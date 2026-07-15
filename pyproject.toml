@@ -1,0 +1,23 @@
+[project]
+name = "mini-agent"
+version = "0.1.0"
+description = "A terminal-first playground for studying agent execution loops."
+requires-python = ">=3.11"
+dependencies = ["requests>=2.31,<3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+mini-agent = "mini_agent.tui.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

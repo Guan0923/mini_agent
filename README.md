@@ -141,3 +141,76 @@
 项目完成标准：
 
 **能够稳定运行多步骤任务，能够解释每一次决策，能够在失败后恢复，并能够用真实实验数据比较不同 Agent 策略。**
+
+------
+
+## 七、当前实现：终端演示版
+
+首版使用 TUI（终端交互界面）而非 Web/GUI，以便直接观察 Agent 的计划、工具调用、重试和结果。当前版本不依赖第三方包，运行环境为 Python 3.11+。
+
+```bash
+# 交互模式
+python run.py
+
+# 安装为本地命令（推荐）
+python -m pip install -e .
+mini-agent
+
+# 单次演示
+python run.py "calculate (18 + 6) * 4"
+python run.py "读取 README.md"
+python run.py "list files"
+```
+
+TUI 有两种模式，默认是 Agent 模式：模型每次选择一个工具调用或直接回复，而不会预先生成完整计划。Agent 模式会在本次 TUI 会话中保留已完成的用户消息与最终回复，因此可进行连续对话。对 DeepSeek，TUI 以 SSE 流式接收模型响应：`reasoning_content` 会实时显示为 `THINKING`，最终文本在 JSON action 校验后显示为 `RESPONSE`。输入 `/plan` 会先生成完整的待执行计划，但不会调用任何工具；随后终端显示 `Continue / Cancel / Supplement`。`Continue` 会切换到 Agent 模式并执行该计划，`Cancel` 保留记录但不执行，`Supplement` 会将英文补充意见交给模型以修订计划后重新审批。每一次工具调用前也会经过同样的 Human-in-the-Loop 审批，`Continue` 就是唯一的执行确认，不会再出现第二次终端确认。输入 `/agent` 回到 Agent 模式。这里的模式与执行策略独立：在 Agent 模式下，LLM 会先选择 `reactive`、`plan_execute` 或 `dynamic_replan`，并在 TUI 显示为 `STRATEGY`；`reactive` 是逐步决策，`plan_execute` 会先生成固定计划并按顺序执行，`dynamic_replan` 则会在工具失败或步骤结果令后续计划失效时生成替代的剩余计划。动态模式会保存旧计划版本，将未执行步骤标记为 `superseded`，且受累计动作数与 `max_replans` 限制。
+
+其它 TUI 命令：`:help` 查看帮助，`:tools` 查看工具，`:trace` 查看上一次运行的结构化轨迹，`:quit` 退出。每一次 CLI 运行还会将完整事件流写入 `<workspace>/logs/<run_id>.jsonl`：其中包含开始/结束、策略选择、思考片段、审批、工具调用与结果、重试、错误、重规划请求/应用和最终回复，并为每条事件记录 UTC 时间戳与运行上下文。用 `--log-dir <目录>` 可替换默认日志位置。运行时还会将关键状态转换写入 `<workspace>/.mini_agent/checkpoints.db`；推理流片段仅写 JSONL，不会产生大量 SQLite checkpoint。
+
+当前已具备：
+
+- 可观察的「直接决策 → 工具调用 → 工具结果 → 再决策/最终回复」执行闭环；
+- 安全计算、文件列出、文件读取、需要用户确认的文件写入，以及跨平台命令执行工具；
+- 工具失败重试与结构化运行轨迹；
+- 可替换的规划器接口，为下一步接入 LLM 规划策略保留边界。
+
+### 模块结构
+
+```text
+tui/          终端交互，仅负责输入、输出与确认
+runtime/      依赖装配、策略路由、工作流、工具执行、checkpoint 边界与运行状态收尾
+observability/事件扇出与 JSONL 持久化日志 Sink
+planning/     规则规划与 LLM 规划策略
+tools/        工具契约、注册表、计算器、受限文件操作与跨平台命令执行
+providers/    .env 配置、通用 HTTP 传输和各厂商响应适配器
+domain/       AgentAction、RunState 与运行轨迹等纯数据模型
+```
+
+依赖只向内：TUI 只渲染 `RuntimeEvent`，不直接创建模型或工具；`runtime.factory` 负责装配具体实现；运行时发布结构化事件并执行动作，工具和模型提供方可以各自替换或单独测试。
+
+### 大模型配置（无 SDK）
+
+将 `.env.example` 复制为 `.env`，填写 OpenAI 兼容 Chat Completions 接口的 `API_KEY`、`BASE_URL` 和 `MODEL`。可选的 `MAX_TOKENS` 控制每次模型输出上限，默认 `8192`，允许范围为 `1` 到 `384000`；复杂 JSON 计划应提高该值以避免输出被中途截断。`.env` 已被 Git 忽略，密钥不会被提交。
+
+默认启动方式会通过 Python 的 `requests` 直接向 DeepSeek 的 `BASE_URL/v1/chat/completions`（若 `BASE_URL` 已以 `/v1` 或 `/chat/completions` 结尾，会自动适配）发送 HTTP 请求；项目没有使用任何模型 SDK。`providers/client.py` 只负责 HTTP 传输，`providers/deepseek.py` 负责 DeepSeek 请求字段和响应解析；将来接入 MiniMax、GLM 时应增加各自的 provider adapter，而不是复用 DeepSeek 解析逻辑。
+
+模型每轮只能返回受限 JSON action（工具调用或最终回复）。项目会校验工具名和参数结构，再写入 `RunState` 并由本地工具层执行。写文件和 `run_command` 都需经过终端的 Human-in-the-Loop 明确批准；直接调用 `ToolRegistry` 时仍需显式传入 `confirmed=True`。`run_command` 固定以 workspace 为工作目录：Windows 使用 PowerShell，Linux/macOS 使用 Bash；它允许任意已批准的本地命令，因此应只批准你理解且信任的命令，例如创建目录可使用 `mkdir demo`（Bash）或 `New-Item -ItemType Directory demo`（PowerShell）。
+
+```bash
+# 使用 .env 中的大模型（默认）
+python run.py "计算 (18 + 6) * 4"
+
+# 不发起网络请求的离线演示
+python run.py --planner rule "calculate (18 + 6) * 4"
+
+# 调整运行限制
+python run.py --max-actions 12 --max-retries 2 "计算 (18 + 6) * 4"
+
+# 强制预先规划、顺序执行策略（仅用于策略对比或调试；默认由 LLM 自动选择）
+python run.py --strategy plan_execute "读取 README.md"
+
+# 强制动态重规划，并限制最多两次重规划
+python run.py --strategy dynamic_replan --max-replans 2 "整理并更新项目说明"
+
+# 将运行日志写入自定义目录
+python run.py --log-dir .agent-logs "计算 2 + 2"
+```

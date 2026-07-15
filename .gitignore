@@ -1,0 +1,10 @@
+# Local credentials must never be committed.
+.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local runtime logs
+logs/
