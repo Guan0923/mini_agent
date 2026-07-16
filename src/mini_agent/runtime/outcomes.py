@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mini_agent.domain import ArtifactMessage, AssistantMessage, UserMessage
+from mini_agent.domain import AssistantMessage, UserMessage
 
 from .context import AgentRuntime
 from .events import RuntimeEvent
@@ -16,7 +16,7 @@ def planning_failure_data(error: Exception, planner: str) -> dict[str, object]:
     return data
 
 
-def complete_run(runtime: AgentRuntime, message: AssistantMessage | ArtifactMessage) -> None:
+def complete_run(runtime: AgentRuntime, message: AssistantMessage) -> None:
     run = runtime.run
     if not any(existing is message for existing in runtime.state.messages):
         runtime.state.messages.append(message)

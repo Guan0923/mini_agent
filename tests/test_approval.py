@@ -1,4 +1,4 @@
-from mini_agent.runtime.contracts import InterruptRequest
+from mini_agent.runtime.contracts import InterruptRequest, QuestionOption, UserQuestion
 from mini_agent.tui.approval import TerminalApproval
 
 
@@ -7,12 +7,12 @@ def test_tool_review_collects_english_supplement(monkeypatch, capsys) -> None:
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     decision = TerminalApproval()(
-        InterruptRequest("tool", "Call tool write_file?", {"tool": "write_file", "arguments": {}})
+        InterruptRequest("tool", "Call tool run_command?", {"tool": "run_command", "arguments": {}})
     )
 
     assert decision.choice == "supplement"
     assert decision.supplement == "Use a smaller change."
-    assert "TOOL REVIEW\nwrite_file {}" in capsys.readouterr().out
+    assert "TOOL REVIEW\nrun_command {}" in capsys.readouterr().out
 
 
 def test_plan_review_implements_plan(monkeypatch, capsys) -> None:
@@ -60,11 +60,11 @@ def test_tool_review_continues_tool(monkeypatch, capsys) -> None:
     monkeypatch.setattr("builtins.input", lambda _prompt: "continue")
 
     decision = TerminalApproval()(
-        InterruptRequest("tool", "Call tool write_file?", {"tool": "write_file", "arguments": {}})
+        InterruptRequest("tool", "Call tool run_command?", {"tool": "run_command", "arguments": {}})
     )
 
     assert decision.choice == "continue"
-    assert "TOOL REVIEW\nwrite_file {}" in capsys.readouterr().out
+    assert "TOOL REVIEW\nrun_command {}" in capsys.readouterr().out
 
 
 def test_tool_review_rejects_plan_implement_choice(monkeypatch, capsys) -> None:
@@ -72,7 +72,7 @@ def test_tool_review_rejects_plan_implement_choice(monkeypatch, capsys) -> None:
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     decision = TerminalApproval()(
-        InterruptRequest("tool", "Call tool write_file?", {"tool": "write_file", "arguments": {}})
+        InterruptRequest("tool", "Call tool run_command?", {"tool": "run_command", "arguments": {}})
     )
 
     assert decision.choice == "continue"
@@ -97,7 +97,7 @@ def test_full_access_auto_approves_tools_but_not_plan_review(monkeypatch, capsys
     approval = TerminalApproval("full_access")
     monkeypatch.setattr("builtins.input", lambda _prompt: "3")
 
-    tool_decision = approval(InterruptRequest("tool", "Call tool write_file?", {"tool": "write_file", "arguments": {}}))
+    tool_decision = approval(InterruptRequest("tool", "Call tool run_command?", {"tool": "run_command", "arguments": {}}))
     plan_decision = approval(InterruptRequest("plan", "Implement this plan?", {"plan": "1. Write the file."}))
 
     assert tool_decision.choice == "continue"
@@ -105,3 +105,38 @@ def test_full_access_auto_approves_tools_but_not_plan_review(monkeypatch, capsys
     output = capsys.readouterr().out
     assert "TOOL REVIEW" not in output
     assert "PLAN REVIEW\n1. Write the file." in output
+
+
+def test_terminal_questionnaire_uses_numeric_choices_and_custom_input(monkeypatch, capsys) -> None:
+    questions = (
+        UserQuestion(
+            "storage",
+            "Storage",
+            "Where should the result be stored?",
+            (
+                QuestionOption("SQLite", "Use the existing database."),
+                QuestionOption("JSONL", "Use the audit stream."),
+            ),
+        ),
+        UserQuestion(
+            "scope",
+            "Scope",
+            "How broad should the change be?",
+            (
+                QuestionOption("Focused", "Change one workflow."),
+                QuestionOption("Shared", "Change shared behavior."),
+            ),
+        ),
+    )
+    answers = iter(["2", "3", "Only storage code"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    decision = TerminalApproval()(
+        InterruptRequest("question", "Answer questions.", {"questions": []}, questions=questions)
+    )
+
+    assert decision.choice == "answer"
+    assert decision.answers == {"storage": ["JSONL"], "scope": ["Only storage code"]}
+    output = capsys.readouterr().out
+    assert "PLAN QUESTIONS" in output
+    assert "[3] 以上都不对" in output

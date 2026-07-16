@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Literal
 
-from mini_agent.runtime.contracts import InterruptDecision, InterruptRequest
+from mini_agent.runtime.contracts import InterruptDecision, InterruptRequest, UserQuestion
+from mini_agent.runtime.user_input import OTHER_OPTION_LABEL
 
 PermissionMode = Literal["approval_for_me", "full_access"]
 
@@ -70,6 +71,8 @@ class TerminalApproval:
         if automatic is not None:
             return automatic
         self.render_request(request)
+        if request.kind == "question":
+            return self._read_question_decision(request.questions)
         return self._read_decision(request)
 
     def automatic_decision(self, request: InterruptRequest) -> InterruptDecision | None:
@@ -78,6 +81,14 @@ class TerminalApproval:
         return None
 
     def render_request(self, request: InterruptRequest) -> None:
+        if request.kind == "question":
+            self._write("\nPLAN QUESTIONS")
+            for question_index, question in enumerate(request.questions, start=1):
+                self._write(f"\n{question_index}/{len(request.questions)} {question.header}\n{question.question}")
+                for option_index, option in enumerate(question.options, start=1):
+                    self._write(f"[{option_index}] {option.label} - {option.description}")
+                self._write(f"[{len(question.options) + 1}] {OTHER_OPTION_LABEL}")
+            return
         if request.kind == "plan":
             proposal = request.data.get("plan")
             if isinstance(proposal, str):
@@ -86,9 +97,6 @@ class TerminalApproval:
                 self._write(f"\nPLAN REVIEW\nGoal: {request.data['goal']}")
                 for index, step in enumerate(request.data["steps"], start=1):
                     self._write(f"{index}. {step}")
-            artifact_path = request.data.get("artifact_path")
-            if isinstance(artifact_path, str) and artifact_path:
-                self._write(f"PLAN FILE {artifact_path}")
             return
 
         self._write(f"\nTOOL REVIEW\n{request.data['tool']} {request.data['arguments']}")
@@ -144,6 +152,30 @@ class TerminalApproval:
             elif not next_supplement:
                 self._write("Choose 1, 2, or 3.")
             supplement = next_supplement
+
+    def _read_question_decision(self, questions: tuple[UserQuestion, ...]) -> InterruptDecision:
+        answers: dict[str, list[str]] = {}
+        for question_index, question in enumerate(questions, start=1):
+            other_index = len(question.options) + 1
+            while True:
+                raw = input(f"Question {question_index}/{len(questions)} - choose 1 to {other_index}: ").strip()
+                try:
+                    selected = int(raw)
+                except ValueError:
+                    selected = 0
+                if 1 <= selected <= len(question.options):
+                    answers[question.id] = [question.options[selected - 1].label]
+                    break
+                if selected == other_index:
+                    while True:
+                        custom = input("Your answer: ").strip()
+                        if custom:
+                            answers[question.id] = [custom]
+                            break
+                        self._write("Answer cannot be empty.")
+                    break
+                self._write(f"Choose 1 to {other_index}.")
+        return InterruptDecision("answer", answers=answers)
 
     @staticmethod
     def _permission_label(mode: PermissionMode) -> str:

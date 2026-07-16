@@ -1,8 +1,7 @@
 """Local tools and their registry."""
 
 from .base import ConfirmationRequired, Tool, ToolError, ToolExecutor
-from .calculator import calculate
-from .catalog import build_workspace_tool_registry, build_workspace_tools
+from .catalog import build_tool_registry
 from .command import WorkspaceCommand
 from .registry import ToolRegistry
 from .web import DdgrWebSearch, SafeWebFetcher
@@ -16,7 +15,5 @@ __all__ = [
     "ToolExecutor",
     "ToolRegistry",
     "WorkspaceCommand",
-    "build_workspace_tool_registry",
-    "build_workspace_tools",
-    "calculate",
+    "build_tool_registry",
 ]

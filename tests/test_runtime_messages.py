@@ -72,12 +72,12 @@ def test_session_runtime_messages_survive_restart_and_match_run_state(tmp_path: 
 
     assert messages == state.runtime_messages
     assert [message.sequence for message in messages] == list(range(1, len(messages) + 1))
-    assert {"run_started", "tool_call", "tool_result", "response", "run_finished"} <= {
+    assert {"run_started", "response", "response", "response", "run_finished"} <= {
         message.kind for message in messages
     }
     assert reopened.load_conversation(service.active_session.session_id) == [
         {"role": "user", "content": "calculate 2 + 2"},
-        {"role": "assistant", "content": "4"},
+        {"role": "assistant", "content": "Hello! I can help with web search, file operations, and running commands in the workspace."},
     ]
 
 

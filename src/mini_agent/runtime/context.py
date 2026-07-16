@@ -8,7 +8,6 @@ from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from mini_agent.domain import (
-    ArtifactMessage,
     AssistantMessage,
     ChatMessage,
     RunState,
@@ -20,9 +19,9 @@ from mini_agent.domain import (
 from mini_agent.domain.messages import messages_from_dicts
 from mini_agent.domain.state import utc_now
 
-from .artifacts import ArtifactStore, InMemoryArtifactStore
 from .config import RunnerSettings
-from .contracts import Confirm, EventHandler, InterruptHandler, SteeringHandler
+from .contracts import CancellationHandler, Confirm, EventHandler, InterruptHandler, SteeringHandler
+from .hooks import HookManager
 
 RuntimeOperation = Literal["decision", "strategy", "plan", "evaluate", "replan"]
 OutputMode = Literal["text", "json", "tools"]
@@ -36,7 +35,6 @@ class RunSummary:
     status: str
     mode: str
     final_answer: str | None = None
-    artifact_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -59,7 +57,6 @@ class RuntimeState:
     status: RuntimeStatus = "idle"
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
-    pending_plan_artifact_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -94,7 +91,6 @@ class RuntimeState:
             "status": self.status,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "pending_plan_artifact_id": self.pending_plan_artifact_id,
         }
 
     @classmethod
@@ -136,9 +132,6 @@ class RuntimeState:
             status=data.get("status", "idle"),
             created_at=str(data.get("created_at") or utc_now()),
             updated_at=str(data.get("updated_at") or utc_now()),
-            pending_plan_artifact_id=(
-                str(data["pending_plan_artifact_id"]) if data.get("pending_plan_artifact_id") else None
-            ),
         )
 
 
@@ -160,6 +153,7 @@ class RuntimeExchange:
     exchange_id: str | None = None
     output_mode: OutputMode = "text"
     allowed_tools: list[ToolSpec] = field(default_factory=list)
+    operation_tools: list[ToolSpec] = field(default_factory=list)
     messages: list[ChatMessage] = field(default_factory=list)
     stream: bool = False
     request: dict[str, Any] | None = None
@@ -173,6 +167,7 @@ class RuntimeExchange:
         self.exchange_id = None
         self.output_mode = "text"
         self.allowed_tools = []
+        self.operation_tools = []
         self.messages = []
         self.stream = False
         self.request = None
@@ -202,16 +197,17 @@ class RuntimeServices:
 
     planner: object
     tools: object
-    artifact_store: ArtifactStore = field(default_factory=InMemoryArtifactStore)
     checkpoint_store: object | None = None
     runtime_store: RuntimeStore | None = None
     on_event: EventHandler | None = None
     interrupt: InterruptHandler | None = None
     steering: SteeringHandler | None = None
+    cancel_requested: CancellationHandler | None = None
     confirm: Confirm | None = None
     id_factory: Callable[[], str] = new_tool_call_id
     clock: Callable[[], str] = utc_now
     publish: EventHandler | None = None
+    hooks: HookManager = field(default_factory=HookManager)
 
 
 @dataclass
@@ -277,6 +273,4 @@ def text_messages(messages: list[ChatMessage]) -> list[dict[str, str]]:
             projected.append({"role": "user", "content": message.content or ""})
         elif isinstance(message, AssistantMessage) and not message.tool_messages:
             projected.append({"role": "assistant", "content": message.content or ""})
-        elif isinstance(message, ArtifactMessage):
-            projected.append({"role": "assistant", "content": message.content})
     return projected

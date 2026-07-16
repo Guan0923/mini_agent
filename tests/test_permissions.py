@@ -15,7 +15,7 @@ class FullAccessWritePlanner:
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         if history[-1]["content"].startswith("[Tool result]"):
             return AgentAction(type="final_answer", answer="written")
-        return AgentAction(type="tool_call", tool="write_file", arguments={"path": "full-access.txt", "content": "ok"})
+        return AgentAction(type="tool_call", tool="run_command", arguments={"command": "python -c \"open('full-access.txt','w').write('ok')\""})
 
 
 class FullAccessPlanPlanner:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from mini_agent.domain import (
-    ArtifactMessage,
+    AssistantMessage,
     RunState,
     ToolSpec,
     UserMessage,
@@ -13,12 +15,23 @@ from mini_agent.domain import (
 )
 from mini_agent.tools import ToolError
 
-from .artifacts import ArtifactStore, InMemoryArtifactStore
+from .cancellation import cancel_if_requested
 from .checkpointing import CheckpointStore
 from .config import RunnerSettings
 from .context import AgentRuntime, RunSummary, RuntimeServices, RuntimeState
 from .contracts import InterruptDecision, InterruptRequest
 from .events import RuntimeEvent
+from .hooks import (
+    AgentHook,
+    HookCancellation,
+    HookExecutionError,
+    HookManager,
+    HookOutcome,
+    RunHookContext,
+    RunHookInfo,
+    RunHookResult,
+)
+from .outcomes import cancel_run, fail_run
 from .plan_mode import PlanModeWorkflow
 from .publisher import RunEventPublisher
 from .routing import StrategyRouter
@@ -38,7 +51,7 @@ class AgentRunner:
         strategy: str = "auto",
         log_full_messages: bool = True,
         checkpoints: CheckpointStore | None = None,
-        artifact_store: ArtifactStore | None = None,
+        hooks: Iterable[AgentHook] = (),
     ) -> None:
         self.planner = planner
         self.tools = tools
@@ -51,7 +64,7 @@ class AgentRunner:
             log_full_messages=log_full_messages,
         )
         self.checkpoints = checkpoints
-        self.artifact_store = artifact_store or InMemoryArtifactStore()
+        self.hooks = HookManager(hooks)
         self._router = StrategyRouter()
         self._reactive = ReactiveWorkflow()
         self._plan_mode = PlanModeWorkflow()
@@ -109,9 +122,9 @@ class AgentRunner:
         services = RuntimeServices(
             planner=self.planner,
             tools=self.tools,
-            artifact_store=self.artifact_store,
             checkpoint_store=self.checkpoints,
             runtime_store=runtime_store,  # type: ignore[arg-type]
+            hooks=self.hooks,
         )
         return AgentRuntime(state=state, services=services)
 
@@ -120,8 +133,8 @@ class AgentRunner:
 
         runtime.services.planner = self.planner
         runtime.services.tools = self.tools
-        runtime.services.artifact_store = self.artifact_store
         runtime.services.checkpoint_store = self.checkpoints
+        runtime.services.hooks = self.hooks
         runtime.state.runner_settings = self.settings
         return runtime
 
@@ -134,41 +147,53 @@ class AgentRunner:
         runtime.services.interrupt = runtime.services.interrupt or self._default_interrupt(runtime)
         run = runtime.run
         run.history = runtime.state.messages
-        run.add_event("run_started", "Run started")
+        publish = runtime.services.publish
+        context = RunHookContext(RunHookInfo(runtime.state.session_id, run.run_id, run.task, run.mode))
+        try:
+            self.hooks.run_run(
+                context,
+                lambda _context: self._dispatch(runtime),
+                lambda _result: HookOutcome(
+                    status=(
+                        "succeeded"
+                        if run.status == "completed"
+                        else run.status
+                        if run.status in {"failed", "cancelled"}
+                        else "failed"
+                    ),
+                    result=RunHookResult(run.status, run.strategy, run.final_answer),
+                ),
+                publish,
+            )
+        except HookCancellation:
+            cancel_run(runtime)
+        except HookExecutionError as exc:
+            fail_run(
+                runtime,
+                str(exc),
+                hook=exc.hook,
+                lifecycle=exc.lifecycle,
+                phase=exc.phase,
+                error_type=exc.error_type,
+            )
+        return self._finish(runtime)
+
+    def _dispatch(self, runtime: AgentRuntime) -> None:
+        runtime.run.add_event("run_started", "Run started")
+        assert runtime.services.publish is not None
         runtime.services.publish(RuntimeEvent("run_started", "started"))
-        if run.mode == "plan":
+        if cancel_if_requested(runtime):
+            return
+        if runtime.run.mode == "plan":
             self._plan_mode.run(runtime)
         else:
             self._run_from_router(runtime)
-        return self._finish(runtime)
 
     def _run_from_router(self, runtime: AgentRuntime) -> None:
-        if runtime.run.input_artifact_ids:
-            runtime.run.strategy = "dynamic_replan"
-            runtime.run.strategy_reason = "A plan artifact handoff requires dynamic implementation."
-            runtime.run.add_event(
-                "strategy",
-                "Execution strategy selected",
-                strategy=runtime.run.strategy,
-                reason=runtime.run.strategy_reason,
-                source="handoff",
-            )
-            publish = runtime.services.publish or (lambda _event: None)
-            publish(
-                RuntimeEvent(
-                    "strategy",
-                    runtime.run.strategy,
-                    {"reason": runtime.run.strategy_reason, "source": "handoff"},
-                )
-            )
-            if consume_steering(runtime, phase="after_strategy_selection") is not None:
-                runtime.run.strategy = None
-                self._run_from_router(runtime)
-                return
-            self._execute(runtime)
-            return
         while True:
             if self._router.resolve(runtime) is None:
+                return
+            if cancel_if_requested(runtime):
                 return
             if consume_steering(runtime, phase="after_strategy_selection") is None:
                 break
@@ -209,7 +234,7 @@ class AgentRunner:
         runtime.state.status = "idle"
         if not any(summary.run_id == run.run_id for summary in runtime.state.run_history):
             runtime.state.run_history.append(
-                RunSummary(run.run_id, run.task, run.status, run.mode, run.final_answer, list(run.artifact_ids))
+                RunSummary(run.run_id, run.task, run.status, run.mode, run.final_answer)
             )
         run.add_event("run_finished", "Run finished", status=run.status)
         if runtime.services.publish is not None:
@@ -243,26 +268,18 @@ class LegacyAgentRunner(AgentRunner):
         if result.handoff is not None:
             handoff = result.handoff
             if handoff.new_session:
-                artifact = next(
-                    (
-                        message
-                        for message in runtime.state.messages
-                        if isinstance(message, ArtifactMessage) and message.artifact_id == handoff.artifact_id
-                    ),
-                    None,
-                )
-                if artifact is None:
-                    raise RuntimeError(f"Unknown handoff artifact: {handoff.artifact_id}")
+                proposal = (result.final_answer or "").strip()
+                if not proposal:
+                    raise RuntimeError("Cannot start an isolated handoff without a completed plan proposal.")
                 runtime = self.new_runtime(
                     task=handoff.task,
                     mode=handoff.mode,
                     session_id=new_session_id(),
-                    messages=[artifact],
+                    messages=[AssistantMessage(content=proposal)],
                     on_event=runtime.services.on_event,
                     interrupt=runtime.services.interrupt,
                     confirm=runtime.services.confirm,
                 )
-                runtime.run.input_artifact_ids = [handoff.artifact_id]
             else:
                 runtime.state.messages.append(UserMessage(content=handoff.task))
                 runtime.state.current_run = RunState(
@@ -270,10 +287,7 @@ class LegacyAgentRunner(AgentRunner):
                     mode=handoff.mode,
                     run_id=new_run_id(),
                     history=runtime.state.messages,
-                    input_artifact_ids=[handoff.artifact_id],
                 )
-                if runtime.state.pending_plan_artifact_id == handoff.artifact_id:
-                    runtime.state.pending_plan_artifact_id = None
                 runtime.state.active_message = None
                 runtime.state.active_tool_index = None
                 runtime.state.turn_usage = None

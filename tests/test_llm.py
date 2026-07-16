@@ -30,7 +30,7 @@ def deepseek_for_test() -> DeepSeek:
 
 def test_prepare_request_expands_nested_tool_messages() -> None:
     tool = ToolMessage(
-        name="calculator",
+        name="run_command",
         call_id="call_1",
         arguments={"expression": "2 + 2"},
         content="4",
@@ -46,7 +46,7 @@ def test_prepare_request_expands_nested_tool_messages() -> None:
     runtime.exchange.output_mode = "tools"
     runtime.exchange.allowed_tools = [
         ToolSpec(
-            "calculator",
+            "run_command",
             "Calculate.",
             {"type": "object", "properties": {"expression": {"type": "string"}}},
         )
@@ -55,7 +55,7 @@ def test_prepare_request_expands_nested_tool_messages() -> None:
     payload = deepseek_for_test().prepare_request(runtime)
 
     assert "response_format" not in payload
-    assert payload["tools"][0]["function"]["name"] == "calculator"
+    assert payload["tools"][0]["function"]["name"] == "run_command"
     assistant, result = payload["messages"][-2:]
     assert assistant["reasoning_content"] == "Use arithmetic."
     assert assistant["tool_calls"][0]["id"] == "call_1"
@@ -63,8 +63,32 @@ def test_prepare_request_expands_nested_tool_messages() -> None:
     assert result == {"role": "tool", "tool_call_id": "call_1", "content": "4"}
 
 
+def test_prepare_request_replays_plan_question_without_exposing_control_tool_in_agent_mode() -> None:
+    question = ToolMessage(
+        name="request_user_input",
+        call_id="question_1",
+        arguments={"questions": []},
+        content='{"answers":{"scope":{"answers":["Focused"]}}}',
+        status="succeeded",
+    )
+    runtime = runtime_for(messages=[AssistantMessage(tool_messages=[question]), UserMessage(content="Implement the plan")])
+    runtime.exchange.messages = runtime.state.messages
+    runtime.exchange.output_mode = "tools"
+    runtime.exchange.allowed_tools = [ToolSpec("run_command", "Execute commands.", {"type": "object"})]
+
+    payload = deepseek_for_test().prepare_request(runtime)
+
+    assert [tool["function"]["name"] for tool in payload["tools"]] == ["run_command"]
+    assert payload["messages"][0]["tool_calls"][0]["function"]["name"] == "request_user_input"
+    assert payload["messages"][1] == {
+        "role": "tool",
+        "tool_call_id": "question_1",
+        "content": question.content,
+    }
+
+
 def test_prepare_request_rejects_pending_tool_history() -> None:
-    runtime = runtime_for(messages=[AssistantMessage(tool_messages=[ToolMessage(name="calculator", call_id="call_1")])])
+    runtime = runtime_for(messages=[AssistantMessage(tool_messages=[ToolMessage(name="run_command", call_id="call_1")])])
 
     with pytest.raises(ModelRequestError, match="no result"):
         deepseek_for_test().prepare_request(runtime)
@@ -87,14 +111,14 @@ def test_prepare_request_supports_documented_deepseek_parameters() -> None:
         "logprobs": True,
         "top_logprobs": 5,
         "user_id": "user_123",
-        "tool_choice": {"type": "function", "function": {"name": "calculator"}},
+        "tool_choice": {"type": "function", "function": {"name": "run_command"}},
         "extra_body": {"future_parameter": "supported"},
     }
     runtime.exchange.stream = True
     runtime.exchange.output_mode = "tools"
     runtime.exchange.allowed_tools = [
         ToolSpec(
-            "calculator",
+            "run_command",
             "Calculate.",
             {"type": "object"},
             provider_options={"deepseek": {"strict": True}},
@@ -117,7 +141,7 @@ def test_prepare_request_supports_documented_deepseek_parameters() -> None:
     assert payload["top_logprobs"] == 5
     assert payload["user_id"] == "user_123"
     assert payload["tools"][0]["function"]["strict"] is True
-    assert payload["tool_choice"] == {"type": "function", "function": {"name": "calculator"}}
+    assert payload["tool_choice"] == {"type": "function", "function": {"name": "run_command"}}
     assert payload["stream_options"] == {"include_usage": True}
     assert payload["future_parameter"] == "supported"
 
@@ -153,7 +177,7 @@ def test_prepare_request_supports_assistant_prefix_and_explicit_usage_opt_out() 
 def test_prepare_request_supports_string_tool_choices(tool_choice) -> None:
     runtime = runtime_for()
     runtime.state.request_parameters["tool_choice"] = tool_choice
-    runtime.exchange.allowed_tools = [ToolSpec("calculator", "Calculate.")]
+    runtime.exchange.allowed_tools = [ToolSpec("run_command", "Calculate.")]
 
     payload = deepseek_for_test().prepare_request(runtime)
 
@@ -197,7 +221,7 @@ def test_prepare_response_preserves_usage_logprobs_and_tool_calls() -> None:
                         {
                             "id": "call_1",
                             "type": "function",
-                            "function": {"name": "calculator", "arguments": '{"expression":"2 + 2"}'},
+                            "function": {"name": "run_command", "arguments": '{"expression":"2 + 2"}'},
                         }
                     ],
                 },
@@ -222,7 +246,7 @@ def test_prepare_response_preserves_usage_logprobs_and_tool_calls() -> None:
     assert response.message.reasoning == "Need a calculation."
     assert response.message.logprobs == {"content": [{"token": "x", "logprob": -0.1}]}
     assert response.message.tool_messages == [
-        ToolMessage(name="calculator", call_id="call_1", arguments={"expression": "2 + 2"})
+        ToolMessage(name="run_command", call_id="call_1", arguments={"expression": "2 + 2"})
     ]
     assert response.usage == {
         "prompt_tokens": 10,
@@ -302,7 +326,7 @@ def test_prepare_response_rejects_invalid_tool_arguments_before_execution() -> N
                         {
                             "id": "call_1",
                             "type": "function",
-                            "function": {"name": "calculator", "arguments": "not-json"},
+                            "function": {"name": "run_command", "arguments": "not-json"},
                         }
                     ],
                 },
@@ -337,7 +361,7 @@ def test_prepare_response_aggregates_streamed_reasoning_and_tool_arguments() -> 
                                 {
                                     "index": 0,
                                     "id": "call_1",
-                                    "function": {"name": "calculator", "arguments": '{"expression":'},
+                                    "function": {"name": "run_command", "arguments": '{"expression":'},
                                 }
                             ],
                         },
@@ -541,7 +565,7 @@ def test_llm_planner_uses_native_tool_response_with_runtime_only() -> None:
                     reasoning="Calculate.",
                     tool_messages=[
                         ToolMessage(
-                            name="calculator",
+                            name="run_command",
                             call_id="call_1",
                             arguments={"expression": "2 + 2"},
                         )
@@ -551,23 +575,54 @@ def test_llm_planner_uses_native_tool_response_with_runtime_only() -> None:
             )
         ]
     )
-    spec = ToolSpec("calculator", "Calculate", {"type": "object"})
+    spec = ToolSpec("run_command", "Calculate", {"type": "object"})
     planner = LLMPlanner(client, [spec], [spec])
-    tools = [Tool("calculator", "Calculate", lambda expression: expression, parameters=spec.parameters)]
+    tools = [Tool("run_command", "Calculate", lambda expression: expression, parameters=spec.parameters)]
     runtime = AgentRunner(planner, ToolRegistry(tools)).new_runtime(task="2 + 2")
 
     message = planner.decide(runtime)
 
-    assert message.tool_messages[0].name == "calculator"
+    assert message.tool_messages[0].name == "run_command"
     assert runtime.exchange.output_mode == "tools"
     assert runtime.exchange.allowed_tools == [spec]
+
+
+def test_agent_decision_explicitly_ends_previous_plan_mode() -> None:
+    client = ScriptedClient([PreparedResponse(AssistantMessage(content="Ready to execute."))])
+    planner = LLMPlanner(client, [], [])
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(
+        task="Implement the plan",
+        messages=[AssistantMessage(content="1. Make the change.")],
+    )
+
+    planner.decide(runtime)
+
+    system = runtime.exchange.messages[0]
+    assert isinstance(system, SystemMessage)
+    assert "You are now in Agent mode" in (system.content or "")
+    assert "previous Plan mode instructions" in (system.content or "")
+
+
+def test_plan_decision_exposes_request_user_input_without_registering_it() -> None:
+    client = ScriptedClient([PreparedResponse(AssistantMessage(content="1. Inspect the project."))])
+    planner = LLMPlanner(client, [], [])
+    registry = ToolRegistry()
+    runtime = AgentRunner(planner, registry).new_runtime(task="Plan the change", mode="plan")
+
+    planner.decide(runtime)
+
+    assert registry.names() == []
+    assert [spec.name for spec in runtime.exchange.allowed_tools] == ["request_user_input"]
+    system = runtime.exchange.messages[0]
+    assert isinstance(system, SystemMessage)
+    assert "request_user_input" in (system.content or "")
 
 
 def test_llm_planner_rejects_unknown_native_tool() -> None:
     client = ScriptedClient(
         [PreparedResponse(AssistantMessage(tool_messages=[ToolMessage(name="shell", call_id="call_1", arguments={})]))]
     )
-    spec = ToolSpec("calculator", "Calculate")
+    spec = ToolSpec("run_command", "Calculate")
     planner = LLMPlanner(client, [spec], [spec])
     runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="run it")
 
@@ -588,7 +643,7 @@ def test_llm_plan_keeps_json_output_for_structured_operations() -> None:
                                     "id": "calculate",
                                     "description": "Calculate 2 + 2",
                                     "success_criteria": "Result is available",
-                                    "tool": "calculator",
+                                    "tool": "run_command",
                                     "arguments": {"expression": "2 + 2"},
                                 }
                             ],
@@ -598,15 +653,17 @@ def test_llm_plan_keeps_json_output_for_structured_operations() -> None:
             )
         ]
     )
-    spec = ToolSpec("calculator", "Calculate")
+    spec = ToolSpec("run_command", "Calculate")
     planner = LLMPlanner(client, [spec], [spec])
     runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="make a plan")
 
     plan = planner.create_plan(runtime)
 
-    assert plan.steps[0].tool_message.name == "calculator"
+    assert plan.steps[0].tool_message.name == "run_command"
     assert plan.steps[0].tool_message.arguments == {"expression": "2 + 2"}
     assert runtime.exchange.output_mode == "json"
+    assert runtime.exchange.allowed_tools == []
+    assert runtime.exchange.operation_tools == [spec]
 
 
 def test_llm_empty_json_error_preserves_response_diagnostics() -> None:

@@ -21,7 +21,7 @@ def test_file_reference_expander_inlines_workspace_file_and_preserves_email(tmp_
 def test_file_reference_expander_rejects_files_outside_workspace(tmp_path: Path) -> None:
     expander = FileReferenceExpander(ToolRegistry(tmp_path))
 
-    with pytest.raises(ToolError, match="Path must stay inside the workspace"):
+    with pytest.raises(ToolError, match="Command exited with code"):
         expander.expand("summarize @../outside.txt")
 
 

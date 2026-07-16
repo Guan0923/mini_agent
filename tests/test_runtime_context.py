@@ -8,7 +8,7 @@ from mini_agent.tools import Tool, ToolRegistry
 
 def test_messages_expose_required_fields_and_nest_tools() -> None:
     tool = ToolMessage(
-        name="calculator",
+        name="run_command",
         call_id="call_1",
         arguments={"expression": "2 + 2"},
         content="4",
@@ -23,13 +23,13 @@ def test_messages_expose_required_fields_and_nest_tools() -> None:
     )
 
     assert (assistant.name, assistant.role, assistant.content) == ("mini-agent", "assistant", None)
-    assert (tool.name, tool.role, tool.content) == ("calculator", "tool", "4")
+    assert (tool.name, tool.role, tool.content) == ("run_command", "tool", "4")
     assert assistant.tool_messages == [tool]
 
 
 def test_runtime_state_round_trips_complete_session_state() -> None:
     tool = ToolMessage(
-        name="calculator",
+        name="run_command",
         call_id="call_1",
         arguments={"expression": "2 + 2"},
         content="4",
@@ -51,7 +51,7 @@ def test_runtime_state_round_trips_complete_session_state() -> None:
         request_parameters={"max_tokens": 512},
         tool_specs=[
             ToolSpec(
-                "calculator",
+                "run_command",
                 "Calculate",
                 {"type": "object"},
                 provider_options={"deepseek": {"strict": True}},
@@ -83,7 +83,7 @@ def test_sqlite_persists_and_reloads_runtime_snapshot(tmp_path: Path) -> None:
     tools = ToolRegistry(
         [
             Tool(
-                "calculator",
+                "run_command",
                 "Calculate",
                 lambda expression: expression,
                 parameters={"type": "object"},
@@ -102,7 +102,7 @@ def test_sqlite_persists_and_reloads_runtime_snapshot(tmp_path: Path) -> None:
 
     assert restored is not None
     assert restored.usage == {"prompt_tokens": 5, "total_tokens": 8}
-    assert restored.tool_specs[0].name == "calculator"
+    assert restored.tool_specs[0].name == "run_command"
     assert isinstance(restored.messages[0], AssistantMessage)
     assert restored.messages[0].logprobs == {"content": []}
 

@@ -24,14 +24,17 @@ _IDENTIFIER_KEYS = frozenset(
         "exchange_id",
         "error_type",
         "finish_reason",
+        "hook",
         "kind",
         "mode",
+        "lifecycle",
         "model",
         "name",
         "operation",
         "output_mode",
         "planner",
         "provider",
+        "phase",
         "response_id",
         "response_model",
         "role",
@@ -50,6 +53,10 @@ _PREVIEW_CHARS = 200
 def model_request_data(state: RuntimeState, exchange: RuntimeExchange) -> dict[str, Any]:
     """Return provider-neutral data needed to replay a prepared model request."""
 
+    parameters = dict(state.request_parameters)
+    overrides = exchange.context.get("request_parameters")
+    if isinstance(overrides, Mapping):
+        parameters.update(overrides)
     return {
         "exchange_id": exchange.exchange_id,
         "operation": exchange.operation,
@@ -57,7 +64,7 @@ def model_request_data(state: RuntimeState, exchange: RuntimeExchange) -> dict[s
         "model": state.model,
         "output_mode": exchange.output_mode,
         "stream": exchange.stream,
-        "request_parameters": dict(state.request_parameters),
+        "request_parameters": parameters,
         "messages": [_message_to_record(message) for message in exchange.messages],
         "tools": [_tool_spec_to_dict(tool) for tool in exchange.allowed_tools],
     }

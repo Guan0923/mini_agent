@@ -142,7 +142,8 @@ class LLMClient:
         runtime.state.provider = self.config.provider
         runtime.state.model = self.config.model
         runtime.state.request_parameters.setdefault("max_tokens", self.config.max_tokens)
-        runtime.exchange.exchange_id = runtime.next_exchange_id()
+        if runtime.exchange.exchange_id is None:
+            runtime.exchange.exchange_id = runtime.next_exchange_id()
         publish = runtime.services.publish or (lambda _event: None)
         publish(
             RuntimeEvent(

@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 
 from mini_agent.planning import LLMPlanner, RuleBasedPlanner
 from mini_agent.providers import LLMClient, ModelConfig
-from mini_agent.storage import FileArtifactStore, SQLiteCheckpointStore, SQLiteSessionStore
-from mini_agent.tools import ToolExecutor, build_workspace_tool_registry
+from mini_agent.storage import SQLiteCheckpointStore, SQLiteSessionStore
+from mini_agent.tools import ToolExecutor, build_tool_registry
 
 from .application import AgentApplication
 from .config import RunnerSettings, log_full_messages_from_env
+from .hooks import AgentHook
 from .references import FileReferenceExpander
 from .runner import AgentRunner
 
@@ -34,11 +36,12 @@ def build_application(
     workspace: Path,
     planner_name: PlannerName = "llm",
     settings: RunnerSettings | None = None,
+    hooks: Iterable[AgentHook] = (),
 ) -> AgentApplication:
     """Compose one interface-neutral application with its workspace dependencies."""
 
-    tools = build_workspace_tool_registry(workspace)
-    runner = _build_runner(workspace, planner_name, _settings_for(workspace, settings), tools)
+    tools = build_tool_registry(workspace)
+    runner = _build_runner(workspace, planner_name, _settings_for(workspace, settings), tools, hooks)
     return AgentApplication(runner, build_session_store(workspace), FileReferenceExpander(tools))
 
 
@@ -46,12 +49,14 @@ def build_runner(
     workspace: Path,
     planner_name: PlannerName = "llm",
     settings: RunnerSettings | None = None,
+    hooks: Iterable[AgentHook] = (),
 ) -> AgentRunner:
     return _build_runner(
         workspace,
         planner_name,
         _settings_for(workspace, settings),
-        build_workspace_tool_registry(workspace),
+        build_tool_registry(workspace),
+        hooks,
     )
 
 
@@ -60,6 +65,7 @@ def _build_runner(
     planner_name: PlannerName,
     settings: RunnerSettings,
     tools: ToolExecutor,
+    hooks: Iterable[AgentHook],
 ) -> AgentRunner:
     if planner_name == "rule":
         planner = RuleBasedPlanner()
@@ -76,7 +82,7 @@ def _build_runner(
         strategy=settings.strategy,
         log_full_messages=settings.log_full_messages,
         checkpoints=SQLiteCheckpointStore(session_database_path(workspace)),
-        artifact_store=FileArtifactStore(workspace),
+        hooks=hooks,
     )
 
 

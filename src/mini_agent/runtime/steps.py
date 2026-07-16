@@ -9,6 +9,13 @@ from mini_agent.tools import ToolError
 from .context import AgentRuntime
 from .contracts import InterruptDecision, InterruptRequest
 from .events import RuntimeEvent
+from .hooks import (
+    HookCancellation,
+    HookOutcome,
+    RunHookInfo,
+    ToolHookContext,
+    ToolHookResult,
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +47,60 @@ class ToolStepExecutor:
             retryable = tools.is_retryable(tool)
         except ToolError as exc:
             return self._failure(runtime, tool, str(exc))
+
+        context = ToolHookContext(
+            run=RunHookInfo(runtime.state.session_id, run.run_id, run.task, run.mode),
+            call_id=tool_message.call_id,
+            name=tool,
+            arguments=dict(tool_message.arguments),
+        )
+        try:
+            return runtime.services.hooks.run_tool(
+                context,
+                lambda hook_context: self._invoke(
+                    runtime,
+                    hook_context,
+                    requires_confirmation=requires_confirmation,
+                    retryable=retryable,
+                ),
+                self._hook_outcome,
+                publish,
+            )
+        except HookCancellation as exc:
+            tool_message.status = "failed"
+            tool_message.content = exc.reason
+            tool_message.retryable = False
+            runtime.save()
+            return ToolStepResult(
+                success=False,
+                error=exc.reason,
+                interrupt=InterruptDecision("cancel"),
+                retryable=False,
+            )
+
+    def _invoke(
+        self,
+        runtime: AgentRuntime,
+        context: ToolHookContext,
+        *,
+        requires_confirmation: bool,
+        retryable: bool,
+    ) -> ToolStepResult:
+        run = runtime.run
+        message = runtime.state.active_message
+        index = runtime.state.active_tool_index
+        assert message is not None and index is not None
+        tool_message = message.tool_messages[index]
+        tool = tool_message.name
+        tools = runtime.services.tools
+        publish = runtime.services.publish or (lambda _event: None)
+        tool_message.arguments = dict(context.arguments)
+        validate = getattr(tools, "validate_arguments", None)
+        if callable(validate):
+            try:
+                validate(tool, tool_message.arguments)
+            except ToolError as exc:
+                return self._failure(runtime, tool, str(exc), retryable=retryable)
 
         if requires_confirmation:
             request = InterruptRequest(
@@ -77,6 +138,22 @@ class ToolStepExecutor:
                     continue
                 return self._failure(runtime, tool, str(exc), retryable=retryable)
         return self._failure(runtime, tool, "Tool execution ended without an outcome.", retryable=retryable)
+
+    @staticmethod
+    def _hook_outcome(result: ToolStepResult) -> HookOutcome[ToolHookResult]:
+        if result.interrupt is not None:
+            status = "cancelled"
+        else:
+            status = "succeeded" if result.success else "failed"
+        return HookOutcome(
+            status=status,
+            result=ToolHookResult(
+                result.success,
+                result.output,
+                result.error,
+                result.retryable,
+            ),
+        )
 
     @staticmethod
     def _failure(

@@ -162,15 +162,19 @@ python run.py "读取 README.md"
 python run.py "list files"
 ```
 
-TUI 有两种模式，默认是 Agent 模式：模型每次选择工具调用或直接回复，而不会预先生成完整计划。系统以 provider-neutral Message 保存完整上下文；顶层包含 System/User/Assistant，以及保存计划内容快照和文件元数据的 ArtifactMessage，工具调用和结果则作为 ToolMessage 嵌套在 AssistantMessage 中。对 DeepSeek，ArtifactMessage 会在请求边界投影为 assistant 消息，工具决策使用原生 Tool Calls，SSE `reasoning_content` 会实时显示为 `THINKING`，最终文本显示为 `RESPONSE`。
+TUI 有两种模式，默认是 Agent 模式：模型每次选择工具调用或直接回复，而不会预先生成完整计划。系统以 provider-neutral Message 保存完整上下文；顶层会话只包含 System/User/Assistant，工具调用和结果作为 ToolMessage 嵌套在 AssistantMessage 中。对 DeepSeek，工具决策使用原生 Tool Calls，SSE `reasoning_content` 会实时显示为 `THINKING`，最终文本显示为 `RESPONSE`。
 
 正常产品路径只会自动选择 `reactive` 或 `dynamic_replan`：前者适合简单、逐步确定的任务，后者会按实时工具结果生成并替换后续可执行阶段。`plan_execute` 仍可通过 `--strategy plan_execute` 显式启用，但它是“固定计划、失败即停止”的实验对照基线，自动路由和 `/plan` 都不会使用它。
 
-输入 `/plan` 会进入只读调研：本地计算、列目录和读取文件自动执行；网页搜索/抓取仍会要求确认；写入、移动、删除和命令执行会被阻止。模型随后生成完整的编号高层计划，将内容保存为 `.mini_agent/artifacts/<session_id>/<run_id>/plan-r1.md`，并把包含完整快照的 ArtifactMessage 加入 session history；每个 Plan run 只生成一个不可变计划文件。`PLAN REVIEW` 只提供三个选择：`Implement` 先完成当前 Plan run，再在当前 session 创建独立的 Agent run，关联该 artifact 并追加 `UserMessage(content="Implement the plan")` 后开始落实；`Implement and Clear Session` 保存原 Plan run 后创建并激活新的隔离 session，只把获批 artifact 交给新的 Agent run，不继承原聊天历史；`Cancel and Stay in plan mode` 取消当前 run、保留待实施 artifact，并让 TUI 继续停留在 Plan 模式。Plan Review 不提供 Supplement，也不依赖“执行”等关键词匹配。
+输入 `/plan` 会进入只读调研：本地计算、列目录和读取文件自动执行；网页搜索/抓取仍会要求确认；写入、移动、删除和命令执行会被阻止。若项目本身无法回答会实质影响方案的问题，模型可调用 Plan 专用内建控制工具 `request_user_input`；它不注册到 `ToolRegistry`，也不计入 `/tools` 展示的三个执行工具。一次调用包含 1–3 题，每题给出 2–3 个候选，终端在最后追加“以上都不对”供自由输入。模型可进行多轮问答，只有在信息充分并输出最终编号计划后才进入 `PLAN REVIEW`。
+
+Plan 调研、问题调用、结构化答案、格式修正和最终编号计划都保存在 session runtime history。问题调用与答案只占一个普通 `AssistantMessage`：答案作为嵌套 `ToolMessage` 的结果保存，不额外复制为 `UserMessage`。`PLAN REVIEW` 只提供三个选择：`Implement` 完成当前 Plan run，在同一 session 追加 `UserMessage(content="Implement the plan")` 并启动独立 Agent run；`Implement and Clear Session` 创建新的隔离 session，只携带最终计划的 AssistantMessage 与实施指令；`Cancel and Stay in plan mode` 取消当前 run、保留完整 Plan 对话并停留在 Plan 模式。handoff 后由正常策略路由器选择执行方式，不强制 `dynamic_replan`。Plan Review 不提供 Supplement，也不依赖“执行”等关键词匹配。
 
 工具仅在其声明需要确认时才请求 Human-in-the-Loop：网页搜索/抓取、写文件、移动、删除和命令执行均会逐次确认；本地计算、列目录和读文件自动执行。TUI 默认使用 `Approval for me`；输入 `/permission` 可在当前程序内切换为 `Full access`，使所有工具审批自动 Continue。工具审批仍使用 `Continue / Cancel / Supplement`，Supplement 只属于 Tool Review，与 Plan Review 相互独立；`Full access` 不会跳过 `/plan` 生成提案后的 `PLAN REVIEW`，最终计划仍需人工选择 `Implement / Implement and Clear Session / Cancel and Stay in plan mode`。安全只读工具可按 `--max-retries` 同参数重试。若 reactive 或 `/plan` 调研中的工具最终失败，运行时会将截断后的调用和错误作为不可信上下文交给 LLM，请其最多连续纠错 `--max-tool-recoveries` 次（默认 2）；任一工具成功会重置该计数。不可自动重试的写入、移动、删除和命令调用不会因相同参数被重复执行。
 
-交互式 TUI 使用 alternate screen：可滚动消息区占满终端，状态栏和单行输入栏固定在最底部；退出后会恢复进入前的终端画面，并输出当前 session ID、`/use <session_id>` 与 `mini-agent --session-id <session_id>` 恢复方式。`/new <title>` 与 `/clear <title>` 清空当前 transcript 并进入待创建 session，不会修改 alternate screen 之外的终端内容。其它 TUI 命令：`/permission` 在底部输入栏切换当前程序的工具审批模式，`/help` 查看帮助，`/tools` 查看工具，`/trace` 查看上一次运行的结构化轨迹，`/sessions` 列出保存的对话，`/session` 查看当前对话信息，`/history` 查看当前 session 的历史消息，`/use <session_id>` 切换保存的对话，`/quit` 退出。待创建 session 只保存在内存中，终端显示 `SESSION PENDING — <title> (not saved yet)`；用户发送第一条消息时才生成 session ID 并写入 SQLite，未发送消息便退出不会留下空 session。`/clear` 不删除旧 session，可通过 `/sessions` 和 `/use <session_id>` 恢复；待创建状态会清除当前模型上下文、当前会话记录和上一次运行状态，但不改变进程内的 mode、permission 或工具配置。标题和 session ID 只接受空格参数，不支持 `/new/<title>` 或 `/use/<session_id>`。
+交互式 TUI 使用 alternate screen：可滚动消息区占满终端，状态栏和单行输入栏固定在最底部；退出后会恢复进入前的终端画面，并输出当前 session ID、`/use <session_id>` 与 `mini-agent --session-id <session_id>` 恢复方式。Plan 问题逐题显示在独立候选列表中：方向键循环选择，普通候选按 Enter 确认；选中“以上都不对”后按 Tab 进入自由输入，Enter 提交非空答案，Esc 返回候选列表，Ctrl+C 取消当前 run。非 Textual 运行使用数字选择并在最后一项后读取自由文本。
+
+`/new <title>` 与 `/clear <title>` 清空当前 transcript 并进入待创建 session，不会修改 alternate screen 之外的终端内容。其它 TUI 命令：`/permission` 在底部输入栏切换当前程序的工具审批模式，`/help` 查看帮助，`/tools` 查看工具，`/trace` 查看上一次运行的结构化轨迹，`/sessions` 列出保存的对话，`/session` 查看当前对话信息，`/history` 查看当前 session 的历史消息，`/use <session_id>` 切换保存的对话，`/quit` 退出。待创建 session 只保存在内存中，终端显示 `SESSION PENDING — <title> (not saved yet)`；用户发送第一条消息时才生成 session ID 并写入 SQLite，未发送消息便退出不会留下空 session。`/clear` 不删除旧 session，可通过 `/sessions` 和 `/use <session_id>` 恢复；待创建状态会清除当前模型上下文、当前会话记录和上一次运行状态，但不改变进程内的 mode、permission 或工具配置。标题和 session ID 只接受空格参数，不支持 `/new/<title>` 或 `/use/<session_id>`。
 
 交互模式支持命令实时补全：输入 `/p` 会显示 `/plan` 和 `/permission`，按 Tab 接受候选，方向键选择候选，Enter 提交。已识别命令会按文本顺序先执行，剩余普通文字按原顺序合并为一次 task；例如 `你好 /plan` 和 `/plan 你好` 都会先启用 Plan mode，再运行一次“你好”。`/new`、`/clear` 和 `/use` 会消费其后的文字直到下一个命令作为参数，其他命令后的文字仍属于 task；`/quit` 会停止处理当前行且不会提交 task。命令可以出现在任务句子中，但前面必须有空格；文件路径和 URL 中的 `/` 不会被识别为命令。任务中可以使用 `@相对路径` 引用工作区文件，例如 `请总结 @README.md`；文件内容会在本次任务中以内嵌引用形式提供给 Agent，引用路径必须位于 workspace 内。每次运行会在 `<workspace>/logs/<run_id>.jsonl` 记录有序 runtime messages，包括模型请求/规范化响应、计划、审批、工具调用和结果；SQLite 同时保存按 session/run 查询的同一审计轨迹、`session_runtime` 快照、checkpoint 和供 `/history` 使用的 user/assistant 文本投影。`LOG_FULL_MESSAGES=True`（默认）记录完整消息正文；设为 `False` 时记录长度、哈希和最多 200 字符预览。两种模式都会脱敏 API key、Authorization、Cookie、token、password 与 secret 字段，且不会记录 HTTP headers 或原始 provider payload。每个 turn 结束时，Runtime 的 usage 会被该 turn 最后一次模型响应 usage 覆盖。使用 `--session-id <session_id>` 可在新的 CLI 进程中继续已有对话。
 
@@ -192,7 +196,7 @@ Agent 运行时输入框会保持为 `mini-agent[running]>`。期间提交的多
 #### P0：可靠性底座
 
 - [ ] **上下文管理**：增加模型 token 预算、工具结果裁剪、滑动窗口、摘要压缩和关键事实保留，避免长 session 与大工具输出拖垮后续请求。
-- [ ] **Hooks**：为模型请求、工具调用、审批、状态转换和 run 完成提供稳定、可扩展的生命周期接口。
+- [x] **Hooks**：为 run、模型请求和工具调用提供可注入、可取消、可审计的 before/after 生命周期接口。
 - [ ] **工具输出治理**：统一限制字符数、行数、文件数和估算 token；超限结果应截断或转存 artifact，而不是直接进入模型上下文。
 - [ ] **工具选择策略**：按任务、模式和风险动态缩小可用工具集合，并要求工具与用户目标直接相关，避免无关的 workspace 扫描或网络请求。
 - [ ] **暂停与恢复**：基于现有 checkpoint 实现 durable `/resume`、`/cancel` 和 `/terminate`，恢复时不得重复执行已经产生副作用的操作。
@@ -220,8 +224,8 @@ observability/事件扇出与 JSONL 持久化日志 Sink
 planning/     规则/LLM 规划策略与显式能力协议
 tools/        工具契约、通用注册表、默认 workspace 工具 catalog、计算器、受限文件操作与跨平台命令执行
 providers/    LLM 门面、.env 配置和各厂商完整 API 适配器
-storage/      SQLite checkpoint/session 与 workspace artifact 持久化适配器
-domain/       Message、ArtifactMessage、ToolMessage、ToolSpec、RunState 与运行轨迹等纯数据模型
+storage/      SQLite checkpoint/session 与未装配的 artifact 持久化适配器
+domain/       Message、ToolMessage、ToolSpec、RunState 与运行轨迹等纯数据模型
 ```
 
 依赖只向内：TUI 只处理终端输入、确认和 `RuntimeEvent` 渲染；`ConversationService` 管理单轮执行与当前 session，`runtime.factory` 负责装配具体实现；`ToolRegistry` 只负责注册与调用策略，默认工具由独立 catalog 提供；SQLite 位于 `storage/`，不被执行工作流直接依赖。工具和模型提供方可以各自替换或单独测试。

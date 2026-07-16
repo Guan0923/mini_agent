@@ -17,7 +17,7 @@ class StrategyRouter:
         capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
         if run.mode == "plan":
             selection = StrategySelection(
-                "reactive", "Plan mode drafts an artifact for explicit implementation review."
+                "reactive", "Plan mode drafts a proposal for explicit implementation review."
             )
             source = "mode"
         elif settings.strategy == "auto":

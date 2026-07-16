@@ -9,6 +9,7 @@ import os
 from concurrent.futures import Future
 from pathlib import Path
 from queue import Empty, Queue
+from threading import Event
 
 from mini_agent.domain import RunState
 from mini_agent.observability import EventFanout, JsonlRunLogger
@@ -22,7 +23,13 @@ from mini_agent.runtime import (
     build_application,
     log_full_messages_from_env,
 )
-from mini_agent.runtime.contracts import InterruptDecision, InterruptHandler, InterruptRequest, SteeringHandler
+from mini_agent.runtime.contracts import (
+    CancellationHandler,
+    InterruptDecision,
+    InterruptHandler,
+    InterruptRequest,
+    SteeringHandler,
+)
 
 from .approval import TerminalApproval
 from .commands import COMMAND_ARGUMENT_NAMES, COMMAND_PATTERN, render_help
@@ -34,11 +41,17 @@ HELP = render_help()
 
 
 class _InteractiveApproval:
-    """Move blocking runtime approvals onto the active prompt-toolkit input loop."""
+    """Move blocking runtime approvals onto the active Textual input loop."""
 
-    def __init__(self, approval: TerminalApproval, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        approval: TerminalApproval,
+        loop: asyncio.AbstractEventLoop,
+        view: TerminalView | None = None,
+    ) -> None:
         self._approval = approval
         self._loop = loop
+        self._view = view
         self._pending: tuple[InterruptRequest, Future[InterruptDecision]] | None = None
         self._supplement = False
         self.changed = asyncio.Event()
@@ -60,6 +73,8 @@ class _InteractiveApproval:
         request = self._pending[0]
         if self._supplement:
             return "TOOL REVIEW | Enter supplement"
+        if request.kind == "question":
+            return "PLAN QUESTIONS | Select answers"
         if request.kind == "plan":
             return "PLAN REVIEW | 1 Implement | 2 Implement + clear | 3 Cancel"
         return "TOOL REVIEW | 1 Continue | 2 Cancel | 3 Supplement"
@@ -99,7 +114,32 @@ class _InteractiveApproval:
             return
         self._pending = (request, decision)
         self._supplement = False
-        self._approval.render_request(request)
+        if request.kind == "question" and self._view is not None:
+            self._view.begin_questionnaire(request.questions, self._complete_questionnaire)
+        else:
+            self._approval.render_request(request)
+        self.changed.set()
+
+    def _complete_questionnaire(self, answers: dict[str, list[str]]) -> None:
+        if self._pending is None or self._pending[0].kind != "question":
+            return
+        _request, future = self._pending
+        self._pending = None
+        self._supplement = False
+        future.set_result(InterruptDecision("answer", answers=answers))
+        self.changed.set()
+
+    def cancel_pending(self) -> None:
+        """Resolve an active review so cooperative run cancellation can continue."""
+
+        if self._pending is None:
+            return
+        request, future = self._pending
+        self._pending = None
+        self._supplement = False
+        if self._view is not None and request.kind == "question":
+            self._view.cancel_questionnaire()
+        future.set_result(InterruptDecision("cancel"))
         self.changed.set()
 
 
@@ -166,10 +206,12 @@ class TerminalApp:
         self._write("Mini-Agent TUI — type /help for commands, /quit to exit.")
         self._print_active_session()
         steering: Queue[str] = Queue()
-        approval = _InteractiveApproval(self._approval, loop)
+        approval = _InteractiveApproval(self._approval, loop, view)
         active_run: asyncio.Task[RunState | None] | None = None
         permission_pending = False
         deferred_task: str | None = None
+        cancel_requested = Event()
+        exit_after_run = False
 
         def launch(task: str) -> asyncio.Task[RunState | None]:
             return asyncio.create_task(
@@ -178,13 +220,20 @@ class TerminalApp:
                     task,
                     steering=lambda: self._drain_steering(steering),
                     interrupt=approval,
+                    cancel_requested=cancel_requested.is_set,
                 )
             )
 
         view_task = asyncio.create_task(view.run_async())
         try:
             while True:
-                self._update_view_state(view, active_run is not None, approval, permission_pending)
+                self._update_view_state(
+                    view,
+                    active_run is not None,
+                    approval,
+                    permission_pending,
+                    cancelling=exit_after_run,
+                )
                 submission = asyncio.create_task(view.submissions.get())
                 approval_change = asyncio.create_task(approval.changed.wait())
                 waiters: set[asyncio.Task[object]] = {submission, approval_change, view_task}  # type: ignore[arg-type]
@@ -213,7 +262,9 @@ class TerminalApp:
                         self._write(f"ERROR {exc}")
                     active_run = None
                     queued = self._drain_steering(steering)
-                    if queued:
+                    if exit_after_run:
+                        exit_requested = True
+                    elif queued:
                         self._write(f"STEERING STARTED — {len(queued)} queued message(s)")
                         active_run = launch("\n\n".join(queued))
 
@@ -234,7 +285,23 @@ class TerminalApp:
                             exit_requested = True
                     else:
                         task = submitted.strip()
-                        if approval.pending:
+                        if task == "/quit":
+                            if active_run is not None or approval.pending:
+                                if not exit_after_run:
+                                    exit_after_run = True
+                                    cancel_requested.set()
+                                    self._drain_steering(steering)
+                                    approval.cancel_pending()
+                                    self._write("CANCELLING — waiting for current operation")
+                            else:
+                                if permission_pending:
+                                    permission_pending = False
+                                    deferred_task = None
+                                self._write("Bye.")
+                                exit_requested = True
+                        elif exit_after_run:
+                            pass
+                        elif approval.pending:
                             approval.submit(task)
                         elif permission_pending:
                             selected = self._approval.parse_permission(task)
@@ -244,6 +311,7 @@ class TerminalApp:
                                 self._approval.set_permission(selected)
                                 permission_pending = False
                                 if deferred_task is not None:
+                                    self._write_user_message(deferred_task)
                                     active_run = launch(deferred_task)
                                     deferred_task = None
                         elif active_run is not None:
@@ -251,6 +319,7 @@ class TerminalApp:
                                 if any(kind == "command" for kind, _value, _argument in self._split_input(task)):
                                     self._write("Commands are unavailable while the agent is running.")
                                 else:
+                                    self._write_user_message(task)
                                     steering.put(task)
                                     self._write("STEERING QUEUED")
                         else:
@@ -262,6 +331,7 @@ class TerminalApp:
                                 deferred_task = next_task
                                 self._approval.render_permission()
                             elif next_task is not None:
+                                self._write_user_message(next_task)
                                 active_run = launch(next_task)
 
                 if submission not in done:
@@ -283,6 +353,7 @@ class TerminalApp:
         *,
         steering: SteeringHandler | None = None,
         interrupt: InterruptHandler | None = None,
+        cancel_requested: CancellationHandler | None = None,
     ) -> RunState | None:
         previous_session_id = self.active_session.session_id if self.active_session is not None else None
         try:
@@ -292,6 +363,7 @@ class TerminalApp:
                 on_event=self._event_sink,
                 interrupt=interrupt or self._approval,
                 steering=steering,
+                cancel_requested=cancel_requested,
             )
         except TaskPreparationError as exc:
             self._write(f"REFERENCE ERROR {exc}")
@@ -340,17 +412,20 @@ class TerminalApp:
         running: bool,
         approval: _InteractiveApproval,
         permission_pending: bool,
+        *,
+        cancelling: bool = False,
     ) -> None:
         mode = self.mode.upper()
-        if approval.pending:
-            view.set_ui(status=approval.status, prompt="review> ")
+        if cancelling:
+            view.set_ui(status=f"{mode} | CANCELLING")
+        elif approval.pending:
+            view.set_ui(status=approval.status)
         elif permission_pending:
-            view.set_ui(status="PERMISSION | 1 Approval for me | 2 Full access", prompt="permission> ")
+            view.set_ui(status="PERMISSION | 1 Approval for me | 2 Full access")
         elif running:
-            view.set_ui(status=f"{mode} | RUNNING", prompt="mini-agent[running]> ")
+            view.set_ui(status=f"{mode} | RUNNING")
         else:
-            prompt = "mini-agent[plan]> " if self.mode == "plan" else "mini-agent> "
-            view.set_ui(status=f"{mode} | IDLE", prompt=prompt)
+            view.set_ui(status=f"{mode} | IDLE")
 
     def _write(self, text: str, end: str = "\n") -> None:
         view = getattr(self, "_view", None)
@@ -358,6 +433,11 @@ class TerminalApp:
             view.write(text, end)
             return
         print(text, end=end, flush=end == "")
+
+    def _write_user_message(self, content: str) -> None:
+        """Echo only content that is about to enter the conversation."""
+
+        self._write(f"USER\n{content}")
 
     def _clear_display(self) -> None:
         view = getattr(self, "_view", None)

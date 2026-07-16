@@ -193,7 +193,7 @@ def test_response_rejects_duplicate_tool_call_ids() -> None:
     tool_call = {
         "id": "call_1",
         "type": "function",
-        "function": {"name": "calculator", "arguments": "{}"},
+        "function": {"name": "run_command", "arguments": "{}"},
     }
     runtime.exchange.raw_response = {
         "choices": [

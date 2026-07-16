@@ -1,0 +1,32 @@
+"""Cooperative run cancellation at explicit runtime safe points."""
+
+from __future__ import annotations
+
+from .context import AgentRuntime
+from .outcomes import cancel_run
+
+
+def cancel_if_requested(runtime: AgentRuntime) -> bool:
+    """Cancel the active run once when its process-local signal is set."""
+
+    handler = runtime.services.cancel_requested
+    if handler is None or not handler():
+        return False
+    if runtime.run.status == "cancelled":
+        return True
+    if runtime.run.status != "running":
+        return False
+
+    active = runtime.state.active_message
+    if active is not None:
+        for tool in active.tool_messages:
+            if tool.status == "pending":
+                tool.status = "failed"
+                tool.content = "Not executed because the run was cancelled."
+        if not any(message is active for message in runtime.state.messages):
+            runtime.state.messages.append(active)
+        runtime.run.history = runtime.state.messages
+        runtime.state.active_message = None
+        runtime.state.active_tool_index = None
+    cancel_run(runtime)
+    return True

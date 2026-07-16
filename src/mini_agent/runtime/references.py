@@ -50,7 +50,7 @@ class FileReferenceExpander:
         return "".join(pieces)
 
     def _read(self, path: str) -> str:
-        content = self._tools.invoke("read_file", {"path": path}, confirmed=True)
+        content = self._tools.invoke("run_command", {"command": f"Get-Content {path}"}, confirmed=True)
         if len(content) > self._max_file_chars:
             raise ToolError(f"Referenced file is too large: {path} (limit {self._max_file_chars} characters).")
         return content

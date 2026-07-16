@@ -28,9 +28,9 @@ class ToolRegistry:
         self._validators: dict[str, Draft202012Validator] = {}
         if isinstance(tools, Path):
             # Compatibility for callers of the original ``ToolRegistry(workspace)`` API.
-            from .catalog import build_workspace_tools
+            from .catalog import _build_tools
 
-            tools = build_workspace_tools(tools, web_search=web_search, web_fetch=web_fetch)  # type: ignore[arg-type]
+            tools = _build_tools(tools, web_search=web_search, web_fetch=web_fetch)  # type: ignore[arg-type]
         elif web_search is not None or web_fetch is not None:
             raise ValueError("web_search and web_fetch are only supported with the legacy workspace constructor.")
         for tool in tools or ():
@@ -82,7 +82,7 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             raise ToolError(f"Unknown tool: {name}")
-        self._validate_arguments(name, arguments)
+        self.validate_arguments(name, arguments)
         if tool.requires_confirmation and not confirmed:
             raise ConfirmationRequired(
                 f"{name} requires confirmation before it performs a potentially destructive operation."
@@ -97,7 +97,11 @@ class ToolRegistry:
         except (OSError, TypeError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
 
-    def _validate_arguments(self, name: str, arguments: Any) -> None:
+    def validate_arguments(self, name: str, arguments: dict[str, Any]) -> None:
+        """Validate one call without executing its handler."""
+
+        if name not in self._tools:
+            raise ToolError(f"Unknown tool: {name}")
         if not isinstance(arguments, dict):
             raise ToolError(f"Invalid arguments for tool {name!r}: arguments must be an object.")
         error = next(self._validators[name].iter_errors(arguments), None)

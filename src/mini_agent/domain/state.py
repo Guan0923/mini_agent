@@ -35,9 +35,10 @@ EventKind = Literal[
     "run_finished",
     "approval_requested",
     "approval_granted",
+    "user_input_requested",
+    "user_input_received",
     "feedback_received",
     "steering_applied",
-    "artifact_created",
     "handoff_created",
     "cancelled",
 ]
@@ -64,7 +65,6 @@ class RunHandoff:
 
     mode: RunMode
     task: str
-    artifact_id: str
     new_session: bool = False
 
 
@@ -186,8 +186,6 @@ class RunState:
     replan_count: int = 0
     final_answer: str | None = None
     status: RunStatus = "running"
-    artifact_ids: list[str] = field(default_factory=list)
-    input_artifact_ids: list[str] = field(default_factory=list)
     handoff: RunHandoff | None = None
 
     def add_event(self, kind: EventKind, message: str, **data: Any) -> None:
@@ -230,8 +228,6 @@ class RunState:
             "replan_count": self.replan_count,
             "final_answer": self.final_answer,
             "status": self.status,
-            "artifact_ids": self.artifact_ids,
-            "input_artifact_ids": self.input_artifact_ids,
             "handoff": asdict(self.handoff) if self.handoff else None,
         }
 
@@ -278,7 +274,6 @@ class RunState:
             handoff = RunHandoff(
                 mode=handoff_data.get("mode", "agent"),
                 task=str(handoff_data.get("task") or ""),
-                artifact_id=str(handoff_data.get("artifact_id") or ""),
                 new_session=(
                     handoff_data["new_session"] if isinstance(handoff_data.get("new_session"), bool) else False
                 ),
@@ -313,8 +308,6 @@ class RunState:
             replan_count=data.get("replan_count", 0),
             final_answer=data.get("final_answer"),
             status=data.get("status", "running"),
-            artifact_ids=list(data.get("artifact_ids") or []),
-            input_artifact_ids=list(data.get("input_artifact_ids") or []),
             handoff=handoff,
         )
 

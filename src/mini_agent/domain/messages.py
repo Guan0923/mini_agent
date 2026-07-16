@@ -90,7 +90,7 @@ class ArtifactMessage(Message):
     media_type: str = "text/markdown"
 
 
-ChatMessage: TypeAlias = SystemMessage | UserMessage | AssistantMessage | ArtifactMessage
+ChatMessage: TypeAlias = SystemMessage | UserMessage | AssistantMessage
 
 
 @dataclass(frozen=True)
@@ -143,6 +143,8 @@ def tool_message_from_dict(data: dict[str, Any], *, fallback_call_id: str | None
 
 
 def message_to_dict(message: ChatMessage) -> dict[str, Any]:
+    if isinstance(message, ArtifactMessage):
+        raise TypeError("ArtifactMessage is not an active chat message")
     payload: dict[str, Any] = {
         "name": message.name,
         "role": message.role,
@@ -154,17 +156,6 @@ def message_to_dict(message: ChatMessage) -> dict[str, Any]:
             reasoning=message.reasoning,
             logprobs=message.logprobs,
             tool_messages=[tool_message_to_dict(tool) for tool in message.tool_messages],
-        )
-    elif isinstance(message, ArtifactMessage):
-        payload.update(
-            artifact_id=message.artifact_id,
-            kind=message.kind,
-            source_role=message.source_role,
-            relative_path=message.relative_path,
-            media_type=message.media_type,
-            sha256=message.sha256,
-            revision=message.revision,
-            created_by_run_id=message.created_by_run_id,
         )
     return payload
 
@@ -198,19 +189,7 @@ def message_from_dict(data: dict[str, Any]) -> ChatMessage:
             tool_messages=tools,
         )
     if role == "artifact":
-        return ArtifactMessage(
-            name=str(data.get("name") or "artifact"),
-            content=text or "",
-            provider_options=_provider_options_from_dict(data),
-            artifact_id=str(data.get("artifact_id") or ""),
-            kind=str(data.get("kind") or "plan"),
-            source_role="assistant",
-            relative_path=data.get("relative_path") if isinstance(data.get("relative_path"), str) else None,
-            media_type=str(data.get("media_type") or "text/markdown"),
-            sha256=str(data.get("sha256") or ""),
-            revision=data.get("revision") if isinstance(data.get("revision"), int) else 1,
-            created_by_run_id=str(data.get("created_by_run_id") or ""),
-        )
+        raise ValueError("Unsupported message role: artifact")
     if role == "tool":
         # Old checkpoints stored tool results as top-level rows without call metadata.
         return AssistantMessage(

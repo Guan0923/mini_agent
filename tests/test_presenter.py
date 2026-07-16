@@ -10,7 +10,7 @@ def test_presenter_renders_stream_and_response(capsys) -> None:
     presenter.on_event(RuntimeEvent("thinking_delta", "Thinking."))
     presenter.on_event(RuntimeEvent("thinking_end"))
     presenter.on_event(RuntimeEvent("model_repair", "Malformed model action was repaired automatically."))
-    presenter.on_event(RuntimeEvent("tool_recovery", "missing.txt", {"tool": "read_file", "attempt": 1}))
+    presenter.on_event(RuntimeEvent("tool_recovery", "missing.txt", {"tool": "run_command", "attempt": 1}))
     presenter.on_event(RuntimeEvent("response", "Hello."))
 
     assert capsys.readouterr().out == (
@@ -18,7 +18,7 @@ def test_presenter_renders_stream_and_response(capsys) -> None:
         "THINKING\n"
         "Thinking.\n"
         "MODEL FORMAT RETRY — Malformed model action was repaired automatically.\n"
-        "TOOL RECOVERY 1 — read_file: missing.txt\n"
+        "TOOL RECOVERY 1 — run_command: missing.txt\n"
         "RESPONSE\n"
         "Hello.\n"
     )

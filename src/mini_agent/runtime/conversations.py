@@ -6,7 +6,7 @@ from typing import Protocol
 
 from mini_agent.domain import (
     DEFAULT_SESSION_TITLE,
-    ArtifactMessage,
+    AssistantMessage,
     RunHandoff,
     RunMode,
     RunState,
@@ -20,7 +20,7 @@ from mini_agent.domain import (
 from mini_agent.tools import ToolError
 
 from .context import AgentRuntime, text_messages
-from .contracts import EventHandler, InterruptHandler, SteeringHandler
+from .contracts import CancellationHandler, EventHandler, InterruptHandler, SteeringHandler
 from .events import RuntimeEvent
 from .execution import RuntimeRunner
 from .session_store import SessionStore
@@ -61,6 +61,7 @@ class ConversationService:
         on_event: EventHandler | None = None,
         interrupt: InterruptHandler | None = None,
         steering: SteeringHandler | None = None,
+        cancel_requested: CancellationHandler | None = None,
     ) -> RunState:
         prepared = self._prepare(task)
         state = self._run_single_turn(
@@ -69,6 +70,7 @@ class ConversationService:
             on_event=on_event,
             interrupt=interrupt,
             steering=steering,
+            cancel_requested=cancel_requested,
         )
         handoff = state.handoff
         if handoff is None:
@@ -81,7 +83,7 @@ class ConversationService:
             on_event=on_event,
             interrupt=interrupt,
             steering=steering,
-            input_artifact_ids=[handoff.artifact_id],
+            cancel_requested=cancel_requested,
         )
         if follow_up.handoff is not None:
             raise RuntimeError("Nested run handoffs are not supported.")
@@ -91,21 +93,15 @@ class ConversationService:
         if self.runtime is None:
             raise RuntimeError("Cannot start a handoff without an active runtime.")
         source_runtime = self.runtime
-        artifact = next(
-            (
-                message
-                for message in source_runtime.state.messages
-                if isinstance(message, ArtifactMessage) and message.artifact_id == handoff.artifact_id
-            ),
-            None,
-        )
-        if artifact is None:
-            raise RuntimeError(f"Unknown handoff artifact: {handoff.artifact_id}")
+        proposal = (source_runtime.run.final_answer or "").strip()
+        if not proposal:
+            raise RuntimeError("Cannot start an isolated handoff without a completed plan proposal.")
+        plan_message = AssistantMessage(content=proposal)
 
         if self.session_store is None:
             self.runtime = self.runner.empty_runtime(
                 session_id=new_session_id(),
-                messages=[artifact],
+                messages=[plan_message],
             )
             self.conversation = text_messages(self.runtime.state.messages)
             return
@@ -116,18 +112,10 @@ class ConversationService:
         isolated_session = self.session_store.create_session(f"Implement: {source_session.title}")
         isolated_runtime = self.runner.empty_runtime(
             session_id=isolated_session.session_id,
-            messages=[artifact],
+            messages=[plan_message],
             runtime_store=self.session_store,
         )
         isolated_runtime.save()
-
-        if source_runtime.state.pending_plan_artifact_id == handoff.artifact_id:
-            source_runtime.state.pending_plan_artifact_id = None
-            try:
-                source_runtime.save()
-            except Exception:
-                source_runtime.state.pending_plan_artifact_id = handoff.artifact_id
-                raise
 
         self.active_session = isolated_session
         self.runtime = isolated_runtime
@@ -142,7 +130,7 @@ class ConversationService:
         on_event: EventHandler | None,
         interrupt: InterruptHandler | None,
         steering: SteeringHandler | None,
-        input_artifact_ids: list[str] | None = None,
+        cancel_requested: CancellationHandler | None,
     ) -> RunState:
         if self.session_store is not None:
             session = self.ensure_session(prepared)
@@ -165,10 +153,7 @@ class ConversationService:
             mode=mode,
             run_id=run_id,
             history=self.runtime.state.messages,
-            input_artifact_ids=list(input_artifact_ids or []),
         )
-        if input_artifact_ids and self.runtime.state.pending_plan_artifact_id in input_artifact_ids:
-            self.runtime.state.pending_plan_artifact_id = None
         self.runtime.state.active_message = None
         self.runtime.state.active_tool_index = None
         self.runtime.state.turn_usage = None
@@ -177,6 +162,7 @@ class ConversationService:
         self.runtime.services.on_event = on_event
         self.runtime.services.interrupt = interrupt
         self.runtime.services.steering = steering
+        self.runtime.services.cancel_requested = cancel_requested
         runtime = self.runner.bind(self.runtime)
         try:
             state = self.runner.run(runtime)

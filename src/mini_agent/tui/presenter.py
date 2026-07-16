@@ -73,8 +73,6 @@ class TerminalPresenter:
             self._write(f"STEERING RECEIVED — {event.data['message_count']} message(s)")
         elif event.kind == "steering_applied":
             self._write(f"STEERING APPLIED — {event.data['phase']}")
-        elif event.kind == "artifact_created":
-            self._write(f"PLAN ARTIFACT {event.message}")
         elif event.kind == "handoff_created":
             self._write(f"HANDOFF — {event.message}")
         elif event.kind == "cancelled":

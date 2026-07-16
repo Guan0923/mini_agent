@@ -10,7 +10,7 @@ import pytest
 from mini_agent.domain import RunState
 from mini_agent.providers import ModelConfigurationError
 from mini_agent.runtime import TaskPreparationError
-from mini_agent.runtime.contracts import InterruptRequest
+from mini_agent.runtime.contracts import InterruptRequest, QuestionOption, UserQuestion
 from mini_agent.tui import cli
 from mini_agent.tui.approval import TerminalApproval
 
@@ -126,8 +126,11 @@ def test_interactive_start_accepts_messages_while_run_is_active(monkeypatch, cap
             return RunState(task=task, mode="agent", status="completed")
 
     class InteractiveView:
+        last = None
+
         def __init__(self, loop, **kwargs) -> None:
             del loop, kwargs
+            type(self).last = self
             self.submissions = asyncio.Queue()
             self.stopped = asyncio.Event()
             self.initial_sent = False
@@ -147,8 +150,7 @@ def test_interactive_start_accepts_messages_while_run_is_active(monkeypatch, cap
         def clear(self) -> None:
             self.writes.clear()
 
-        def set_ui(self, *, status: str, prompt: str) -> None:
-            del prompt
+        def set_ui(self, *, status: str) -> None:
             if status.endswith("IDLE") and not self.initial_sent:
                 self.initial_sent = True
                 self.submissions.put_nowait("initial task")
@@ -175,8 +177,73 @@ def test_interactive_start_accepts_messages_while_run_is_active(monkeypatch, cap
     app.start()
 
     assert captured == ["first steering", "second steering"]
+    assert InteractiveView.last is not None
+    rendered = "".join(InteractiveView.last.writes)
+    assert rendered.count("USER\ninitial task\n") == 1
+    assert rendered.count("USER\nfirst steering\n") == 1
+    assert rendered.count("USER\nsecond steering\n") == 1
+    assert "USER\n/quit" not in rendered
     output = capsys.readouterr().out
     assert output == "No saved session.\n"
+
+
+def test_interactive_quit_cancels_active_run_then_exits(monkeypatch, capsys) -> None:
+    cancellation_seen: list[bool] = []
+
+    class CancellableConversation(StubConversation):
+        def run_task(self, task: str, **kwargs) -> RunState:
+            assert task == "long task"
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and not kwargs["cancel_requested"]():
+                time.sleep(0.005)
+            cancellation_seen.append(kwargs["cancel_requested"]())
+            return RunState(task=task, mode="agent", status="cancelled")
+
+    class CancelView:
+        last = None
+
+        def __init__(self, loop, **kwargs) -> None:
+            del loop, kwargs
+            type(self).last = self
+            self.submissions = asyncio.Queue()
+            self.stopped = asyncio.Event()
+            self.started = False
+            self.quit_sent = False
+            self.writes: list[str] = []
+
+        async def run_async(self) -> None:
+            await self.stopped.wait()
+
+        def stop(self) -> None:
+            self.stopped.set()
+
+        def write(self, text: str, end: str = "\n") -> None:
+            self.writes.append(f"{text}{end}")
+
+        def clear(self) -> None:
+            self.writes.clear()
+
+        def set_ui(self, *, status: str) -> None:
+            if status.endswith("IDLE") and not self.started:
+                self.started = True
+                self.submissions.put_nowait("long task")
+            elif status.endswith("RUNNING") and not self.quit_sent:
+                self.quit_sent = True
+                self.submissions.put_nowait("/quit")
+
+    monkeypatch.setattr(cli, "TerminalView", CancelView)
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._conversation_service = CancellableConversation(RunState(task="unused", mode="agent"))
+    app._approval = TerminalApproval()
+
+    app.start()
+
+    assert cancellation_seen == [True]
+    assert CancelView.last is not None
+    output = "".join(CancelView.last.writes)
+    assert output.count("CANCELLING — waiting for current operation") == 1
+    assert "Commands are unavailable" not in output
+    assert capsys.readouterr().out == "No saved session.\n"
 
 
 def test_interactive_approval_bridge_resolves_on_prompt_loop(capsys) -> None:
@@ -194,6 +261,58 @@ def test_interactive_approval_bridge_resolves_on_prompt_loop(capsys) -> None:
 
     assert decision.choice == "continue"
     assert "TOOL REVIEW" in capsys.readouterr().out
+
+
+def test_interactive_approval_bridge_can_be_cancelled_for_exit() -> None:
+    async def scenario():
+        bridge = cli._InteractiveApproval(TerminalApproval(), asyncio.get_running_loop())
+        request = InterruptRequest("tool", "Call tool?", {"tool": "run_command", "arguments": {}})
+        decision_task = asyncio.create_task(asyncio.to_thread(bridge, request))
+        await bridge.changed.wait()
+
+        bridge.cancel_pending()
+
+        return await asyncio.wait_for(decision_task, 1)
+
+    decision = asyncio.run(scenario())
+
+    assert decision.choice == "cancel"
+
+
+def test_interactive_approval_bridge_resolves_textual_questionnaire() -> None:
+    async def scenario():
+        view = cli.TerminalView(asyncio.get_running_loop())
+        question = UserQuestion(
+            "storage",
+            "Storage",
+            "Where should the result be stored?",
+            (
+                QuestionOption("SQLite", "Use the existing database."),
+                QuestionOption("JSONL", "Use the audit stream."),
+            ),
+        )
+        async with view.run_test() as pilot:
+            bridge = cli._InteractiveApproval(TerminalApproval(), asyncio.get_running_loop(), view)
+            request = InterruptRequest(
+                "question",
+                "Answer questions.",
+                {"questions": []},
+                questions=(question,),
+            )
+            decision_task = asyncio.create_task(asyncio.to_thread(bridge, request))
+            await bridge.changed.wait()
+            bridge.changed.clear()
+            await pilot.pause()
+
+            assert view.questionnaire_active is True
+            await pilot.press("down", "enter")
+            return await asyncio.wait_for(decision_task, 1), view.questionnaire_active
+
+    decision, active = asyncio.run(scenario())
+
+    assert decision.choice == "answer"
+    assert decision.answers == {"storage": ["JSONL"]}
+    assert active is False
 
 
 class StubTerminalApp:

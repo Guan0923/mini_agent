@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 
-from mini_agent.domain import AgentAction, ArtifactMessage, AssistantMessage, ToolMessage, message_to_dict
+from mini_agent.domain import AgentAction, AssistantMessage, ToolMessage, message_to_dict
 from mini_agent.runtime.context import AgentRuntime
 
 from .base import (
@@ -32,9 +32,6 @@ def _uses_runtime(method: object) -> bool:
 def _legacy_history(runtime: AgentRuntime) -> list[dict[str, str]]:
     history: list[dict[str, str]] = []
     for message in runtime.state.messages:
-        if isinstance(message, ArtifactMessage):
-            history.append({"role": message.source_role, "content": _bounded(message.content)})
-            continue
         if isinstance(message, AssistantMessage) and message.tool_messages:
             calls = ", ".join(f"{tool.name} {tool.arguments}" for tool in message.tool_messages)
             history.append({"role": "assistant", "content": _bounded(f"[Tool call] {calls}")})

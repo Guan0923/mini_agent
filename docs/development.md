@@ -14,7 +14,7 @@ The editable install exposes the `mini-agent` command and keeps the `src/` packa
 
 Tasks can reference workspace files with `@relative/path`, for example `summarize @README.md`. References are expanded before planning, remain workspace-confined, and are bounded to avoid unintentional oversized prompts.
 
-Interactive TUI input uses a full-screen `prompt_toolkit.Application`: the scrollable transcript fills the viewport, while status and single-line input remain fixed at the bottom. Type `/p` to see `/plan`, use Tab or the arrow keys to choose a command, and press Enter to submit it. Completion only activates at the beginning of a token, so slashes in paths and URLs remain ordinary text.
+Interactive TUI input uses a full-screen Textual application: the selectable, scrollable transcript fills the viewport, while status and single-line input remain fixed at the bottom. Type `/p` to see `/plan`, use Tab or the arrow keys to choose a command, and press Enter to submit it. Completion only activates at the beginning of a token, so slashes in paths and URLs remain ordinary text.
 
 The input prompt remains active while an agent run is in progress. Plain-text messages submitted at `mini-agent[running]>` are merged in submission order and applied at the next safe point after the current model request or tool call finishes. Slash commands are unavailable during a run. Plan and tool reviews take precedence over steering input and temporarily switch the prompt to the existing review choices.
 
@@ -47,7 +47,9 @@ mini-agent
 
 The rule planner is offline and deterministic. The default LLM planner reads provider settings from `.env`; never commit that file or real API keys.
 
-In Plan mode, `PLAN REVIEW` offers exactly three choices. `Implement` completes the Plan run and starts a separate Agent run in the current session with `Implement the plan`. `Implement and Clear Session` persists the Plan run, creates and activates a new isolated session, then starts the Agent run with the approved artifact but without the old conversation history. `Cancel and Stay in plan mode` cancels the run, retains the artifact, and leaves the TUI in Plan mode. Plan Review has no Supplement option; Tool Review continues to use `Continue`, `Cancel`, and `Supplement`.
+In Plan mode, the model may use the built-in `request_user_input` control ToolSpec after read-only exploration. It is not one of the three registered execution tools. Each call asks one to three single-choice questions with two or three model options; the TUI appends a final free-form option, collects all answers, and resumes the same Plan run with one structured ToolMessage result. Multiple question rounds are allowed within `max_actions`; `PLAN REVIEW` starts only after the model returns the final numbered plan.
+
+`PLAN REVIEW` offers exactly three choices. `Implement` completes the Plan run and starts a separate Agent run in the current session with the complete Plan conversation plus `Implement the plan`. `Implement and Clear Session` creates and activates a new isolated session containing only the final plan and implementation message. `Cancel and Stay in plan mode` cancels the run, retains the complete Plan conversation, and leaves the TUI in Plan mode. Plan Review has no Supplement option; Tool Review continues to use `Continue`, `Cancel`, and `Supplement`.
 
 ## Runtime data
 
@@ -55,17 +57,16 @@ The application writes local runtime data below the selected workspace:
 
 - `logs/`: JSONL audit streams for individual runs, including normalized model request/response messages;
 - `.mini_agent/checkpoints.db`: run checkpoints, typed runtime snapshots, compact conversation projections, and ordered session runtime messages;
-- `.mini_agent/artifacts/<session_id>/<run_id>/plan-r1.md`: the immutable UTF-8 plan created before Plan Review.
 
-These paths are ignored by Git. `LOG_FULL_MESSAGES=True` is the development default; set it to `False` in `.env` to write summaries instead of complete audit-message bodies. Sensitive key names and values are redacted in both modes. Artifact files are runtime-owned snapshots: do not edit or reuse a revision path manually, and create a new revision whenever content must change. Do not use production credentials or sensitive personal data in checked-in fixtures.
+These paths are ignored by Git. `LOG_FULL_MESSAGES=True` is the development default; set it to `False` in `.env` to write summaries instead of complete audit-message bodies. Sensitive key names and values are redacted in both modes. Existing artifact files are left untouched, but the active Agent runtime no longer creates or consumes them. Do not use production credentials or sensitive personal data in checked-in fixtures.
 
 ## Change boundaries
 
-- Domain types remain independent of the TUI, providers, and concrete storage. `ArtifactMessage` carries the complete content snapshot and metadata, not storage behavior.
-- Runtime owns strategy execution, preprocessing, checkpoint/session ports, and the `ArtifactStore` port. `ConversationService` owns the active session, one durable turn at a time, same-session handoffs, and isolated-session handoffs requested by `RunHandoff.new_session`.
+- Domain types remain independent of the TUI, providers, and concrete storage. Active chat history contains only system, user, and assistant messages.
+- Runtime owns strategy execution, preprocessing, and checkpoint/session ports. `ConversationService` owns the active session, one durable turn at a time, same-session handoffs, and isolated-session handoffs requested by `RunHandoff.new_session`.
 - Tools validate untrusted model arguments and remain workspace-confined. Keep default workspace assembly in `tools/catalog.py`; keep `ToolRegistry` independent of concrete tool implementations.
-- Provider adapters own wire conversion only; convert artifacts from `ArtifactMessage.content` and never read `.mini_agent/artifacts` directly. Keep reusable HTTP and SSE mechanics in `providers/client.py`.
-- Storage adapters implement runtime ports and are chosen only by `runtime.factory`. Artifact adapters must use atomic writes, keep revisions immutable, and confine paths beneath the configured workspace.
+- Provider adapters own wire conversion only and accept active chat messages, never artifact snapshots. Keep reusable HTTP and SSE mechanics in `providers/client.py`.
+- Storage adapters implement runtime ports and are chosen only by `runtime.factory`. Dormant artifact adapters remain independently testable but are not composed into AgentRunner.
 - TUI renders runtime events and owns terminal commands/approval prompts; keep the Plan Review and Tool Review decision sets separate, and do not implement tool behavior or session persistence in the TUI.
 
 When adding behavior, add or update focused tests in `tests/`, then run the complete validation commands before opening a pull request.

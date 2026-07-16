@@ -10,7 +10,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from mini_agent.domain import ArtifactMessage, AssistantMessage, SystemMessage, ToolMessage, ToolSpec, UserMessage
+from mini_agent.domain import AssistantMessage, SystemMessage, ToolMessage, ToolSpec, UserMessage
 from mini_agent.runtime.context import AgentRuntime, PreparedResponse
 
 from .config import ModelConfig
@@ -182,26 +182,6 @@ def _wire_messages(runtime: AgentRuntime) -> list[dict[str, Any]]:
                 options.get("extra_body"),
                 protected={"role", "content", "name"},
                 label="user message",
-            )
-            wire.append(item)
-            continue
-        if isinstance(message, ArtifactMessage):
-            options = _provider_options(message)
-            unknown = set(options) - {"extra_body"}
-            if unknown:
-                raise ModelRequestError(f"Unknown DeepSeek artifact message option(s): {', '.join(sorted(unknown))}.")
-            reference = f"kind={message.kind} id={message.artifact_id} revision={message.revision}"
-            if message.relative_path:
-                reference += f" path={message.relative_path}"
-            item = {
-                "role": message.source_role,
-                "content": f"[Artifact {reference}]\n{message.content}",
-            }
-            _merge_extra_fields(
-                item,
-                options.get("extra_body"),
-                protected={"role", "content"},
-                label="artifact message",
             )
             wire.append(item)
             continue
