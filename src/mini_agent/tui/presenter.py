@@ -2,54 +2,82 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from mini_agent.runtime import RuntimeEvent
+
+
+def _console_write(text: str, end: str = "\n") -> None:
+    print(text, end=end, flush=end == "")
 
 
 class TerminalPresenter:
     """Renders runtime events without leaking console concerns into the runner."""
 
-    def __init__(self) -> None:
+    def __init__(self, write: Callable[[str, str], None] | None = None) -> None:
         self._thinking_open = False
+        self._write = write or _console_write
 
     def on_event(self, event: RuntimeEvent) -> None:
         if event.kind == "run_started":
-            print(f"RUN {event.data['run_id']} started")
+            self._write(f"RUN {event.data['run_id']} started")
         elif event.kind == "thinking_start":
-            print("THINKING")
+            self._write("THINKING")
             self._thinking_open = True
         elif event.kind == "thinking_delta":
-            print(event.message, end="", flush=True)
+            self._write(event.message, "")
         elif event.kind == "thinking_end":
             if self._thinking_open:
-                print()
+                self._write("")
             self._thinking_open = False
         elif event.kind == "strategy":
-            print(f"STRATEGY {event.message} — {event.data['reason']}")
+            self._write(f"STRATEGY {event.message} — {event.data['reason']}")
+        elif event.kind == "model_repair":
+            self._write(f"MODEL FORMAT RETRY — {event.message}")
         elif event.kind == "tool_call":
-            print(f"CALL  {event.message} {event.data['arguments']}")
+            self._write(f"CALL  {event.message} {event.data['arguments']}")
         elif event.kind == "tool_result":
-            print(f"RESULT\n{event.message}")
+            self._write(f"RESULT\n{event.message}")
         elif event.kind == "tool_failed":
-            print(f"TOOL FAILED {event.data['tool']}: {event.message}")
+            self._write(f"TOOL FAILED {event.data['tool']}: {event.message}")
         elif event.kind == "retry":
-            print(f"RETRY {event.data['tool']}: {event.message}")
+            self._write(f"RETRY {event.data['tool']}: {event.message}")
+        elif event.kind == "tool_recovery":
+            self._write(f"TOOL RECOVERY {event.data['attempt']} — {event.data['tool']}: {event.message}")
         elif event.kind == "replan_requested":
-            print(f"REPLAN REQUESTED\n{event.message}")
+            self._write(f"REPLAN REQUESTED\n{event.message}")
         elif event.kind == "replan_applied":
-            print(f"REPLAN APPLIED\n{event.message}")
+            self._write(f"REPLAN APPLIED\n{event.message}")
         elif event.kind == "response":
-            print(f"RESPONSE\n{event.message}")
+            self._write(f"RESPONSE\n{event.message}")
         elif event.kind == "plan":
-            print(f"PLAN\n{event.message}")
+            self._write(f"PLAN\n{event.message}")
         elif event.kind == "error":
-            print(f"ERROR {event.message}")
+            self._write(f"ERROR {event.message}")
+            diagnostics = event.data.get("provider_diagnostics")
+            if isinstance(diagnostics, dict):
+                values = [
+                    f"{name}={diagnostics[name]}"
+                    for name in ("finish_reason", "content_chars", "reasoning_chars")
+                    if name in diagnostics
+                ]
+                if values:
+                    self._write(f"MODEL DIAGNOSTICS {' '.join(values)}")
         elif event.kind == "approval_requested":
-            print(f"APPROVAL REQUIRED — {event.message}")
+            self._write(f"APPROVAL REQUIRED — {event.message}")
         elif event.kind == "approval_granted":
-            print(f"APPROVED — {event.message}")
+            self._write(f"APPROVED — {event.message}")
         elif event.kind == "feedback_received":
-            print(f"SUPPLEMENT — {event.message}")
+            self._write(f"SUPPLEMENT — {event.message}")
+        elif event.kind == "steering_received":
+            self._write(f"STEERING RECEIVED — {event.data['message_count']} message(s)")
+        elif event.kind == "steering_applied":
+            self._write(f"STEERING APPLIED — {event.data['phase']}")
+        elif event.kind == "artifact_created":
+            self._write(f"PLAN ARTIFACT {event.message}")
+        elif event.kind == "handoff_created":
+            self._write(f"HANDOFF — {event.message}")
         elif event.kind == "cancelled":
-            print("CANCELLED")
+            self._write("CANCELLED")
         elif event.kind == "run_finished":
-            print(f"RUN {event.data['run_id']} {event.message}")
+            self._write(f"RUN {event.data['run_id']} {event.message}")

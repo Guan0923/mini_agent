@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import operator
-from typing import Callable
+from collections.abc import Callable
 
 from .base import ToolError
 
@@ -27,7 +27,7 @@ def calculate(expression: str) -> str:
         raise ToolError("Calculator only accepts a valid arithmetic expression.") from exc
 
     def evaluate(node: ast.AST) -> int | float:
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, int | float):
             return node.value
         if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
             return _BINARY_OPERATORS[type(node.op)](evaluate(node.left), evaluate(node.right))

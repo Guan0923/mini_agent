@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from mini_agent.domain import RunState
+from .context import AgentRuntime
 
 
 class CheckpointStore(Protocol):
-    """Persist snapshots without exposing a concrete database to the runner."""
-
-    def save(self, state: RunState, reason: str) -> None: ...
+    def save(self, runtime: AgentRuntime, reason: str) -> None: ...

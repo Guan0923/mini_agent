@@ -1,9 +1,391 @@
 import json
 
 import pytest
+import requests
 
-from mini_agent.planning import LLMPlanner, PlanningError
-from mini_agent.providers import ChatCompletionsClient, DeepSeekChatCompletions, DeepSeekStreamDelta, ModelConfig, ModelRequestError
+from mini_agent.domain import AssistantMessage, PlanningError, SystemMessage, ToolMessage, ToolSpec, UserMessage
+from mini_agent.planning import LLMPlanner, RuleBasedPlanner
+from mini_agent.providers import (
+    DeepSeek,
+    LLMClient,
+    ModelConfig,
+    ModelConfigurationError,
+    ModelRequestError,
+)
+from mini_agent.runtime import AgentRunner, PreparedResponse
+from mini_agent.tools import Tool, ToolRegistry
+
+
+def runtime_for(*, messages=None, tools=None):
+    registry = ToolRegistry(tools or [])
+    runtime = AgentRunner(RuleBasedPlanner(), registry).new_runtime(task="hello", messages=messages or [])
+    runtime.state.model = "demo"
+    runtime.state.request_parameters = {"max_tokens": 512, "temperature": 0}
+    return runtime
+
+
+def deepseek_for_test() -> DeepSeek:
+    return DeepSeek(ModelConfig("secret", "https://example.test/v1", "demo"))
+
+
+def test_prepare_request_expands_nested_tool_messages() -> None:
+    tool = ToolMessage(
+        name="calculator",
+        call_id="call_1",
+        arguments={"expression": "2 + 2"},
+        content="4",
+        status="succeeded",
+    )
+    runtime = runtime_for(
+        messages=[
+            UserMessage(content="calculate"),
+            AssistantMessage(reasoning="Use arithmetic.", tool_messages=[tool]),
+        ]
+    )
+    runtime.exchange.messages = runtime.state.messages[:2]
+    runtime.exchange.output_mode = "tools"
+    runtime.exchange.allowed_tools = [
+        ToolSpec(
+            "calculator",
+            "Calculate.",
+            {"type": "object", "properties": {"expression": {"type": "string"}}},
+        )
+    ]
+
+    payload = deepseek_for_test().prepare_request(runtime)
+
+    assert "response_format" not in payload
+    assert payload["tools"][0]["function"]["name"] == "calculator"
+    assistant, result = payload["messages"][-2:]
+    assert assistant["reasoning_content"] == "Use arithmetic."
+    assert assistant["tool_calls"][0]["id"] == "call_1"
+    assert json.loads(assistant["tool_calls"][0]["function"]["arguments"]) == {"expression": "2 + 2"}
+    assert result == {"role": "tool", "tool_call_id": "call_1", "content": "4"}
+
+
+def test_prepare_request_rejects_pending_tool_history() -> None:
+    runtime = runtime_for(messages=[AssistantMessage(tool_messages=[ToolMessage(name="calculator", call_id="call_1")])])
+
+    with pytest.raises(ModelRequestError, match="no result"):
+        deepseek_for_test().prepare_request(runtime)
+
+
+def test_prepare_request_supports_documented_deepseek_parameters() -> None:
+    messages = [UserMessage(name="alice", content="Use a tool.")]
+    runtime = runtime_for(messages=messages)
+    runtime.exchange.messages = messages
+    runtime.state.request_parameters = {
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
+        "max_tokens": 1024,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "max",
+        "response_format": {"type": "text"},
+        "stop": ["DONE"],
+        "logprobs": True,
+        "top_logprobs": 5,
+        "user_id": "user_123",
+        "tool_choice": {"type": "function", "function": {"name": "calculator"}},
+        "extra_body": {"future_parameter": "supported"},
+    }
+    runtime.exchange.stream = True
+    runtime.exchange.output_mode = "tools"
+    runtime.exchange.allowed_tools = [
+        ToolSpec(
+            "calculator",
+            "Calculate.",
+            {"type": "object"},
+            provider_options={"deepseek": {"strict": True}},
+        )
+    ]
+
+    payload = deepseek_for_test().prepare_request(runtime)
+
+    assert payload["messages"] == [{"role": "user", "content": "Use a tool.", "name": "alice"}]
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "max"
+    assert payload["max_tokens"] == 1024
+    assert payload["temperature"] == 0.2
+    assert payload["top_p"] == 0.9
+    assert payload["frequency_penalty"] == 0
+    assert payload["presence_penalty"] == 0
+    assert payload["response_format"] == {"type": "text"}
+    assert payload["stop"] == ["DONE"]
+    assert payload["logprobs"] is True
+    assert payload["top_logprobs"] == 5
+    assert payload["user_id"] == "user_123"
+    assert payload["tools"][0]["function"]["strict"] is True
+    assert payload["tool_choice"] == {"type": "function", "function": {"name": "calculator"}}
+    assert payload["stream_options"] == {"include_usage": True}
+    assert payload["future_parameter"] == "supported"
+
+
+def test_prepare_request_supports_assistant_prefix_and_explicit_usage_opt_out() -> None:
+    messages = [
+        SystemMessage(name="guide", content="Answer directly."),
+        UserMessage(content="Complete this."),
+        AssistantMessage(
+            content="Prefix:",
+            reasoning="Continue carefully.",
+            provider_options={"deepseek": {"prefix": True}},
+        ),
+    ]
+    runtime = runtime_for(messages=messages)
+    runtime.exchange.messages = messages
+    runtime.state.request_parameters["stream_options"] = {"include_usage": False}
+    runtime.exchange.stream = True
+
+    payload = deepseek_for_test().prepare_request(runtime)
+
+    assert payload["messages"][0] == {"role": "system", "content": "Answer directly.", "name": "guide"}
+    assert payload["messages"][-1] == {
+        "role": "assistant",
+        "content": "Prefix:",
+        "prefix": True,
+        "reasoning_content": "Continue carefully.",
+    }
+    assert payload["stream_options"] == {"include_usage": False}
+
+
+@pytest.mark.parametrize("tool_choice", ["none", "auto", "required"])
+def test_prepare_request_supports_string_tool_choices(tool_choice) -> None:
+    runtime = runtime_for()
+    runtime.state.request_parameters["tool_choice"] = tool_choice
+    runtime.exchange.allowed_tools = [ToolSpec("calculator", "Calculate.")]
+
+    payload = deepseek_for_test().prepare_request(runtime)
+
+    assert payload["tool_choice"] == tool_choice
+
+
+@pytest.mark.parametrize(
+    ("parameters", "stream", "error"),
+    [
+        ({"top_logprobs": 3}, False, "requires logprobs=true"),
+        ({"stream_options": {"include_usage": True}}, False, "only valid when stream=true"),
+        ({"unknown": True}, False, "use extra_body"),
+        ({"extra_body": {"model": "override"}}, False, "cannot override: model"),
+    ],
+)
+def test_prepare_request_rejects_invalid_parameter_combinations(parameters, stream, error) -> None:
+    runtime = runtime_for()
+    runtime.state.request_parameters = parameters
+    runtime.exchange.stream = stream
+
+    with pytest.raises(ModelRequestError, match=error):
+        deepseek_for_test().prepare_request(runtime)
+
+
+def test_prepare_response_preserves_usage_logprobs_and_tool_calls() -> None:
+    runtime = runtime_for()
+    runtime.exchange.raw_response = {
+        "id": "chatcmpl-test",
+        "model": "deepseek-test",
+        "created": 1718345013,
+        "object": "chat.completion",
+        "system_fingerprint": "fp_test",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "Need a calculation.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "calculator", "arguments": '{"expression":"2 + 2"}'},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+                "logprobs": {"content": [{"token": "x", "logprob": -0.1}]},
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 10,
+            "prompt_cache_hit_tokens": 4,
+            "prompt_cache_miss_tokens": 6,
+            "completion_tokens": 3,
+            "completion_tokens_details": {"reasoning_tokens": 2},
+            "total_tokens": 13,
+        },
+    }
+
+    response = deepseek_for_test().prepare_response(runtime)
+
+    assert response.message.name == "assistant"
+    assert response.message.role == "assistant"
+    assert response.message.reasoning == "Need a calculation."
+    assert response.message.logprobs == {"content": [{"token": "x", "logprob": -0.1}]}
+    assert response.message.tool_messages == [
+        ToolMessage(name="calculator", call_id="call_1", arguments={"expression": "2 + 2"})
+    ]
+    assert response.usage == {
+        "prompt_tokens": 10,
+        "prompt_cache_hit_tokens": 4,
+        "prompt_cache_miss_tokens": 6,
+        "completion_tokens": 3,
+        "completion_tokens_details": {"reasoning_tokens": 2},
+        "total_tokens": 13,
+    }
+    assert response.provider_metadata["created"] == 1718345013
+    assert response.provider_metadata["system_fingerprint"] == "fp_test"
+    assert response.message.provider_options["deepseek"]["response"]["choice_index"] == 0
+    assert runtime.state.turn_usage == response.usage
+
+
+def test_prepare_response_uses_lowest_choice_and_preserves_alternatives() -> None:
+    runtime = runtime_for()
+    runtime.exchange.raw_response = {
+        "id": "multi",
+        "model": "deepseek-test",
+        "choices": [
+            {
+                "index": 1,
+                "message": {"role": "assistant", "content": "Alternative"},
+                "finish_reason": "length",
+                "logprobs": None,
+            },
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "Primary"},
+                "finish_reason": "content_filter",
+                "logprobs": None,
+            },
+        ],
+    }
+
+    response = deepseek_for_test().prepare_response(runtime)
+
+    assert response.message.content == "Primary"
+    assert response.finish_reason == "content_filter"
+    alternatives = response.message.provider_options["deepseek"]["response"]["alternative_choices"]
+    assert alternatives[0]["index"] == 1
+
+
+@pytest.mark.parametrize(
+    "finish_reason",
+    ["stop", "length", "content_filter", "tool_calls", "insufficient_system_resource"],
+)
+def test_prepare_response_preserves_documented_finish_reasons(finish_reason) -> None:
+    runtime = runtime_for()
+    runtime.exchange.raw_response = {
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "Partial"},
+                "finish_reason": finish_reason,
+                "logprobs": None,
+            }
+        ]
+    }
+
+    response = deepseek_for_test().prepare_response(runtime)
+
+    assert response.finish_reason == finish_reason
+
+
+def test_prepare_response_rejects_invalid_tool_arguments_before_execution() -> None:
+    runtime = runtime_for()
+    runtime.exchange.raw_response = {
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "calculator", "arguments": "not-json"},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+    with pytest.raises(ModelRequestError, match="not valid JSON"):
+        deepseek_for_test().prepare_response(runtime)
+
+
+def test_prepare_response_aggregates_streamed_reasoning_and_tool_arguments() -> None:
+    runtime = runtime_for()
+    reasoning = []
+    runtime.exchange.on_reasoning = reasoning.append
+    runtime.exchange.raw_response = iter(
+        [
+            {
+                "id": "stream-1",
+                "model": "deepseek-test",
+                "created": 1718345013,
+                "object": "chat.completion.chunk",
+                "system_fingerprint": "fp_stream",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "reasoning_content": "Think ",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {"name": "calculator", "arguments": '{"expression":'},
+                                }
+                            ],
+                        },
+                        "finish_reason": None,
+                        "logprobs": {
+                            "content": None,
+                            "reasoning_content": [{"token": "Think", "logprob": -0.1}],
+                        },
+                    }
+                ],
+                "usage": None,
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "reasoning_content": "now.",
+                            "tool_calls": [{"index": 0, "function": {"arguments": '"2 + 2"}'}}],
+                        },
+                        "finish_reason": "tool_calls",
+                        "logprobs": {
+                            "content": [{"token": "", "logprob": -0.2}],
+                            "reasoning_content": [{"token": "now", "logprob": -0.3}],
+                        },
+                    }
+                ],
+                "usage": None,
+            },
+            {"choices": [], "usage": {"total_tokens": 12, "completion_tokens_details": {"reasoning_tokens": 2}}},
+        ]
+    )
+
+    response = deepseek_for_test().prepare_response(runtime)
+
+    assert response.message.reasoning == "Think now."
+    assert reasoning == ["Think ", "now."]
+    assert response.message.tool_messages[0].arguments == {"expression": "2 + 2"}
+    assert response.message.logprobs == {
+        "content": [{"token": "", "logprob": -0.2}],
+        "reasoning_content": [
+            {"token": "Think", "logprob": -0.1},
+            {"token": "now", "logprob": -0.3},
+        ],
+    }
+    assert response.usage == {"total_tokens": 12, "completion_tokens_details": {"reasoning_tokens": 2}}
+    assert response.provider_metadata["object"] == "chat.completion.chunk"
+    assert response.provider_metadata["system_fingerprint"] == "fp_stream"
 
 
 class FakeResponse:
@@ -12,215 +394,238 @@ class FakeResponse:
 
     def json(self) -> dict:
         return {
+            "id": "chatcmpl-test",
+            "model": "deepseek-test",
             "choices": [
                 {
-                    "message": {
-                        "content": json.dumps(
-                            {
-                                "type": "tool_call",
-                                "tool": "calculator",
-                                "arguments": {"expression": "2 + 2"},
-                            }
-                        ),
-                        "reasoning_content": "The user requested arithmetic.",
-                    },
+                    "message": {"role": "assistant", "content": "Hello", "reasoning_content": "Greet."},
                     "finish_reason": "stop",
-                },
+                    "logprobs": None,
+                }
             ],
-            "id": "chatcmpl-test",
-            "model": "deepseek-v4-flash",
-            "usage": {
-                "prompt_tokens": 20,
-                "completion_tokens": 10,
-                "total_tokens": 30,
-                "completion_tokens_details": {"reasoning_tokens": 4},
-            },
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
         }
 
 
 class FakeSession:
     def __init__(self) -> None:
-        self.request: dict | None = None
+        self.request = None
 
-    def post(self, url: str, **kwargs: object) -> FakeResponse:
+    def post(self, url, **kwargs):
         self.request = {"url": url, **kwargs}
         return FakeResponse()
 
 
-class FakeStreamResponse(FakeResponse):
-    def iter_lines(self, decode_unicode: bool = False) -> list[str]:
+class FakeStreamResponse:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def iter_lines(self, decode_unicode=True):
+        assert decode_unicode is True
         return [
-            'data: {"choices":[{"delta":{"reasoning_content":"Think ","content":"{\\"type\\": "}}]}',
-            'data: {"choices":[{"delta":{"reasoning_content":"now.","content":"\\"final_answer\\",\\"answer\\":\\"Hi\\"}"}}]}',
-            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            'data: {"id":"stream","model":"demo","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null,"logprobs":null}],"usage":null}',
+            'data: {"choices":[{"index":0,"delta":{"content":"!"},"finish_reason":"stop","logprobs":null}],"usage":null}',
+            'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}',
             "data: [DONE]",
         ]
 
     def close(self) -> None:
-        return None
+        self.closed = True
 
 
-class StreamSession:
-    def post(self, url: str, **kwargs: object) -> FakeStreamResponse:
-        assert kwargs["stream"] is True
-        return FakeStreamResponse()
+class FakeStreamSession:
+    def __init__(self) -> None:
+        self.request = None
+        self.response = FakeStreamResponse()
+
+    def post(self, url, **kwargs):
+        self.request = {"url": url, **kwargs}
+        return self.response
 
 
-def test_deepseek_client_builds_and_parses_chat_completion() -> None:
+class FailingSession:
+    def post(self, url, **kwargs):
+        raise requests.Timeout("timeout")
+
+
+def test_llm_client_delegates_to_deepseek_runtime() -> None:
     session = FakeSession()
-    http_client = ChatCompletionsClient(session=session)
-    client = DeepSeekChatCompletions(ModelConfig("secret", "https://example.test/v1", "demo"), client=http_client)
+    client = LLMClient(
+        ModelConfig("secret", "https://example.test/v1", "demo"),
+        session=session,
+    )
+    runtime = runtime_for()
+    runtime.exchange.messages = [UserMessage(content="hello")]
 
-    completion = client.create([{"role": "user", "content": "hello"}])
-    assert session.request is not None
+    response = client.run(runtime)
+
+    assert isinstance(client.llm, DeepSeek)
     assert session.request["url"] == "https://example.test/v1/chat/completions"
-    assert session.request["json"]["model"] == "demo"
-    assert session.request["json"]["response_format"] == {"type": "json_object"}
-    assert session.request["json"]["max_tokens"] == 8192
-    assert completion.reasoning_content == "The user requested arithmetic."
-    assert completion.usage is not None
-    assert completion.usage.reasoning_tokens == 4
-    assert client.complete_with_reasoning([{"role": "user", "content": "hello"}]) == (
-        '{"type": "tool_call", "tool": "calculator", "arguments": {"expression": "2 + 2"}}',
-        "The user requested arithmetic.",
+    assert session.request["json"]["messages"] == [{"role": "user", "content": "hello"}]
+    assert response.message.content == "Hello"
+    assert response.message.reasoning == "Greet."
+    assert runtime.state.turn_usage["total_tokens"] == 4
+
+
+def test_llm_client_runs_deepseek_sse_lifecycle() -> None:
+    session = FakeStreamSession()
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
+    runtime = runtime_for()
+    runtime.exchange.messages = [UserMessage(content="hello")]
+    runtime.exchange.stream = True
+
+    response = client.run(runtime)
+
+    assert session.request["stream"] is True
+    assert session.request["json"]["stream_options"] == {"include_usage": True}
+    assert response.message.content == "Hi!"
+    assert response.usage == {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+    assert session.response.closed is True
+
+
+def test_llm_client_attaches_provider_diagnostics_to_http_errors() -> None:
+    client = LLMClient(
+        ModelConfig("secret", "https://example.test/v1", "demo"),
+        session=FailingSession(),
+    )
+    runtime = runtime_for()
+
+    with pytest.raises(ModelRequestError, match="Model request failed") as exc_info:
+        client.run(runtime)
+
+    assert exc_info.value.diagnostics["provider"] == "deepseek"
+    assert exc_info.value.diagnostics["request_outcome"] == "failed"
+
+
+def test_llm_client_rejects_unknown_provider() -> None:
+    config = ModelConfig("secret", "https://example.test/v1", "demo", provider="unknown")
+
+    with pytest.raises(ModelConfigurationError, match="Unsupported model provider"):
+        LLMClient(config)
+
+
+def test_model_config_loads_provider_from_env_file(tmp_path, monkeypatch) -> None:
+    for name in ("API_KEY", "BASE_URL", "MODEL", "MAX_TOKENS", "PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "API_KEY=secret\nBASE_URL=https://example.test/v1\nMODEL=demo\nPROVIDER=DEEPSEEK\n",
+        encoding="utf-8",
     )
 
+    config = ModelConfig.from_env(env_path)
 
-def test_llm_plan_is_validated() -> None:
-    client = DeepSeekChatCompletions(
-        ModelConfig("secret", "https://example.test", "demo"),
-        client=ChatCompletionsClient(session=FakeSession()),
+    assert config.provider == "deepseek"
+
+
+class ScriptedClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def run(self, runtime):
+        self.requests.append(runtime.exchange)
+        response = self.responses.pop(0)
+        runtime.state.turn_usage = response.usage
+        return response
+
+
+def test_llm_planner_uses_native_tool_response_with_runtime_only() -> None:
+    client = ScriptedClient(
+        [
+            PreparedResponse(
+                AssistantMessage(
+                    reasoning="Calculate.",
+                    tool_messages=[
+                        ToolMessage(
+                            name="calculator",
+                            call_id="call_1",
+                            arguments={"expression": "2 + 2"},
+                        )
+                    ],
+                ),
+                usage={"total_tokens": 8},
+            )
+        ]
     )
-    planner = LLMPlanner(client, ["calculator"], ["calculator"])
-    action = planner.decide([{"role": "user", "content": "2 + 2"}], "agent")
+    spec = ToolSpec("calculator", "Calculate", {"type": "object"})
+    planner = LLMPlanner(client, [spec], [spec])
+    tools = [Tool("calculator", "Calculate", lambda expression: expression, parameters=spec.parameters)]
+    runtime = AgentRunner(planner, ToolRegistry(tools)).new_runtime(task="2 + 2")
 
-    assert action.tool == "calculator"
-    assert action.arguments == {"expression": "2 + 2"}
-    assert action.reasoning == "The user requested arithmetic."
+    message = planner.decide(runtime)
+
+    assert message.tool_messages[0].name == "calculator"
+    assert runtime.exchange.output_mode == "tools"
+    assert runtime.exchange.allowed_tools == [spec]
 
 
-def test_deepseek_stream_yields_reasoning_and_content() -> None:
-    client = DeepSeekChatCompletions(
-        ModelConfig("secret", "https://example.test", "demo"),
-        client=ChatCompletionsClient(session=StreamSession()),
+def test_llm_planner_rejects_unknown_native_tool() -> None:
+    client = ScriptedClient(
+        [PreparedResponse(AssistantMessage(tool_messages=[ToolMessage(name="shell", call_id="call_1", arguments={})]))]
     )
+    spec = ToolSpec("calculator", "Calculate")
+    planner = LLMPlanner(client, [spec], [spec])
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="run it")
 
-    deltas = list(client.stream_with_reasoning([{"role": "user", "content": "hello"}]))
-
-    assert "".join(delta.reasoning_content or "" for delta in deltas) == "Think now."
-    assert "".join(delta.content or "" for delta in deltas) == '{"type": "final_answer","answer":"Hi"}'
-    assert deltas[-1].finish_reason == "stop"
-
-
-def test_llm_plan_rejects_unknown_tool() -> None:
-    planner = LLMPlanner.__new__(LLMPlanner)
-    planner.tool_names = {"calculator"}
-    planner.read_only_tool_names = {"calculator"}
     with pytest.raises(PlanningError, match="unavailable tool"):
-        planner._parse_action('{"type":"tool_call","tool":"shell","arguments":{}}', {"calculator"})
+        planner.decide(runtime)
 
 
-def test_llm_execution_plan_is_validated() -> None:
-    planner = LLMPlanner.__new__(LLMPlanner)
-    plan = planner._parse_execution_plan(
-        json.dumps(
-            {
-                "goal": "Calculate a value.",
-                "steps": [
-                    {
-                        "id": "calculate",
-                        "description": "Calculate 2 + 2",
-                        "success_criteria": "The result is available.",
-                        "tool": "calculator",
-                        "arguments": {"expression": "2 + 2"},
-                    }
-                ],
-            }
-        ),
-        {"calculator"},
+def test_llm_plan_keeps_json_output_for_structured_operations() -> None:
+    client = ScriptedClient(
+        [
+            PreparedResponse(
+                AssistantMessage(
+                    content=json.dumps(
+                        {
+                            "goal": "Calculate.",
+                            "steps": [
+                                {
+                                    "id": "calculate",
+                                    "description": "Calculate 2 + 2",
+                                    "success_criteria": "Result is available",
+                                    "tool": "calculator",
+                                    "arguments": {"expression": "2 + 2"},
+                                }
+                            ],
+                        }
+                    )
+                )
+            )
+        ]
     )
+    spec = ToolSpec("calculator", "Calculate")
+    planner = LLMPlanner(client, [spec], [spec])
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="make a plan")
 
-    assert plan.goal == "Calculate a value."
-    assert plan.steps[0].action.arguments == {"expression": "2 + 2"}
+    plan = planner.create_plan(runtime)
+
+    assert plan.steps[0].tool_message.name == "calculator"
+    assert plan.steps[0].tool_message.arguments == {"expression": "2 + 2"}
+    assert runtime.exchange.output_mode == "json"
 
 
-def test_llm_strategy_selection_is_validated() -> None:
-    selection = LLMPlanner._parse_strategy_selection(
-        json.dumps({"strategy": "plan_execute", "reason": "The steps are concrete and independent."})
+def test_llm_empty_json_error_preserves_response_diagnostics() -> None:
+    client = ScriptedClient(
+        [
+            PreparedResponse(
+                AssistantMessage(reasoning="The response stopped before the JSON answer."),
+                finish_reason="stop",
+            )
+        ]
     )
+    planner = LLMPlanner(client, [], [])
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="make a plan")
 
-    assert selection.strategy == "plan_execute"
-    assert selection.reason == "The steps are concrete and independent."
+    with pytest.raises(PlanningError, match="did not contain JSON content") as exc_info:
+        planner.create_plan(runtime)
 
-
-def test_llm_step_evaluation_is_validated() -> None:
-    evaluation = LLMPlanner._parse_step_evaluation(
-        json.dumps({"decision": "replan", "reason": "The result invalidates the next step."})
-    )
-
-    assert evaluation.decision == "replan"
-    assert evaluation.reason == "The result invalidates the next step."
-
-
-class LengthLimitedStreamClient:
-    def stream_with_reasoning(self, messages):
-        yield DeepSeekStreamDelta(content='{"goal":', reasoning_content="Thinking", finish_reason="length")
-
-
-def test_llm_reports_a_length_limited_json_stream() -> None:
-    planner = LLMPlanner(LengthLimitedStreamClient(), ["calculator"], ["calculator"])
-
-    with pytest.raises(ModelRequestError, match="max_tokens"):
-        planner.create_plan([{"role": "user", "content": "calculate 2 + 2"}], "agent", on_reasoning=lambda _: None)
-
-
-class DynamicPlanClient:
-    def __init__(self) -> None:
-        self.messages: list[dict[str, str]] | None = None
-
-    def complete(self, messages: list[dict[str, str]]) -> str:
-        self.messages = messages
-        return json.dumps(
-            {
-                "goal": "Inspect the project.",
-                "steps": [
-                    {
-                        "id": "inspect",
-                        "description": "List files",
-                        "success_criteria": "Files are listed.",
-                        "tool": "calculator",
-                        "arguments": {"expression": "2 + 2"},
-                    }
-                ],
-            }
-        )
-
-
-def test_dynamic_planning_uses_a_stage_prompt() -> None:
-    client = DynamicPlanClient()
-    planner = LLMPlanner(client, ["calculator"], ["calculator"])
-
-    planner.create_dynamic_plan([{"role": "user", "content": "inspect first"}], "agent")
-
-    assert client.messages is not None
-    assert "first executable phase" in client.messages[0]["content"]
-
-
-class StrategySelectionClient:
-    def __init__(self) -> None:
-        self.messages: list[dict[str, str]] | None = None
-
-    def complete(self, messages: list[dict[str, str]]) -> str:
-        self.messages = messages
-        return json.dumps({"strategy": "reactive", "reason": "The task is a direct calculation."})
-
-
-def test_llm_selects_execution_strategy_before_running_a_workflow() -> None:
-    client = StrategySelectionClient()
-    planner = LLMPlanner(client, ["calculator"], ["calculator"])
-
-    selection = planner.select_strategy([{"role": "user", "content": "calculate 2 + 2"}], "agent")
-
-    assert selection.strategy == "reactive"
-    assert client.messages is not None
-    assert "route tasks" in client.messages[0]["content"]
+    assert exc_info.value.diagnostics == {
+        "finish_reason": "stop",
+        "content_chars": 0,
+        "reasoning_chars": 44,
+    }

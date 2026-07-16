@@ -1,36 +1,80 @@
-"""Enrich all runtime events with immutable run context before publishing them."""
+"""Enrich runtime events and checkpoint stable state transitions."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
-from mini_agent.domain import RunState
-
-from .contracts import EventHandler
+from .context import AgentRuntime
 from .events import CHECKPOINT_EVENT_KINDS, RuntimeEvent
+from .recording import persistent_event
 
 
 class RunEventPublisher:
-    """Adds run metadata once at the runtime boundary, independent of event sinks."""
-
-    def __init__(
-        self,
-        state: RunState,
-        sink: EventHandler,
-        checkpoint: Callable[[RunState, str], None] | None = None,
-    ) -> None:
-        self._state = state
-        self._sink = sink
-        self._checkpoint = checkpoint
+    def __init__(self, runtime: AgentRuntime) -> None:
+        self._runtime = runtime
+        self._thinking_started_at: str | None = None
+        self._thinking_data: dict[str, object] = {}
+        self._thinking_chunks: list[str] = []
 
     def __call__(self, event: RuntimeEvent) -> None:
-        if self._checkpoint is not None and event.kind in CHECKPOINT_EVENT_KINDS:
-            self._checkpoint(self._state, event.kind)
+        runtime = self._runtime
+        run = runtime.run
         context = {
-            "run_id": self._state.run_id,
-            "task": self._state.task,
-            "mode": self._state.mode,
-            "strategy": self._state.strategy,
-            "status": self._state.status,
+            "run_id": run.run_id,
+            "task": run.task,
+            "mode": run.mode,
+            "strategy": run.strategy,
+            "status": run.status,
         }
-        self._sink(RuntimeEvent(event.kind, event.message, {**event.data, **context}))
+        enriched = RuntimeEvent(
+            event.kind,
+            event.message,
+            {**event.data, **context},
+            timestamp=event.timestamp,
+        )
+        self._record(enriched)
+        checkpoint = runtime.services.checkpoint_store
+        if checkpoint is not None and event.kind in CHECKPOINT_EVENT_KINDS:
+            checkpoint.save(runtime, event.kind)
+        if runtime.services.on_event is not None:
+            runtime.services.on_event(enriched)
+
+    def _record(self, event: RuntimeEvent) -> None:
+        if event.kind == "thinking_start":
+            self._thinking_started_at = event.timestamp
+            self._thinking_data = dict(event.data)
+            self._thinking_chunks = []
+            return
+        if event.kind == "thinking_delta":
+            if self._thinking_started_at is None:
+                self._thinking_started_at = event.timestamp
+            self._thinking_chunks.append(event.message)
+            return
+        if event.kind == "thinking_end":
+            self._flush_thinking(completed=True, closing_data=event.data)
+            return
+        self._flush_thinking(completed=False)
+        message, data = persistent_event(event, self._runtime.state.runner_settings.log_full_messages)
+        self._append(event.kind, message, event.timestamp, data)
+
+    def _flush_thinking(self, *, completed: bool, closing_data: dict[str, object] | None = None) -> None:
+        if self._thinking_started_at is None:
+            return
+        source_data = dict(closing_data or {}) if completed else self._thinking_data
+        data = {"streamed": True, **source_data}
+        if not completed:
+            data["interrupted"] = True
+        message, persistent_data = persistent_event(
+            RuntimeEvent("thinking_delta", "".join(self._thinking_chunks), data),
+            self._runtime.state.runner_settings.log_full_messages,
+        )
+        self._append("thinking", message, self._thinking_started_at, persistent_data)
+        self._thinking_started_at = None
+        self._thinking_data = {}
+        self._thinking_chunks = []
+
+    def _append(self, kind: str, message: str, timestamp: str, data: dict[str, object]) -> None:
+        runtime = self._runtime
+        durable = runtime.run.add_runtime_message(kind, message, timestamp=timestamp, data=data)
+        store = runtime.services.runtime_store
+        append = getattr(store, "append_runtime_message", None)
+        if callable(append):
+            append(runtime.state.session_id, runtime.run.run_id, durable)

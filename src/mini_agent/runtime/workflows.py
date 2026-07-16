@@ -1,456 +1,668 @@
-"""Independent implementations of the supported execution workflows."""
+"""Execution workflows operating on a single AgentRuntime argument."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
-from mini_agent.domain import ExecutionPlan, PlanStep, RunState
-from mini_agent.planning import Planner, PlanningError
-from mini_agent.providers import ModelRequestError
+from mini_agent.domain import AssistantMessage, ExecutionPlan, PlanningError, PlanStep, ToolMessage, UserMessage
+from mini_agent.planning import PlannerCapabilities
 
-from .contracts import EventHandler, InterruptHandler
+from .context import AgentRuntime
 from .events import RuntimeEvent
-from .outcomes import cancel_run, complete_run, fail_run, record_plan_feedback
+from .outcomes import cancel_run, complete_run, fail_run, planning_failure_data, record_plan_feedback
+from .steering import SteeringUpdate, apply_steering, collect_steering, consume_steering
 from .steps import ToolStepExecutor, ToolStepResult
 
-ReasoningHandler = Callable[[str], None]
+_MAX_TOOL_CONTEXT_CHARS = 2_000
 
 
-def _reasoning_stream(publish: EventHandler) -> tuple[ReasoningHandler, Callable[[], bool]]:
-    """Create an event publisher and a closer for optional provider reasoning streams."""
+def _publish(runtime: AgentRuntime, event: RuntimeEvent) -> None:
+    (runtime.services.publish or (lambda _event: None))(event)
+
+
+def _reasoning_stream(runtime: AgentRuntime) -> Callable[[], bool]:
     streamed = False
 
     def on_reasoning(chunk: str) -> None:
         nonlocal streamed
         if not streamed:
-            publish(RuntimeEvent("thinking_start"))
+            _publish(runtime, RuntimeEvent("thinking_start"))
             streamed = True
-        publish(RuntimeEvent("thinking_delta", chunk))
+        _publish(runtime, RuntimeEvent("thinking_delta", chunk))
+
+    runtime.exchange.on_reasoning = on_reasoning
 
     def close() -> bool:
+        runtime.exchange.on_reasoning = None
         if streamed:
-            publish(RuntimeEvent("thinking_end"))
+            _publish(runtime, RuntimeEvent("thinking_end"))
         return streamed
 
-    return on_reasoning, close
+    return close
+
+
+def _publish_repairs(runtime: AgentRuntime, capabilities: PlannerCapabilities) -> None:
+    reporter = capabilities.output_repair_reporter
+    if reporter is None:
+        return
+    for repair in reporter.consume_output_repairs():
+        if not isinstance(repair, dict):
+            continue
+        outcome = repair.get("outcome")
+        message = (
+            "Malformed model output was repaired automatically."
+            if outcome == "repaired"
+            else "Malformed model output could not be repaired automatically."
+        )
+        runtime.run.add_event("model_repair", message, **repair)
+        _publish(runtime, RuntimeEvent("model_repair", message, repair))
+
+
+def _record_reasoning(runtime: AgentRuntime, message: AssistantMessage, streamed: bool) -> None:
+    if not message.reasoning:
+        return
+    runtime.run.add_event("reasoning", "Model reasoning", content=message.reasoning)
+    if not streamed:
+        _publish(runtime, RuntimeEvent("thinking_start"))
+        _publish(runtime, RuntimeEvent("thinking_delta", message.reasoning))
+        _publish(runtime, RuntimeEvent("thinking_end"))
+
+
+def _truncate(value: str) -> str:
+    if len(value) <= _MAX_TOOL_CONTEXT_CHARS:
+        return value
+    omitted = len(value) - _MAX_TOOL_CONTEXT_CHARS
+    return f"{value[:_MAX_TOOL_CONTEXT_CHARS]}… ({omitted} characters omitted)"
+
+
+def _same_tool(first: ToolMessage, second: ToolMessage | None) -> bool:
+    return second is not None and first.name == second.name and first.arguments == second.arguments
+
+
+def _start_assistant(runtime: AgentRuntime, message: AssistantMessage) -> None:
+    runtime.state.active_message = message
+    runtime.state.active_tool_index = None
+    runtime.save()
+
+
+def _finish_assistant(runtime: AgentRuntime) -> None:
+    message = runtime.state.active_message
+    if message is None:
+        return
+    runtime.state.messages.append(message)
+    runtime.run.history = runtime.state.messages
+    runtime.state.active_message = None
+    runtime.state.active_tool_index = None
+    runtime.save()
+
+
+def _execute_tool(runtime: AgentRuntime, index: int, executor: ToolStepExecutor) -> ToolStepResult:
+    message = runtime.state.active_message
+    assert message is not None
+    tool = message.tool_messages[index]
+    runtime.state.active_tool_index = index
+    runtime.run.actions.append(tool)
+    runtime.run.add_event("model", "Model tool call validated", tool=tool.name, mode=runtime.run.mode)
+    return executor.execute(runtime)
+
+
+def _apply_tool_batch_steering(
+    runtime: AgentRuntime,
+    update: SteeringUpdate,
+    *,
+    next_tool_index: int,
+    phase: str,
+) -> None:
+    """Preserve completed calls and close any unexecuted calls before steering."""
+
+    message = runtime.state.active_message
+    if message is not None and next_tool_index > 0:
+        for tool in message.tool_messages[next_tool_index:]:
+            if tool.status == "pending":
+                tool.status = "failed"
+                tool.content = "Not executed because the user supplied new instructions."
+                tool.retryable = False
+        _finish_assistant(runtime)
+    else:
+        runtime.state.active_message = None
+        runtime.state.active_tool_index = None
+    apply_steering(runtime, update, phase=phase)
 
 
 class ReactiveWorkflow:
-    """Repeatedly request one action, execute it, and feed its result back to the planner."""
+    def __init__(self) -> None:
+        self._steps = ToolStepExecutor()
 
-    def __init__(self, planner: Planner, steps: ToolStepExecutor, max_actions: int) -> None:
-        self._planner = planner
-        self._steps = steps
-        self._max_actions = max_actions
+    def run(self, runtime: AgentRuntime):
+        capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
+        planner = capabilities.decision_planner
+        if planner is None:
+            fail_run(runtime, f"Planner {capabilities.name!r} does not support reactive decisions.")
+            return runtime.run
+        consecutive_failures = 0
+        blocked: ToolMessage | None = None
 
-    def run(
-        self,
-        state: RunState,
-        history: list[dict[str, str]],
-        conversation: list[dict[str, str]] | None,
-        publish: EventHandler,
-        interrupt: InterruptHandler,
-    ) -> RunState:
-        for _ in range(max(0, self._max_actions - len(state.actions))):
-            on_reasoning, close_reasoning = _reasoning_stream(publish)
+        while len(runtime.run.actions) < runtime.state.runner_settings.max_actions:
+            close = _reasoning_stream(runtime)
             try:
-                action = self._planner.decide(history, state.mode, on_reasoning=on_reasoning)
-            except (ModelRequestError, PlanningError) as exc:
-                close_reasoning()
-                return fail_run(state, publish, f"Decision failed: {exc}", planner=self._planner.name)
+                response = planner.decide(runtime)
+            except PlanningError as exc:
+                close()
+                _publish_repairs(runtime, capabilities)
+                fail_run(runtime, f"Decision failed: {exc}", **planning_failure_data(exc, capabilities.name))
+                return runtime.run
+            streamed = close()
+            _publish_repairs(runtime, capabilities)
+            _record_reasoning(runtime, response, streamed)
 
-            state.actions.append(action)
-            state.add_event("model", "Model action validated", action_type=action.type, mode=state.mode)
-            streamed_reasoning = close_reasoning()
-            if action.reasoning:
-                state.add_event("reasoning", "Model reasoning", content=action.reasoning)
-                if not streamed_reasoning:
-                    publish(RuntimeEvent("thinking_start"))
-                    publish(RuntimeEvent("thinking_delta", action.reasoning))
-                    publish(RuntimeEvent("thinking_end"))
-            if action.type == "final_answer":
-                return complete_run(state, action.answer or "", conversation, publish)
-
-            outcome = self._steps.execute(state, action, publish, interrupt)
-            if outcome.interrupt is not None:
-                if outcome.interrupt.choice == "cancel":
-                    return cancel_run(state, publish)
-                if record_plan_feedback(state, history, outcome.interrupt.supplement, publish) is None:
-                    return state
+            if consume_steering(runtime, phase="after_model_response") is not None:
                 continue
-            if not outcome.success:
-                return fail_run(state, publish, f"Stopped: {action.tool} failed: {outcome.error}")
-            assert action.tool is not None and outcome.output is not None
-            history.extend(
-                [
-                    {"role": "assistant", "content": f"[Tool call] {action.tool} {action.arguments}"},
-                    {"role": "user", "content": f"[Tool result]\n{outcome.output}"},
-                ]
-            )
-        return fail_run(state, publish, f"Stopped after {self._max_actions} actions without a final answer.")
+
+            if not response.tool_messages:
+                complete_run(runtime, response)
+                return runtime.run
+            if len(runtime.run.actions) + len(response.tool_messages) > runtime.state.runner_settings.max_actions:
+                fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions.")
+                return runtime.run
+
+            _start_assistant(runtime, response)
+            stop_after_batch: str | None = None
+            steered = False
+            for index, tool in enumerate(response.tool_messages):
+                update = collect_steering(runtime)
+                if update is not None:
+                    _apply_tool_batch_steering(
+                        runtime,
+                        update,
+                        next_tool_index=index,
+                        phase="before_tool",
+                    )
+                    steered = True
+                    break
+                if _same_tool(tool, blocked):
+                    stop_after_batch = f"Stopped: refusing to repeat non-retryable tool call {tool.name} after failure."
+                    tool.status = "failed"
+                    tool.content = stop_after_batch
+                    continue
+                outcome = _execute_tool(runtime, index, self._steps)
+                if outcome.interrupt is not None:
+                    runtime.state.active_message = None
+                    runtime.state.active_tool_index = None
+                    if outcome.interrupt.choice == "cancel":
+                        cancel_run(runtime)
+                    elif record_plan_feedback(runtime, outcome.interrupt.supplement) is None:
+                        pass
+                    return runtime.run
+                update = collect_steering(runtime)
+                if update is not None:
+                    _apply_tool_batch_steering(
+                        runtime,
+                        update,
+                        next_tool_index=index + 1,
+                        phase="after_tool",
+                    )
+                    steered = True
+                    break
+                if outcome.success:
+                    consecutive_failures = 0
+                    blocked = None
+                    continue
+                error = outcome.error or "Tool execution failed without an error message."
+                tool.content = f"{tool.name} failed: {_truncate(error)}"
+                consecutive_failures += 1
+                blocked = tool if outcome.retryable is False else None
+                if consecutive_failures > runtime.state.runner_settings.max_tool_recoveries:
+                    stop_after_batch = f"Stopped: {tool.name} failed: {error}"
+                    continue
+                runtime.run.add_event(
+                    "tool_recovery",
+                    f"Recovering from {tool.name} failure",
+                    tool=tool.name,
+                    error=_truncate(error),
+                    attempt=consecutive_failures,
+                )
+                _publish(
+                    runtime,
+                    RuntimeEvent(
+                        "tool_recovery",
+                        _truncate(error),
+                        {"tool": tool.name, "attempt": consecutive_failures},
+                    ),
+                )
+            if steered:
+                continue
+            _finish_assistant(runtime)
+            if stop_after_batch:
+                fail_run(runtime, stop_after_batch)
+                return runtime.run
+
+        fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions without a final answer.")
+        return runtime.run
+
+
+class PlanProposalWorkflow:
+    def __init__(self) -> None:
+        self._steps = ToolStepExecutor()
+
+    def prepare(self, runtime: AgentRuntime) -> str | None:
+        capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
+        planner = capabilities.decision_planner
+        if planner is None:
+            fail_run(runtime, f"Planner {capabilities.name!r} does not support plan proposals.")
+            return None
+        format_repair_used = False
+        consecutive_failures = 0
+        while len(runtime.run.actions) < runtime.state.runner_settings.max_actions:
+            close = _reasoning_stream(runtime)
+            try:
+                response = planner.decide(runtime)
+            except PlanningError as exc:
+                close()
+                fail_run(runtime, f"Plan creation failed: {exc}", **planning_failure_data(exc, capabilities.name))
+                return None
+            streamed = close()
+            _record_reasoning(runtime, response, streamed)
+            if consume_steering(runtime, phase="after_model_response") is not None:
+                continue
+            if not response.tool_messages:
+                proposal = response.content or ""
+                if re.search(r"(?m)^\s*1[.)、]\s+\S", proposal):
+                    return proposal
+                if format_repair_used:
+                    fail_run(runtime, "Plan proposal must be a numbered high-level plan.")
+                    return None
+                format_repair_used = True
+                runtime.state.messages.extend(
+                    [
+                        response,
+                        UserMessage(
+                            content="[Plan format correction]\nReturn the proposal as a concise numbered plan starting with 1."
+                        ),
+                    ]
+                )
+                runtime.run.history = runtime.state.messages
+                runtime.run.add_event("model_repair", "Requested numbered plan format", phase="plan_proposal")
+                _publish(
+                    runtime,
+                    RuntimeEvent(
+                        "model_repair",
+                        "Requested numbered plan format",
+                        {"phase": "plan_proposal", "attempt": 1},
+                    ),
+                )
+                continue
+            _start_assistant(runtime, response)
+            steered = False
+            for index, tool in enumerate(response.tool_messages):
+                update = collect_steering(runtime)
+                if update is not None:
+                    _apply_tool_batch_steering(
+                        runtime,
+                        update,
+                        next_tool_index=index,
+                        phase="before_tool",
+                    )
+                    steered = True
+                    break
+                outcome = _execute_tool(runtime, index, self._steps)
+                if outcome.interrupt is not None:
+                    runtime.state.active_message = None
+                    runtime.state.active_tool_index = None
+                    if outcome.interrupt.choice == "cancel":
+                        cancel_run(runtime)
+                    else:
+                        record_plan_feedback(runtime, outcome.interrupt.supplement)
+                    return None
+                update = collect_steering(runtime)
+                if update is not None:
+                    _apply_tool_batch_steering(
+                        runtime,
+                        update,
+                        next_tool_index=index + 1,
+                        phase="after_tool",
+                    )
+                    steered = True
+                    break
+                if outcome.success:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    error = outcome.error or "Tool failed."
+                    tool.content = f"{tool.name} failed: {_truncate(error)}"
+                    if consecutive_failures <= runtime.state.runner_settings.max_tool_recoveries:
+                        runtime.run.add_event(
+                            "tool_recovery",
+                            f"Recovering from {tool.name} failure",
+                            tool=tool.name,
+                            error=_truncate(error),
+                            attempt=consecutive_failures,
+                        )
+                        _publish(
+                            runtime,
+                            RuntimeEvent(
+                                "tool_recovery",
+                                _truncate(error),
+                                {"tool": tool.name, "attempt": consecutive_failures},
+                            ),
+                        )
+            if steered:
+                continue
+            _finish_assistant(runtime)
+            if consecutive_failures > runtime.state.runner_settings.max_tool_recoveries:
+                failed = next((tool for tool in reversed(response.tool_messages) if tool.status == "failed"), None)
+                details = failed.content if failed is not None else "unknown error"
+                fail_run(runtime, f"Stopped: {details}")
+                return None
+        fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions without a plan proposal.")
+        return None
 
 
 class PlanWorkflow:
-    """Shared plan creation, validation, state recording, and presentation behavior."""
+    def __init__(self) -> None:
+        self._steps = ToolStepExecutor()
 
-    def __init__(self, planner: Planner, steps: ToolStepExecutor, max_actions: int) -> None:
-        self._planner = planner
-        self._steps = steps
-        self._max_actions = max_actions
-
-    def _create_plan(
-        self,
-        state: RunState,
-        history: list[dict[str, str]],
-        publish: EventHandler,
-        creator_name: str = "create_plan",
-    ) -> ExecutionPlan | None:
-        create_plan = getattr(self._planner, creator_name, None)
-        if not callable(create_plan):
-            fail_run(state, publish, f"Planner {self._planner.name!r} does not support {creator_name}.")
+    def _create_plan(self, runtime: AgentRuntime, *, dynamic: bool = False) -> ExecutionPlan | None:
+        capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
+        creator = capabilities.dynamic_plan_creator if dynamic else capabilities.plan_creator
+        if creator is None and dynamic:
+            creator = capabilities.plan_creator
+        if creator is None:
+            fail_run(runtime, f"Planner {capabilities.name!r} does not support plan creation.")
             return None
-        on_reasoning, close_reasoning = _reasoning_stream(publish)
+        close = _reasoning_stream(runtime)
         try:
-            return create_plan(history, state.mode, on_reasoning=on_reasoning)
-        except (ModelRequestError, PlanningError) as exc:
-            fail_run(state, publish, f"Plan creation failed: {exc}", planner=self._planner.name)
+            return (
+                creator.create_dynamic_plan(runtime)
+                if dynamic and capabilities.dynamic_plan_creator
+                else creator.create_plan(runtime)
+            )
+        except PlanningError as exc:
+            fail_run(runtime, f"Planning failed: {exc}", **planning_failure_data(exc, capabilities.name))
             return None
         finally:
-            close_reasoning()
+            close()
 
-    def _activate_plan(
-        self,
-        state: RunState,
-        plan: ExecutionPlan,
-        publish: EventHandler,
-        *,
-        event_kind: str = "plan",
-        message: str = "Execution plan created",
-    ) -> None:
-        state.plan = plan
-        state.add_event(event_kind, message, revision=plan.revision, goal=plan.goal, step_count=len(plan.steps))
-        publish(RuntimeEvent(event_kind, self._format_plan(plan), {"revision": plan.revision}))
-
-    def _validate_plan(self, state: RunState, plan: ExecutionPlan, allowed_steps: int, publish: EventHandler) -> bool:
-        if len(plan.steps) > allowed_steps:
-            fail_run(
-                state,
-                publish,
-                f"Plan has {len(plan.steps)} steps but only {allowed_steps} actions remain.",
-            )
+    def _activate(self, runtime: AgentRuntime, plan: ExecutionPlan) -> bool:
+        remaining = runtime.state.runner_settings.max_actions - len(runtime.run.actions)
+        if len(plan.steps) > remaining:
+            fail_run(runtime, f"Plan has {len(plan.steps)} steps but only {remaining} actions remain.")
             return False
-        invalid_steps = [step.id for step in plan.steps if step.action.type != "tool_call" or not step.action.tool]
-        if invalid_steps:
-            fail_run(state, publish, f"Execution plan contains non-tool steps: {', '.join(invalid_steps)}.")
-            return False
+        runtime.run.plan = plan
+        runtime.run.add_event("plan", "Execution plan created", revision=plan.revision, step_count=len(plan.steps))
+        _publish(runtime, RuntimeEvent("plan", self._format_plan(plan), {"revision": plan.revision}))
+        runtime.save()
         return True
 
-    def prepare(self, state: RunState, history: list[dict[str, str]], publish: EventHandler) -> ExecutionPlan | None:
-        """Create and validate a plan without executing any of its steps."""
-        if state.plan is not None:
-            return state.plan
-        plan = self._create_plan(state, history, publish)
-        if plan is None:
-            return None
-        self._activate_plan(state, plan, publish)
-        if not self._validate_plan(state, plan, self._max_actions, publish):
-            return None
-        return plan
+    def prepare(self, runtime: AgentRuntime) -> ExecutionPlan | None:
+        if runtime.run.plan is not None:
+            return runtime.run.plan
+        while runtime.run.plan is None:
+            plan = self._create_plan(runtime)
+            if plan is None:
+                return None
+            if consume_steering(runtime, phase="after_plan_creation") is not None:
+                continue
+            return plan if self._activate(runtime, plan) else None
+        return runtime.run.plan
 
-    def revise_with_feedback(
-        self,
-        state: RunState,
-        history: list[dict[str, str]],
-        supplement: str | None,
-        publish: EventHandler,
-    ) -> bool:
-        """Regenerate the active plan after explicit human feedback."""
-        feedback = record_plan_feedback(state, history, supplement, publish)
+    def revise_with_feedback(self, runtime: AgentRuntime) -> bool:
+        supplement = runtime.exchange.context.get("supplement")
+        feedback = record_plan_feedback(runtime, supplement if isinstance(supplement, str) else None)
         if feedback is None:
             return False
-        previous = state.plan
-        replacement = self._create_feedback_revision(state, history, previous, feedback, publish)
-        if replacement is None:
-            return False
-        if previous is not None:
-            replacement.revision = previous.revision + 1
-            for step in previous.steps:
-                if step.status in {"pending", "running"}:
-                    step.status = "superseded"
-            state.plan_history.append(previous)
-        state.plan = replacement
-        if not self._validate_plan(state, replacement, self._max_actions - len(state.actions), publish):
-            return False
-        state.add_event(
-            "replan_applied",
-            "Plan revised from human feedback",
-            revision=replacement.revision,
-            supplement=feedback,
-            step_count=len(replacement.steps),
-        )
-        publish(RuntimeEvent("replan_applied", self._format_plan(replacement), {"revision": replacement.revision}))
-        return True
+        return self._revise(runtime, f"Human plan feedback: {feedback}")
 
-    def _create_feedback_revision(
-        self,
-        state: RunState,
-        history: list[dict[str, str]],
-        previous: ExecutionPlan | None,
-        feedback: str,
-        publish: EventHandler,
-    ) -> ExecutionPlan | None:
-        """Prefer a planner's remaining-work replan capability for human feedback."""
-        replan = getattr(self._planner, "replan", None)
-        if previous is None or not callable(replan):
-            return self._create_plan(state, history, publish)
+    def revise_with_steering(self, runtime: AgentRuntime) -> bool:
+        return self._revise(runtime, "The user supplied new instructions while the plan was running.")
 
-        reason = f"Human plan feedback: {feedback}"
-        state.add_event("replan_requested", "Plan revision requested by user", revision=previous.revision, reason=reason)
-        publish(RuntimeEvent("replan_requested", reason, {"revision": previous.revision}))
-        on_reasoning, close_reasoning = _reasoning_stream(publish)
+    def _revise(self, runtime: AgentRuntime, reason: str) -> bool:
+        previous = runtime.run.plan
+        capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
+        replanner = capabilities.plan_replanner
+        if previous is None or replanner is None:
+            fail_run(runtime, "Planner cannot revise the active plan.")
+            return False
+        runtime.exchange.context = {"plan": previous, "reason": reason}
         try:
-            return replan(history, previous, reason, on_reasoning=on_reasoning)
-        except (ModelRequestError, PlanningError) as exc:
-            fail_run(state, publish, f"Plan revision failed: {exc}", planner=self._planner.name)
-            return None
-        finally:
-            close_reasoning()
+            replacement = replanner.replan(runtime)
+        except PlanningError as exc:
+            fail_run(runtime, f"Replan failed: {exc}", **planning_failure_data(exc, capabilities.name))
+            return False
+        replacement.revision = previous.revision + 1
+        for step in previous.steps:
+            if step.status in {"pending", "running"}:
+                step.status = "superseded"
+        runtime.run.plan_history.append(previous)
+        return self._activate(runtime, replacement)
 
-    @staticmethod
-    def _discard_unexecuted_action(state: RunState, step: PlanStep) -> None:
-        """Do not charge a plan step against the action budget before approval is granted."""
-        if state.actions and state.actions[-1] == step.action:
-            state.actions.pop()
-
-    @staticmethod
-    def _begin_step(state: RunState, step: PlanStep) -> None:
+    def _execute_step(self, runtime: AgentRuntime, step: PlanStep) -> ToolStepResult:
         step.status = "running"
-        action = step.action
-        state.actions.append(action)
-        state.add_event(
-            "model",
-            "Planned action validated",
-            action_type=action.type,
-            mode=state.mode,
-            plan_revision=state.plan.revision if state.plan else None,
-            plan_step=step.id,
+        runtime.run.actions.append(step.tool_message)
+        runtime.state.active_message = AssistantMessage(tool_messages=[step.tool_message])
+        runtime.state.active_tool_index = 0
+        runtime.run.add_event(
+            "model", "Planned tool call validated", tool=step.tool_message.name, mode=runtime.run.mode
         )
+        outcome = self._steps.execute(runtime)
+        if outcome.interrupt is None:
+            if not outcome.success:
+                step.tool_message.content = (
+                    f"{step.tool_message.name} failed: {_truncate(outcome.error or 'unknown error')}"
+                )
+            _finish_assistant(runtime)
+        else:
+            runtime.state.active_message = None
+            runtime.state.active_tool_index = None
+            if runtime.run.actions and runtime.run.actions[-1] is step.tool_message:
+                runtime.run.actions.pop()
+        return outcome
 
     @staticmethod
     def _format_plan(plan: ExecutionPlan) -> str:
-        header = f"Plan v{plan.revision}: {plan.goal}"
         if not plan.steps:
-            return header
-        lines = [header]
-        lines.extend(f"{index}. {step.description}" for index, step in enumerate(plan.steps, start=1))
-        return "\n".join(lines)
+            return plan.final_answer or ""
+        return "\n".join(f"{index}. {step.description}" for index, step in enumerate(plan.steps, 1))
 
     @staticmethod
-    def _format_completion(
-        plans: list[ExecutionPlan], replan_count: int = 0, *, dynamic: bool = False
-    ) -> str:
-        prefix = "Dynamic plan completed" if dynamic else "Execution plan completed"
-        lines = [f"{prefix} after {replan_count} replans:"] if dynamic else [f"{prefix}:"]
-        completed = [
-            (plan.revision, step)
-            for plan in plans
-            for step in plan.steps
-            if step.status == "completed"
-        ]
-        lines.extend(
-            f"v{revision}.{step.id} {step.description}: {step.result or 'completed'}"
-            for revision, step in completed
-        )
-        return "\n".join(lines)
+    def _format_completion(plans: list[ExecutionPlan], replans: int = 0, *, dynamic: bool = False) -> str:
+        completed = [step for plan in plans for step in plan.steps if step.status == "completed"]
+        details = "\n".join(f"- {step.description}: {step.result}" for step in completed)
+        prefix = f"Execution plan completed with {len(completed)} planned tool calls"
+        if dynamic:
+            prefix += f" with {replans} replans"
+        return f"{prefix}.\n{details}" if details else f"{prefix}."
 
 
 class PlanExecuteWorkflow(PlanWorkflow):
-    """Generate one fixed executable plan, then run its steps in order."""
-
-    def run(
-        self,
-        state: RunState,
-        history: list[dict[str, str]],
-        conversation: list[dict[str, str]] | None,
-        publish: EventHandler,
-        interrupt: InterruptHandler,
-    ) -> RunState:
-        plan = self.prepare(state, history, publish)
+    def run(self, runtime: AgentRuntime):
+        plan = self.prepare(runtime)
         if plan is None:
-            return state
+            return runtime.run
         if not plan.steps:
-            return complete_run(state, plan.final_answer or "", conversation, publish)
-
+            if consume_steering(runtime, phase="before_plan_completion") is not None:
+                if self.revise_with_steering(runtime):
+                    return self.run(runtime)
+                return runtime.run
+            complete_run(runtime, AssistantMessage(content=plan.final_answer or ""))
+            return runtime.run
         for step in plan.steps:
-            if step.status in {"completed", "superseded"}:
+            if step.status != "pending":
                 continue
-            self._begin_step(state, step)
-            outcome = self._steps.execute(state, step.action, publish, interrupt)
+            if consume_steering(runtime, phase="before_plan_step") is not None:
+                if self.revise_with_steering(runtime):
+                    return self.run(runtime)
+                return runtime.run
+            outcome = self._execute_step(runtime, step)
             if outcome.interrupt is not None:
-                self._discard_unexecuted_action(state, step)
                 step.status = "pending"
                 if outcome.interrupt.choice == "cancel":
-                    return cancel_run(state, publish)
-                if not self.revise_with_feedback(state, history, outcome.interrupt.supplement, publish):
-                    return state
-                return self.run(state, history, conversation, publish, interrupt)
+                    cancel_run(runtime)
+                    return runtime.run
+                runtime.exchange.context = {"supplement": outcome.interrupt.supplement}
+                if not self.revise_with_feedback(runtime):
+                    return runtime.run
+                return self.run(runtime)
+            update = collect_steering(runtime)
+            if update is not None:
+                if outcome.success:
+                    step.status = "completed"
+                    step.result = outcome.output
+                else:
+                    step.status = "failed"
+                    step.result = outcome.error
+                apply_steering(runtime, update, phase="after_plan_step")
+                if self.revise_with_steering(runtime):
+                    return self.run(runtime)
+                return runtime.run
             if not outcome.success:
                 step.status = "failed"
                 step.result = outcome.error
-                return fail_run(state, publish, f"Stopped: {step.action.tool} failed: {outcome.error}")
+                fail_run(runtime, f"Stopped: {step.tool_message.name} failed: {outcome.error}")
+                return runtime.run
             step.status = "completed"
             step.result = outcome.output
-
-        return complete_run(state, self._format_completion([plan]), conversation, publish)
+        if consume_steering(runtime, phase="before_plan_completion") is not None:
+            if self.revise_with_steering(runtime):
+                return self.run(runtime)
+            return runtime.run
+        complete_run(runtime, AssistantMessage(content=self._format_completion([plan])))
+        return runtime.run
 
 
 class DynamicReplanWorkflow(PlanWorkflow):
-    """Execute a plan while replacing only unfinished work after failures or deviations."""
-
-    def __init__(self, planner: Planner, steps: ToolStepExecutor, max_actions: int, max_replans: int) -> None:
-        super().__init__(planner, steps, max_actions)
-        self._max_replans = max_replans
-
-    def run(
-        self,
-        state: RunState,
-        history: list[dict[str, str]],
-        conversation: list[dict[str, str]] | None,
-        publish: EventHandler,
-        interrupt: InterruptHandler,
-    ) -> RunState:
-        if not self._supports_dynamic_replanning(state, publish):
-            return state
-        creator_name = "create_dynamic_plan" if callable(getattr(self._planner, "create_dynamic_plan", None)) else "create_plan"
-        if state.plan is None:
-            plan = self._create_plan(state, history, publish, creator_name=creator_name)
+    def run(self, runtime: AgentRuntime):
+        capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
+        if capabilities.dynamic_replanner is None:
+            fail_run(runtime, f"Planner {capabilities.name!r} does not support dynamic_replan.")
+            return runtime.run
+        while runtime.run.plan is None:
+            plan = self._create_plan(runtime, dynamic=True)
             if plan is None:
-                return state
-            self._activate_plan(state, plan, publish)
-            if not self._validate_plan(state, plan, self._max_actions, publish):
-                return state
+                return runtime.run
+            if consume_steering(runtime, phase="after_plan_creation") is not None:
+                continue
+            if not self._activate(runtime, plan):
+                return runtime.run
 
-        while state.plan is not None:
-            active_plan = state.plan
-            step = next((candidate for candidate in active_plan.steps if candidate.status == "pending"), None)
+        while runtime.run.plan is not None:
+            plan = runtime.run.plan
+            step = next((candidate for candidate in plan.steps if candidate.status == "pending"), None)
             if step is None:
-                if not active_plan.steps:
-                    return complete_run(state, active_plan.final_answer or "", conversation, publish)
-                plans = [*state.plan_history, active_plan]
-                return complete_run(
-                    state,
-                    self._format_completion(plans, state.replan_count, dynamic=True),
-                    conversation,
-                    publish,
-                )
-            if len(state.actions) >= self._max_actions:
-                return fail_run(state, publish, f"Stopped after {self._max_actions} actions.")
+                if consume_steering(runtime, phase="before_plan_completion") is not None:
+                    if not self._replace(
+                        runtime,
+                        "The user supplied new instructions before plan completion.",
+                        capabilities,
+                    ):
+                        return runtime.run
+                    continue
+                if not plan.steps:
+                    complete_run(runtime, AssistantMessage(content=plan.final_answer or ""))
+                else:
+                    complete_run(
+                        runtime,
+                        AssistantMessage(
+                            content=self._format_completion(
+                                [*runtime.run.plan_history, plan], runtime.run.replan_count, dynamic=True
+                            )
+                        ),
+                    )
+                return runtime.run
+            if len(runtime.run.actions) >= runtime.state.runner_settings.max_actions:
+                fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions.")
+                return runtime.run
 
-            self._begin_step(state, step)
-            outcome = self._steps.execute(state, step.action, publish, interrupt)
+            if consume_steering(runtime, phase="before_plan_step") is not None:
+                if not self._replace(
+                    runtime,
+                    "The user supplied new instructions before the next plan step.",
+                    capabilities,
+                ):
+                    return runtime.run
+                continue
+
+            outcome = self._execute_step(runtime, step)
             if outcome.interrupt is not None:
-                self._discard_unexecuted_action(state, step)
                 step.status = "pending"
                 if outcome.interrupt.choice == "cancel":
-                    return cancel_run(state, publish)
-                if not self.revise_with_feedback(state, history, outcome.interrupt.supplement, publish):
-                    return state
+                    cancel_run(runtime)
+                    return runtime.run
+                runtime.exchange.context = {"supplement": outcome.interrupt.supplement}
+                if not self.revise_with_feedback(runtime):
+                    return runtime.run
                 continue
+
+            update = collect_steering(runtime)
+            if update is not None:
+                if outcome.success:
+                    step.status = "completed"
+                    step.result = outcome.output
+                else:
+                    step.status = "failed"
+                    step.result = outcome.error
+                apply_steering(runtime, update, phase="after_plan_step")
+                if not self._replace(
+                    runtime,
+                    "The user supplied new instructions after a plan step.",
+                    capabilities,
+                ):
+                    return runtime.run
+                continue
+
             if outcome.success:
                 step.status = "completed"
                 step.result = outcome.output
-                reason = self._evaluate_step(state, history, active_plan, step, outcome, publish)
-                if state.status == "failed":
-                    return state
-                if reason is not None:
-                    if not self._replace_remaining_plan(state, history, reason, publish):
-                        return state
+                runtime.exchange.context = {"plan": plan, "step": step, "result": outcome.output or ""}
+                try:
+                    evaluation = capabilities.dynamic_replanner.evaluate_step(runtime)
+                except PlanningError as exc:
+                    fail_run(runtime, f"Step evaluation failed: {exc}", **planning_failure_data(exc, capabilities.name))
+                    return runtime.run
+                if consume_steering(runtime, phase="after_step_evaluation") is not None:
+                    if not self._replace(
+                        runtime,
+                        "The user supplied new instructions during step evaluation.",
+                        capabilities,
+                    ):
+                        return runtime.run
                     continue
-                if not any(candidate.status == "pending" for candidate in active_plan.steps):
-                    plans = [*state.plan_history, active_plan]
-                    return complete_run(
-                        state,
-                        self._format_completion(plans, state.replan_count, dynamic=True),
-                        conversation,
-                        publish,
-                    )
-                continue
+                if evaluation.decision == "continue":
+                    continue
+                reason = evaluation.reason
             else:
                 step.status = "failed"
                 step.result = outcome.error
-                reason = f"Step {step.id} failed: {outcome.error}"
+                reason = f"Step {step.id} failed: {outcome.error or 'unknown error'}"
 
-            if not self._replace_remaining_plan(state, history, reason, publish):
-                return state
+            if not self._replace(runtime, reason, capabilities):
+                return runtime.run
+        return runtime.run
 
-        return fail_run(state, publish, "Dynamic execution ended without an active plan.")
-
-    def _supports_dynamic_replanning(self, state: RunState, publish: EventHandler) -> bool:
-        if not callable(getattr(self._planner, "evaluate_step", None)) or not callable(getattr(self._planner, "replan", None)):
-            fail_run(state, publish, f"Planner {self._planner.name!r} does not support dynamic_replan.")
+    def _replace(self, runtime: AgentRuntime, reason: str, capabilities: PlannerCapabilities) -> bool:
+        current = runtime.run.plan
+        assert current is not None and capabilities.dynamic_replanner is not None
+        runtime.run.add_event("replan_requested", "Replan requested", revision=current.revision, reason=reason)
+        _publish(runtime, RuntimeEvent("replan_requested", reason, {"revision": current.revision}))
+        if runtime.run.replan_count >= runtime.state.runner_settings.max_replans:
+            fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_replans} replans: {reason}")
             return False
-        return True
-
-    def _evaluate_step(
-        self,
-        state: RunState,
-        history: list[dict[str, str]],
-        plan: ExecutionPlan,
-        step: PlanStep,
-        outcome: ToolStepResult,
-        publish: EventHandler,
-    ) -> str | None:
-        assert outcome.output is not None
-        evaluate_step = getattr(self._planner, "evaluate_step")
+        runtime.exchange.context = {"plan": current, "reason": reason}
         try:
-            evaluation = evaluate_step(history, plan, step, outcome.output)
-        except (ModelRequestError, PlanningError) as exc:
-            fail_run(state, publish, f"Step evaluation failed: {exc}", planner=self._planner.name)
-            return None
-        if evaluation.decision == "continue":
-            return None
-        return evaluation.reason
-
-    def _replace_remaining_plan(
-        self,
-        state: RunState,
-        history: list[dict[str, str]],
-        reason: str,
-        publish: EventHandler,
-    ) -> bool:
-        active_plan = state.plan
-        assert active_plan is not None
-        state.add_event("replan_requested", "Replan requested", revision=active_plan.revision, reason=reason)
-        publish(RuntimeEvent("replan_requested", reason, {"revision": active_plan.revision}))
-        if state.replan_count >= self._max_replans:
-            fail_run(state, publish, f"Stopped after {self._max_replans} replans: {reason}")
+            replacement = capabilities.dynamic_replanner.replan(runtime)
+        except PlanningError as exc:
+            fail_run(runtime, f"Replan failed: {exc}", **planning_failure_data(exc, capabilities.name))
             return False
-
-        replan = getattr(self._planner, "replan")
-        on_reasoning, close_reasoning = _reasoning_stream(publish)
-        try:
-            replacement: ExecutionPlan = replan(history, active_plan, reason, on_reasoning=on_reasoning)
-        except (ModelRequestError, PlanningError) as exc:
-            fail_run(state, publish, f"Replan failed: {exc}", planner=self._planner.name)
-            return False
-        finally:
-            close_reasoning()
-
-        replacement.revision = active_plan.revision + 1
-        if not self._validate_plan(state, replacement, self._max_actions - len(state.actions), publish):
-            return False
-        for step in active_plan.steps:
+        replacement.revision = current.revision + 1
+        for step in current.steps:
             if step.status == "pending":
                 step.status = "superseded"
-        state.plan_history.append(active_plan)
-        state.plan = replacement
-        state.replan_count += 1
-        state.add_event(
-            "replan_applied",
-            "Replacement plan applied",
-            revision=replacement.revision,
-            reason=reason,
-            step_count=len(replacement.steps),
+        runtime.run.plan_history.append(current)
+        runtime.run.plan = replacement
+        runtime.run.replan_count += 1
+        runtime.run.add_event(
+            "replan_applied", "Replacement plan applied", revision=replacement.revision, reason=reason
         )
-        publish(RuntimeEvent("replan_applied", self._format_plan(replacement), {"revision": replacement.revision, "reason": reason}))
+        _publish(runtime, RuntimeEvent("replan_applied", self._format_plan(replacement), {"reason": reason}))
+        runtime.save()
         return True

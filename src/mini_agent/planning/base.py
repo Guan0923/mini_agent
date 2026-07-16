@@ -1,60 +1,52 @@
-"""Planner contract consumed by the runtime."""
+"""Planner contracts consumed by the runtime."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
-from mini_agent.domain import AgentAction, ExecutionPlan, PlanStep, RunMode, StepEvaluation, StrategySelection
-
-
-class PlanningError(RuntimeError):
-    """A plan could not be produced or failed validation."""
+from mini_agent.domain import AssistantMessage, ExecutionPlan, StepEvaluation, StrategySelection
+from mini_agent.runtime.context import AgentRuntime
 
 
-class Planner(Protocol):
+@runtime_checkable
+class NamedPlanner(Protocol):
     name: str
 
-    def decide(
-        self,
-        history: list[dict[str, str]],
-        mode: RunMode,
-        on_reasoning: Callable[[str], None] | None = None,
-    ) -> AgentAction: ...
+
+@runtime_checkable
+class Planner(NamedPlanner, Protocol):
+    def decide(self, runtime: AgentRuntime) -> AssistantMessage: ...
 
 
-class ExecutionPlanner(Planner, Protocol):
-    """Optional planner capability for strategies that execute a fixed plan."""
-
-    def create_plan(
-        self,
-        history: list[dict[str, str]],
-        mode: RunMode,
-        on_reasoning: Callable[[str], None] | None = None,
-    ) -> ExecutionPlan: ...
+@runtime_checkable
+class PlanCreator(NamedPlanner, Protocol):
+    def create_plan(self, runtime: AgentRuntime) -> ExecutionPlan: ...
 
 
+@runtime_checkable
 class StrategySelector(Protocol):
-    """Optional planner capability used by the automatic execution-policy router."""
-
-    def select_strategy(self, history: list[dict[str, str]], mode: RunMode) -> StrategySelection: ...
+    def select_strategy(self, runtime: AgentRuntime) -> StrategySelection: ...
 
 
-class DynamicReplanner(ExecutionPlanner, Protocol):
-    """Optional planner capability for evaluating and repairing an active plan."""
+@runtime_checkable
+class DynamicPlanCreator(NamedPlanner, Protocol):
+    def create_dynamic_plan(self, runtime: AgentRuntime) -> ExecutionPlan: ...
 
-    def evaluate_step(
-        self,
-        history: list[dict[str, str]],
-        plan: ExecutionPlan,
-        step: PlanStep,
-        result: str,
-    ) -> StepEvaluation: ...
 
-    def replan(
-        self,
-        history: list[dict[str, str]],
-        plan: ExecutionPlan,
-        reason: str,
-        on_reasoning: Callable[[str], None] | None = None,
-    ) -> ExecutionPlan: ...
+@runtime_checkable
+class PlanReplanner(NamedPlanner, Protocol):
+    def replan(self, runtime: AgentRuntime) -> ExecutionPlan: ...
+
+
+@runtime_checkable
+class DynamicReplanner(PlanReplanner, Protocol):
+    def evaluate_step(self, runtime: AgentRuntime) -> StepEvaluation: ...
+
+
+@runtime_checkable
+class OutputRepairReporter(Protocol):
+    def consume_output_repairs(self) -> list[dict[str, str | int]]: ...
+
+
+class ExecutionPlanner(Planner, PlanCreator, Protocol):
+    """Backward-compatible composite protocol for fixed-plan planners."""

@@ -7,16 +7,27 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
+from .messages import (
+    ChatMessage,
+    ToolMessage,
+    message_to_dict,
+    messages_from_dicts,
+    tool_message_from_dict,
+    tool_message_to_dict,
+)
+
 EventKind = Literal[
     "run_started",
     "strategy",
     "model",
+    "model_repair",
     "reasoning",
     "plan",
     "tool_call",
     "tool_result",
     "tool_failed",
     "retry",
+    "tool_recovery",
     "replan_requested",
     "replan_applied",
     "error",
@@ -25,15 +36,18 @@ EventKind = Literal[
     "approval_requested",
     "approval_granted",
     "feedback_received",
+    "steering_applied",
+    "artifact_created",
+    "handoff_created",
     "cancelled",
 ]
-ActionType = Literal["tool_call", "final_answer"]
 RunMode = Literal["agent", "plan"]
 RunStatus = Literal["running", "completed", "failed", "cancelled"]
 ExecutionStrategy = Literal["reactive", "plan_execute", "dynamic_replan"]
 StrategyPolicy = Literal["auto", "reactive", "plan_execute", "dynamic_replan"]
 PlanStepStatus = Literal["pending", "running", "completed", "failed", "superseded"]
 ReplanDecision = Literal["continue", "replan"]
+ActionType = Literal["tool_call", "final_answer"]
 
 
 def utc_now() -> str:
@@ -45,8 +59,18 @@ def new_run_id() -> str:
 
 
 @dataclass(frozen=True)
+class RunHandoff:
+    """A follow-up run requested by the completed current run."""
+
+    mode: RunMode
+    task: str
+    artifact_id: str
+    new_session: bool = False
+
+
+@dataclass(frozen=True)
 class AgentAction:
-    """The model's next atomic decision in either runtime mode."""
+    """Deprecated input adapter for planners written before ToolMessage."""
 
     type: ActionType
     tool: str | None = None
@@ -55,16 +79,49 @@ class AgentAction:
     reasoning: str | None = None
 
 
-@dataclass
+@dataclass(init=False)
 class PlanStep:
     """One validated, executable tool operation in a precomputed plan."""
 
     id: str
     description: str
-    action: AgentAction
+    tool_message: ToolMessage
     success_criteria: str = ""
     status: PlanStepStatus = "pending"
     result: str | None = None
+
+    def __init__(
+        self,
+        id: str,
+        description: str,
+        tool_message: ToolMessage | None = None,
+        *,
+        action: AgentAction | ToolMessage | None = None,
+        success_criteria: str = "",
+        status: PlanStepStatus = "pending",
+        result: str | None = None,
+    ) -> None:
+        selected = tool_message or action
+        if isinstance(selected, AgentAction):
+            if selected.type != "tool_call" or not selected.tool:
+                raise ValueError("PlanStep compatibility actions must be tool calls.")
+            selected = ToolMessage(
+                name=selected.tool,
+                call_id=f"call_{uuid4().hex}",
+                arguments=selected.arguments,
+            )
+        if not isinstance(selected, ToolMessage):
+            raise ValueError("PlanStep requires a ToolMessage.")
+        self.id = id
+        self.description = description
+        self.tool_message = selected
+        self.success_criteria = success_criteria
+        self.status = status
+        self.result = result
+
+    @property
+    def action(self) -> AgentAction:
+        return AgentAction(type="tool_call", tool=self.tool_message.name, arguments=self.tool_message.arguments)
 
 
 @dataclass
@@ -101,6 +158,17 @@ class TraceEvent:
     data: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RuntimeMessage:
+    """One normalized runtime event retained for audit and replay."""
+
+    sequence: int
+    kind: str
+    message: str
+    timestamp: str
+    data: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass
 class RunState:
     task: str
@@ -108,18 +176,42 @@ class RunState:
     run_id: str = field(default_factory=new_run_id)
     strategy: ExecutionStrategy = "reactive"
     strategy_reason: str | None = None
-    history: list[dict[str, str]] = field(default_factory=list)
-    actions: list[AgentAction] = field(default_factory=list)
+    history: list[ChatMessage] = field(default_factory=list)
+    actions: list[ToolMessage] = field(default_factory=list)
     events: list[TraceEvent] = field(default_factory=list)
+    runtime_messages: list[RuntimeMessage] = field(default_factory=list)
     completed_steps: list[int] = field(default_factory=list)
     plan: ExecutionPlan | None = None
     plan_history: list[ExecutionPlan] = field(default_factory=list)
     replan_count: int = 0
     final_answer: str | None = None
     status: RunStatus = "running"
+    artifact_ids: list[str] = field(default_factory=list)
+    input_artifact_ids: list[str] = field(default_factory=list)
+    handoff: RunHandoff | None = None
 
     def add_event(self, kind: EventKind, message: str, **data: Any) -> None:
         self.events.append(TraceEvent(kind=kind, message=message, data=data))
+
+    def add_runtime_message(
+        self,
+        kind: str,
+        message: str,
+        *,
+        timestamp: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> RuntimeMessage:
+        """Append a presentation-independent event in its durable order."""
+
+        runtime_message = RuntimeMessage(
+            sequence=len(self.runtime_messages) + 1,
+            kind=kind,
+            message=message,
+            timestamp=timestamp or utc_now(),
+            data=dict(data or {}),
+        )
+        self.runtime_messages.append(runtime_message)
+        return runtime_message
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -128,23 +220,36 @@ class RunState:
             "run_id": self.run_id,
             "strategy": self.strategy,
             "strategy_reason": self.strategy_reason,
-            "history": self.history,
-            "actions": [asdict(action) for action in self.actions],
+            "history": [message_to_dict(message) for message in self.history],
+            "actions": [tool_message_to_dict(action) for action in self.actions],
             "events": [asdict(event) for event in self.events],
+            "runtime_messages": [asdict(message) for message in self.runtime_messages],
             "completed_steps": self.completed_steps,
-            "plan": asdict(self.plan) if self.plan else None,
-            "plan_history": [asdict(plan) for plan in self.plan_history],
+            "plan": self._plan_to_dict(self.plan) if self.plan else None,
+            "plan_history": [self._plan_to_dict(plan) for plan in self.plan_history],
             "replan_count": self.replan_count,
             "final_answer": self.final_answer,
             "status": self.status,
+            "artifact_ids": self.artifact_ids,
+            "input_artifact_ids": self.input_artifact_ids,
+            "handoff": asdict(self.handoff) if self.handoff else None,
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RunState":
+    def from_dict(cls, data: dict[str, Any]) -> RunState:
         """Rebuild persisted state without coupling the domain to a storage backend."""
 
-        def action(value: dict[str, Any]) -> AgentAction:
-            return AgentAction(**value)
+        def tool(value: dict[str, Any], fallback_call_id: str) -> ToolMessage:
+            if "type" in value:
+                content = value.get("answer") if value.get("type") == "final_answer" else None
+                return ToolMessage(
+                    name=str(value.get("tool") or "legacy"),
+                    call_id=fallback_call_id,
+                    arguments=dict(value.get("arguments") or {}),
+                    content=content if isinstance(content, str) else None,
+                    status="succeeded" if isinstance(content, str) else "pending",
+                )
+            return tool_message_from_dict(value, fallback_call_id=fallback_call_id)
 
         def plan(value: dict[str, Any]) -> ExecutionPlan:
             return ExecutionPlan(
@@ -153,15 +258,30 @@ class RunState:
                     PlanStep(
                         id=step["id"],
                         description=step["description"],
-                        action=action(step["action"]),
+                        tool_message=tool(
+                            step.get("tool_message") or step.get("action") or {},
+                            f"call_legacy_plan_{index}",
+                        ),
                         success_criteria=step.get("success_criteria", ""),
                         status=step.get("status", "pending"),
                         result=step.get("result"),
                     )
-                    for step in value.get("steps", [])
+                    for index, step in enumerate(value.get("steps", []), start=1)
                 ],
                 final_answer=value.get("final_answer"),
                 revision=value.get("revision", 1),
+            )
+
+        handoff_data = data.get("handoff")
+        handoff = None
+        if isinstance(handoff_data, dict):
+            handoff = RunHandoff(
+                mode=handoff_data.get("mode", "agent"),
+                task=str(handoff_data.get("task") or ""),
+                artifact_id=str(handoff_data.get("artifact_id") or ""),
+                new_session=(
+                    handoff_data["new_session"] if isinstance(handoff_data.get("new_session"), bool) else False
+                ),
             )
 
         return cls(
@@ -170,13 +290,49 @@ class RunState:
             run_id=data["run_id"],
             strategy=data.get("strategy", "reactive"),
             strategy_reason=data.get("strategy_reason"),
-            history=[dict(item) for item in data.get("history", [])],
-            actions=[action(item) for item in data.get("actions", [])],
+            history=messages_from_dicts([dict(item) for item in data.get("history", [])]),
+            actions=[
+                tool(dict(item), f"call_legacy_action_{index}")
+                for index, item in enumerate(data.get("actions", []), start=1)
+            ],
             events=[TraceEvent(**item) for item in data.get("events", [])],
+            runtime_messages=[
+                RuntimeMessage(
+                    sequence=int(item.get("sequence", index)),
+                    kind=str(item.get("kind") or "unknown"),
+                    message=str(item.get("message") or ""),
+                    timestamp=str(item.get("timestamp") or utc_now()),
+                    data=dict(item.get("data") or {}),
+                )
+                for index, item in enumerate(data.get("runtime_messages", []), start=1)
+                if isinstance(item, dict)
+            ],
             completed_steps=list(data.get("completed_steps", [])),
             plan=plan(data["plan"]) if data.get("plan") else None,
             plan_history=[plan(item) for item in data.get("plan_history", [])],
             replan_count=data.get("replan_count", 0),
             final_answer=data.get("final_answer"),
             status=data.get("status", "running"),
+            artifact_ids=list(data.get("artifact_ids") or []),
+            input_artifact_ids=list(data.get("input_artifact_ids") or []),
+            handoff=handoff,
         )
+
+    @staticmethod
+    def _plan_to_dict(plan: ExecutionPlan) -> dict[str, Any]:
+        return {
+            "goal": plan.goal,
+            "steps": [
+                {
+                    "id": step.id,
+                    "description": step.description,
+                    "tool_message": tool_message_to_dict(step.tool_message),
+                    "success_criteria": step.success_criteria,
+                    "status": step.status,
+                    "result": step.result,
+                }
+                for step in plan.steps
+            ],
+            "final_answer": plan.final_answer,
+            "revision": plan.revision,
+        }

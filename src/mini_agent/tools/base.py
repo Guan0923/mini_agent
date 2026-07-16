@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from mini_agent.domain import ToolSpec
 
 
 class ToolError(Exception):
@@ -22,8 +25,14 @@ class Tool:
     name: str
     description: str
     handler: ToolHandler
+    parameters: dict[str, Any] = field(default_factory=dict)
     requires_confirmation: bool = False
     read_only: bool = True
+    retryable: bool = False
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(self.name, self.description, self.parameters)
 
 
 class ToolExecutor(Protocol):
@@ -33,6 +42,14 @@ class ToolExecutor(Protocol):
 
     def read_only_names(self) -> list[str]: ...
 
+    def specs(self) -> list[ToolSpec]: ...
+
+    def read_only_specs(self) -> list[ToolSpec]: ...
+
     def is_read_only(self, name: str) -> bool: ...
+
+    def requires_confirmation(self, name: str) -> bool: ...
+
+    def is_retryable(self, name: str) -> bool: ...
 
     def invoke(self, name: str, arguments: dict[str, Any], confirmed: bool = False) -> str: ...

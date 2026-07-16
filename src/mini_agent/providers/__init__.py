@@ -1,18 +1,26 @@
-"""External model-provider adapters and shared Chat Completions transport."""
+"""Provider strategies and the high-level LLM client."""
 
-from .client import ChatCompletionsClient
+from .client import JsonHttpTransport, LLMClient, ProviderAdapter
 from .config import ModelConfig
-from .deepseek import DeepSeekChatCompletions, DeepSeekCompletion, DeepSeekStreamDelta, DeepSeekToolCall, DeepSeekUsage
+from .deepseek import (
+    DeepSeek,
+    DeepSeekCompletion,
+    DeepSeekStreamDelta,
+    DeepSeekToolCall,
+    DeepSeekUsage,
+)
 from .errors import ModelConfigurationError, ModelRequestError
 
 __all__ = [
-    "ChatCompletionsClient",
-    "DeepSeekChatCompletions",
+    "DeepSeek",
     "DeepSeekCompletion",
     "DeepSeekStreamDelta",
     "DeepSeekToolCall",
     "DeepSeekUsage",
+    "LLMClient",
+    "JsonHttpTransport",
     "ModelConfig",
     "ModelConfigurationError",
     "ModelRequestError",
+    "ProviderAdapter",
 ]

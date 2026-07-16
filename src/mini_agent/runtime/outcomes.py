@@ -1,63 +1,59 @@
-"""State transitions for runtime run outcomes."""
+"""Consistent state transitions for runtime outcomes."""
 
 from __future__ import annotations
 
-from mini_agent.domain import RunState
+from mini_agent.domain import ArtifactMessage, AssistantMessage, UserMessage
 
-from .contracts import EventHandler
+from .context import AgentRuntime
 from .events import RuntimeEvent
 
 
-def complete_run(
-    state: RunState,
-    answer: str,
-    conversation: list[dict[str, str]] | None,
-    publish: EventHandler,
-) -> RunState:
-    """Mark a run complete and persist agent-mode conversation context."""
-    state.status = "completed"
-    state.final_answer = answer
-    state.add_event("final", "Task completed")
-    if state.mode == "agent" and conversation is not None:
-        conversation.extend(
-            [
-                {"role": "user", "content": state.task},
-                {"role": "assistant", "content": answer},
-            ]
-        )
-    publish(RuntimeEvent("plan" if state.mode == "plan" else "response", answer))
-    return state
+def planning_failure_data(error: Exception, planner: str) -> dict[str, object]:
+    data: dict[str, object] = {"planner": planner}
+    diagnostics = getattr(error, "diagnostics", None)
+    if isinstance(diagnostics, dict) and diagnostics:
+        data["provider_diagnostics"] = diagnostics
+    return data
 
 
-def fail_run(state: RunState, publish: EventHandler, message: str, **data: object) -> RunState:
-    """Mark a run failed through one consistent trace and presentation path."""
-    state.status = "failed"
-    state.final_answer = message
-    state.add_event("error", message, **data)
+def complete_run(runtime: AgentRuntime, message: AssistantMessage | ArtifactMessage) -> None:
+    run = runtime.run
+    if not any(existing is message for existing in runtime.state.messages):
+        runtime.state.messages.append(message)
+    run.history = runtime.state.messages
+    run.status = "completed"
+    run.final_answer = message.content or ""
+    run.add_event("final", "Task completed")
+    publish = runtime.services.publish or (lambda _event: None)
+    publish(RuntimeEvent("plan" if run.mode == "plan" else "response", run.final_answer))
+
+
+def fail_run(runtime: AgentRuntime, message: str, **data: object) -> None:
+    run = runtime.run
+    run.status = "failed"
+    run.final_answer = message
+    run.add_event("error", message, **data)
+    publish = runtime.services.publish or (lambda _event: None)
     publish(RuntimeEvent("error", message, dict(data)))
-    return state
 
 
-def cancel_run(state: RunState, publish: EventHandler) -> RunState:
-    """Mark a run as user-cancelled through the same event path as other outcomes."""
-    state.status = "cancelled"
-    state.add_event("cancelled", "Run cancelled by user")
+def cancel_run(runtime: AgentRuntime) -> None:
+    run = runtime.run
+    run.status = "cancelled"
+    run.add_event("cancelled", "Run cancelled by user")
+    publish = runtime.services.publish or (lambda _event: None)
     publish(RuntimeEvent("cancelled", "cancelled"))
-    return state
 
 
-def record_plan_feedback(
-    state: RunState,
-    history: list[dict[str, str]],
-    supplement: str | None,
-    publish: EventHandler,
-) -> str | None:
-    """Add valid human plan feedback to model context and the durable trace."""
+def record_plan_feedback(runtime: AgentRuntime, supplement: str | None) -> str | None:
     feedback = (supplement or "").strip()
     if not feedback:
-        fail_run(state, publish, "Supplement must contain plan feedback.")
+        fail_run(runtime, "Supplement must contain plan feedback.")
         return None
-    history.append({"role": "user", "content": f"[Plan feedback]\n{feedback}"})
-    state.add_event("feedback_received", "Human plan feedback received", supplement=feedback)
+    runtime.state.messages.append(UserMessage(content=f"[Plan feedback]\n{feedback}"))
+    runtime.run.history = runtime.state.messages
+    runtime.run.add_event("feedback_received", "Human plan feedback received", supplement=feedback)
+    publish = runtime.services.publish or (lambda _event: None)
     publish(RuntimeEvent("feedback_received", feedback))
+    runtime.save()
     return feedback

@@ -1,149 +1,289 @@
-"""Thin application orchestrator that delegates routing and execution workflows."""
+"""Application orchestrator whose execution entry accepts only AgentRuntime."""
 
 from __future__ import annotations
 
-from mini_agent.domain import RunMode, RunState, StrategyPolicy
-from mini_agent.planning import Planner
-from mini_agent.tools import ToolError, ToolExecutor
+from mini_agent.domain import (
+    ArtifactMessage,
+    RunState,
+    ToolSpec,
+    UserMessage,
+    message_from_dict,
+    new_run_id,
+    new_session_id,
+)
+from mini_agent.tools import ToolError
 
+from .artifacts import ArtifactStore, InMemoryArtifactStore
 from .checkpointing import CheckpointStore
-from .contracts import Confirm, EventHandler, InterruptDecision, InterruptHandler, InterruptRequest
+from .config import RunnerSettings
+from .context import AgentRuntime, RunSummary, RuntimeServices, RuntimeState
+from .contracts import InterruptDecision, InterruptRequest
 from .events import RuntimeEvent
-from .outcomes import cancel_run
+from .plan_mode import PlanModeWorkflow
 from .publisher import RunEventPublisher
 from .routing import StrategyRouter
-from .steps import ToolStepExecutor
+from .steering import consume_steering
 from .workflows import DynamicReplanWorkflow, PlanExecuteWorkflow, ReactiveWorkflow
 
 
 class AgentRunner:
-    """Create run state, resolve a strategy, then delegate the selected workflow."""
-
     def __init__(
         self,
-        planner: Planner,
-        tools: ToolExecutor,
+        planner: object,
+        tools: object,
         max_retries: int = 1,
+        max_tool_recoveries: int = 2,
         max_actions: int = 8,
         max_replans: int = 2,
-        strategy: StrategyPolicy = "auto",
+        strategy: str = "auto",
+        log_full_messages: bool = True,
         checkpoints: CheckpointStore | None = None,
+        artifact_store: ArtifactStore | None = None,
     ) -> None:
         self.planner = planner
         self.tools = tools
-        self._checkpoints = checkpoints
-        steps = ToolStepExecutor(tools, max_retries)
-        self._router = StrategyRouter(planner, strategy)
-        self._reactive = ReactiveWorkflow(planner, steps, max_actions)
-        self._plan_execute = PlanExecuteWorkflow(planner, steps, max_actions)
-        self._dynamic_replan = DynamicReplanWorkflow(planner, steps, max_actions, max_replans)
+        self.settings = RunnerSettings(
+            max_retries=max_retries,
+            max_tool_recoveries=max_tool_recoveries,
+            max_actions=max_actions,
+            max_replans=max_replans,
+            strategy=strategy,  # type: ignore[arg-type]
+            log_full_messages=log_full_messages,
+        )
+        self.checkpoints = checkpoints
+        self.artifact_store = artifact_store or InMemoryArtifactStore()
+        self._router = StrategyRouter()
+        self._reactive = ReactiveWorkflow()
+        self._plan_mode = PlanModeWorkflow()
+        self._plan_execute = PlanExecuteWorkflow()
+        self._dynamic_replan = DynamicReplanWorkflow()
 
-    def run(
+    def new_runtime(
         self,
+        *,
         task: str,
-        confirm: Confirm | None = None,
-        mode: RunMode = "agent",
-        conversation: list[dict[str, str]] | None = None,
-        on_event: EventHandler | None = None,
-        interrupt: InterruptHandler | None = None,
-    ) -> RunState:
-        state = RunState(task=task, mode=mode, history=[*(conversation or []), {"role": "user", "content": task}])
-        publish = self._publisher(state, on_event)
-        state.add_event("run_started", "Run started")
-        publish(RuntimeEvent("run_started", "started"))
-        handler = interrupt or self._default_interrupt(confirm)
-        if state.mode == "plan":
-            return self._run_plan_mode(state, conversation, publish, handler)
-        return self._run_from_router(state, conversation, publish, handler)
+        mode: str = "agent",
+        session_id: str | None = None,
+        messages: list | None = None,
+        run_id: str | None = None,
+        runtime_store: object | None = None,
+        on_event=None,
+        interrupt=None,
+        confirm=None,
+    ) -> AgentRuntime:
+        runtime = self.empty_runtime(
+            session_id=session_id or new_session_id(),
+            messages=list(messages or []),
+            runtime_store=runtime_store,
+        )
+        history = runtime.state.messages
+        history.append(UserMessage(content=task))
+        runtime.state.current_run = RunState(
+            task=task,
+            mode=mode,  # type: ignore[arg-type]
+            run_id=run_id or new_run_id(),
+            history=history,
+        )
+        runtime.state.status = "running"
+        runtime.services.on_event = on_event
+        runtime.services.interrupt = interrupt
+        runtime.services.confirm = confirm
+        return runtime
 
-    def _run_from_router(
+    def empty_runtime(
         self,
-        state: RunState,
-        conversation: list[dict[str, str]] | None,
-        publish: EventHandler,
-        interrupt: InterruptHandler,
-    ) -> RunState:
-        selection = self._router.resolve(state, state.history, publish)
-        if selection is None:
-            return self._finish_run(state, publish)
-        return self._execute(state, conversation, publish, interrupt)
+        *,
+        session_id: str,
+        messages: list | None = None,
+        runtime_store: object | None = None,
+    ) -> AgentRuntime:
+        specs: list[ToolSpec] = self.tools.specs() if hasattr(self.tools, "specs") else []
+        state = RuntimeState(
+            session_id=session_id,
+            messages=list(messages or []),
+            runner_settings=self.settings,
+            tool_specs=specs,
+            current_run=None,
+            status="idle",
+        )
+        services = RuntimeServices(
+            planner=self.planner,
+            tools=self.tools,
+            artifact_store=self.artifact_store,
+            checkpoint_store=self.checkpoints,
+            runtime_store=runtime_store,  # type: ignore[arg-type]
+        )
+        return AgentRuntime(state=state, services=services)
 
-    def _execute(
-        self,
-        state: RunState,
-        conversation: list[dict[str, str]] | None,
-        publish: EventHandler,
-        interrupt: InterruptHandler,
-    ) -> RunState:
-        if state.strategy == "plan_execute":
-            result = self._plan_execute.run(state, state.history, conversation, publish, interrupt)
-        elif state.strategy == "dynamic_replan":
-            result = self._dynamic_replan.run(state, state.history, conversation, publish, interrupt)
+    def bind(self, runtime: AgentRuntime) -> AgentRuntime:
+        """Rebind non-serializable services after loading a persisted RuntimeState."""
+
+        runtime.services.planner = self.planner
+        runtime.services.tools = self.tools
+        runtime.services.artifact_store = self.artifact_store
+        runtime.services.checkpoint_store = self.checkpoints
+        runtime.state.runner_settings = self.settings
+        return runtime
+
+    def run(self, runtime: AgentRuntime) -> RunState:
+        """Execute one turn using the single runtime parameter."""
+
+        self.bind(runtime)
+        runtime.state.status = "running"
+        runtime.services.publish = RunEventPublisher(runtime)
+        runtime.services.interrupt = runtime.services.interrupt or self._default_interrupt(runtime)
+        run = runtime.run
+        run.history = runtime.state.messages
+        run.add_event("run_started", "Run started")
+        runtime.services.publish(RuntimeEvent("run_started", "started"))
+        if run.mode == "plan":
+            self._plan_mode.run(runtime)
         else:
-            result = self._reactive.run(state, state.history, conversation, publish, interrupt)
-        return self._finish_run(result, publish)
+            self._run_from_router(runtime)
+        return self._finish(runtime)
 
-    def _run_plan_mode(
-        self,
-        state: RunState,
-        conversation: list[dict[str, str]] | None,
-        publish: EventHandler,
-        interrupt: InterruptHandler,
-    ) -> RunState:
-        state.strategy = "plan_execute"
-        state.strategy_reason = "Plan mode creates a plan and waits for human approval."
-        plan = self._plan_execute.prepare(state, state.history, publish)
-        if plan is None:
-            return self._finish_run(state, publish)
-        while True:
-            request = InterruptRequest(
-                "plan",
-                "Execute this plan in Agent mode?",
-                {"run_id": state.run_id, "goal": plan.goal, "steps": [step.description for step in plan.steps]},
+    def _run_from_router(self, runtime: AgentRuntime) -> None:
+        if runtime.run.input_artifact_ids:
+            runtime.run.strategy = "dynamic_replan"
+            runtime.run.strategy_reason = "A plan artifact handoff requires dynamic implementation."
+            runtime.run.add_event(
+                "strategy",
+                "Execution strategy selected",
+                strategy=runtime.run.strategy,
+                reason=runtime.run.strategy_reason,
+                source="handoff",
             )
-            state.add_event("approval_requested", "Plan execution approval requested", interrupt_kind="plan", **request.data)
-            publish(RuntimeEvent("approval_requested", request.message, request.data))
-            decision = interrupt(request)
-            if decision.choice == "cancel":
-                cancel_run(state, publish)
-                return self._finish_run(state, publish)
-            if decision.choice == "supplement":
-                if not self._plan_execute.revise_with_feedback(state, state.history, decision.supplement, publish):
-                    return self._finish_run(state, publish)
-                assert state.plan is not None
-                plan = state.plan
-                continue
-            state.mode = "agent"
-            state.add_event("approval_granted", "Plan execution approved", interrupt_kind="plan", **request.data)
-            publish(RuntimeEvent("approval_granted", request.message, request.data))
-            return self._execute(state, conversation, publish, interrupt)
+            publish = runtime.services.publish or (lambda _event: None)
+            publish(
+                RuntimeEvent(
+                    "strategy",
+                    runtime.run.strategy,
+                    {"reason": runtime.run.strategy_reason, "source": "handoff"},
+                )
+            )
+            if consume_steering(runtime, phase="after_strategy_selection") is not None:
+                runtime.run.strategy = None
+                self._run_from_router(runtime)
+                return
+            self._execute(runtime)
+            return
+        while True:
+            if self._router.resolve(runtime) is None:
+                return
+            if consume_steering(runtime, phase="after_strategy_selection") is None:
+                break
+            runtime.run.strategy = None
+        self._execute(runtime)
 
-    def _default_interrupt(self, confirm: Confirm | None) -> InterruptHandler:
-        """Preserve one confirmation for mutating tools when no UI adapter is supplied."""
+    def _execute(self, runtime: AgentRuntime) -> None:
+        if runtime.run.strategy == "plan_execute":
+            self._plan_execute.run(runtime)
+        elif runtime.run.strategy == "dynamic_replan":
+            self._dynamic_replan.run(runtime)
+        else:
+            self._reactive.run(runtime)
 
+    def _default_interrupt(self, runtime: AgentRuntime):
         def decide(request: InterruptRequest) -> InterruptDecision:
             if request.kind == "plan":
-                return InterruptDecision("continue")
+                return InterruptDecision("cancel")
             tool = request.data.get("tool")
             if not isinstance(tool, str):
                 return InterruptDecision("cancel")
             try:
-                is_read_only = self.tools.is_read_only(tool)
+                requires_confirmation = runtime.services.tools.requires_confirmation(tool)
             except ToolError:
                 return InterruptDecision("cancel")
-            if is_read_only:
+            if not requires_confirmation:
                 return InterruptDecision("continue")
-            message = f"{tool} requires confirmation before it performs a potentially destructive operation."
+            message = f"{tool} requires confirmation before an external or destructive operation."
+            confirm = runtime.services.confirm
             return InterruptDecision("continue" if confirm is not None and confirm(message) else "cancel")
 
         return decide
 
-    def _publisher(self, state: RunState, on_event: EventHandler | None) -> RunEventPublisher:
-        checkpoint = self._checkpoints.save if self._checkpoints is not None else None
-        return RunEventPublisher(state, on_event or (lambda _event: None), checkpoint)
+    def _finish(self, runtime: AgentRuntime) -> RunState:
+        run = runtime.run
+        runtime.state.usage = runtime.state.turn_usage
+        runtime.state.turn_usage = None
+        runtime.state.status = "idle"
+        if not any(summary.run_id == run.run_id for summary in runtime.state.run_history):
+            runtime.state.run_history.append(
+                RunSummary(run.run_id, run.task, run.status, run.mode, run.final_answer, list(run.artifact_ids))
+            )
+        run.add_event("run_finished", "Run finished", status=run.status)
+        if runtime.services.publish is not None:
+            runtime.services.publish(RuntimeEvent("run_finished", run.status, {"final_answer": run.final_answer or ""}))
+        runtime.save()
+        return run
 
-    @staticmethod
-    def _finish_run(state: RunState, publish: EventHandler) -> RunState:
-        state.add_event("run_finished", "Run finished", status=state.status)
-        publish(RuntimeEvent("run_finished", state.status, {"final_answer": state.final_answer or ""}))
-        return state
+
+class LegacyAgentRunner(AgentRunner):
+    """Deprecated facade for pre-Runtime embedding callers."""
+
+    def run(self, task, *args, **kwargs):  # type: ignore[override]
+        if isinstance(task, AgentRuntime):
+            return super().run(task)
+        confirm = args[0] if args else kwargs.pop("confirm", None)
+        conversation = kwargs.pop("conversation", None)
+        messages = [message_from_dict(item) for item in (conversation or [])]
+        runtime = self.new_runtime(
+            task=task,
+            mode=kwargs.pop("mode", "agent"),
+            messages=messages,
+            run_id=kwargs.pop("run_id", None),
+            on_event=kwargs.pop("on_event", None),
+            interrupt=kwargs.pop("interrupt", None),
+            confirm=confirm,
+        )
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unknown LegacyAgentRunner.run arguments: {unknown}")
+        result = super().run(runtime)
+        if result.handoff is not None:
+            handoff = result.handoff
+            if handoff.new_session:
+                artifact = next(
+                    (
+                        message
+                        for message in runtime.state.messages
+                        if isinstance(message, ArtifactMessage) and message.artifact_id == handoff.artifact_id
+                    ),
+                    None,
+                )
+                if artifact is None:
+                    raise RuntimeError(f"Unknown handoff artifact: {handoff.artifact_id}")
+                runtime = self.new_runtime(
+                    task=handoff.task,
+                    mode=handoff.mode,
+                    session_id=new_session_id(),
+                    messages=[artifact],
+                    on_event=runtime.services.on_event,
+                    interrupt=runtime.services.interrupt,
+                    confirm=runtime.services.confirm,
+                )
+                runtime.run.input_artifact_ids = [handoff.artifact_id]
+            else:
+                runtime.state.messages.append(UserMessage(content=handoff.task))
+                runtime.state.current_run = RunState(
+                    task=handoff.task,
+                    mode=handoff.mode,
+                    run_id=new_run_id(),
+                    history=runtime.state.messages,
+                    input_artifact_ids=[handoff.artifact_id],
+                )
+                if runtime.state.pending_plan_artifact_id == handoff.artifact_id:
+                    runtime.state.pending_plan_artifact_id = None
+                runtime.state.active_message = None
+                runtime.state.active_tool_index = None
+                runtime.state.turn_usage = None
+                runtime.state.status = "running"
+            result = super().run(runtime)
+        if conversation is not None and result.mode == "agent":
+            conversation.extend(
+                [
+                    {"role": "user", "content": result.task},
+                    {"role": "assistant", "content": result.final_answer or ""},
+                ]
+            )
+        return result

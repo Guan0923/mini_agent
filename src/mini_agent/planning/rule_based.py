@@ -3,110 +3,158 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 
-from mini_agent.domain import AgentAction, ExecutionPlan, PlanStep, RunMode, StepEvaluation, StrategySelection
-
-from .base import PlanningError
+from mini_agent.domain import (
+    AssistantMessage,
+    ExecutionPlan,
+    PlanningError,
+    PlanStep,
+    StepEvaluation,
+    StrategySelection,
+    ToolMessage,
+    UserMessage,
+)
+from mini_agent.runtime.context import AgentRuntime
 
 
 class RuleBasedPlanner:
     name = "rule"
 
-    def decide(
-        self,
-        history: list[dict[str, str]],
-        mode: RunMode,
-        on_reasoning: Callable[[str], None] | None = None,
-    ) -> AgentAction:
-        task = history[-1]["content"].removeprefix("[Tool result]\n")
-        if history[-1]["content"].startswith("[Tool result]\n"):
-            return AgentAction(type="final_answer", answer=task)
-        task = task.strip()
+    def decide(self, runtime: AgentRuntime) -> AssistantMessage:
+        run = runtime.run
+        last = runtime.state.messages[-1] if runtime.state.messages else UserMessage(content=run.task)
+        if isinstance(last, AssistantMessage) and last.tool_messages:
+            result = last.tool_messages[-1].content or ""
+            return AssistantMessage(content=result.removeprefix("[Tool result]\n"))
+        task = (last.content or "").strip()
         if not task:
-            return AgentAction(type="final_answer", answer="Please provide a task.")
-        if mode == "plan":
-            return AgentAction(
-                type="final_answer",
-                answer=f"1. Inspect the relevant files for: {task}\n2. Identify the smallest safe change.\n3. Implement and test the change after leaving Plan mode.",
+            return AssistantMessage(content="Please provide a task.")
+        if run.mode == "plan":
+            return AssistantMessage(
+                content=(
+                    f"1. Inspect the relevant files for: {task}\n"
+                    "2. Identify the smallest safe change.\n"
+                    "3. Implement and test the change after leaving Plan mode."
+                )
             )
-        expression = self._expression(task)
-        if expression:
-            return AgentAction(type="tool_call", tool="calculator", arguments={"expression": expression})
-        file_match = re.search(r"(?:read|show|读取|查看)\s+[`'\"]?([^`'\"\s]+)", task, flags=re.IGNORECASE)
-        if file_match:
-            path = file_match.group(1).rstrip("。.!！")
-            return AgentAction(type="tool_call", tool="read_file", arguments={"path": path})
-        if re.search(r"(?:list|files|目录|文件)", task, flags=re.IGNORECASE):
-            return AgentAction(type="tool_call", tool="list_files", arguments={})
-        command_match = re.search(r"(?:run|execute)\s+(?:command\s+)?(.+)$|执行命令\s+(.+)$", task, flags=re.IGNORECASE)
-        if command_match:
-            command = next(value for value in command_match.groups() if value is not None).strip()
-            return AgentAction(type="tool_call", tool="run_command", arguments={"command": command})
-        return AgentAction(type="final_answer", answer="Hello! I can help inspect files, calculate expressions, and plan safe changes.")
+        tool = self._tool_for_task(task, runtime)
+        if tool is not None:
+            return AssistantMessage(tool_messages=[tool])
+        return AssistantMessage(
+            content="Hello! I can help inspect, move, and delete workspace files; calculate expressions; and plan safe changes."
+        )
 
-    def select_strategy(self, history: list[dict[str, str]], mode: RunMode) -> StrategySelection:
-        """Keep offline demonstrations deterministic; LLMPlanner performs live routing."""
+    def select_strategy(self, runtime: AgentRuntime) -> StrategySelection:
         return StrategySelection("reactive", "Offline rule planner uses its deterministic reactive loop.")
 
-    def create_plan(
-        self,
-        history: list[dict[str, str]],
-        mode: RunMode,
-        on_reasoning: Callable[[str], None] | None = None,
-    ) -> ExecutionPlan:
-        """Provide a deterministic single-step execution plan for offline demos."""
+    def create_plan(self, runtime: AgentRuntime) -> ExecutionPlan:
         task_message = next(
-            (item for item in reversed(history) if not item["content"].startswith("[Plan feedback]")),
-            history[-1],
+            (message for message in reversed(runtime.state.messages) if isinstance(message, UserMessage)),
+            UserMessage(content=runtime.run.task),
         )
-        action = self.decide([task_message], "agent", on_reasoning=on_reasoning)
-        if action.type == "final_answer":
-            return ExecutionPlan(goal=task_message["content"], final_answer=action.answer)
-        assert action.tool is not None
+        original = runtime.state.messages
+        runtime.state.messages = [task_message]
+        try:
+            response = self.decide(runtime)
+        finally:
+            runtime.state.messages = original
+        if not response.tool_messages:
+            return ExecutionPlan(goal=task_message.content or "", final_answer=response.content)
         return ExecutionPlan(
-            goal=task_message["content"],
+            goal=task_message.content or "",
             steps=[
                 PlanStep(
                     id="step_1",
-                    description=f"Call {action.tool}",
-                    action=action,
+                    description=f"Call {response.tool_messages[0].name}",
+                    tool_message=response.tool_messages[0],
                     success_criteria="The tool call succeeds.",
                 )
             ],
         )
 
-    def create_dynamic_plan(
-        self,
-        history: list[dict[str, str]],
-        mode: RunMode,
-        on_reasoning: Callable[[str], None] | None = None,
-    ) -> ExecutionPlan:
-        return self.create_plan(history, mode, on_reasoning=on_reasoning)
+    def create_dynamic_plan(self, runtime: AgentRuntime) -> ExecutionPlan:
+        return self.create_plan(runtime)
 
-    def evaluate_step(
-        self,
-        history: list[dict[str, str]],
-        plan: ExecutionPlan,
-        step: PlanStep,
-        result: str,
-    ) -> StepEvaluation:
+    def evaluate_step(self, runtime: AgentRuntime) -> StepEvaluation:
         return StepEvaluation("continue", "Offline rule planner accepts successful tool results.")
 
-    def replan(
-        self,
-        history: list[dict[str, str]],
-        plan: ExecutionPlan,
-        reason: str,
-        on_reasoning: Callable[[str], None] | None = None,
-    ) -> ExecutionPlan:
+    def replan(self, runtime: AgentRuntime) -> ExecutionPlan:
         raise PlanningError("Offline rule planner cannot repair a failed plan.")
+
+    def _tool_for_task(self, task: str, runtime: AgentRuntime) -> ToolMessage | None:
+        web = self._web_tool(task, runtime)
+        if web is not None:
+            return web
+        mutation = self._file_mutation(task, runtime)
+        if mutation is not None:
+            return mutation
+        expression = self._expression(task)
+        if expression:
+            return self._tool("calculator", {"expression": expression}, runtime)
+        file_match = re.search(r"(?:read|show|读取|查看)\s+[`'\"]?([^`'\"\s]+)", task, flags=re.IGNORECASE)
+        if file_match:
+            return self._tool("read_file", {"path": file_match.group(1).rstrip("。.!！")}, runtime)
+        if re.search(r"(?:list|files|目录|文件)", task, flags=re.IGNORECASE):
+            return self._tool("list_files", {}, runtime)
+        command = re.search(r"(?:run|execute)\s+(?:command\s+)?(.+)$|执行命令\s+(.+)$", task, re.IGNORECASE)
+        if command:
+            value = next(group for group in command.groups() if group is not None).strip()
+            return self._tool("run_command", {"command": value}, runtime)
+        return None
+
+    @staticmethod
+    def _tool(name: str, arguments: dict[str, object], runtime: AgentRuntime) -> ToolMessage:
+        return ToolMessage(name=name, call_id=runtime.next_tool_call_id(), arguments=arguments)
 
     @staticmethod
     def _expression(task: str) -> str | None:
         candidate = re.search(r"(?:calculate|compute|计算)\s+(.+)$", task, flags=re.IGNORECASE)
         if candidate:
             return candidate.group(1).strip().rstrip("。.!！")
-        if re.fullmatch(r"[0-9\s+\-*/%().]+", task):
-            return task
+        return task if re.fullmatch(r"[0-9\s+\-*/%().]+", task) else None
+
+    def _web_tool(self, task: str, runtime: AgentRuntime) -> ToolMessage | None:
+        search = re.search(r"(?:search|搜索)\s+(.+)$", task, re.IGNORECASE)
+        if search:
+            return self._tool("web_search", {"query": search.group(1).strip()}, runtime)
+        fetch = re.search(r"(?:fetch|抓取(?:网页)?|访问)\s+(https?://\S+)", task, re.IGNORECASE)
+        if fetch:
+            return self._tool("web_fetch", {"url": fetch.group(1).rstrip("。.!！")}, runtime)
+        return None
+
+    def _file_mutation(self, task: str, runtime: AgentRuntime) -> ToolMessage | None:
+        write = re.search(r"(?:write|写入)\s+([^\s]+)\s+(.+)$", task, re.IGNORECASE)
+        if write:
+            return self._tool("write_file", {"path": write.group(1), "content": write.group(2)}, runtime)
+        delete_folder = re.search(
+            r"(?:delete\s+folder\s+(recursive\s+)?|(?:递归)?删除(?:文件夹|目录)\s+)([^\s]+)",
+            task,
+            re.IGNORECASE,
+        )
+        if delete_folder:
+            return self._tool(
+                "delete_folder",
+                {
+                    "path": delete_folder.group(2),
+                    "recursive": bool(delete_folder.group(1)) or task.startswith("递归"),
+                },
+                runtime,
+            )
+        delete = re.search(r"(?:delete\s+(?:file\s+)?|删除文件\s+)([^\s]+)", task, re.IGNORECASE)
+        if delete:
+            return self._tool("delete_file", {"path": delete.group(1)}, runtime)
+        move_folder = re.search(r"(?:move\s+folder|移动文件夹)\s+([^\s]+)\s+(?:to|到)?\s*([^\s]+)", task, re.IGNORECASE)
+        if move_folder:
+            return self._tool(
+                "move_folder",
+                {"source": move_folder.group(1), "destination": move_folder.group(2)},
+                runtime,
+            )
+        move = re.search(
+            r"(?:move\s+(?:file\s+)?|移动文件\s+)([^\s]+)\s+(?:to|到)?\s*([^\s]+)",
+            task,
+            re.IGNORECASE,
+        )
+        if move:
+            return self._tool("move_file", {"source": move.group(1), "destination": move.group(2)}, runtime)
         return None

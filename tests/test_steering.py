@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+from collections import deque
+from pathlib import Path
+
+from mini_agent.domain import AssistantMessage, ExecutionPlan, PlanStep, ToolMessage, UserMessage
+from mini_agent.runtime import AgentRunner, ConversationService, SQLiteSessionStore
+from mini_agent.tools import Tool, ToolRegistry
+
+
+class SteeringPlanner:
+    name = "steering"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, runtime):
+        self.calls += 1
+        if self.calls == 1:
+            return AssistantMessage(tool_messages=[ToolMessage(name="work", call_id="call_1")])
+        latest = next(
+            message.content for message in reversed(runtime.state.messages) if isinstance(message, UserMessage)
+        )
+        return AssistantMessage(content=f"adjusted: {latest}")
+
+
+def sequence_handler(values: list[list[str]]):
+    pending = deque(values)
+
+    def drain() -> list[str]:
+        return pending.popleft() if pending else []
+
+    return drain
+
+
+def test_steering_after_model_response_discards_stale_tool_call() -> None:
+    calls: list[str] = []
+    runner = AgentRunner(
+        SteeringPlanner(),
+        ToolRegistry([Tool("work", "Work", lambda: calls.append("called") or "done")]),
+        strategy="reactive",
+    )
+    runtime = runner.new_runtime(task="start")
+    runtime.services.steering = sequence_handler([[], ["change direction"], [], []])
+
+    result = runner.run(runtime)
+
+    assert result.status == "completed"
+    assert result.final_answer == "adjusted: change direction"
+    assert calls == []
+    assert any(event.kind == "steering_applied" for event in result.events)
+
+
+def test_steering_during_tool_keeps_result_and_stops_remaining_actions() -> None:
+    queued: list[str] = []
+    calls: list[str] = []
+
+    class TwoToolPlanner(SteeringPlanner):
+        def decide(self, runtime):
+            self.calls += 1
+            if self.calls == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(name="first", call_id="call_1"),
+                        ToolMessage(name="second", call_id="call_2"),
+                    ]
+                )
+            return AssistantMessage(content="replanned")
+
+    def first() -> str:
+        calls.append("first")
+        queued.append("use the first result only")
+        return "first result"
+
+    def drain() -> list[str]:
+        messages = list(queued)
+        queued.clear()
+        return messages
+
+    runner = AgentRunner(
+        TwoToolPlanner(),
+        ToolRegistry(
+            [
+                Tool("first", "First", first),
+                Tool("second", "Second", lambda: calls.append("second") or "second result"),
+            ]
+        ),
+        strategy="reactive",
+    )
+    runtime = runner.new_runtime(task="start")
+    runtime.services.steering = drain
+
+    result = runner.run(runtime)
+
+    assert result.status == "completed"
+    assert calls == ["first"]
+    tool_turn = next(
+        message for message in runtime.state.messages if isinstance(message, AssistantMessage) and message.tool_messages
+    )
+    assert [tool.status for tool in tool_turn.tool_messages] == ["succeeded", "failed"]
+    steering_index = next(
+        index
+        for index, message in enumerate(runtime.state.messages)
+        if isinstance(message, UserMessage) and message.content == "use the first result only"
+    )
+    assert runtime.state.messages.index(tool_turn) < steering_index
+
+
+def test_conversation_persists_merged_in_run_messages(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(tmp_path / "steering.db")
+    service = ConversationService(
+        AgentRunner(SteeringPlanner(), ToolRegistry([Tool("work", "Work", lambda: "done")]), strategy="reactive"),
+        store,
+    )
+    handler = sequence_handler([[], ["first update", "second update"], [], []])
+
+    result = service.run_task("start", mode="agent", steering=handler)
+
+    assert result.status == "completed"
+    assert service.active_session is not None
+    assert store.load_conversation(service.active_session.session_id) == [
+        {"role": "user", "content": "start"},
+        {"role": "user", "content": "first update\n\nsecond update"},
+        {"role": "assistant", "content": "adjusted: first update\n\nsecond update"},
+    ]
+    restored = store.load_runtime(service.active_session.session_id)
+    assert restored is not None
+    assert [message.content for message in restored.messages if isinstance(message, UserMessage)] == [
+        "start",
+        "first update\n\nsecond update",
+    ]
+
+
+def test_plan_execute_revises_before_starting_stale_step() -> None:
+    calls: list[str] = []
+
+    class SteeringPlanPlanner:
+        name = "steering-plan"
+
+        def create_plan(self, runtime):
+            return ExecutionPlan(
+                goal="Run stale work",
+                steps=[
+                    PlanStep(
+                        "stale",
+                        "Run stale work",
+                        ToolMessage(name="work", call_id="call_plan"),
+                    )
+                ],
+            )
+
+        def replan(self, runtime):
+            return ExecutionPlan(goal="Use the new direction", final_answer="updated plan accepted")
+
+    runner = AgentRunner(
+        SteeringPlanPlanner(),
+        ToolRegistry([Tool("work", "Work", lambda: calls.append("called") or "done")]),
+        strategy="plan_execute",
+    )
+    runtime = runner.new_runtime(task="start")
+    runtime.services.steering = sequence_handler([[], [], ["skip that step"], []])
+
+    result = runner.run(runtime)
+
+    assert result.status == "completed"
+    assert result.final_answer == "updated plan accepted"
+    assert calls == []
+    assert result.plan_history[0].steps[0].status == "superseded"

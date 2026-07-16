@@ -1,6 +1,6 @@
-"""Terminal user-interface adapter."""
 """Terminal user-interface adapters."""
 
-from .approval import TerminalApproval
+from .approval import PermissionMode, TerminalApproval
+from .completion import SlashCommandCompleter
 
-__all__ = ["TerminalApproval"]
+__all__ = ["PermissionMode", "SlashCommandCompleter", "TerminalApproval"]

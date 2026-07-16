@@ -1,49 +1,50 @@
-"""Resolve the execution strategy without coupling policy to a workflow."""
+"""Resolve execution strategy from AgentRuntime."""
 
 from __future__ import annotations
 
-from mini_agent.domain import RunState, StrategyPolicy, StrategySelection
-from mini_agent.planning import Planner, PlanningError
-from mini_agent.providers import ModelRequestError
+from mini_agent.domain import PlanningError, StrategySelection
+from mini_agent.planning import PlannerCapabilities
 
-from .contracts import EventHandler
+from .context import AgentRuntime
 from .events import RuntimeEvent
-from .outcomes import fail_run
+from .outcomes import fail_run, planning_failure_data
 
 
 class StrategyRouter:
-    """Selects a validated strategy or applies an explicit test override."""
-
-    def __init__(self, planner: Planner, policy: StrategyPolicy) -> None:
-        self._planner = planner
-        self._policy = policy
-
-    def resolve(
-        self,
-        state: RunState,
-        history: list[dict[str, str]],
-        publish: EventHandler,
-    ) -> StrategySelection | None:
-        if state.mode == "plan":
-            selection = StrategySelection("reactive", "Plan mode requires human approval before execution.")
+    def resolve(self, runtime: AgentRuntime) -> StrategySelection | None:
+        run = runtime.run
+        settings = runtime.state.runner_settings
+        capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
+        if run.mode == "plan":
+            selection = StrategySelection(
+                "reactive", "Plan mode drafts an artifact for explicit implementation review."
+            )
             source = "mode"
-        elif self._policy == "auto":
-            select_strategy = getattr(self._planner, "select_strategy", None)
-            if not callable(select_strategy):
-                fail_run(state, publish, f"Planner {self._planner.name!r} does not support automatic strategy selection.")
+        elif settings.strategy == "auto":
+            if capabilities.strategy_selector is None:
+                fail_run(runtime, f"Planner {capabilities.name!r} does not support automatic strategy selection.")
                 return None
             try:
-                selection = select_strategy(history, state.mode)
-            except (ModelRequestError, PlanningError) as exc:
-                fail_run(state, publish, f"Strategy selection failed: {exc}", planner=self._planner.name)
+                selection = capabilities.strategy_selector.select_strategy(runtime)
+            except PlanningError as exc:
+                fail_run(runtime, f"Strategy selection failed: {exc}", **planning_failure_data(exc, capabilities.name))
                 return None
-            source = "llm" if self._planner.name == "llm" else "planner"
+            if selection.strategy == "plan_execute":
+                fail_run(runtime, "Automatic strategy selection cannot use experimental plan_execute.")
+                return None
+            source = "llm" if capabilities.name == "llm" else "planner"
         else:
-            selection = StrategySelection(self._policy, "Execution strategy forced by configuration.")
+            selection = StrategySelection(settings.strategy, "Execution strategy forced by configuration.")
             source = "override"
-
-        state.strategy = selection.strategy
-        state.strategy_reason = selection.reason
-        state.add_event("strategy", "Execution strategy selected", strategy=selection.strategy, reason=selection.reason, source=source)
+        run.strategy = selection.strategy
+        run.strategy_reason = selection.reason
+        run.add_event(
+            "strategy",
+            "Execution strategy selected",
+            strategy=selection.strategy,
+            reason=selection.reason,
+            source=source,
+        )
+        publish = runtime.services.publish or (lambda _event: None)
         publish(RuntimeEvent("strategy", selection.strategy, {"reason": selection.reason, "source": source}))
         return selection

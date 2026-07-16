@@ -31,7 +31,12 @@ def test_command_tool_uses_powershell_on_windows_and_workspace_cwd(tmp_path: Pat
         calls.append((args, kwargs))
         return CompletedProcess(args, 0, stdout="created\n", stderr="")
 
-    output = WorkspaceCommand(tmp_path, is_windows=True, runner=runner).run("New-Item -ItemType Directory demo")
+    output = WorkspaceCommand(
+        tmp_path,
+        is_windows=True,
+        runner=runner,
+        environment={"PATH": "C:\\Windows\\System32", "API_KEY": "secret"},
+    ).run("New-Item -ItemType Directory demo")
 
     assert output == "stdout:\ncreated\n"
     assert calls == [
@@ -45,6 +50,7 @@ def test_command_tool_uses_powershell_on_windows_and_workspace_cwd(tmp_path: Pat
                 "errors": "replace",
                 "text": True,
                 "timeout": 30,
+                "env": {"PATH": "C:\\Windows\\System32"},
             },
         )
     ]

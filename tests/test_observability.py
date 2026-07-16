@@ -3,7 +3,7 @@ from pathlib import Path
 
 from mini_agent.observability import EventFanout, JsonlRunLogger
 from mini_agent.planning import RuleBasedPlanner
-from mini_agent.runtime import AgentRunner
+from mini_agent.runtime import LegacyAgentRunner as AgentRunner
 from mini_agent.tools import ToolRegistry
 
 

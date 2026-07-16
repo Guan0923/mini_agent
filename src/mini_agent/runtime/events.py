@@ -5,16 +5,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from mini_agent.domain.state import utc_now
+
 RuntimeEventKind = Literal[
     "run_started",
     "thinking_start",
     "thinking_delta",
     "thinking_end",
+    "model_request",
+    "model_response",
+    "model_error",
     "strategy",
+    "model_repair",
     "tool_call",
     "tool_result",
     "tool_failed",
     "retry",
+    "tool_recovery",
     "replan_requested",
     "replan_applied",
     "response",
@@ -24,6 +31,10 @@ RuntimeEventKind = Literal[
     "approval_requested",
     "approval_granted",
     "feedback_received",
+    "steering_received",
+    "steering_applied",
+    "artifact_created",
+    "handoff_created",
     "cancelled",
 ]
 
@@ -33,13 +44,22 @@ RuntimeEventKind = Literal[
 CHECKPOINT_EVENT_KINDS: frozenset[RuntimeEventKind] = frozenset(
     {
         "run_started",
+        "model_request",
+        "model_response",
+        "model_error",
         "strategy",
+        "model_repair",
         "approval_requested",
         "approval_granted",
         "feedback_received",
+        "steering_received",
+        "steering_applied",
+        "artifact_created",
+        "handoff_created",
         "tool_call",
         "tool_result",
         "tool_failed",
+        "tool_recovery",
         "replan_requested",
         "replan_applied",
         "response",
@@ -58,3 +78,4 @@ class RuntimeEvent:
     kind: RuntimeEventKind
     message: str = ""
     data: dict[str, Any] = field(default_factory=dict)
+    timestamp: str = field(default_factory=utc_now, compare=False)

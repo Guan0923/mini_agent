@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ class WorkspaceCommand:
 
     _MAX_TIMEOUT_SECONDS = 120
     _MAX_OUTPUT_CHARS = 20_000
+    _SENSITIVE_ENV_SUFFIXES = ("API_KEY", "PASSWORD", "SECRET", "TOKEN")
 
     def __init__(
         self,
@@ -25,10 +26,12 @@ class WorkspaceCommand:
         *,
         is_windows: bool | None = None,
         runner: CommandRunner = subprocess.run,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self._workspace = workspace.resolve()
         self._is_windows = os.name == "nt" if is_windows is None else is_windows
         self._runner = runner
+        self._environment = self._filtered_environment(os.environ if environment is None else environment)
 
     def run(self, command: str, timeout_seconds: int = 30) -> str:
         """Execute Bash on Unix-like systems and PowerShell on Windows."""
@@ -43,6 +46,7 @@ class WorkspaceCommand:
                 errors="replace",
                 text=True,
                 timeout=timeout_seconds,
+                env=self._environment,
             )
         except FileNotFoundError as exc:
             shell = "PowerShell" if self._is_windows else "Bash"
@@ -77,7 +81,7 @@ class WorkspaceCommand:
         if len(value) <= self._MAX_OUTPUT_CHARS:
             return value
         omitted = len(value) - self._MAX_OUTPUT_CHARS
-        return f"{value[:self._MAX_OUTPUT_CHARS]}\n… output truncated ({omitted} characters omitted)"
+        return f"{value[: self._MAX_OUTPUT_CHARS]}\n… output truncated ({omitted} characters omitted)"
 
     @staticmethod
     def _as_text(value: str | bytes) -> str:
@@ -90,3 +94,12 @@ class WorkspaceCommand:
             raise ToolError("timeout_seconds must be an integer.")
         if not 1 <= timeout_seconds <= self._MAX_TIMEOUT_SECONDS:
             raise ToolError(f"timeout_seconds must be between 1 and {self._MAX_TIMEOUT_SECONDS}.")
+
+    @classmethod
+    def _filtered_environment(cls, environment: Mapping[str, str]) -> dict[str, str]:
+        return {name: value for name, value in environment.items() if not cls._is_sensitive_environment_name(name)}
+
+    @classmethod
+    def _is_sensitive_environment_name(cls, name: str) -> bool:
+        normalised = name.upper()
+        return any(normalised == suffix or normalised.endswith(f"_{suffix}") for suffix in cls._SENSITIVE_ENV_SUFFIXES)

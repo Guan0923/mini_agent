@@ -10,12 +10,15 @@ from .events import RuntimeEvent
 
 Confirm = Callable[[str], bool]
 EventHandler = Callable[[RuntimeEvent], None]
-HumanChoice = Literal["continue", "cancel", "supplement"]
+SteeringHandler = Callable[[], list[str]]
+PlanReviewChoice = Literal["implement", "implement_clear_session", "cancel"]
+ToolReviewChoice = Literal["continue", "cancel", "supplement"]
+HumanChoice = Literal["implement", "implement_clear_session", "continue", "cancel", "supplement"]
 
 
 @dataclass(frozen=True)
 class InterruptRequest:
-    """A human-approval point emitted before a plan or tool action proceeds."""
+    """A human decision point for a plan review or confirmed tool action."""
 
     kind: Literal["plan", "tool"]
     message: str

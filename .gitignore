@@ -5,6 +5,19 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
 
 # Local runtime logs
 logs/
+.mini_agent/
+
+# Local editor settings
+.vscode/
