@@ -14,7 +14,12 @@ from mini_agent.domain import AssistantMessage, ChatMessage, SystemMessage, Tool
 from mini_agent.runtime.context import AgentRuntime, PreparedResponse
 
 from .config import ModelConfig
-from .errors import ModelConfigurationError, ModelRequestError
+from .errors import (
+    ModelConfigurationError,
+    ModelRequestError,
+    ModelTransportError,
+    ProviderOutputError,
+)
 
 
 @dataclass(frozen=True)
@@ -721,7 +726,20 @@ def _prepare_response(runtime: AgentRuntime) -> PreparedResponse:
     raw = runtime.exchange.raw_response
     if raw is None:
         raise ModelRequestError("DeepSeek response is missing from runtime.exchange.raw_response.")
-    prepared = _parse_response(raw) if isinstance(raw, Mapping) else _parse_stream(runtime, raw)
+    try:
+        prepared = _parse_response(raw) if isinstance(raw, Mapping) else _parse_stream(runtime, raw)
+    except ModelTransportError:
+        raise
+    except ModelRequestError as exc:
+        invalid_output = ""
+        if isinstance(raw, Mapping):
+            invalid_output = json.dumps(raw, ensure_ascii=False, default=str)
+        raise ProviderOutputError(
+            str(exc),
+            operation=runtime.exchange.operation,
+            invalid_output=invalid_output,
+            diagnostics=exc.diagnostics,
+        ) from exc
     runtime.exchange.prepared_response = prepared
     runtime.state.turn_usage = prepared.usage
     return prepared

@@ -9,7 +9,7 @@ from .deepseek import (
     DeepSeekToolCall,
     DeepSeekUsage,
 )
-from .errors import ModelConfigurationError, ModelRequestError
+from .errors import ModelConfigurationError, ModelRequestError, ModelTransportError
 
 __all__ = [
     "DeepSeek",
@@ -22,5 +22,6 @@ __all__ = [
     "ModelConfig",
     "ModelConfigurationError",
     "ModelRequestError",
+    "ModelTransportError",
     "ProviderAdapter",
 ]

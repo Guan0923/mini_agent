@@ -286,9 +286,11 @@ class PlanProposalWorkflow:
                 response = planner.decide(runtime)
             except PlanningError as exc:
                 close()
+                _publish_repairs(runtime, capabilities)
                 fail_run(runtime, f"Plan creation failed: {exc}", **planning_failure_data(exc, capabilities.name))
                 return None
             streamed = close()
+            _publish_repairs(runtime, capabilities)
             _record_reasoning(runtime, response, streamed)
             if cancel_if_requested(runtime):
                 return None
@@ -536,16 +538,19 @@ class PlanWorkflow:
             return None
         close = _reasoning_stream(runtime)
         try:
-            return (
+            plan = (
                 creator.create_dynamic_plan(runtime)
                 if dynamic and capabilities.dynamic_plan_creator
                 else creator.create_plan(runtime)
             )
         except PlanningError as exc:
+            _publish_repairs(runtime, capabilities)
             fail_run(runtime, f"Planning failed: {exc}", **planning_failure_data(exc, capabilities.name))
             return None
         finally:
             close()
+        _publish_repairs(runtime, capabilities)
+        return plan
 
     def _activate(self, runtime: AgentRuntime, plan: ExecutionPlan) -> bool:
         remaining = runtime.state.runner_settings.max_actions - len(runtime.run.actions)
@@ -593,8 +598,10 @@ class PlanWorkflow:
         try:
             replacement = replanner.replan(runtime)
         except PlanningError as exc:
+            _publish_repairs(runtime, capabilities)
             fail_run(runtime, f"Replan failed: {exc}", **planning_failure_data(exc, capabilities.name))
             return False
+        _publish_repairs(runtime, capabilities)
         if cancel_if_requested(runtime):
             return False
         replacement.revision = previous.revision + 1
@@ -803,8 +810,10 @@ class DynamicReplanWorkflow(PlanWorkflow):
                 try:
                     evaluation = capabilities.dynamic_replanner.evaluate_step(runtime)
                 except PlanningError as exc:
+                    _publish_repairs(runtime, capabilities)
                     fail_run(runtime, f"Step evaluation failed: {exc}", **planning_failure_data(exc, capabilities.name))
                     return runtime.run
+                _publish_repairs(runtime, capabilities)
                 if cancel_if_requested(runtime):
                     return runtime.run
                 if consume_steering(runtime, phase="after_step_evaluation") is not None:
@@ -839,8 +848,10 @@ class DynamicReplanWorkflow(PlanWorkflow):
         try:
             replacement = capabilities.dynamic_replanner.replan(runtime)
         except PlanningError as exc:
+            _publish_repairs(runtime, capabilities)
             fail_run(runtime, f"Replan failed: {exc}", **planning_failure_data(exc, capabilities.name))
             return False
+        _publish_repairs(runtime, capabilities)
         if cancel_if_requested(runtime):
             return False
         replacement.revision = current.revision + 1

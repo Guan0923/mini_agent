@@ -754,6 +754,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-actions", type=int, default=8, help="Maximum model decisions per task (default: 8).")
     parser.add_argument("--max-retries", type=int, default=1, help="Retries for a failed tool call (default: 1).")
     parser.add_argument(
+        "--max-model-repairs",
+        type=int,
+        default=1,
+        help="Retries for malformed model output (default: 1).",
+    )
+    parser.add_argument(
+        "--max-transport-retries",
+        type=int,
+        default=2,
+        help="Retries for transient model transport failures (default: 2).",
+    )
+    parser.add_argument(
         "--max-tool-recoveries",
         type=int,
         default=2,
@@ -768,6 +780,8 @@ def main(argv: list[str] | None = None) -> int:
         settings = RunnerSettings(
             max_actions=args.max_actions,
             max_retries=args.max_retries,
+            max_model_repairs=args.max_model_repairs,
+            max_transport_retries=args.max_transport_retries,
             max_tool_recoveries=args.max_tool_recoveries,
             max_replans=args.max_replans,
             strategy=args.strategy,

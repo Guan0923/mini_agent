@@ -75,6 +75,8 @@ def _build_runner(
     return AgentRunner(
         planner=planner,
         tools=tools,
+        max_model_repairs=settings.max_model_repairs,
+        max_transport_retries=settings.max_transport_retries,
         max_retries=settings.max_retries,
         max_tool_recoveries=settings.max_tool_recoveries,
         max_actions=settings.max_actions,

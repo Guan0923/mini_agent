@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from mini_agent.domain import (
     AssistantMessage,
     ExecutionPlan,
+    ModelOutputError,
     PlanningError,
     PlanStep,
     StepEvaluation,
@@ -73,7 +75,13 @@ class LLMPlanner:
         return [value if isinstance(value, ToolSpec) else ToolSpec(value, "") for value in values]
 
     def decide(self, runtime: AgentRuntime) -> AssistantMessage:
-        self._output_repairs.clear()
+        return self._with_output_repair(
+            runtime,
+            "decision",
+            lambda correction: self._decide_once(runtime, correction),
+        )
+
+    def _decide_once(self, runtime: AgentRuntime, correction: UserMessage | None = None) -> AssistantMessage:
         allowed = self.read_only_tool_specs if runtime.run.mode == "plan" else self.tool_specs
         if runtime.run.mode == "plan":
             allowed = self._plan_mode_specs(allowed)
@@ -158,7 +166,12 @@ class LLMPlanner:
             )
         prepared = self._request(
             runtime,
-            self._messages_for_request(runtime, system, tools=allowed),
+            self._messages_for_request(
+                runtime,
+                system,
+                extra=[correction] if correction is not None else None,
+                tools=allowed,
+            ),
             operation="decision",
             output_mode="tools",
             allowed_tools=allowed,
@@ -167,9 +180,17 @@ class LLMPlanner:
         allowed_names = {spec.name for spec in runtime.exchange.operation_tools}
         for tool in message.tool_messages:
             if tool.name not in allowed_names:
-                raise PlanningError(f"Model requested unavailable tool: {tool.name!r}.")
+                raise ModelOutputError(
+                    f"Model requested unavailable tool: {tool.name!r}.",
+                    operation="decision",
+                    invalid_output=self._message_preview(message),
+                )
         if not message.tool_messages and not (message.content and message.content.strip()):
-            raise PlanningError("Model returned neither text nor a tool call.")
+            raise ModelOutputError(
+                "Model returned neither text nor a tool call.",
+                operation="decision",
+                invalid_output=self._message_preview(message),
+            )
         return message
 
     def _plan_mode_specs(self, specs: list[ToolSpec]) -> list[ToolSpec]:
@@ -194,7 +215,75 @@ class LLMPlanner:
         self._output_repairs = []
         return repairs
 
+    def _with_output_repair(
+        self,
+        runtime: AgentRuntime,
+        operation: str,
+        request: Callable[[UserMessage | None], Any],
+    ) -> Any:
+        self._output_repairs.clear()
+        correction: UserMessage | None = None
+        repairs: list[dict[str, str | int]] = []
+        max_repairs = runtime.state.runner_settings.max_model_repairs
+        for attempt in range(max_repairs + 1):
+            try:
+                result = request(correction)
+            except ModelOutputError as exc:
+                repair: dict[str, str | int] = {
+                    "phase": operation,
+                    "attempt": attempt + 1,
+                    "validation_error": exc.validation_error,
+                    "invalid_output_preview": exc.invalid_output_preview,
+                    "outcome": "retrying",
+                }
+                repairs.append(repair)
+                if attempt >= max_repairs:
+                    for item in repairs:
+                        item["outcome"] = "failed"
+                    self._output_repairs.extend(repairs)
+                    raise
+                correction = UserMessage(content=self._repair_instruction(exc))
+                continue
+            for item in repairs:
+                item["outcome"] = "repaired"
+            self._output_repairs.extend(repairs)
+            return result
+        raise AssertionError("Model output repair loop ended without an outcome.")
+
+    @staticmethod
+    def _repair_instruction(error: ModelOutputError) -> str:
+        preview = error.invalid_output_preview.strip()
+        invalid = f"\n\nInvalid output:\n{preview}" if preview else ""
+        return (
+            "[Model output correction]\n"
+            "Your previous response could not be executed.\n\n"
+            f"Validation error: {error.validation_error}."
+            f"{invalid}\n\n"
+            "Return the complete response again using the required schema. "
+            "Do not explain the correction."
+        )
+
+    @staticmethod
+    def _message_preview(message: AssistantMessage) -> str:
+        return json.dumps(
+            {
+                "content": message.content,
+                "tool_calls": [
+                    {"name": tool.name, "arguments": tool.arguments} for tool in message.tool_messages
+                ],
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
     def select_strategy(self, runtime: AgentRuntime) -> StrategySelection:
+        return self._with_output_repair(
+            runtime,
+            "strategy",
+            lambda correction: self._select_strategy_once(runtime, correction),
+        )
+
+    def _select_strategy_once(self, runtime: AgentRuntime, correction: UserMessage | None = None) -> StrategySelection:
         if runtime.run.mode == "plan":
             return StrategySelection("reactive", "Plan mode supports read-only discussion and optional Plan Review.")
         raw = self._json_request(
@@ -214,39 +303,71 @@ class LLMPlanner:
                 )
             ),
             "strategy",
+            extra=[correction] if correction is not None else None,
         )
         try:
             payload = self._json_object(raw)
             strategy = payload.get("strategy")
             reason = payload.get("reason")
             if strategy not in {"reactive", "dynamic_replan"}:
-                raise PlanningError(f"Unsupported execution strategy: {strategy!r}.")
+                raise ModelOutputError(
+                    f"Unsupported execution strategy: {strategy!r}.",
+                    operation="strategy",
+                    invalid_output=raw,
+                )
             if not isinstance(reason, str) or not reason.strip():
-                raise PlanningError("Strategy reason must be non-empty text.")
+                raise ModelOutputError(
+                    "Strategy reason must be non-empty text.",
+                    operation="strategy",
+                    invalid_output=raw,
+                )
             return StrategySelection(strategy, reason.strip())
         except PlanningError as exc:
             raise exc
 
     def create_plan(self, runtime: AgentRuntime) -> ExecutionPlan:
+        return self._with_output_repair(
+            runtime,
+            "plan",
+            lambda correction: self._create_plan_once(runtime, correction),
+        )
+
+    def _create_plan_once(self, runtime: AgentRuntime, correction: UserMessage | None = None) -> ExecutionPlan:
         raw = self._json_request(
             runtime,
             self._plan_system(dynamic=False, allowed_specs=self.tool_specs),
             "plan",
             operation_tools=self.tool_specs,
+            extra=[correction] if correction is not None else None,
         )
         return self._parse_execution_plan(raw, runtime, runtime.exchange.operation_tools)
 
     def create_dynamic_plan(self, runtime: AgentRuntime) -> ExecutionPlan:
+        return self._with_output_repair(
+            runtime,
+            "plan",
+            lambda correction: self._create_dynamic_plan_once(runtime, correction),
+        )
+
+    def _create_dynamic_plan_once(self, runtime: AgentRuntime, correction: UserMessage | None = None) -> ExecutionPlan:
         allowed = self.read_only_tool_specs if runtime.run.mode == "plan" else self.tool_specs
         raw = self._json_request(
             runtime,
             self._plan_system(dynamic=True, allowed_specs=allowed),
             "plan",
+            extra=[correction] if correction is not None else None,
             operation_tools=allowed,
         )
         return self._parse_execution_plan(raw, runtime, runtime.exchange.operation_tools)
 
     def evaluate_step(self, runtime: AgentRuntime) -> StepEvaluation:
+        return self._with_output_repair(
+            runtime,
+            "evaluate",
+            lambda correction: self._evaluate_step_once(runtime, correction),
+        )
+
+    def _evaluate_step_once(self, runtime: AgentRuntime, correction: UserMessage | None = None) -> StepEvaluation:
         context = runtime.exchange.context
         plan = context.get("plan")
         step = context.get("step")
@@ -279,18 +400,33 @@ class LLMPlanner:
                 )
             ),
             "evaluate",
-            extra=[prompt],
+            extra=[prompt, *([correction] if correction is not None else [])],
         )
         payload = self._json_object(raw)
         decision = payload.get("decision")
         reason = payload.get("reason")
         if decision not in {"continue", "replan"}:
-            raise PlanningError("Step evaluation decision must be continue or replan.")
+            raise ModelOutputError(
+                "Step evaluation decision must be continue or replan.",
+                operation="evaluate",
+                invalid_output=raw,
+            )
         if not isinstance(reason, str) or not reason.strip():
-            raise PlanningError("Step evaluation reason must be non-empty text.")
+            raise ModelOutputError(
+                "Step evaluation reason must be non-empty text.",
+                operation="evaluate",
+                invalid_output=raw,
+            )
         return StepEvaluation(decision, reason.strip())
 
     def replan(self, runtime: AgentRuntime) -> ExecutionPlan:
+        return self._with_output_repair(
+            runtime,
+            "replan",
+            lambda correction: self._replan_once(runtime, correction),
+        )
+
+    def _replan_once(self, runtime: AgentRuntime, correction: UserMessage | None = None) -> ExecutionPlan:
         context = runtime.exchange.context
         plan = context.get("plan")
         reason = context.get("reason")
@@ -306,7 +442,7 @@ class LLMPlanner:
             runtime,
             self._plan_system(dynamic=True, allowed_specs=self.tool_specs),
             "replan",
-            extra=[extra],
+            extra=[extra, *([correction] if correction is not None else [])],
             operation_tools=self.tool_specs,
         )
         return self._parse_execution_plan(raw, runtime, runtime.exchange.operation_tools)
@@ -477,8 +613,10 @@ class LLMPlanner:
         )
         content = prepared.message.content
         if not content or not content.strip():
-            raise PlanningError(
+            raise ModelOutputError(
                 "Model response did not contain JSON content.",
+                operation=operation,
+                invalid_output=content or "",
                 diagnostics=self._response_diagnostics(prepared),
             )
         return content.strip()
@@ -519,13 +657,17 @@ class LLMPlanner:
         )
 
     @staticmethod
-    def _json_object(raw: str) -> dict[str, Any]:
+    def _json_object(raw: str, operation: str | None = None) -> dict[str, Any]:
+        normalized = raw.lstrip("\ufeff").strip()
+        lines = normalized.splitlines()
+        if len(lines) >= 2 and lines[0].strip().lower() in {"```", "```json"} and lines[-1].strip() == "```":
+            normalized = "\n".join(lines[1:-1]).strip()
         try:
-            payload = json.loads(raw)
+            payload = json.loads(normalized)
         except json.JSONDecodeError as exc:
-            raise PlanningError("Model did not return valid JSON.") from exc
+            raise ModelOutputError("Model did not return valid JSON.", operation=operation, invalid_output=raw) from exc
         if not isinstance(payload, dict):
-            raise PlanningError("Model JSON must be an object.")
+            raise ModelOutputError("Model JSON must be an object.", operation=operation, invalid_output=raw)
         return payload
 
     def _parse_execution_plan(
@@ -538,26 +680,26 @@ class LLMPlanner:
         goal = payload.get("goal")
         steps = payload.get("steps")
         if not isinstance(goal, str) or not goal.strip() or not isinstance(steps, list):
-            raise PlanningError("Execution plan requires a goal and a steps array.")
+            raise ModelOutputError("Execution plan requires a goal and a steps array.", operation="plan", invalid_output=raw)
         allowed = {spec.name for spec in allowed_specs}
         parsed_steps: list[PlanStep] = []
         seen_ids: set[str] = set()
         for item in steps:
             if not isinstance(item, dict):
-                raise PlanningError("Each plan step must be an object.")
+                raise ModelOutputError("Each plan step must be an object.", operation="plan", invalid_output=raw)
             step_id = item.get("id")
             description = item.get("description")
             success = item.get("success_criteria", "")
             name = item.get("tool")
             arguments = item.get("arguments")
             if not isinstance(step_id, str) or not step_id or step_id in seen_ids:
-                raise PlanningError("Plan step ids must be unique non-empty strings.")
+                raise ModelOutputError("Plan step ids must be unique non-empty strings.", operation="plan", invalid_output=raw)
             if not isinstance(description, str) or not description.strip():
-                raise PlanningError("Plan step description must be non-empty text.")
+                raise ModelOutputError("Plan step description must be non-empty text.", operation="plan", invalid_output=raw)
             if name not in allowed:
-                raise PlanningError(f"Model requested unavailable tool: {name!r}.")
+                raise ModelOutputError(f"Model requested unavailable tool: {name!r}.", operation="plan", invalid_output=raw)
             if not isinstance(arguments, dict):
-                raise PlanningError("Plan step arguments must be an object.")
+                raise ModelOutputError("Plan step arguments must be an object.", operation="plan", invalid_output=raw)
             seen_ids.add(step_id)
             call_id = runtime.next_tool_call_id()
             parsed_steps.append(
@@ -570,9 +712,9 @@ class LLMPlanner:
             )
         final_answer = payload.get("final_answer")
         if not parsed_steps and (not isinstance(final_answer, str) or not final_answer.strip()):
-            raise PlanningError("A zero-step plan requires final_answer.")
+            raise ModelOutputError("A zero-step plan requires final_answer.", operation="plan", invalid_output=raw)
         if parsed_steps and final_answer is not None:
-            raise PlanningError("A plan with steps must not contain final_answer.")
+            raise ModelOutputError("A plan with steps must not contain final_answer.", operation="plan", invalid_output=raw)
         return ExecutionPlan(
             goal=goal.strip(),
             steps=parsed_steps,

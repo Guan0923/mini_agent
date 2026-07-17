@@ -7,6 +7,7 @@ from mini_agent.planning import PlannerCapabilities
 
 from .context import AgentRuntime
 from .events import RuntimeEvent
+from .workflows import _publish_repairs
 from .outcomes import fail_run, planning_failure_data
 
 
@@ -27,8 +28,10 @@ class StrategyRouter:
             try:
                 selection = capabilities.strategy_selector.select_strategy(runtime)
             except PlanningError as exc:
+                _publish_repairs(runtime, capabilities)
                 fail_run(runtime, f"Strategy selection failed: {exc}", **planning_failure_data(exc, capabilities.name))
                 return None
+            _publish_repairs(runtime, capabilities)
             if selection.strategy == "plan_execute":
                 fail_run(runtime, "Automatic strategy selection cannot use experimental plan_execute.")
                 return None

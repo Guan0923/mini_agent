@@ -13,6 +13,8 @@ from mini_agent.domain import StrategyPolicy
 @dataclass(frozen=True)
 class RunnerSettings:
     max_retries: int = 1
+    max_model_repairs: int = 1
+    max_transport_retries: int = 2
     max_tool_recoveries: int = 2
     max_actions: int = 8
     max_replans: int = 2
@@ -22,6 +24,10 @@ class RunnerSettings:
     def __post_init__(self) -> None:
         if self.max_retries < 0:
             raise ValueError("max_retries must be zero or greater.")
+        if self.max_model_repairs < 0:
+            raise ValueError("max_model_repairs must be zero or greater.")
+        if self.max_transport_retries < 0:
+            raise ValueError("max_transport_retries must be zero or greater.")
         if self.max_tool_recoveries < 0:
             raise ValueError("max_tool_recoveries must be zero or greater.")
         if self.max_actions < 1:

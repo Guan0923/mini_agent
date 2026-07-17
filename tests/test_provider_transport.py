@@ -1,7 +1,8 @@
 import pytest
+import requests
 
-from mini_agent.domain import AssistantMessage, UserMessage
-from mini_agent.planning import RuleBasedPlanner
+from mini_agent.domain import AssistantMessage, ToolSpec, UserMessage
+from mini_agent.planning import LLMPlanner, RuleBasedPlanner
 from mini_agent.providers import DeepSeek, LLMClient, ModelConfig, ModelRequestError
 from mini_agent.runtime import AgentRunner, PreparedResponse
 from mini_agent.tools import ToolRegistry
@@ -26,8 +27,10 @@ class FakeStreamResponse:
 class FakeStreamSession:
     def __init__(self, lines: list[str]) -> None:
         self.response = FakeStreamResponse(lines)
+        self.calls = 0
 
     def post(self, url: str, **kwargs: object) -> FakeStreamResponse:
+        self.calls += 1
         return self.response
 
 
@@ -56,6 +59,70 @@ class RecordingTransport:
     def post_json(self, endpoint, headers, payload, timeout_seconds):
         self.call = (endpoint, headers, payload, timeout_seconds)
         return {"answer": "custom response"}
+
+
+class SequencedTransport:
+    def __init__(self, results: list[object]) -> None:
+        self.results = list(results)
+        self.calls = 0
+
+    def post_json(self, endpoint, headers, payload, timeout_seconds):
+        self.calls += 1
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class FakeJsonResponse:
+    def __init__(self, status_code: int, body: object, headers: dict[str, str] | None = None) -> None:
+        self.status_code = status_code
+        self.body = body
+        self.headers = headers or {}
+
+    def raise_for_status(self) -> None:
+        if self.status_code < 400:
+            return
+        error = requests.HTTPError(f"HTTP {self.status_code}")
+        error.response = self
+        raise error
+
+    def json(self):
+        if isinstance(self.body, Exception):
+            raise self.body
+        return self.body
+
+
+class SequencedSession:
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = list(responses)
+        self.calls = 0
+
+    def post(self, url: str, **kwargs: object):
+        self.calls += 1
+        result = self.responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class SequencedStreamSession:
+    def __init__(self, responses: list[FakeStreamResponse]) -> None:
+        self.responses = list(responses)
+        self.calls = 0
+
+    def post(self, url: str, **kwargs: object) -> FakeStreamResponse:
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+def runtime_for_custom(*, max_transport_retries: int = 2):
+    runtime = AgentRunner(
+        RuleBasedPlanner(), ToolRegistry(), max_transport_retries=max_transport_retries
+    ).new_runtime(task="hello")
+    runtime.exchange.messages = [UserMessage(content="hello")]
+    return runtime
+
 
 
 def runtime_for_stream():
@@ -132,6 +199,7 @@ def test_stream_eof_before_done_is_rejected_and_closed() -> None:
         client.run(runtime)
 
     assert session.response.closed is True
+    assert session.calls == 1
     assert runtime.exchange.raw_response is None
 
 
@@ -204,9 +272,182 @@ def test_response_rejects_duplicate_tool_call_ids() -> None:
                     "tool_calls": [tool_call, tool_call],
                 },
                 "finish_reason": "tool_calls",
+
             }
         ]
     }
 
     with pytest.raises(ModelRequestError, match="Duplicate DeepSeek tool call id"):
         deepseek_for_test().prepare_response(runtime)
+
+
+@pytest.mark.parametrize("status_code", [429, 503])
+def test_transient_http_status_retries_with_retry_after(monkeypatch, status_code: int) -> None:
+    session = SequencedSession(
+        [
+            FakeJsonResponse(status_code, {}, {"Retry-After": "0"}),
+            FakeJsonResponse(200, {"answer": "recovered"}),
+        ]
+    )
+    client = LLMClient(
+        ModelConfig("secret", "https://unused.test", "custom-model", provider="custom"),
+        session=session,
+        adapter=CustomAdapter(),
+    )
+    runtime = runtime_for_custom()
+    events = []
+    runtime.services.publish = events.append
+    delays = []
+    monkeypatch.setattr("mini_agent.providers.client.time.sleep", delays.append)
+
+    response = client.run(runtime)
+
+    assert response.message.content == "recovered"
+    assert session.calls == 2
+    assert delays == [0.0]
+    assert [event.kind for event in events] == ["model_request", "model_retry", "model_response"]
+    assert events[1].data["status_code"] == status_code
+
+
+def test_non_retryable_http_status_fails_immediately(monkeypatch) -> None:
+    session = SequencedSession(
+        [
+            FakeJsonResponse(401, {}),
+            FakeJsonResponse(200, {"answer": "must not run"}),
+        ]
+    )
+    client = LLMClient(
+        ModelConfig("secret", "https://unused.test", "custom-model", provider="custom"),
+        session=session,
+        adapter=CustomAdapter(),
+    )
+    runtime = runtime_for_custom()
+    monkeypatch.setattr("mini_agent.providers.client.time.sleep", lambda _delay: None)
+
+    with pytest.raises(ModelRequestError, match="HTTPError"):
+        client.run(runtime)
+
+    assert session.calls == 1
+
+
+def test_invalid_json_http_body_retries(monkeypatch) -> None:
+    session = SequencedSession(
+        [
+            FakeJsonResponse(200, ValueError("invalid JSON")),
+            FakeJsonResponse(200, {"answer": "recovered"}),
+        ]
+    )
+    client = LLMClient(
+        ModelConfig("secret", "https://unused.test", "custom-model", provider="custom"),
+        session=session,
+        adapter=CustomAdapter(),
+    )
+    runtime = runtime_for_custom()
+    monkeypatch.setattr("mini_agent.providers.client.time.sleep", lambda _delay: None)
+
+    response = client.run(runtime)
+
+    assert response.message.content == "recovered"
+    assert session.calls == 2
+
+
+def test_stream_retries_only_before_the_first_event(monkeypatch) -> None:
+    first = FakeStreamResponse([])
+    second = FakeStreamResponse(
+        [
+            'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+    )
+    session = SequencedStreamSession([first, second])
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
+    runtime = runtime_for_stream()
+    monkeypatch.setattr("mini_agent.providers.client.time.sleep", lambda _delay: None)
+
+    response = client.run(runtime)
+
+    assert response.message.content == "done"
+    assert session.calls == 2
+    assert first.closed is True
+    assert second.closed is True
+
+
+def test_deepseek_invalid_tool_arguments_are_regenerated_before_execution() -> None:
+    invalid = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_command", "arguments": "not-json"},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+    valid = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": '{"command":"echo ok"}',
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+    transport = SequencedTransport([invalid, valid])
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), transport=transport)
+    spec = ToolSpec("run_command", "Run a command")
+    planner = LLMPlanner(client, [spec], [spec])
+    runtime = AgentRunner(
+        planner,
+        ToolRegistry(),
+        max_model_repairs=1,
+        max_transport_retries=0,
+    ).new_runtime(task="run it")
+
+    message = planner.decide(runtime)
+
+    assert transport.calls == 2
+    assert message.tool_messages[0].arguments == {"command": "echo ok"}
+    assert planner.consume_output_repairs()[0]["outcome"] == "repaired"
+
+
+def test_connection_timeout_retries(monkeypatch) -> None:
+    session = SequencedSession(
+        [
+            requests.Timeout("timed out"),
+            FakeJsonResponse(200, {"answer": "recovered"}),
+        ]
+    )
+    client = LLMClient(
+        ModelConfig("secret", "https://unused.test", "custom-model", provider="custom"),
+        session=session,
+        adapter=CustomAdapter(),
+    )
+    runtime = runtime_for_custom()
+    delays = []
+    monkeypatch.setattr("mini_agent.providers.client.time.sleep", delays.append)
+
+    response = client.run(runtime)
+
+    assert response.message.content == "recovered"
+    assert session.calls == 2
+    assert delays == [0.5]

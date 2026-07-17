@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
-from mini_agent.domain import ChatMessage, ToolSpec
+from mini_agent.domain import ChatMessage, ModelOutputError, ToolSpec
 from mini_agent.runtime.context import AgentRuntime, PreparedResponse
 from mini_agent.runtime.events import RuntimeEvent
 from mini_agent.runtime.recording import model_error_data, model_request_data, model_response_data
 
 from .config import ModelConfig
 from .deepseek import DeepSeek
-from .errors import ModelConfigurationError, ModelRequestError
+from .errors import ModelConfigurationError, ModelRequestError, ModelTransportError
 
 
 class ProviderAdapter(Protocol):
@@ -73,11 +74,11 @@ class JsonHttpTransport:
             response.raise_for_status()
             data = response.json()
         except requests.RequestException as exc:
-            raise ModelRequestError(f"Model request failed: {exc.__class__.__name__}") from exc
+            raise _transport_error(exc, "Model request failed") from exc
         except ValueError as exc:
-            raise ModelRequestError("Model response is not valid JSON.") from exc
+            raise ModelTransportError("Model response is not valid JSON.", retryable=True) from exc
         if not isinstance(data, dict):
-            raise ModelRequestError("Model response must be a JSON object.")
+            raise ModelTransportError("Model response must be a JSON object.", retryable=True)
         return data
 
     def stream_json(
@@ -89,6 +90,7 @@ class JsonHttpTransport:
     ) -> Iterator[dict[str, Any]]:
         response: requests.Response | None = None
         saw_done = False
+        saw_event = False
         try:
             response = self.session.post(
                 endpoint,
@@ -106,7 +108,9 @@ class JsonHttpTransport:
                     try:
                         line = line.decode("utf-8")
                     except UnicodeDecodeError as exc:
-                        raise ModelRequestError("Stream event is not valid UTF-8.") from exc
+                        raise ModelTransportError(
+                            "Stream event is not valid UTF-8.", retryable=not saw_event, stream_started=saw_event
+                        ) from exc
                 if not line.startswith("data:"):
                     continue
                 raw_event = line.removeprefix("data:").strip()
@@ -116,17 +120,53 @@ class JsonHttpTransport:
                 try:
                     event = json.loads(raw_event)
                 except json.JSONDecodeError as exc:
-                    raise ModelRequestError("Stream event is not valid JSON.") from exc
+                    raise ModelTransportError(
+                        "Stream event is not valid JSON.", retryable=not saw_event, stream_started=saw_event
+                    ) from exc
                 if not isinstance(event, dict):
-                    raise ModelRequestError("Stream event must be a JSON object.")
+                    raise ModelTransportError(
+                        "Stream event must be a JSON object.", retryable=not saw_event, stream_started=saw_event
+                    )
+                saw_event = True
                 yield event
             if not saw_done:
-                raise ModelRequestError("Model stream ended before [DONE].")
+                raise ModelTransportError(
+                    "Model stream ended before [DONE].", retryable=not saw_event, stream_started=saw_event
+                )
         except requests.RequestException as exc:
-            raise ModelRequestError(f"Model stream failed: {exc.__class__.__name__}") from exc
+            raise _transport_error(exc, "Model stream failed", stream_started=saw_event) from exc
         finally:
             if response is not None:
                 response.close()
+
+
+_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _transport_error(
+    error: requests.RequestException,
+    label: str,
+    *,
+    stream_started: bool = False,
+) -> ModelTransportError:
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    retry_after: float | None = None
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        raw_retry_after = headers.get("Retry-After")
+        try:
+            retry_after = min(30.0, max(0.0, float(raw_retry_after)))
+        except (TypeError, ValueError):
+            retry_after = None
+    retryable = isinstance(error, (requests.Timeout, requests.ConnectionError)) or status_code in _RETRYABLE_STATUS_CODES
+    return ModelTransportError(
+        f"{label}: {error.__class__.__name__}",
+        retryable=retryable and not stream_started,
+        status_code=status_code if isinstance(status_code, int) else None,
+        retry_after=retry_after,
+        stream_started=stream_started,
+    )
 
 
 class LLMClient:
@@ -166,7 +206,6 @@ class LLMClient:
         return estimate(messages, tools, request_parameters)
 
     def run(self, runtime: AgentRuntime) -> PreparedResponse:
-        self._last_request_diagnostics = {}
         runtime.state.provider = self.config.provider
         runtime.state.model = self.config.model
         runtime.state.request_parameters.setdefault("max_tokens", self.config.max_tokens)
@@ -180,6 +219,56 @@ class LLMClient:
                 model_request_data(runtime.state, runtime.exchange),
             )
         )
+        max_retries = runtime.state.runner_settings.max_transport_retries
+        for attempt in range(max_retries + 1):
+            try:
+                prepared = self._run_once(runtime)
+                self._last_request_diagnostics["transport_attempts"] = attempt + 1
+                return prepared
+            except ModelTransportError as exc:
+                if exc.retryable and attempt < max_retries:
+                    delay = exc.retry_after if exc.retry_after is not None else 0.5 * (2**attempt)
+                    publish(
+                        RuntimeEvent(
+                            "model_retry",
+                            str(exc),
+                            {
+                                "attempt": attempt + 1,
+                                "max_retries": max_retries,
+                                "delay_seconds": delay,
+                                "status_code": exc.status_code,
+                            },
+                        )
+                    )
+                    time.sleep(delay)
+                    continue
+                self._publish_request_failure(runtime, exc, publish)
+                raise
+            except ModelOutputError:
+                raise
+            except ModelRequestError as exc:
+                self._publish_request_failure(runtime, exc, publish)
+                raise
+        raise AssertionError("Transport retry loop ended without an outcome.")
+
+    @staticmethod
+    def _publish_request_failure(runtime: AgentRuntime, error: ModelRequestError, publish) -> None:
+        publish(
+            RuntimeEvent(
+                "model_error",
+                f"Model {runtime.exchange.operation or 'completion'} failed",
+                model_error_data(runtime.state, runtime.exchange, error),
+            )
+        )
+
+    def _run_once(self, runtime: AgentRuntime) -> PreparedResponse:
+        self._last_request_diagnostics = {}
+        runtime.state.provider = self.config.provider
+        runtime.state.model = self.config.model
+        runtime.state.request_parameters.setdefault("max_tokens", self.config.max_tokens)
+        if runtime.exchange.exchange_id is None:
+            runtime.exchange.exchange_id = runtime.next_exchange_id()
+        publish = runtime.services.publish or (lambda _event: None)
         diagnostics = self._request_diagnostics(runtime.exchange.stream)
         raw: dict[str, Any] | Iterator[dict[str, Any]] | None = None
         completed = False
@@ -203,17 +292,34 @@ class LLMClient:
             prepared = self.llm.prepare_response(runtime)
             completed = True
         except ModelRequestError as exc:
+            if isinstance(exc, ModelOutputError):
+                diagnostics.update(request_outcome="failed", request_error_message=str(exc))
+                exc.diagnostics = {**diagnostics, **exc.diagnostics}
+                self._last_request_diagnostics = exc.diagnostics
+                publish(
+                    RuntimeEvent(
+                        "model_error",
+                        f"Model {runtime.exchange.operation or 'completion'} failed",
+                        model_error_data(runtime.state, runtime.exchange, exc),
+                    )
+                )
+                raise
             diagnostics.update(request_outcome="failed", request_error_message=str(exc))
-            self._last_request_diagnostics = diagnostics
-            failure = ModelRequestError(str(exc), diagnostics=diagnostics)
+            exc.diagnostics = {**diagnostics, **exc.diagnostics}
+            self._last_request_diagnostics = exc.diagnostics
+            raise
+        except ModelOutputError as exc:
+            diagnostics.update(request_outcome="failed", request_error_message=str(exc))
+            exc.diagnostics = {**diagnostics, **exc.diagnostics}
+            self._last_request_diagnostics = exc.diagnostics
             publish(
                 RuntimeEvent(
                     "model_error",
                     f"Model {runtime.exchange.operation or 'completion'} failed",
-                    model_error_data(runtime.state, runtime.exchange, failure),
+                    model_error_data(runtime.state, runtime.exchange, exc),
                 )
             )
-            raise failure from exc
+            raise
         except Exception as exc:
             publish(
                 RuntimeEvent(

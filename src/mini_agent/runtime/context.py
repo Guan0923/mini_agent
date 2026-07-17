@@ -67,6 +67,8 @@ class RuntimeState:
             "request_parameters": self.request_parameters,
             "runner_settings": {
                 "max_retries": self.runner_settings.max_retries,
+                "max_model_repairs": self.runner_settings.max_model_repairs,
+                "max_transport_retries": self.runner_settings.max_transport_retries,
                 "max_tool_recoveries": self.runner_settings.max_tool_recoveries,
                 "max_actions": self.runner_settings.max_actions,
                 "max_replans": self.runner_settings.max_replans,

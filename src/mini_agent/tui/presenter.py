@@ -34,6 +34,8 @@ class TerminalPresenter:
             self._write(f"STRATEGY {event.message} — {event.data['reason']}")
         elif event.kind == "model_repair":
             self._write(f"MODEL FORMAT RETRY — {event.message}")
+        elif event.kind == "model_retry":
+            self._write(f"MODEL RETRY {event.data['attempt']} — {event.message}")
         elif event.kind == "tool_call":
             self._write(f"CALL  {event.message} {event.data['arguments']}")
         elif event.kind == "tool_result":

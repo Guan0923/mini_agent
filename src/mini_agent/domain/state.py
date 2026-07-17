@@ -23,6 +23,7 @@ EventKind = Literal[
     "context_compressed",
     "model",
     "model_repair",
+    "model_retry",
     "reasoning",
     "plan",
     "tool_call",

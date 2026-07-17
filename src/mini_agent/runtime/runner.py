@@ -52,11 +52,15 @@ class AgentRunner:
         log_full_messages: bool = True,
         checkpoints: CheckpointStore | None = None,
         hooks: Iterable[AgentHook] = (),
+        max_model_repairs: int = 1,
+        max_transport_retries: int = 2,
     ) -> None:
         self.planner = planner
         self.tools = tools
         self.settings = RunnerSettings(
             max_retries=max_retries,
+            max_model_repairs=max_model_repairs,
+            max_transport_retries=max_transport_retries,
             max_tool_recoveries=max_tool_recoveries,
             max_actions=max_actions,
             max_replans=max_replans,

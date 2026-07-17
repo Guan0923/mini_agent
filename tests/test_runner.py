@@ -528,6 +528,8 @@ def test_dynamic_replan_stops_when_replan_budget_is_exhausted(tmp_path: Path) ->
     [
         ({"max_actions": 0}, "max_actions"),
         ({"max_retries": -1}, "max_retries"),
+        ({"max_model_repairs": -1}, "max_model_repairs"),
+        ({"max_transport_retries": -1}, "max_transport_retries"),
         ({"max_tool_recoveries": -1}, "max_tool_recoveries"),
         ({"max_replans": -1}, "max_replans"),
         ({"strategy": "unknown"}, "strategy"),

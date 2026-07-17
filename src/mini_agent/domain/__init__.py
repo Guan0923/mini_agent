@@ -1,6 +1,6 @@
 """Stable domain types with no dependency on the UI, tools, or providers."""
 
-from .errors import PlanningError
+from .errors import ModelOutputError, PlanningError
 from .messages import (
     ArtifactMessage,
     AssistantMessage,
@@ -43,6 +43,7 @@ __all__ = [
     "ExecutionStrategy",
     "Message",
     "MessageRole",
+    "ModelOutputError",
     "PlanStep",
     "PlanningError",
     "RunMode",
