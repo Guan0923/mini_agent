@@ -1,9 +1,12 @@
 from pathlib import Path
 
-from mini_agent.domain import AgentAction, StrategySelection
+from mini_agent.domain import AgentAction
 from mini_agent.planning import PlannerCapabilities
 from mini_agent.runtime import AgentRunner, ConversationService, SQLiteSessionStore
 from mini_agent.tools import Tool, ToolRegistry
+from mini_agent.tools import build_default_tools as public_build_default_tools
+from mini_agent.tools import build_tool_registry as public_build_tool_registry
+from mini_agent.tools.catalog import build_default_tools, build_tool_registry
 
 
 def test_tool_registry_accepts_constructor_injected_tools() -> None:
@@ -11,6 +14,11 @@ def test_tool_registry_accepts_constructor_injected_tools() -> None:
 
     assert registry.names() == ["echo"]
     assert registry.invoke("echo", {"value": "hello"}) == "hello"
+
+
+def test_tool_catalog_compatibility_exports_remain_available() -> None:
+    assert build_default_tools is public_build_default_tools
+    assert build_tool_registry is public_build_tool_registry
 
 
 class FeedbackOnlyPlanner:
@@ -40,9 +48,6 @@ class RememberingPlanner:
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         self.histories.append(list(history))
         return AgentAction(type="final_answer", answer=f"remembered {history[-1]['content']}")
-
-    def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("reactive", "The answer does not need a tool.")
 
 
 class PrefixTask:

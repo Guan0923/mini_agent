@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from mini_agent.domain import AgentAction, StrategySelection
+from mini_agent.domain import AgentAction
 from mini_agent.runtime import LegacyAgentRunner as AgentRunner
 from mini_agent.tools import ToolRegistry
 from mini_agent.tui.cli import TerminalApp
@@ -9,13 +9,14 @@ from mini_agent.tui.cli import TerminalApp
 class FullAccessWritePlanner:
     name = "full-access-write"
 
-    def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("reactive", "The test runs one approved write.")
-
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         if history[-1]["content"].startswith("[Tool result]"):
             return AgentAction(type="final_answer", answer="written")
-        return AgentAction(type="tool_call", tool="run_command", arguments={"command": "python -c \"open('full-access.txt','w').write('ok')\""})
+        return AgentAction(
+            type="tool_call",
+            tool="run_command",
+            arguments={"command": "python -c \"open('full-access.txt','w').write('ok')\""},
+        )
 
 
 class FullAccessPlanPlanner:

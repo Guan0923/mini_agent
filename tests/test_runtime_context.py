@@ -1,8 +1,10 @@
 from pathlib import Path
 
-from mini_agent.domain import AssistantMessage, RunState, StrategySelection, ToolMessage, ToolSpec, UserMessage
+import pytest
+
+from mini_agent.domain import AssistantMessage, RunState, ToolMessage, ToolSpec, UserMessage
 from mini_agent.planning import RuleBasedPlanner
-from mini_agent.runtime import AgentRunner, ConversationService, RuntimeState, SQLiteSessionStore
+from mini_agent.runtime import AgentRunner, ConversationService, RunnerSettings, RuntimeState, SQLiteSessionStore
 from mini_agent.tools import Tool, ToolRegistry
 
 
@@ -77,6 +79,30 @@ def test_runtime_state_round_trips_complete_session_state() -> None:
     assert restored.tool_specs[0].provider_options == {"deepseek": {"strict": True}}
 
 
+def test_legacy_auto_strategy_is_normalized_when_loading_checkpoint() -> None:
+    restored = RuntimeState.from_dict(
+        {
+            "session_id": "session_legacy",
+            "runner_settings": {"strategy": "auto"},
+            "current_run": {
+                "task": "legacy",
+                "mode": "agent",
+                "run_id": "run_legacy",
+                "strategy": "auto",
+            },
+        }
+    )
+
+    assert restored.runner_settings.strategy == "reactive"
+    assert restored.current_run is not None
+    assert restored.current_run.strategy == "reactive"
+
+
+def test_auto_strategy_is_rejected_for_new_settings() -> None:
+    with pytest.raises(ValueError, match="strategy"):
+        RunnerSettings(strategy="auto")
+
+
 def test_sqlite_persists_and_reloads_runtime_snapshot(tmp_path: Path) -> None:
     store = SQLiteSessionStore(tmp_path / "runtime.db")
     session = store.create_session("Runtime")
@@ -112,9 +138,6 @@ class UsagePlanner:
 
     def __init__(self) -> None:
         self.turn = 0
-
-    def select_strategy(self, runtime):
-        return StrategySelection("reactive", "Direct response.")
 
     def decide(self, runtime):
         self.turn += 1

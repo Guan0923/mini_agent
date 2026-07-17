@@ -34,8 +34,6 @@ from .hooks import (
 from .outcomes import cancel_run, fail_run
 from .plan_mode import PlanModeWorkflow
 from .publisher import RunEventPublisher
-from .routing import StrategyRouter
-from .steering import consume_steering
 from .workflows import DynamicReplanWorkflow, PlanExecuteWorkflow, ReactiveWorkflow
 
 
@@ -48,7 +46,7 @@ class AgentRunner:
         max_tool_recoveries: int = 2,
         max_actions: int = 8,
         max_replans: int = 2,
-        strategy: str = "auto",
+        strategy: str = "reactive",
         log_full_messages: bool = True,
         checkpoints: CheckpointStore | None = None,
         hooks: Iterable[AgentHook] = (),
@@ -65,7 +63,6 @@ class AgentRunner:
         )
         self.checkpoints = checkpoints
         self.hooks = HookManager(hooks)
-        self._router = StrategyRouter()
         self._reactive = ReactiveWorkflow()
         self._plan_mode = PlanModeWorkflow()
         self._plan_execute = PlanExecuteWorkflow()
@@ -179,26 +176,16 @@ class AgentRunner:
         return self._finish(runtime)
 
     def _dispatch(self, runtime: AgentRuntime) -> None:
-        runtime.run.add_event("run_started", "Run started")
+        runtime.run.strategy = "reactive" if runtime.run.mode == "plan" else runtime.state.runner_settings.strategy
+        runtime.run.add_event("run_started", "Run started", strategy=runtime.run.strategy)
         assert runtime.services.publish is not None
-        runtime.services.publish(RuntimeEvent("run_started", "started"))
+        runtime.services.publish(RuntimeEvent("run_started", "started", {"strategy": runtime.run.strategy}))
         if cancel_if_requested(runtime):
             return
         if runtime.run.mode == "plan":
             self._plan_mode.run(runtime)
         else:
-            self._run_from_router(runtime)
-
-    def _run_from_router(self, runtime: AgentRuntime) -> None:
-        while True:
-            if self._router.resolve(runtime) is None:
-                return
-            if cancel_if_requested(runtime):
-                return
-            if consume_steering(runtime, phase="after_strategy_selection") is None:
-                break
-            runtime.run.strategy = None
-        self._execute(runtime)
+            self._execute(runtime)
 
     def _execute(self, runtime: AgentRuntime) -> None:
         if runtime.run.strategy == "plan_execute":
@@ -233,9 +220,7 @@ class AgentRunner:
         runtime.state.turn_usage = None
         runtime.state.status = "idle"
         if not any(summary.run_id == run.run_id for summary in runtime.state.run_history):
-            runtime.state.run_history.append(
-                RunSummary(run.run_id, run.task, run.status, run.mode, run.final_answer)
-            )
+            runtime.state.run_history.append(RunSummary(run.run_id, run.task, run.status, run.mode, run.final_answer))
         run.add_event("run_finished", "Run finished", status=run.status)
         if runtime.services.publish is not None:
             runtime.services.publish(RuntimeEvent("run_finished", run.status, {"final_answer": run.final_answer or ""}))

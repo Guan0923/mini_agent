@@ -747,9 +747,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--planner", choices=("llm", "rule"), default="llm", help="Planning strategy (default: llm).")
     parser.add_argument(
         "--strategy",
-        choices=("auto", "reactive", "plan_execute", "dynamic_replan"),
-        default="auto",
-        help="Execution strategy override; plan_execute is an experimental baseline (default: auto).",
+        choices=("reactive", "dynamic_replan", "plan_execute"),
+        default="reactive",
+        help="Execution strategy (default: reactive; dynamic_replan and plan_execute are experimental).",
     )
     parser.add_argument("--max-actions", type=int, default=8, help="Maximum model decisions per task (default: 8).")
     parser.add_argument("--max-retries", type=int, default=1, help="Retries for a failed tool call (default: 1).")

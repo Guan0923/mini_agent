@@ -6,8 +6,6 @@ import pytest
 from mini_agent.tools import ToolError, ToolRegistry, WorkspaceCommand
 
 
-
-
 def test_command_tool_uses_powershell_on_windows_and_workspace_cwd(tmp_path: Path) -> None:
     calls = []
 

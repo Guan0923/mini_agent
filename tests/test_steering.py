@@ -258,7 +258,7 @@ def test_plan_execute_revises_before_starting_stale_step() -> None:
         strategy="plan_execute",
     )
     runtime = runner.new_runtime(task="start")
-    runtime.services.steering = sequence_handler([[], [], ["skip that step"], []])
+    runtime.services.steering = sequence_handler([[], ["skip that step"], []])
 
     result = runner.run(runtime)
 

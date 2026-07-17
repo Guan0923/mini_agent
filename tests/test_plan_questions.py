@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.domain import AssistantMessage, StrategySelection, ToolMessage, UserMessage
+from mini_agent.domain import AssistantMessage, ToolMessage, UserMessage
 from mini_agent.runtime import AgentRunner, ConversationService, SQLiteSessionStore
 from mini_agent.runtime.contracts import InterruptDecision, QuestionOption, UserQuestion
 from mini_agent.runtime.user_input import (
@@ -104,9 +104,6 @@ class QuestionThenPlanPlanner:
             return AssistantMessage(content="1. Store the result in SQLite.\n2. Run the tests.")
         self.agent_histories.append(list(runtime.state.messages))
         return AssistantMessage(content="Implemented.")
-
-    def select_strategy(self, runtime):
-        return StrategySelection("reactive", "Execute from the approved conversation history.")
 
 
 class ScriptedPlanPlanner(QuestionThenPlanPlanner):

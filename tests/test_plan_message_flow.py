@@ -5,7 +5,6 @@ import pytest
 from mini_agent.domain import (
     ArtifactMessage,
     AssistantMessage,
-    StrategySelection,
     UserMessage,
     message_from_dict,
     message_to_dict,
@@ -26,9 +25,6 @@ class PlanMessagePlanner:
             return AssistantMessage(content="1. Implement the reviewed change.")
         self.agent_histories.append(list(runtime.state.messages))
         return AssistantMessage(content="Implemented from ordinary messages.")
-
-    def select_strategy(self, runtime):
-        return StrategySelection("reactive", "The model can execute directly from conversation history.")
 
 
 class FormatRepairPlanner(PlanMessagePlanner):
@@ -76,9 +72,7 @@ def test_plan_implement_clear_session_seeds_only_final_plan(tmp_path: Path) -> N
     service = build_service(tmp_path, planner)
     source = service.new_session("Source conversation")
     assert service.runtime is not None
-    service.runtime.state.messages.extend(
-        [UserMessage(content="Old request"), AssistantMessage(content="Old answer")]
-    )
+    service.runtime.state.messages.extend([UserMessage(content="Old request"), AssistantMessage(content="Old answer")])
     service.runtime.save()
 
     result = service.run_task(

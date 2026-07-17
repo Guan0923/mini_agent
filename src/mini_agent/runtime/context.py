@@ -23,7 +23,7 @@ from .config import RunnerSettings
 from .contracts import CancellationHandler, Confirm, EventHandler, InterruptHandler, SteeringHandler
 from .hooks import HookManager
 
-RuntimeOperation = Literal["decision", "strategy", "plan", "evaluate", "replan"]
+RuntimeOperation = Literal["decision", "plan", "evaluate", "replan"]
 OutputMode = Literal["text", "json", "tools"]
 RuntimeStatus = Literal["idle", "running"]
 
@@ -96,6 +96,9 @@ class RuntimeState:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RuntimeState:
         settings = data.get("runner_settings") or {}
+        settings = dict(settings)
+        if settings.get("strategy") == "auto":
+            settings["strategy"] = "reactive"
         active_data = data.get("active_message")
         active_message = None
         if isinstance(active_data, dict):

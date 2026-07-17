@@ -72,12 +72,13 @@ def test_session_runtime_messages_survive_restart_and_match_run_state(tmp_path: 
 
     assert messages == state.runtime_messages
     assert [message.sequence for message in messages] == list(range(1, len(messages) + 1))
-    assert {"run_started", "response", "response", "response", "run_finished"} <= {
-        message.kind for message in messages
-    }
+    assert {"run_started", "response", "response", "response", "run_finished"} <= {message.kind for message in messages}
     assert reopened.load_conversation(service.active_session.session_id) == [
         {"role": "user", "content": "calculate 2 + 2"},
-        {"role": "assistant", "content": "Hello! I can help with web search, file operations, and running commands in the workspace."},
+        {
+            "role": "assistant",
+            "content": "Hello! I can help with web search, file operations, and running commands in the workspace.",
+        },
     ]
 
 
@@ -156,7 +157,7 @@ def test_model_exchange_messages_are_logged_as_normalized_request_and_response(t
 
 def test_each_model_call_receives_a_distinct_exchange_id() -> None:
     planner = LLMPlanner(
-        SequencedCompletionClient(['{"strategy":"reactive","reason":"Direct answer."}', "model answer"]),
+        SequencedCompletionClient(["model answer"]),
         [],
         [],
     )
@@ -166,8 +167,13 @@ def test_each_model_call_receives_a_distinct_exchange_id() -> None:
     exchange_ids = [
         message.data["exchange_id"] for message in state.runtime_messages if message.kind == "model_request"
     ]
-    assert len(exchange_ids) == 2
-    assert len(set(exchange_ids)) == 2
+    assert len(exchange_ids) == 1
+    assert len(set(exchange_ids)) == 1
+    assert all(
+        message.data["operation"] != "strategy"
+        for message in state.runtime_messages
+        if message.kind == "model_request"
+    )
 
 
 def test_model_request_failure_is_recorded_without_secret_content() -> None:

@@ -10,7 +10,6 @@ from mini_agent.domain import (
     PlanningError,
     PlanStep,
     StepEvaluation,
-    StrategySelection,
     ToolMessage,
     UserMessage,
 )
@@ -43,9 +42,6 @@ class RuleBasedPlanner:
         return AssistantMessage(
             content="Hello! I can help with web search, file operations, and running commands in the workspace."
         )
-
-    def select_strategy(self, runtime: AgentRuntime) -> StrategySelection:
-        return StrategySelection("reactive", "Offline rule planner uses its deterministic reactive loop.")
 
     def create_plan(self, runtime: AgentRuntime) -> ExecutionPlan:
         task_message = next(
@@ -85,9 +81,7 @@ class RuleBasedPlanner:
         web = self._web_tool(task, runtime)
         if web is not None:
             return web
-        file_match = re.search(
-            r"(?:read|show|cat|查看|读取)\s+[`'\"]?([^`'\"\s]+)", task, flags=re.IGNORECASE
-        )
+        file_match = re.search(r"(?:read|show|cat|查看|读取)\s+[`'\"]?([^`'\"\s]+)", task, flags=re.IGNORECASE)
         if file_match:
             path = file_match.group(1).rstrip("。.!！")
             return self._tool("run_command", {"command": f"cat {path}"}, runtime)
@@ -109,5 +103,17 @@ class RuleBasedPlanner:
             return self._tool("web_search", {"query": search.group(1).strip()}, runtime)
         fetch = re.search(r"(?:fetch|抓取(?:网页)?|访问)\s+(https?://\S+)", task, re.IGNORECASE)
         if fetch:
-            return self._tool("web_fetch", {"url": fetch.group(1).rstrip("。.!！")}, runtime)
+            return self._tool("web_fetch", {"url": self._clean_url_candidate(fetch.group(1))}, runtime)
         return None
+
+    @staticmethod
+    def _clean_url_candidate(value: str) -> str:
+        candidate = value.rstrip(",，;；!！。")
+        pairs = {")": "(", "]": "[", "}": "{"}
+        while candidate and candidate[-1] in pairs:
+            closing = candidate[-1]
+            opening = pairs[closing]
+            if candidate.count(closing) <= candidate.count(opening):
+                break
+            candidate = candidate[:-1]
+        return candidate

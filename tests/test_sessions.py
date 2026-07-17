@@ -2,7 +2,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-from mini_agent.domain import AgentAction, RunState, StrategySelection
+from mini_agent.domain import AgentAction, RunState
 from mini_agent.runtime import AgentRunner, SQLiteCheckpointStore, SQLiteSessionStore
 from mini_agent.tools import ToolRegistry
 from mini_agent.tui.cli import TerminalApp
@@ -120,9 +120,6 @@ class HistoryPlanner:
 
     def __init__(self) -> None:
         self.histories: list[list[dict[str, str]]] = []
-
-    def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("reactive", "The test uses one direct answer.")
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         self.histories.append(list(history))

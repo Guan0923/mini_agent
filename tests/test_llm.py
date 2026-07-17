@@ -71,7 +71,9 @@ def test_prepare_request_replays_plan_question_without_exposing_control_tool_in_
         content='{"answers":{"scope":{"answers":["Focused"]}}}',
         status="succeeded",
     )
-    runtime = runtime_for(messages=[AssistantMessage(tool_messages=[question]), UserMessage(content="Implement the plan")])
+    runtime = runtime_for(
+        messages=[AssistantMessage(tool_messages=[question]), UserMessage(content="Implement the plan")]
+    )
     runtime.exchange.messages = runtime.state.messages
     runtime.exchange.output_mode = "tools"
     runtime.exchange.allowed_tools = [ToolSpec("run_command", "Execute commands.", {"type": "object"})]
@@ -88,7 +90,9 @@ def test_prepare_request_replays_plan_question_without_exposing_control_tool_in_
 
 
 def test_prepare_request_rejects_pending_tool_history() -> None:
-    runtime = runtime_for(messages=[AssistantMessage(tool_messages=[ToolMessage(name="run_command", call_id="call_1")])])
+    runtime = runtime_for(
+        messages=[AssistantMessage(tool_messages=[ToolMessage(name="run_command", call_id="call_1")])]
+    )
 
     with pytest.raises(ModelRequestError, match="no result"):
         deepseek_for_test().prepare_request(runtime)

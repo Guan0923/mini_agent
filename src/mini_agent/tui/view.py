@@ -53,7 +53,7 @@ class TerminalInput(TextArea):
     """Multiline editor that keeps the value/cursor surface used by the TUI."""
 
     class Submitted(Message):
-        def __init__(self, input: "TerminalInput", value: str) -> None:
+        def __init__(self, input: TerminalInput, value: str) -> None:
             super().__init__()
             self.input = input
             self.value = value
@@ -353,8 +353,7 @@ class TerminalView(App[None]):
         self._suggestions = self._completer.suggestions(self.input.value, self.input.cursor_position)
         self.completion_menu.clear_options()
         self.completion_menu.add_options(
-            Option(f"{item.value} — {item.description}", id=str(index))
-            for index, item in enumerate(self._suggestions)
+            Option(f"{item.value} — {item.description}", id=str(index)) for index, item in enumerate(self._suggestions)
         )
         self.completion_menu.display = bool(self._suggestions)
         if self._suggestions:
@@ -437,7 +436,7 @@ class TerminalView(App[None]):
         index = self.completion_menu.highlighted or 0
         suggestion = self._suggestions[index]
         end = self.input.cursor_position
-        self.input.value = f"{self.input.value[:suggestion.start_position]}{suggestion.value}{self.input.value[end:]}"
+        self.input.value = f"{self.input.value[: suggestion.start_position]}{suggestion.value}{self.input.value[end:]}"
         self.input.cursor_position = suggestion.start_position + len(suggestion.value)
         self._hide_completions()
         self.input.focus()

@@ -16,7 +16,7 @@ class RunnerSettings:
     max_tool_recoveries: int = 2
     max_actions: int = 8
     max_replans: int = 2
-    strategy: StrategyPolicy = "auto"
+    strategy: StrategyPolicy = "reactive"
     log_full_messages: bool = True
 
     def __post_init__(self) -> None:
@@ -28,8 +28,8 @@ class RunnerSettings:
             raise ValueError("max_actions must be at least one.")
         if self.max_replans < 0:
             raise ValueError("max_replans must be zero or greater.")
-        if self.strategy not in {"auto", "reactive", "plan_execute", "dynamic_replan"}:
-            raise ValueError("strategy must be 'auto', 'reactive', 'plan_execute', or 'dynamic_replan'.")
+        if self.strategy not in {"reactive", "plan_execute", "dynamic_replan"}:
+            raise ValueError("strategy must be 'reactive', 'plan_execute', or 'dynamic_replan'.")
         if not isinstance(self.log_full_messages, bool):
             raise ValueError("log_full_messages must be boolean.")
 

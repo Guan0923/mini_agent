@@ -11,7 +11,6 @@ from mini_agent.domain import (
     PlanningError,
     PlanStep,
     StepEvaluation,
-    StrategySelection,
     SystemMessage,
     ToolMessage,
     ToolSpec,
@@ -146,8 +145,7 @@ class LLMPlanner:
                     "## Response Style\n"
                     "- When using a tool, briefly state what you are doing and why.\n"
                     "- When answering directly, be concise, accurate, and grounded in observations.\n"
-                    "- If uncertain about something, say so rather than guessing."
-                    + self._UNTRUSTED_TOOL_RESULT_POLICY
+                    "- If uncertain about something, say so rather than guessing." + self._UNTRUSTED_TOOL_RESULT_POLICY
                 )
             )
         prepared = self._request(
@@ -187,39 +185,6 @@ class LLMPlanner:
         repairs = self._output_repairs
         self._output_repairs = []
         return repairs
-
-    def select_strategy(self, runtime: AgentRuntime) -> StrategySelection:
-        if runtime.run.mode == "plan":
-            return StrategySelection("reactive", "Plan mode drafts an artifact for explicit implementation review.")
-        raw = self._json_request(
-            runtime,
-            SystemMessage(
-                content=(
-                    "Analyze the user's task and choose an execution strategy.\n\n"
-                    "Consider:\n"
-                    "- Task complexity: single straightforward action vs. multiple dependent steps.\n"
-                    "- Ambiguity: is the path clear or does it require exploration first?\n"
-                    "- Risk: are there destructive operations that warrant a step-by-step approach?\n\n"
-                    "Return JSON only as "
-                    '{"strategy":"reactive|dynamic_replan","reason":"short explanation"}. '
-                    "Choose reactive for simple, single-step, or exploratory tasks. "
-                    "Choose dynamic_replan for multi-step work that benefits from a plan "
-                    "with step-by-step evaluation."
-                )
-            ),
-            "strategy",
-        )
-        try:
-            payload = self._json_object(raw)
-            strategy = payload.get("strategy")
-            reason = payload.get("reason")
-            if strategy not in {"reactive", "dynamic_replan"}:
-                raise PlanningError(f"Unsupported execution strategy: {strategy!r}.")
-            if not isinstance(reason, str) or not reason.strip():
-                raise PlanningError("Strategy reason must be non-empty text.")
-            return StrategySelection(strategy, reason.strip())
-        except PlanningError as exc:
-            raise exc
 
     def create_plan(self, runtime: AgentRuntime) -> ExecutionPlan:
         raw = self._json_request(

@@ -164,13 +164,13 @@ python run.py "list files"
 
 TUI 有两种模式，默认是 Agent 模式：模型每次选择工具调用或直接回复，而不会预先生成完整计划。系统以 provider-neutral Message 保存完整上下文；顶层会话只包含 System/User/Assistant，工具调用和结果作为 ToolMessage 嵌套在 AssistantMessage 中。对 DeepSeek，工具决策使用原生 Tool Calls，SSE `reasoning_content` 会实时显示为 `THINKING`，最终文本显示为 `RESPONSE`。
 
-正常产品路径只会自动选择 `reactive` 或 `dynamic_replan`：前者适合简单、逐步确定的任务，后者会按实时工具结果生成并替换后续可执行阶段。`plan_execute` 仍可通过 `--strategy plan_execute` 显式启用，但它是“固定计划、失败即停止”的实验对照基线，自动路由和 `/plan` 都不会使用它。
+默认执行策略固定为 `reactive`，适合简单、逐步确定的任务。`dynamic_replan` 会按实时工具结果生成并替换后续可执行阶段，`plan_execute` 则是“固定计划、失败即停止”的实验对照基线；两者都必须通过 `--strategy` 或程序配置显式启用。
 
-输入 `/plan` 会进入只读调研：本地计算、列目录和读取文件自动执行；网页搜索/抓取仍会要求确认；写入、移动、删除和命令执行会被阻止。若项目本身无法回答会实质影响方案的问题，模型可调用 Plan 专用内建控制工具 `request_user_input`；它不注册到 `ToolRegistry`，也不计入 `/tools` 展示的三个执行工具。一次调用包含 1–3 题，每题给出 2–3 个候选，终端在最后追加“以上都不对”供自由输入。模型可进行多轮问答，只有在信息充分并输出最终编号计划后才进入 `PLAN REVIEW`。
+输入 `/plan` 会进入只读调研：本地计算、列目录和读取文件自动执行；网页搜索/抓取仍会要求确认；写入、移动、删除和命令执行会被阻止。若项目本身无法回答会实质影响方案的问题，模型可调用 Plan 专用内建控制工具 `request_user_input`；它不注册到 `ToolRegistry`，也不计入 `/tools` 展示的三个执行工具。一次调用包含 1–3 题，每题给出 2–3 个候选，终端在最后追加“以上都不对”供自由输入。模型可进行多轮问答，只有在信息充分并输出最终编号计划后才进入 `PLAN REVIEW`。用户确认实施后会启动独立的 Agent run，并按默认配置交给 `reactive` 执行。
 
-Plan 调研、问题调用、结构化答案、格式修正和最终编号计划都保存在 session runtime history。问题调用与答案只占一个普通 `AssistantMessage`：答案作为嵌套 `ToolMessage` 的结果保存，不额外复制为 `UserMessage`。`PLAN REVIEW` 只提供三个选择：`Implement` 完成当前 Plan run，在同一 session 追加 `UserMessage(content="Implement the plan")` 并启动独立 Agent run；`Implement and Clear Session` 创建新的隔离 session，只携带最终计划的 AssistantMessage 与实施指令；`Cancel and Stay in plan mode` 取消当前 run、保留完整 Plan 对话并停留在 Plan 模式。handoff 后由正常策略路由器选择执行方式，不强制 `dynamic_replan`。Plan Review 不提供 Supplement，也不依赖“执行”等关键词匹配。
+Plan 调研、问题调用、结构化答案、格式修正和最终编号计划都保存在 session runtime history。问题调用与答案只占一个普通 `AssistantMessage`：答案作为嵌套 `ToolMessage` 的结果保存，不额外复制为 `UserMessage`。`PLAN REVIEW` 只提供三个选择：`Implement` 完成当前 Plan run，在同一 session 追加 `UserMessage(content="Implement the plan")` 并启动独立 Agent run；`Implement and Clear Session` 创建新的隔离 session，只携带最终计划的 AssistantMessage 与实施指令；`Cancel and Stay in plan mode` 取消当前 run、保留完整 Plan 对话并停留在 Plan 模式。handoff 后按配置执行，默认使用 `reactive`。Plan Review 不提供 Supplement，也不依赖“执行”等关键词匹配。
 
-工具仅在其声明需要确认时才请求 Human-in-the-Loop：网页搜索/抓取、写文件、移动、删除和命令执行均会逐次确认；本地计算、列目录和读文件自动执行。TUI 默认使用 `Approval for me`；输入 `/permission` 可在当前程序内切换为 `Full access`，使所有工具审批自动 Continue。工具审批仍使用 `Continue / Cancel / Supplement`，Supplement 只属于 Tool Review，与 Plan Review 相互独立；`Full access` 不会跳过 `/plan` 生成提案后的 `PLAN REVIEW`，最终计划仍需人工选择 `Implement / Implement and Clear Session / Cancel and Stay in plan mode`。安全只读工具可按 `--max-retries` 同参数重试。若 reactive 或 `/plan` 调研中的工具最终失败，运行时会将截断后的调用和错误作为不可信上下文交给 LLM，请其最多连续纠错 `--max-tool-recoveries` 次（默认 2）；任一工具成功会重置该计数。不可自动重试的写入、移动、删除和命令调用不会因相同参数被重复执行。
+工具仅在其声明需要确认时才请求 Human-in-the-Loop：网页搜索/抓取、写文件、移动、删除和命令执行均会逐次确认；本地计算、列目录和读文件自动执行。TUI 默认使用 `Approval for me`；输入 `/permission` 可在当前程序内切换为 `Full access`，使所有工具审批自动 Continue。工具审批仍使用 `Continue / Cancel / Supplement`，Supplement 只属于 Tool Review，与 Plan Review 相互独立；`Full access` 不会跳过 `/plan` 生成提案后的 `PLAN REVIEW`，最终计划仍需人工选择 `Implement / Implement and Clear Session / Cancel and Stay in plan mode`。声明可重试的安全只读工具可按 `--max-retries` 同参数重试；`web_fetch` 不进行同参数自动重试，后续是否重新抓取由 Agent 的工具失败恢复流程决定。若 reactive 或 `/plan` 调研中的工具最终失败，运行时会将截断后的调用和错误作为不可信上下文交给 LLM，请其最多连续纠错 `--max-tool-recoveries` 次（默认 2）；任一工具成功会重置该计数。不可自动重试的网页抓取、写入、移动、删除和命令调用不会因相同参数被本地重试。
 
 交互式 TUI 使用 alternate screen：可滚动消息区占满终端，状态栏和输入框固定在最底部；状态栏始终包含当前 permission 模式。输入框按显式换行和软换行从 1 行自动增高到最多 4 行，超过后保持 4 行并在内部滚动；Enter 提交完整消息，Ctrl+J 在光标处插入换行。退出后会恢复进入前的终端画面，并输出当前 session ID、`/use <session_id>` 与 `mini-agent --session-id <session_id>` 恢复方式。Agent 运行中提交的普通消息进入进程内的下一轮队列；当前 run 结束后，这些消息按提交顺序合并并自动启动一个 follow-up run。Esc 会协作式取消当前 active run（包括 Tool/Plan Review 和 Plan 问题），取消完成后发送队列；`/quit` 或 Ctrl+C 则取消、丢弃队列并退出。Plan 问题逐题显示在独立候选列表中：方向键循环选择，普通候选按 Enter 确认；选中“以上都不对”后按 Tab 进入自由输入，Enter 提交非空答案。非 Textual 运行使用数字选择并在最后一项后读取自由文本。
 
@@ -218,17 +218,18 @@ P0 完成后再系统推进 P1，避免先扩展功能数量而缺少可靠性�
 ### 模块结构
 
 ```text
+bootstrap.py  组合根，选择 planner、provider、storage 和默认工具实现
 tui/          终端交互，仅负责输入、输出与确认
-runtime/      应用服务、依赖装配、策略路由、工作流、工具执行、checkpoint 边界与运行状态收尾
+runtime/      应用服务、planner 端口、配置策略分发、按职责拆分的 workflows、工具执行与运行状态收尾
 observability/事件扇出与 JSONL 持久化日志 Sink
-planning/     规则/LLM 规划策略与显式能力协议
-tools/        工具契约、通用注册表、默认 workspace 工具 catalog、计算器、受限文件操作与跨平台命令执行
+planning/     规则/LLM 规划实现，以及旧 planner 协议的兼容导出
+tools/        工具契约、通用注册表、默认工具 definitions、组装 factory、兼容 catalog 与具体实现
 providers/    LLM 门面、.env 配置和各厂商完整 API 适配器
-storage/      SQLite checkpoint/session 与未装配的 artifact 持久化适配器
+storage/      SQLite checkpoint/session 与内存/文件 artifact 存储实现
 domain/       Message、ToolMessage、ToolSpec、RunState 与运行轨迹等纯数据模型
 ```
 
-依赖只向内：TUI 只处理终端输入、确认和 `RuntimeEvent` 渲染；`ConversationService` 管理单轮执行与当前 session，`runtime.factory` 负责装配具体实现；`ToolRegistry` 只负责注册与调用策略，默认工具由独立 catalog 提供；SQLite 位于 `storage/`，不被执行工作流直接依赖。工具和模型提供方可以各自替换或单独测试。
+依赖只向内：TUI 只处理终端输入、确认和 `RuntimeEvent` 渲染；`ConversationService` 管理单轮执行与当前 session；顶层 `bootstrap.py` 是唯一选择具体 planner、provider、storage 和默认工具的组合根，`runtime.factory` 仅保留兼容导出。Runtime 核心通过自身的 planner 端口调用 `planning` 实现，不反向导入实现包；`ToolRegistry` 只负责注册与调用策略，`tools.defaults` 定义默认工具集合，factory 负责组装，`tools.catalog` 仅保留旧导入路径。SQLite 与 artifact 实现位于 `storage/`，不被执行工作流直接依赖。
 
 ### 大模型配置（无 SDK）
 
@@ -236,13 +237,13 @@ domain/       Message、ToolMessage、ToolSpec、RunState 与运行轨迹等纯�
 
 默认启动方式会通过 Python 的 `requests` 直接向 DeepSeek 的 `BASE_URL/v1/chat/completions` 发送 HTTP 请求；项目没有使用模型 SDK。`providers/client.py` 中的 `LLMClient` 负责 Provider 选择、通用 JSON/SSE 传输和请求诊断，`providers/deepseek.py` 中的 `DeepSeek` 只负责请求与响应协议转换。接入其他 API 时增加独立 provider adapter，不改变 Agent 内部 Message、Runtime 或通用传输实现。
 
-模型工具调用由 provider adapter 转成 AssistantMessage 内的 ToolMessage；Runtime 校验工具名和参数后按顺序执行，并在全部结果就绪后再次请求模型。策略选择、计划生成和重规划仍使用 JSON Output。`write_file`、`move_file`、`move_folder`、`delete_file`、`delete_folder` 和 `run_command` 都需经过终端的 Human-in-the-Loop 明确批准；直接调用 `ToolRegistry` 时仍需显式传入 `confirmed=True`。
+模型工具调用由 provider adapter 转成 AssistantMessage 内的 ToolMessage；Runtime 校验工具名和参数后按顺序执行，并在全部结果就绪后再次请求模型。计划生成、步骤评估和重规划仍使用 JSON Output。`write_file`、`move_file`、`move_folder`、`delete_file`、`delete_folder` 和 `run_command` 都需经过终端的 Human-in-the-Loop 明确批准；直接调用 `ToolRegistry` 时仍需显式传入 `confirmed=True`。
 
 DeepSeek tool arguments 和规划阶段的 JSON Output 都会在本地校验；无效 JSON、未知工具、缺失 call ID 或截断响应不会进入工具执行层。工具运行失败后的模型恢复预算与本地工具重试预算相互独立。
 
 所有工具参数在调用 handler 前还会通过注册时缓存的 JSON Schema 校验，未知字段、缺失字段和错误类型会统一转成 `ToolError`。命令工具会从子进程环境中移除 API Key、Token、Secret 和 Password 类变量，避免已批准的命令意外继承模型凭据。
 
-`web_search` 通过项目依赖的 `ddgr` 以 DuckDuckGo HTML 搜索执行，并只接收它的非交互 JSON 结果。`web_fetch` 由项目自行实现：只允许 HTTP/HTTPS 和 80/443 端口，解析后拒绝本机、私网、链路本地及保留地址；每次重定向都会重新验证目标，最多三跳；响应限制为 2 MB，只接受静态 HTML、纯文本和 JSON，并最多向模型返回 100,000 个字符。两种网页工具都是只读，但因为会向外部发送查询或请求网页，均需 Human-in-the-Loop 批准。网页搜索结果和抓取正文始终是**不可信外部内容**，模型不会把其中的指令视为可执行命令。动态渲染、登录页面、PDF 与图片 OCR 不属于当前版本范围。
+`web_search` 通过项目依赖的 `ddgr` 以 DuckDuckGo HTML 搜索执行，并只接收它的非交互 JSON 结果。`web_fetch` 由项目自行实现：只允许 HTTP/HTTPS 和 80/443 端口；每次请求和重定向都会解析并验证完整 DNS 快照，任一地址属于本机、私网、链路本地或保留范围时整次请求失败，验证后的公网 IP 会直接绑定到实际连接；HTTPS 仍以原域名执行 SNI 和证书主机名校验。重定向最多三跳，完整抓取共享 30 秒预算，解压后的响应正文限制为 2 MB。静态 HTML 会转换为结构化 Markdown，保留标题、列表、引用、代码、表格以及规范化后的安全 HTTP(S) 链接；纯文本和 JSON 也会进行安全解码与格式化。`max_chars` 是不可信正文段的硬预算，包含截断提示但不包含 URL、Content-Type 和 Title 元数据，最大值为 100,000。两种网页工具都是只读，但因为会向外部发送查询或请求网页，均需 Human-in-the-Loop 批准；`web_fetch` 不会对相同参数自动重试。网页搜索结果和抓取正文始终是**不可信外部内容**，模型不会把其中的指令视为可执行命令。动态渲染、登录页面、PDF、图片处理与 OCR 不属于当前版本范围。
 
 ```bash
 # 使用 .env 中的大模型（默认）
@@ -262,7 +263,7 @@ python run.py --planner rule "delete folder recursive build"
 # 调整运行限制
 python run.py --max-actions 12 --max-retries 2 --max-tool-recoveries 2 "计算 (18 + 6) * 4"
 
-# 强制固定计划、顺序执行策略（仅用于策略对比或调试；自动路由不会选择它）
+# 显式启用固定计划、顺序执行策略（实验/学习用途）
 python run.py --strategy plan_execute "读取 README.md"
 
 # 强制动态重规划，并限制最多两次重规划

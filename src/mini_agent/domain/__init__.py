@@ -28,7 +28,6 @@ from .state import (
     RuntimeMessage,
     StepEvaluation,
     StrategyPolicy,
-    StrategySelection,
     TraceEvent,
     new_run_id,
 )
@@ -54,7 +53,6 @@ __all__ = [
     "SessionSummary",
     "StepEvaluation",
     "StrategyPolicy",
-    "StrategySelection",
     "SystemMessage",
     "ToolMessage",
     "ToolSpec",

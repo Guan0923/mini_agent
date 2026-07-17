@@ -18,7 +18,6 @@ from .messages import (
 
 EventKind = Literal[
     "run_started",
-    "strategy",
     "model",
     "model_repair",
     "reasoning",
@@ -45,7 +44,7 @@ EventKind = Literal[
 RunMode = Literal["agent", "plan"]
 RunStatus = Literal["running", "completed", "failed", "cancelled"]
 ExecutionStrategy = Literal["reactive", "plan_execute", "dynamic_replan"]
-StrategyPolicy = Literal["auto", "reactive", "plan_execute", "dynamic_replan"]
+StrategyPolicy = Literal["reactive", "plan_execute", "dynamic_replan"]
 PlanStepStatus = Literal["pending", "running", "completed", "failed", "superseded"]
 ReplanDecision = Literal["continue", "replan"]
 ActionType = Literal["tool_call", "final_answer"]
@@ -142,14 +141,6 @@ class StepEvaluation:
     reason: str
 
 
-@dataclass(frozen=True)
-class StrategySelection:
-    """A validated execution strategy selected before a run starts."""
-
-    strategy: ExecutionStrategy
-    reason: str
-
-
 @dataclass
 class TraceEvent:
     kind: EventKind
@@ -175,7 +166,6 @@ class RunState:
     mode: RunMode
     run_id: str = field(default_factory=new_run_id)
     strategy: ExecutionStrategy = "reactive"
-    strategy_reason: str | None = None
     history: list[ChatMessage] = field(default_factory=list)
     actions: list[ToolMessage] = field(default_factory=list)
     events: list[TraceEvent] = field(default_factory=list)
@@ -217,7 +207,6 @@ class RunState:
             "mode": self.mode,
             "run_id": self.run_id,
             "strategy": self.strategy,
-            "strategy_reason": self.strategy_reason,
             "history": [message_to_dict(message) for message in self.history],
             "actions": [tool_message_to_dict(action) for action in self.actions],
             "events": [asdict(event) for event in self.events],
@@ -279,12 +268,14 @@ class RunState:
                 ),
             )
 
+        strategy = data.get("strategy", "reactive")
+        if strategy == "auto":
+            strategy = "reactive"
         return cls(
             task=data["task"],
             mode=data["mode"],
             run_id=data["run_id"],
-            strategy=data.get("strategy", "reactive"),
-            strategy_reason=data.get("strategy_reason"),
+            strategy=strategy,
             history=messages_from_dicts([dict(item) for item in data.get("history", [])]),
             actions=[
                 tool(dict(item), f"call_legacy_action_{index}")

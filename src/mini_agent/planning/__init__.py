@@ -11,7 +11,6 @@ from .base import (
     PlanCreator,
     Planner,
     PlanReplanner,
-    StrategySelector,
 )
 from .capabilities import PlannerCapabilities
 from .llm import LLMPlanner
@@ -30,5 +29,4 @@ __all__ = [
     "PlannerCapabilities",
     "PlanningError",
     "RuleBasedPlanner",
-    "StrategySelector",
 ]

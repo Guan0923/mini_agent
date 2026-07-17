@@ -2,40 +2,152 @@
 
 from __future__ import annotations
 
+import codecs
 import ipaddress
 import json
 import re
 import socket
+import ssl
 import subprocess
+import time
 from collections.abc import Callable, Iterable, Mapping
-from html.parser import HTMLParser
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
-import requests
+import urllib3
+from urllib3 import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.util import Timeout
 
 from .base import ToolError
+from .html_markdown import extract_html_document
 
 DdgrRunner = Callable[..., subprocess.CompletedProcess[str]]
 HostResolver = Callable[..., list[tuple[Any, ...]]]
+Clock = Callable[[], float]
 
 
 class HttpResponse(Protocol):
-    """Subset of a streamed requests response used by ``SafeWebFetcher``."""
+    """Streamed response contract used by ``SafeWebFetcher``."""
 
     status_code: int
     headers: Mapping[str, str]
-    encoding: str | None
 
     def iter_content(self, chunk_size: int = 1, decode_unicode: bool = False) -> Iterable[bytes]: ...
 
     def close(self) -> None: ...
 
 
-class HttpSession(Protocol):
-    """Subset of ``requests.Session`` needed for dependency-free tests."""
+class HttpTransport(Protocol):
+    """Transport that can connect only to caller-validated IP addresses."""
 
-    def get(self, url: str, **kwargs: Any) -> HttpResponse: ...
+    def request(
+        self,
+        url: str,
+        addresses: tuple[str, ...],
+        *,
+        connect_timeout: float,
+        read_timeout: float,
+        deadline: float,
+    ) -> HttpResponse: ...
+
+
+class PinnedHttpTransport:
+    """Issue direct urllib3 requests to a validated DNS snapshot."""
+
+    def __init__(self, *, clock: Clock = time.monotonic) -> None:
+        self._clock = clock
+
+    def request(
+        self,
+        url: str,
+        addresses: tuple[str, ...],
+        *,
+        connect_timeout: float,
+        read_timeout: float,
+        deadline: float,
+    ) -> HttpResponse:
+        parsed = urlsplit(url)
+        assert parsed.hostname is not None
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        request_target = parsed.path or "/"
+        if parsed.query:
+            request_target += f"?{parsed.query}"
+        headers = {
+            "Accept": "text/html, text/plain, application/json",
+            "Accept-Encoding": "gzip, deflate",
+            "Host": self._host_header(parsed.hostname, port, parsed.scheme),
+            "User-Agent": SafeWebFetcher._USER_AGENT,
+        }
+
+        last_error: Exception | None = None
+        for address in addresses:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                raise TimeoutError("Web fetch exceeded its overall time budget.")
+            timeout = Timeout(
+                connect=min(connect_timeout, remaining),
+                read=min(read_timeout, remaining),
+            )
+            pool = self._pool(parsed.scheme, address, port, parsed.hostname)
+            try:
+                response = pool.urlopen(
+                    "GET",
+                    request_target,
+                    headers=headers,
+                    redirect=False,
+                    retries=False,
+                    preload_content=False,
+                    decode_content=True,
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                pool.close()
+                last_error = exc
+                continue
+            return _Urllib3Response(response, pool)
+
+        if last_error is not None:
+            raise last_error
+        raise OSError("No validated IP addresses were available for the request.")
+
+    @staticmethod
+    def _pool(scheme: str, address: str, port: int, hostname: str):
+        if scheme == "https":
+            return HTTPSConnectionPool(
+                address,
+                port=port,
+                retries=False,
+                cert_reqs=ssl.CERT_REQUIRED,
+                assert_hostname=hostname,
+                server_hostname=hostname,
+            )
+        return HTTPConnectionPool(address, port=port, retries=False)
+
+    @staticmethod
+    def _host_header(hostname: str, port: int, scheme: str) -> str:
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        default_port = 443 if scheme == "https" else 80
+        return host if port == default_port else f"{host}:{port}"
+
+
+class _Urllib3Response:
+    """Adapt urllib3's streamed response and own its connection pool."""
+
+    def __init__(self, response: urllib3.response.BaseHTTPResponse, pool: Any) -> None:
+        self._response = response
+        self._pool = pool
+        self.status_code = response.status
+        self.headers = response.headers
+
+    def iter_content(self, chunk_size: int = 1, decode_unicode: bool = False) -> Iterable[bytes]:
+        del decode_unicode
+        return self._response.stream(chunk_size, decode_content=True)
+
+    def close(self) -> None:
+        try:
+            self._response.close()
+        finally:
+            self._pool.close()
 
 
 class DdgrWebSearch:
@@ -139,75 +251,81 @@ class DdgrWebSearch:
 
 
 class SafeWebFetcher:
-    """Fetch limited public HTTP content while applying basic SSRF protections."""
+    """Fetch bounded public HTTP content with DNS-pinned SSRF protection."""
 
     _MAX_REDIRECTS = 3
     _MAX_RESPONSE_BYTES = 2_000_000
     _MAX_OUTPUT_CHARS = 100_000
     _DEFAULT_OUTPUT_CHARS = 50_000
+    _TOTAL_TIMEOUT_SECONDS = 30.0
+    _CONNECT_TIMEOUT_SECONDS = 5.0
+    _READ_TIMEOUT_SECONDS = 15.0
     _ALLOWED_CONTENT_TYPES = {"text/html", "text/plain", "application/json"}
     _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
     _USER_AGENT = "Mini-Agent/0.1 (+https://example.invalid/mini-agent)"
+    _EMPTY_CONTENT = "(The page had no readable text.)"
 
     def __init__(
         self,
         *,
-        session: HttpSession | None = None,
+        transport: HttpTransport | None = None,
         resolver: HostResolver = socket.getaddrinfo,
+        clock: Clock = time.monotonic,
     ) -> None:
-        if session is None:
-            requests_session = requests.Session()
-            requests_session.trust_env = False
-            self._session: HttpSession = requests_session
-        else:
-            self._session = session
+        self._transport = transport or PinnedHttpTransport(clock=clock)
         self._resolver = resolver
+        self._clock = clock
 
     def fetch(self, url: str, max_chars: int = _DEFAULT_OUTPUT_CHARS) -> str:
-        """Fetch a public HTML, text, or JSON resource as limited readable text."""
+        """Fetch a public HTML, text, or JSON resource as bounded readable content."""
         self._validate_max_chars(max_chars)
+        deadline = self._clock() + self._TOTAL_TIMEOUT_SECONDS
         current_url = self._normalise_url(url)
         for redirect_count in range(self._MAX_REDIRECTS + 1):
-            self._assert_public_target(current_url)
-            response = self._request(current_url)
+            self._check_budget(deadline)
+            addresses = self._resolve_public_addresses(current_url, deadline)
+            response = self._request(current_url, addresses, deadline)
             try:
+                self._check_budget(deadline)
                 if response.status_code in self._REDIRECT_STATUSES:
                     current_url = self._redirect_target(response, current_url, redirect_count)
                     continue
                 if not 200 <= response.status_code < 300:
                     raise ToolError(f"Web fetch failed with HTTP status {response.status_code}.")
 
-                content_type = self._content_type(response.headers)
+                content_type, declared_encoding = self._content_metadata(response.headers)
                 if content_type not in self._ALLOWED_CONTENT_TYPES:
                     allowed = ", ".join(sorted(self._ALLOWED_CONTENT_TYPES))
                     raise ToolError(f"Unsupported content type {content_type or 'missing'}; allowed types: {allowed}.")
-                body = self._read_limited_body(response)
-                text = body.decode(response.encoding or "utf-8", errors="replace")
-                title, readable = self._extract_content(text, content_type)
-                readable = self._truncate_output(readable, max_chars)
+                body = self._read_limited_body(response, current_url, deadline)
+                title, readable = self._extract_content(
+                    body,
+                    content_type,
+                    final_url=current_url,
+                    declared_encoding=declared_encoding,
+                )
+                self._check_budget(deadline)
+                readable = self._truncate_output(readable or self._EMPTY_CONTENT, max_chars)
                 header = f"Fetched URL: {current_url}\nContent type: {content_type}"
                 if title:
                     header += f"\nTitle: {title}"
-                return f"{header}\n\nUntrusted external content:\n{readable or '(The page had no readable text.)'}"
+                return f"{header}\n\nUntrusted external content:\n{readable}"
             finally:
-                close = getattr(response, "close", None)
-                if callable(close):
-                    close()
+                self._close_response(response)
         raise ToolError(f"Web fetch exceeded the redirect limit of {self._MAX_REDIRECTS}.")
 
-    def _request(self, url: str) -> HttpResponse:
+    def _request(self, url: str, addresses: tuple[str, ...], deadline: float) -> HttpResponse:
+        remaining = self._remaining_budget(deadline)
         try:
-            return self._session.get(
+            return self._transport.request(
                 url,
-                headers={"Accept": "text/html, text/plain, application/json", "User-Agent": self._USER_AGENT},
-                allow_redirects=False,
-                stream=True,
-                timeout=(5, 15),
+                addresses,
+                connect_timeout=min(self._CONNECT_TIMEOUT_SECONDS, remaining),
+                read_timeout=min(self._READ_TIMEOUT_SECONDS, remaining),
+                deadline=deadline,
             )
-        except requests.RequestException as exc:
-            raise ToolError(f"Unable to fetch URL: {exc}") from exc
-        except OSError as exc:
-            raise ToolError(f"Unable to fetch URL: {exc}") from exc
+        except Exception as exc:
+            raise ToolError(f"Unable to fetch URL {url}: {exc}") from exc
 
     def _redirect_target(self, response: HttpResponse, current_url: str, redirect_count: int) -> str:
         if redirect_count >= self._MAX_REDIRECTS:
@@ -217,7 +335,7 @@ class SafeWebFetcher:
             raise ToolError("Redirect response did not include a Location header.")
         return self._normalise_url(urljoin(current_url, location))
 
-    def _assert_public_target(self, url: str) -> None:
+    def _resolve_public_addresses(self, url: str, deadline: float) -> tuple[str, ...]:
         parsed = urlsplit(url)
         assert parsed.hostname is not None
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -227,8 +345,10 @@ class SafeWebFetcher:
             raise ToolError(f"Unable to resolve web host: {parsed.hostname}.") from exc
         except OSError as exc:
             raise ToolError(f"Unable to resolve web host: {parsed.hostname}.") from exc
+        self._check_budget(deadline)
         if not addresses:
             raise ToolError(f"Web host resolved without addresses: {parsed.hostname}.")
+        validated: list[str] = []
         for address_info in addresses:
             try:
                 address = str(address_info[4][0]).split("%", 1)[0]
@@ -237,6 +357,10 @@ class SafeWebFetcher:
                 raise ToolError(f"Web host resolved to an invalid address: {parsed.hostname}.") from exc
             if not ip.is_global:
                 raise ToolError("Web fetch refuses loopback, private, link-local, or reserved network addresses.")
+            normalised = str(ip)
+            if normalised not in validated:
+                validated.append(normalised)
+        return tuple(validated)
 
     def _normalise_url(self, value: Any) -> str:
         if not isinstance(value, str) or not value.strip():
@@ -254,40 +378,68 @@ class SafeWebFetcher:
             raise ToolError("url must include a host.")
         if port is not None and port not in {80, 443}:
             raise ToolError("url ports must be 80 or 443.")
-        return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path or "/", parsed.query, ""))
+        try:
+            hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise ToolError("url includes an invalid host.") from exc
+        if any(character.isspace() or ord(character) < 32 for character in hostname):
+            raise ToolError("url includes an invalid host.")
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        netloc = f"{host}:{port}" if port is not None else host
+        return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/", parsed.query, ""))
 
-    def _read_limited_body(self, response: HttpResponse) -> bytes:
-        length = self._header(response.headers, "content-length")
-        if length:
-            try:
-                if int(length) > self._MAX_RESPONSE_BYTES:
-                    raise ToolError(f"Web response exceeds the {self._MAX_RESPONSE_BYTES}-byte limit.")
-            except ValueError:
-                pass
+    def _read_limited_body(self, response: HttpResponse, url: str, deadline: float) -> bytes:
         chunks: list[bytes] = []
         total = 0
-        for chunk in response.iter_content(chunk_size=8192):
-            if not chunk:
-                continue
-            chunk_bytes = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
-            total += len(chunk_bytes)
-            if total > self._MAX_RESPONSE_BYTES:
-                raise ToolError(f"Web response exceeds the {self._MAX_RESPONSE_BYTES}-byte limit.")
-            chunks.append(chunk_bytes)
+        try:
+            iterator = iter(response.iter_content(chunk_size=8192))
+            while True:
+                self._check_budget(deadline)
+                try:
+                    chunk = next(iterator)
+                except StopIteration:
+                    break
+                self._check_budget(deadline)
+                if not chunk:
+                    continue
+                chunk_bytes = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+                total += len(chunk_bytes)
+                if total > self._MAX_RESPONSE_BYTES:
+                    raise ToolError(f"Web response exceeds the {self._MAX_RESPONSE_BYTES}-byte limit.")
+                chunks.append(chunk_bytes)
+                self._check_budget(deadline)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(f"Unable to read web response from {url}: {exc}") from exc
         return b"".join(chunks)
 
-    def _extract_content(self, text: str, content_type: str) -> tuple[str | None, str]:
+    def _extract_content(
+        self,
+        body: bytes,
+        content_type: str,
+        *,
+        final_url: str,
+        declared_encoding: str | None,
+    ) -> tuple[str | None, str]:
         if content_type == "text/html":
-            parser = _ReadableHtmlParser()
-            parser.feed(text)
-            parser.close()
-            return parser.title, parser.text
+            document = extract_html_document(
+                body,
+                base_url=final_url,
+                declared_encoding=self._valid_encoding(declared_encoding),
+            )
+            return document.title, document.markdown
         if content_type == "application/json":
             try:
+                text = body.decode("utf-8-sig")
                 return None, json.dumps(json.loads(text), ensure_ascii=False, indent=2)
-            except json.JSONDecodeError:
-                pass
-        return None, self._normalise_whitespace(text)
+            except (UnicodeError, json.JSONDecodeError, RecursionError, ValueError, OverflowError) as exc:
+                raise ToolError("Web response contained invalid JSON.") from exc
+        encoding = self._valid_encoding(declared_encoding) or "utf-8"
+        try:
+            return None, self._normalise_whitespace(body.decode(encoding, errors="replace"))
+        except (LookupError, UnicodeError) as exc:
+            raise ToolError("Unable to decode plain-text web response.") from exc
 
     def _validate_max_chars(self, max_chars: Any) -> None:
         if isinstance(max_chars, bool) or not isinstance(max_chars, int):
@@ -303,9 +455,23 @@ class SafeWebFetcher:
         return None
 
     @classmethod
-    def _content_type(cls, headers: Mapping[str, str]) -> str:
+    def _content_metadata(cls, headers: Mapping[str, str]) -> tuple[str, str | None]:
         raw = cls._header(headers, "content-type")
-        return raw.split(";", 1)[0].strip().lower() if raw else ""
+        if not raw:
+            return "", None
+        content_type = raw.split(";", 1)[0].strip().lower()
+        match = re.search(r"(?:^|;)\s*charset\s*=\s*(?:\"([^\"]*)\"|([^;\s]*))", raw, flags=re.IGNORECASE)
+        declared_encoding = next((group.strip() for group in match.groups() if group), None) if match else None
+        return content_type, declared_encoding
+
+    @staticmethod
+    def _valid_encoding(value: str | None) -> str | None:
+        if not value:
+            return None
+        try:
+            return codecs.lookup(value).name
+        except (LookupError, ValueError):
+            return None
 
     @staticmethod
     def _normalise_whitespace(value: str) -> str:
@@ -315,60 +481,27 @@ class SafeWebFetcher:
     def _truncate_output(value: str, max_chars: int) -> str:
         if len(value) <= max_chars:
             return value
-        omitted = len(value) - max_chars
-        return f"{value[:max_chars]}\n\n… output truncated ({omitted} characters omitted)"
+        for prefix_length in range(min(len(value) - 1, max_chars), -1, -1):
+            omitted = len(value) - prefix_length
+            marker = f"… output truncated ({omitted} characters omitted)"
+            separator = "\n\n" if prefix_length else ""
+            candidate = f"{value[:prefix_length]}{separator}{marker}"
+            if len(candidate) <= max_chars:
+                return candidate
+        return "…"[:max_chars]
 
+    def _remaining_budget(self, deadline: float) -> float:
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            raise ToolError(f"Web fetch exceeded the {int(self._TOTAL_TIMEOUT_SECONDS)}-second time budget.")
+        return remaining
 
-class _ReadableHtmlParser(HTMLParser):
-    """Small dependency-free extractor for static HTML content."""
+    def _check_budget(self, deadline: float) -> None:
+        self._remaining_budget(deadline)
 
-    _IGNORED_TAGS = {"canvas", "footer", "form", "iframe", "nav", "noscript", "script", "style", "svg"}
-    _BLOCK_TAGS = {"article", "br", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "main", "p", "section", "tr"}
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._ignored_depth = 0
-        self._title_depth = 0
-        self._title_parts: list[str] = []
-        self._text_parts: list[str] = []
-
-    @property
-    def title(self) -> str | None:
-        title = SafeWebFetcher._normalise_whitespace(" ".join(self._title_parts))
-        return title or None
-
-    @property
-    def text(self) -> str:
-        return SafeWebFetcher._normalise_whitespace(" ".join(self._text_parts))
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        tag = tag.lower()
-        if tag in self._IGNORED_TAGS:
-            self._ignored_depth += 1
-            return
-        if self._ignored_depth:
-            return
-        if tag == "title":
-            self._title_depth += 1
-        elif tag in self._BLOCK_TAGS:
-            self._text_parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        tag = tag.lower()
-        if tag in self._IGNORED_TAGS:
-            self._ignored_depth = max(0, self._ignored_depth - 1)
-            return
-        if self._ignored_depth:
-            return
-        if tag == "title":
-            self._title_depth = max(0, self._title_depth - 1)
-        elif tag in self._BLOCK_TAGS:
-            self._text_parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if self._ignored_depth:
-            return
-        if self._title_depth:
-            self._title_parts.append(data)
-        else:
-            self._text_parts.append(data)
+    @staticmethod
+    def _close_response(response: HttpResponse) -> None:
+        try:
+            response.close()
+        except Exception:
+            pass

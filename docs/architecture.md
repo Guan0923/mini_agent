@@ -3,10 +3,12 @@
 Mini-Agent keeps provider wire formats outside its execution model. Public pipeline methods accept one `AgentRuntime`; provider adapters translate between that runtime and vendor payloads.
 
 ```text
-TUI -> ConversationService -> RuntimeRunner port -> AgentRunner(runtime) -> workflows -> planner / tools
-                              |                         |
-                              +-> RuntimeState          +-> RuntimeEvent
-                              +-> RuntimeServices
+bootstrap -> TUI -> ConversationService -> RuntimeRunner port -> AgentRunner(runtime)
+                                                               |-> workflows/*
+                                                               |-> planner port -> planning implementation
+                                                               |-> tools
+                              |-> RuntimeState                  +-> RuntimeEvent
+                              |-> RuntimeServices
                               +-> RuntimeExchange
 
 HTTP transport <-> provider adapter prepare_request/prepare_response <-> AgentRuntime
@@ -22,11 +24,11 @@ SQLite        <-> RuntimeState snapshots and user/assistant projections
 - `RuntimeServices` also owns the process-local `HookManager`. Synchronous run, model, and tool hooks are rebound after session restoration and never serialized into checkpoints.
 - `RuntimeExchange` contains one transient model operation: request mode, allowed tools, request payload, raw response or SSE iterator, prepared response, and reasoning callback.
 
-The formal execution entry points (`AgentRunner.run`, planner capabilities, workflows, `ToolStepExecutor.execute`, and provider preparation functions) take only `AgentRuntime`. A deprecated `LegacyAgentRunner` and planner capability adapters isolate pre-Runtime embedding APIs.
+The formal execution entry points (`AgentRunner.run`, planner capabilities, workflows, `ToolStepExecutor.execute`, and provider preparation functions) take only `AgentRuntime`. Runtime-owned planner ports and one legacy planner adapter isolate pre-Runtime embedding APIs; `planning.base` and `planning.capabilities` remain compatibility exports. The top-level `bootstrap` module is the concrete composition root, while `runtime.factory` is a compatibility entrypoint.
 
 One session permits one active turn. Runtime snapshots are saved at stable transitions, including model responses, tool results, plan changes, and turn completion. SSE reasoning deltas are merged into one ordered durable `thinking` message; raw HTTP objects remain transient.
 
-The runtime retains a non-blocking process-local steering callback for embedding callers. Workflows drain and merge steering only after strategy/model responses and before or after individual tool or plan steps; an operation already in progress may finish before stale work is skipped and the new `UserMessage` is checkpointed. The Textual TUI does not bind running input to this callback: it keeps messages in a process-local next-turn queue and starts one merged follow-up run after the active run finishes or is cooperatively cancelled with Esc. Approval prompts remain the exclusive terminal input state while a review is pending.
+The runtime retains a non-blocking process-local steering callback for embedding callers. Workflows drain and merge steering around model responses and before or after individual tool or plan steps; an operation already in progress may finish before stale work is skipped and the new `UserMessage` is checkpointed. The Textual TUI does not bind running input to this callback: it keeps messages in a process-local next-turn queue and starts one merged follow-up run after the active run finishes or is cooperatively cancelled with Esc. Approval prompts remain the exclusive terminal input state while a review is pending.
 
 ## Lifecycle Hooks
 
@@ -64,7 +66,7 @@ Review decisions behave as follows:
 - `Implement and Clear Session` completes and persists the Plan run, then follows `RunHandoff(new_session=True)` into a newly created, active session. The isolated context contains only `AssistantMessage(final_plan)` and the automatic implementation message.
 - `Cancel and Stay in plan mode` cancels the Plan run, preserves the complete Plan conversation, and leaves the TUI in Plan mode.
 
-The handoff is sequential rather than a mode mutation inside one run: the Plan run remains an auditable producer, while the Agent run is an independently checkpointed consumer in either the existing or a fresh session. The Agent prompt explicitly declares prior Plan-mode restrictions inactive, and the normal strategy router selects the implementation strategy.
+The handoff is sequential rather than a mode mutation inside one run: the Plan run remains an auditable producer, while the Agent run is an independently checkpointed consumer in either the existing or a fresh session. The Agent prompt explicitly declares prior Plan-mode restrictions inactive, and the implementation run uses the configured strategy (reactive by default).
 
 Plan questions, Plan Review, and Tool Review intentionally use separate decision vocabularies. Questions return `answer` with an answer map or `cancel`; Plan Review accepts only the three choices above; Tool Review remains `Continue / Cancel / Supplement`, so tool feedback behavior is unchanged.
 
@@ -80,21 +82,22 @@ DeepSeek.prepare_response(runtime: AgentRuntime) -> PreparedResponse
 
 `JsonHttpTransport` owns HTTP status handling, JSON decoding, SSE event decoding, redirect policy, and response cleanup. `DeepSeek` only expands active chat messages, constructs the vendor payload, validates tool-call arguments, aggregates streamed fragments, and converts the response back to provider-neutral messages. Artifact snapshots are not accepted at the provider boundary.
 
-Tool decisions use DeepSeek native Tool Calls. Strategy selection, plan creation, evaluation, and replanning remain JSON-output operations. Another API should add its own adapter without changing domain messages or workflows.
+Tool decisions use DeepSeek native Tool Calls. Plan creation, step evaluation, and replanning remain JSON-output operations. Another API should add its own adapter without changing domain messages or workflows.
 
 ## Responsibilities
 
 - `domain` owns typed messages, ToolSpec, run/plan values, and compatibility serialization.
-- `runtime` owns AgentRuntime, session orchestration and run handoffs, strategy routing, workflows, approval/retry policy, events, checkpoints, and outcome transitions.
+- `bootstrap` is the only module that selects concrete planner, provider, storage, and default tool implementations.
+- `runtime` owns AgentRuntime, planner ports and legacy adaptation, session orchestration and run handoffs, configured-strategy dispatch, approval/retry policy, events, checkpoints, and outcome transitions. `runtime/workflows/` separates reactive execution, Plan proposal, Plan execution, and shared state transitions.
 - `ConversationService` and `AgentApplication` depend on the `RuntimeRunner` protocol; only the composition root selects `AgentRunner`.
 - `PlanModeWorkflow` owns final proposal recording, review, and handoff so the runner only dispatches run modes and strategies.
 - Lifecycle hooks use narrow provider-neutral contexts: before hooks may cancel, model hooks may replace messages/tools/request parameters, and tool hooks may replace arguments before validation and approval. After hooks receive snapshots in reverse registration order.
-- `planning` converts prepared model responses into decisions and plans through runtime-only capability protocols.
-- `tools` owns handlers, executable JSON Schema validation, registration, workspace confinement, and confirmation metadata.
+- `planning` contains rule-based and LLM planner implementations. Public planner protocol names remain compatibility aliases to the runtime-owned execution ports.
+- `tools` owns handlers, executable JSON Schema validation, registration, workspace confinement, and confirmation metadata. `defaults` defines the standard tool collection, registries enforce invocation policy, factories compose them without circular imports, and `catalog` preserves the former direct import path.
 - `providers` owns `LLMClient` selection, generic JSON/SSE transport, and vendor-specific request/response adapters.
-- `storage` persists RuntimeState checkpoints, session snapshots, and compact conversation projections. Dormant artifact adapters remain available but are not composed into the runtime.
+- `storage` persists RuntimeState checkpoints, session snapshots, compact conversation projections, and all in-memory/filesystem artifact store implementations. Runtime artifact exports are compatibility aliases only.
 - `tui` handles terminal commands, approval input, RuntimeEvent presentation, and the process-local full-screen transcript only. Worker threads enqueue display chunks; the Textual event loop owns all widget mutation and rendering.
 
 ## Extension Rules
 
-Add a provider by implementing runtime-based request and response preparation in a new adapter, then register it with `LLMClient`; accept only active chat messages and reuse the generic transport rather than importing `requests` or storage in the adapter. Add a tool with an explicit ToolSpec schema and text-returning handler, then register it in a catalog. Add a workflow that consumes AgentRuntime and reuses ToolStepExecutor. Storage adapters must persist RuntimeState without serializing RuntimeServices or RuntimeExchange. Dormant artifact adapters preserve revision immutability and path confinement for possible future use.
+Add a provider by implementing runtime-based request and response preparation in a new adapter, then register it with `LLMClient`; accept only active chat messages and reuse the generic transport rather than importing `requests` or storage in the adapter. Add a tool with an explicit ToolSpec schema and text-returning handler, include it in a catalog, and compose the registry in a factory. Add a workflow module that consumes AgentRuntime and reuses ToolStepExecutor. Storage adapters must persist RuntimeState without serializing RuntimeServices or RuntimeExchange. Artifact adapters preserve revision immutability and path confinement.

@@ -750,3 +750,11 @@ def test_main_does_not_suggest_rule_planner_for_invalid_runtime_settings(tmp_pat
 
     assert exc_info.value.code == 2
     assert "--planner rule" not in capsys.readouterr().err
+
+
+def test_main_rejects_removed_auto_strategy(tmp_path, capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--workspace", str(tmp_path), "--strategy", "auto"])
+
+    assert exc_info.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
