@@ -9,6 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
+from mini_agent.domain import ChatMessage, ToolSpec
 from mini_agent.runtime.context import AgentRuntime, PreparedResponse
 from mini_agent.runtime.events import RuntimeEvent
 from mini_agent.runtime.recording import model_error_data, model_request_data, model_response_data
@@ -32,6 +33,16 @@ class ProviderAdapter(Protocol):
 
     @property
     def operation(self) -> str: ...
+
+    @property
+    def context_size(self) -> int: ...
+
+    def estimate_tokens(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolSpec],
+        request_parameters: dict[str, Any],
+    ) -> int: ...
 
     def prepare_request(self, runtime: AgentRuntime) -> dict[str, Any]: ...
 
@@ -136,6 +147,23 @@ class LLMClient:
         self.llm = adapter or self._create_llm(config)
         self.transport = transport or JsonHttpTransport(session)
         self._last_request_diagnostics: dict[str, Any] = {}
+
+    @property
+    def context_size(self) -> int:
+        return self.config.context_size
+
+    def estimate_tokens(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolSpec],
+        request_parameters: dict[str, Any],
+    ) -> int:
+        estimate = getattr(self.llm, "estimate_tokens", None)
+        if not callable(estimate):
+            raise ModelConfigurationError(
+                f"Provider {self.config.provider!r} does not support local context token estimation."
+            )
+        return estimate(messages, tools, request_parameters)
 
     def run(self, runtime: AgentRuntime) -> PreparedResponse:
         self._last_request_diagnostics = {}

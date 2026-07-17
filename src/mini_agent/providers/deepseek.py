@@ -6,15 +6,15 @@ import copy
 import json
 import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from mini_agent.domain import AssistantMessage, SystemMessage, ToolMessage, ToolSpec, UserMessage
+from mini_agent.domain import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, ToolSpec, UserMessage
 from mini_agent.runtime.context import AgentRuntime, PreparedResponse
 
 from .config import ModelConfig
-from .errors import ModelRequestError
+from .errors import ModelConfigurationError, ModelRequestError
 
 
 @dataclass(frozen=True)
@@ -148,8 +148,7 @@ def _tool_definition(spec: ToolSpec) -> dict[str, Any]:
     return {"type": "function", "function": function}
 
 
-def _wire_messages(runtime: AgentRuntime) -> list[dict[str, Any]]:
-    source = runtime.exchange.messages or runtime.state.messages
+def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
     if not source:
         raise ModelRequestError("DeepSeek messages must contain at least one message.")
     wire: list[dict[str, Any]] = []
@@ -250,6 +249,10 @@ def _wire_messages(runtime: AgentRuntime) -> list[dict[str, Any]]:
             {"role": "tool", "tool_call_id": tool.call_id, "content": tool.content} for tool in message.tool_messages
         )
     return wire
+
+
+def _wire_messages(runtime: AgentRuntime) -> list[dict[str, Any]]:
+    return _wire_messages_from(runtime.exchange.messages or runtime.state.messages)
 
 
 def _number(value: Any, *, name: str, minimum: float, maximum: float) -> int | float:
@@ -724,11 +727,55 @@ def _prepare_response(runtime: AgentRuntime) -> PreparedResponse:
     return prepared
 
 
+def _default_tokenizer_loader(identifier: str) -> Any:
+    from tokenizers import Tokenizer
+
+    return Tokenizer.from_pretrained(identifier)
+
+
 class DeepSeek:
     """Convert runtime messages to and from the DeepSeek wire format."""
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        tokenizer_loader: Callable[[str], Any] | None = None,
+    ) -> None:
         self.config = config
+        self._tokenizer_loader = tokenizer_loader or _default_tokenizer_loader
+        self._tokenizer: Any | None = None
+
+    @property
+    def context_size(self) -> int:
+        return self.config.context_size
+
+    def estimate_tokens(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolSpec],
+        request_parameters: dict[str, Any],
+    ) -> int:
+        payload: dict[str, Any] = {"messages": _wire_messages_from(messages)}
+        if tools:
+            payload["tools"] = [_tool_definition(spec) for spec in tools]
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        encoding = self._get_tokenizer().encode(serialized)
+        max_tokens = request_parameters.get("max_tokens", self.config.max_tokens)
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+            max_tokens = self.config.max_tokens
+        return len(encoding.ids) + max_tokens
+
+    def _get_tokenizer(self) -> Any:
+        if self._tokenizer is not None:
+            return self._tokenizer
+        try:
+            self._tokenizer = self._tokenizer_loader(self.config.tokenizer_model)
+        except Exception as exc:
+            raise ModelConfigurationError(
+                "Unable to load tokenizer "
+                f"{self.config.tokenizer_model!r}. Check network/cache access or set TOKENIZER_MODEL."
+            ) from exc
+        return self._tokenizer
 
     @property
     def endpoint(self) -> str:

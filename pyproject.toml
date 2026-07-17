@@ -8,7 +8,14 @@ version = "0.1.0"
 description = "A terminal-first playground for studying agent execution loops."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["ddgr>=2.2,<3", "jsonschema>=4.23,<5", "requests>=2.31,<3", "textual>=8.2,<9"]
+dependencies = [
+    "ddgr>=2.2,<3",
+    "huggingface-hub>=0.30,<2",
+    "jsonschema>=4.23,<5",
+    "requests>=2.31,<3",
+    "textual>=8.2,<9",
+    "tokenizers>=0.21,<1",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.6"]

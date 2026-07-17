@@ -90,11 +90,13 @@ class AgentRunner:
             runtime_store=runtime_store,
         )
         history = runtime.state.messages
+        turn_start_index = len(history)
         history.append(UserMessage(content=task))
         runtime.state.current_run = RunState(
             task=task,
             mode=mode,  # type: ignore[arg-type]
             run_id=run_id or new_run_id(),
+            turn_start_index=turn_start_index,
             history=history,
         )
         runtime.state.status = "running"
@@ -233,9 +235,7 @@ class AgentRunner:
         runtime.state.turn_usage = None
         runtime.state.status = "idle"
         if not any(summary.run_id == run.run_id for summary in runtime.state.run_history):
-            runtime.state.run_history.append(
-                RunSummary(run.run_id, run.task, run.status, run.mode, run.final_answer)
-            )
+            runtime.state.run_history.append(RunSummary(run.run_id, run.task, run.status, run.mode, run.final_answer))
         run.add_event("run_finished", "Run finished", status=run.status)
         if runtime.services.publish is not None:
             runtime.services.publish(RuntimeEvent("run_finished", run.status, {"final_answer": run.final_answer or ""}))
@@ -281,11 +281,13 @@ class LegacyAgentRunner(AgentRunner):
                     confirm=runtime.services.confirm,
                 )
             else:
+                turn_start_index = len(runtime.state.messages)
                 runtime.state.messages.append(UserMessage(content=handoff.task))
                 runtime.state.current_run = RunState(
                     task=handoff.task,
                     mode=handoff.mode,
                     run_id=new_run_id(),
+                    turn_start_index=turn_start_index,
                     history=runtime.state.messages,
                 )
                 runtime.state.active_message = None

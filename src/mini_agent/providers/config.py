@@ -34,6 +34,8 @@ class ModelConfig:
     timeout_seconds: int = 45
     max_tokens: int = 8192
     provider: str = "deepseek"
+    context_size: int = 1_024_000
+    tokenizer_model: str = "deepseek-ai/DeepSeek-V3"
 
     @classmethod
     def from_env(cls, env_path: Path, environ: Mapping[str, str] | None = None) -> ModelConfig:
@@ -48,15 +50,27 @@ class ModelConfig:
             raise ModelConfigurationError("MAX_TOKENS must be an integer.") from exc
         if not 1 <= max_tokens <= 384_000:
             raise ModelConfigurationError("MAX_TOKENS must be between 1 and 384000.")
+        raw_context_size = values.get("CONTEXT_SIZE", "1024000")
+        try:
+            context_size = int(raw_context_size)
+        except ValueError as exc:
+            raise ModelConfigurationError("CONTEXT_SIZE must be an integer.") from exc
+        if context_size <= max_tokens:
+            raise ModelConfigurationError("CONTEXT_SIZE must be greater than MAX_TOKENS.")
         provider = values.get("PROVIDER", "deepseek").strip().lower()
         if not provider:
             raise ModelConfigurationError("PROVIDER must not be empty.")
+        tokenizer_model = values.get("TOKENIZER_MODEL", "deepseek-ai/DeepSeek-V3").strip()
+        if not tokenizer_model:
+            raise ModelConfigurationError("TOKENIZER_MODEL must not be empty.")
         return cls(
             values["API_KEY"],
             values["BASE_URL"],
             values["MODEL"],
             max_tokens=max_tokens,
             provider=provider,
+            context_size=context_size,
+            tokenizer_model=tokenizer_model,
         )
 
     @property

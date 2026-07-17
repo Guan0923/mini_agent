@@ -19,6 +19,8 @@ from .messages import (
 EventKind = Literal[
     "run_started",
     "strategy",
+    "context_cleaned",
+    "context_compressed",
     "model",
     "model_repair",
     "reasoning",
@@ -176,6 +178,7 @@ class RunState:
     run_id: str = field(default_factory=new_run_id)
     strategy: ExecutionStrategy = "reactive"
     strategy_reason: str | None = None
+    turn_start_index: int = 0
     history: list[ChatMessage] = field(default_factory=list)
     actions: list[ToolMessage] = field(default_factory=list)
     events: list[TraceEvent] = field(default_factory=list)
@@ -218,6 +221,7 @@ class RunState:
             "run_id": self.run_id,
             "strategy": self.strategy,
             "strategy_reason": self.strategy_reason,
+            "turn_start_index": self.turn_start_index,
             "history": [message_to_dict(message) for message in self.history],
             "actions": [tool_message_to_dict(action) for action in self.actions],
             "events": [asdict(event) for event in self.events],
@@ -285,6 +289,7 @@ class RunState:
             run_id=data["run_id"],
             strategy=data.get("strategy", "reactive"),
             strategy_reason=data.get("strategy_reason"),
+            turn_start_index=int(data.get("turn_start_index", 0)),
             history=messages_from_dicts([dict(item) for item in data.get("history", [])]),
             actions=[
                 tool(dict(item), f"call_legacy_action_{index}")

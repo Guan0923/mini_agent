@@ -147,11 +147,13 @@ class ConversationService:
                 raise RuntimeError("The active session already has a running turn; resume or terminate it first.")
             run_id = new_run_id()
         assert self.runtime is not None
+        turn_start_index = len(self.runtime.state.messages)
         self.runtime.state.messages.append(UserMessage(content=prepared))
         self.runtime.state.current_run = RunState(
             task=prepared,
             mode=mode,
             run_id=run_id,
+            turn_start_index=turn_start_index,
             history=self.runtime.state.messages,
         )
         self.runtime.state.active_message = None

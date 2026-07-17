@@ -23,7 +23,7 @@ from .config import RunnerSettings
 from .contracts import CancellationHandler, Confirm, EventHandler, InterruptHandler, SteeringHandler
 from .hooks import HookManager
 
-RuntimeOperation = Literal["decision", "strategy", "plan", "evaluate", "replan"]
+RuntimeOperation = Literal["decision", "strategy", "plan", "evaluate", "replan", "summarize"]
 OutputMode = Literal["text", "json", "tools"]
 RuntimeStatus = Literal["idle", "running"]
 
