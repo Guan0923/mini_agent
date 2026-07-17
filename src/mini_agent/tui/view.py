@@ -6,10 +6,12 @@ import asyncio
 from collections.abc import Callable
 from threading import Lock
 
-from textual import events
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Input, OptionList, Rule, Static, TextArea
+from textual.message import Message
+from textual.timer import Timer
+from textual.widgets import OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.widgets.text_area import Selection
 
@@ -19,6 +21,7 @@ from mini_agent.runtime.user_input import OTHER_OPTION_LABEL
 from .completion import CommandSuggestion, SlashCommandCompleter
 
 _FLUSH_INTERVAL_SECONDS = 1 / 30
+_COPY_NOTICE_SECONDS = 1.5
 _OMITTED_MARKER = "[Earlier terminal output omitted]\n"
 
 
@@ -46,16 +49,46 @@ class TranscriptTextArea(TextArea):
             view.call_after_refresh(view._resume_follow_if_at_end)
 
 
-class TerminalInput(Input):
-    """Treat terminal right-click paste as copy while transcript text is selected."""
+class TerminalInput(TextArea):
+    """Multiline editor that keeps the value/cursor surface used by the TUI."""
 
-    async def on_event(self, event: events.Event) -> None:
-        if isinstance(event, events.Paste):
-            view = self.app
-            if isinstance(view, TerminalView) and view.copy_transcript_selection(clear=True):
-                event.stop()
-                return
-        await super().on_event(event)
+    class Submitted(Message):
+        def __init__(self, input: "TerminalInput", value: str) -> None:
+            super().__init__()
+            self.input = input
+            self.value = value
+
+    @property
+    def value(self) -> str:
+        return self.text
+
+    @value.setter
+    def value(self, value: str) -> None:
+        self.load_text(value)
+        self.cursor_location = self.document.get_location_from_index(len(value))
+
+    @property
+    def cursor_position(self) -> int:
+        return self.document.get_index_from_location(self.cursor_location)
+
+    @cursor_position.setter
+    def cursor_position(self, value: int) -> None:
+        index = max(0, min(value, len(self.text)))
+        self.cursor_location = self.document.get_location_from_index(index)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "ctrl+j":
+            result = self.replace("\n", self.selection.start, self.selection.end)
+            self.selection = Selection.cursor(result.end_location)
+        elif event.key == "enter":
+            self.post_message(self.Submitted(self, self.value))
+        else:
+            return
+        event.prevent_default()
+        event.stop()
+
+    def _on_paste(self, event: events.Paste) -> None:
+        event.stop()
 
 
 class TerminalView(App[None]):
@@ -72,7 +105,7 @@ class TerminalView(App[None]):
         overflow-y: scroll;
     }
     #separator { color: #5f6b76; height: 1; }
-    #status { height: 1; padding: 0 1; background: #20262d; color: #9fc3e8; }
+    #status { height: 1; padding: 0 1; background: #263442; color: #9fc3e8; }
     #completion-menu { height: auto; max-height: 8; display: none; }
     #question-header {
         height: auto;
@@ -91,7 +124,7 @@ class TerminalView(App[None]):
     #input {
         width: 100%;
         height: 1;
-        margin-bottom: 1;
+        margin-bottom: 0;
         border: none;
         padding: 0;
         background: #171c21;
@@ -122,9 +155,11 @@ class TerminalView(App[None]):
         self._pending_chunks: list[str] = []
         self._pending_lock = Lock()
         self._flush_scheduled = False
-        self._closed = False
+        self._writes_closed = False
         self._follow_tail = True
         self._status = "AGENT | IDLE"
+        self._interrupt_enabled = False
+        self._copy_notice_timer: Timer | None = None
         self._questions: tuple[UserQuestion, ...] = ()
         self._question_index = 0
         self._question_answers: dict[str, list[str]] = {}
@@ -133,6 +168,7 @@ class TerminalView(App[None]):
         self._input_before_questionnaire = ""
         self._placeholder_before_questionnaire = ""
         self.submissions: asyncio.Queue[str | None] = asyncio.Queue()
+        self.interrupts: asyncio.Queue[None] = asyncio.Queue()
         self.transcript = TranscriptTextArea(
             read_only=True,
             soft_wrap=True,
@@ -144,16 +180,19 @@ class TerminalView(App[None]):
         self.question_header = Static(id="question-header")
         self.question_menu = OptionList(id="question-menu")
         self.completion_menu = OptionList(id="completion-menu")
-        self.input = TerminalInput(id="input")
+        self.input = TerminalInput(
+            soft_wrap=True,
+            show_line_numbers=False,
+            id="input",
+        )
 
     def compose(self) -> ComposeResult:
         yield self.transcript
         yield self.question_header
         yield self.question_menu
         yield self.completion_menu
-        yield Rule(id="separator")
-        yield self.status_line
         yield self.input
+        yield self.status_line
 
     def on_mount(self) -> None:
         self._owner_loop = asyncio.get_running_loop()
@@ -172,7 +211,7 @@ class TerminalView(App[None]):
 
     def write(self, text: str, end: str = "\n") -> None:
         value = f"{text}{end}"
-        if not value or self._closed:
+        if not value or self._writes_closed:
             return
         should_schedule = False
         with self._pending_lock:
@@ -188,11 +227,11 @@ class TerminalView(App[None]):
     def clear(self) -> None:
         self._run_on_owner(self._clear_now)
 
-    def set_ui(self, *, status: str) -> None:
+    def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
         def update() -> None:
             self._status = status
-            suffix = " | PgUp/PgDn scroll" if not self._follow_tail else ""
-            self.status_line.update(f" {status}{suffix}")
+            self._interrupt_enabled = interrupt_enabled
+            self._refresh_status()
 
         self._run_on_owner(update)
 
@@ -240,7 +279,7 @@ class TerminalView(App[None]):
     def stop(self) -> None:
         def close() -> None:
             self.flush_now()
-            self._closed = True
+            self._writes_closed = True
             if self.is_running:
                 self.exit()
 
@@ -270,14 +309,17 @@ class TerminalView(App[None]):
         self._follow_tail = False
         self._refresh_status()
 
-    def copy_transcript_selection(self, *, clear: bool = False) -> bool:
+    def copy_transcript_selection(self) -> bool:
         selected = self.transcript.selected_text
-        if selected:
-            self.copy_to_clipboard(selected)
-            if clear:
-                self.transcript.selection = Selection.cursor(self.transcript.selection.end)
+        if not selected:
+            self.input.focus()
+            return False
+        selection_end = self.transcript.selection.end
+        self.copy_to_clipboard(selected)
+        self.transcript.selection = Selection.cursor(selection_end)
+        self._show_copy_notice(len(selected))
         self.input.focus()
-        return bool(selected)
+        return True
 
     def action_page_up(self) -> None:
         self.scroll_page_up()
@@ -295,27 +337,31 @@ class TerminalView(App[None]):
         if self.input.value:
             cursor = self.input.cursor_position
             self.input.value = self.input.value[:cursor] + self.input.value[cursor + 1 :]
+            self.input.cursor_position = cursor
         else:
             self.submissions.put_nowait(None)
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input is not self.input:
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area is not self.input:
             return
+        self._resize_input()
         if self.questionnaire_active:
             self._hide_completions()
             if not self._questionnaire_custom_input and self.input.value:
                 self.input.value = ""
             return
-        self._suggestions = self._completer.suggestions(event.value, self.input.cursor_position)
+        self._suggestions = self._completer.suggestions(self.input.value, self.input.cursor_position)
         self.completion_menu.clear_options()
         self.completion_menu.add_options(
-            Option(item.value, id=str(index)) for index, item in enumerate(self._suggestions)
+            Option(f"{item.value} — {item.description}", id=str(index))
+            for index, item in enumerate(self._suggestions)
         )
         self.completion_menu.display = bool(self._suggestions)
         if self._suggestions:
             self.completion_menu.highlighted = 0
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    @on(TerminalInput.Submitted)
+    def on_input_submitted(self, event: TerminalInput.Submitted) -> None:
         if event.input is not self.input:
             return
         if self.questionnaire_active:
@@ -335,7 +381,16 @@ class TerminalView(App[None]):
         self.input.value = ""
         self.submissions.put_nowait(value)
 
+    def _resize_input(self) -> None:
+        self.input.styles.height = max(1, min(self.input.wrapped_document.height, 4))
+
     def on_key(self, event: events.Key) -> None:
+        if event.key == "escape" and self._interrupt_enabled:
+            if self.interrupts.empty():
+                self.interrupts.put_nowait(None)
+            event.prevent_default()
+            event.stop()
+            return
         if self.questionnaire_active:
             if self._questionnaire_custom_input:
                 if event.key != "escape":
@@ -451,7 +506,7 @@ class TerminalView(App[None]):
         self.input.focus()
 
     def _schedule_flush(self) -> None:
-        if self._closed:
+        if self._writes_closed:
             return
         loop = self._owner_loop
         if loop is not None:
@@ -482,6 +537,13 @@ class TerminalView(App[None]):
             self.transcript.scroll_end(animate=False)
         else:
             self.transcript.scroll_to(y=old_scroll, animate=False)
+        self.call_after_refresh(self._sync_transcript_scroll, old_scroll)
+
+    def _sync_transcript_scroll(self, previous_scroll: float) -> None:
+        if self._follow_tail:
+            self.transcript.scroll_end(animate=False)
+        else:
+            self.transcript.scroll_to(y=previous_scroll, animate=False)
 
     def _clear_now(self) -> None:
         with self._pending_lock:
@@ -496,7 +558,33 @@ class TerminalView(App[None]):
             self._follow_tail = True
             self._refresh_status()
 
+    def _show_copy_notice(self, character_count: int) -> None:
+        self._invalidate_copy_notice()
+        self.status_line.update(f" COPIED — {character_count} characters")
+        timer: Timer | None = None
+
+        def restore() -> None:
+            self._restore_status_after_copy(timer)
+
+        timer = self.set_timer(_COPY_NOTICE_SECONDS, restore)
+        self._copy_notice_timer = timer
+
+    def _invalidate_copy_notice(self) -> None:
+        if self._copy_notice_timer is not None:
+            self._copy_notice_timer.stop()
+            self._copy_notice_timer = None
+
+    def _restore_status_after_copy(self, timer: Timer | None) -> None:
+        if timer is not self._copy_notice_timer:
+            return
+        self._copy_notice_timer = None
+        self._render_status()
+
     def _refresh_status(self) -> None:
+        self._invalidate_copy_notice()
+        self._render_status()
+
+    def _render_status(self) -> None:
         suffix = " | PgUp/PgDn scroll" if not self._follow_tail else ""
         self.status_line.update(f" {self._status}{suffix}")
 
