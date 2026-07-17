@@ -26,7 +26,7 @@ The formal execution entry points (`AgentRunner.run`, planner capabilities, work
 
 One session permits one active turn. Runtime snapshots are saved at stable transitions, including model responses, tool results, plan changes, and turn completion. SSE reasoning deltas are merged into one ordered durable `thinking` message; raw HTTP objects remain transient.
 
-Interactive steering is a non-blocking process-local callback. Workflows drain and merge pending input only after strategy/model responses and before or after individual tool or plan steps. A tool or HTTP request that has already started is allowed to finish; the next stale action is skipped and the new `UserMessage` is checkpointed before replanning. Approval prompts remain the exclusive terminal input state while a review is pending.
+The runtime retains a non-blocking process-local steering callback for embedding callers. Workflows drain and merge steering only after strategy/model responses and before or after individual tool or plan steps; an operation already in progress may finish before stale work is skipped and the new `UserMessage` is checkpointed. The Textual TUI does not bind running input to this callback: it keeps messages in a process-local next-turn queue and starts one merged follow-up run after the active run finishes or is cooperatively cancelled with Esc. Approval prompts remain the exclusive terminal input state while a review is pending.
 
 ## Lifecycle Hooks
 

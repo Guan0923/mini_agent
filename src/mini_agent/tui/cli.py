@@ -205,12 +205,13 @@ class TerminalApp:
         self._view = view
         self._write("Mini-Agent TUI — type /help for commands, /quit to exit.")
         self._print_active_session()
-        steering: Queue[str] = Queue()
+        pending_messages: Queue[str] = Queue()
         approval = _InteractiveApproval(self._approval, loop, view)
         active_run: asyncio.Task[RunState | None] | None = None
         permission_pending = False
         deferred_task: str | None = None
         cancel_requested = Event()
+        cancellation_pending = False
         exit_after_run = False
 
         def launch(task: str) -> asyncio.Task[RunState | None]:
@@ -218,7 +219,6 @@ class TerminalApp:
                 asyncio.to_thread(
                     self.run_task,
                     task,
-                    steering=lambda: self._drain_steering(steering),
                     interrupt=approval,
                     cancel_requested=cancel_requested.is_set,
                 )
@@ -232,11 +232,17 @@ class TerminalApp:
                     active_run is not None,
                     approval,
                     permission_pending,
-                    cancelling=exit_after_run,
+                    cancelling=cancellation_pending or exit_after_run,
                 )
                 submission = asyncio.create_task(view.submissions.get())
+                interrupt_request = asyncio.create_task(view.interrupts.get())
                 approval_change = asyncio.create_task(approval.changed.wait())
-                waiters: set[asyncio.Task[object]] = {submission, approval_change, view_task}  # type: ignore[arg-type]
+                waiters: set[asyncio.Task[object]] = {  # type: ignore[arg-type]
+                    submission,
+                    interrupt_request,
+                    approval_change,
+                    view_task,
+                }
                 if active_run is not None:
                     waiters.add(active_run)  # type: ignore[arg-type]
                 done, _pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
@@ -248,29 +254,20 @@ class TerminalApp:
                         pass
                     if submission not in done:
                         await self._cancel_task(submission)
+                    if interrupt_request not in done:
+                        await self._cancel_task(interrupt_request)
                     if approval_change not in done:
                         await self._cancel_task(approval_change)
                     break
 
                 exit_requested = False
-
                 run_finished = active_run is not None and active_run in done
-                if run_finished:
-                    try:
-                        active_run.result()
-                    except Exception as exc:
-                        self._write(f"ERROR {exc}")
-                    active_run = None
-                    queued = self._drain_steering(steering)
-                    if exit_after_run:
-                        exit_requested = True
-                    elif queued:
-                        self._write(f"STEERING STARTED — {len(queued)} queued message(s)")
-                        active_run = launch("\n\n".join(queued))
 
                 approval_changed = approval_change in done
                 if approval_changed:
                     approval.changed.clear()
+                    if (cancellation_pending or exit_after_run) and approval.pending:
+                        approval.cancel_pending()
 
                 if submission in done:
                     submitted = submission.result()
@@ -290,7 +287,7 @@ class TerminalApp:
                                 if not exit_after_run:
                                     exit_after_run = True
                                     cancel_requested.set()
-                                    self._drain_steering(steering)
+                                    self._drain_steering(pending_messages)
                                     approval.cancel_pending()
                                     self._write("CANCELLING — waiting for current operation")
                             else:
@@ -320,8 +317,8 @@ class TerminalApp:
                                     self._write("Commands are unavailable while the agent is running.")
                                 else:
                                     self._write_user_message(task)
-                                    steering.put(task)
-                                    self._write("STEERING QUEUED")
+                                    pending_messages.put(task)
+                                    self._write("MESSAGE QUEUED")
                         else:
                             keep_running, next_task, request_permission = self._handle_view_input(task)
                             if not keep_running:
@@ -334,8 +331,34 @@ class TerminalApp:
                                 self._write_user_message(next_task)
                                 active_run = launch(next_task)
 
+                if interrupt_request in done:
+                    if (active_run is not None or approval.pending) and not cancellation_pending and not exit_after_run:
+                        cancellation_pending = True
+                        cancel_requested.set()
+                        approval.cancel_pending()
+                        self._write("CANCELLING — waiting for current operation")
+
+                if run_finished:
+                    assert active_run is not None
+                    try:
+                        active_run.result()
+                    except Exception as exc:
+                        self._write(f"ERROR {exc}")
+                    active_run = None
+                    cancel_requested.clear()
+                    cancellation_pending = False
+                    if exit_after_run:
+                        exit_requested = True
+                    else:
+                        queued = self._drain_steering(pending_messages)
+                        if queued:
+                            self._write(f"QUEUE STARTED — {len(queued)} queued message(s)")
+                            active_run = launch("\n\n".join(queued))
+
                 if submission not in done:
                     await self._cancel_task(submission)
+                if interrupt_request not in done:
+                    await self._cancel_task(interrupt_request)
                 if approval_change not in done:
                     await self._cancel_task(approval_change)
                 if exit_requested:
@@ -417,15 +440,25 @@ class TerminalApp:
     ) -> None:
         mode = self.mode.upper()
         if cancelling:
-            view.set_ui(status=f"{mode} | CANCELLING")
+            status = f"{mode} | CANCELLING"
+            interrupt_enabled = False
         elif approval.pending:
-            view.set_ui(status=approval.status)
+            status = approval.status
+            interrupt_enabled = True
         elif permission_pending:
-            view.set_ui(status="PERMISSION | 1 Approval for me | 2 Full access")
+            status = "PERMISSION | 1 Approval for me | 2 Full access"
+            interrupt_enabled = False
         elif running:
-            view.set_ui(status=f"{mode} | RUNNING")
+            status = f"{mode} | RUNNING"
+            interrupt_enabled = True
         else:
-            view.set_ui(status=f"{mode} | IDLE")
+            status = f"{mode} | IDLE"
+            interrupt_enabled = False
+        view.set_ui(status=self._status_with_permission(status), interrupt_enabled=interrupt_enabled)
+
+    def _status_with_permission(self, status: str) -> str:
+        permission = self._approval.permission_mode.replace("_", " ").upper()
+        return f"{status} | PERMISSION: {permission}"
 
     def _write(self, text: str, end: str = "\n") -> None:
         view = getattr(self, "_view", None)

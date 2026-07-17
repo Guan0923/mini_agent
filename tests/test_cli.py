@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from threading import Timer
 from types import SimpleNamespace
 
 import pytest
@@ -36,7 +37,7 @@ def build_terminal_app(result: RunState | Exception) -> cli.TerminalApp:
     app.mode = "agent"
     app._conversation_service = StubConversation(result)
     app._event_sink = lambda event: None
-    app._approval = object()
+    app._approval = TerminalApproval()
     return app
 
 
@@ -74,6 +75,56 @@ def test_run_task_prints_and_activates_an_isolated_handoff_session(capsys) -> No
     )
 
 
+def test_view_status_includes_permission_mode_for_every_state() -> None:
+    statuses: list[tuple[str, bool]] = []
+
+    class StatusView:
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            statuses.append((status, interrupt_enabled))
+
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._approval = TerminalApproval(permission_mode="approval_for_me")
+    view = StatusView()
+    idle_approval = SimpleNamespace(pending=False, status="REVIEW")
+    review_approval = SimpleNamespace(pending=True, status="TOOL REVIEW | 1 Continue | 2 Cancel | 3 Supplement")
+
+    app._update_view_state(view, False, idle_approval, False)
+    app._update_view_state(view, True, idle_approval, False)
+    app._update_view_state(view, True, idle_approval, False, cancelling=True)
+    app._update_view_state(view, True, review_approval, False)
+    app._update_view_state(view, False, idle_approval, True)
+
+    assert statuses == [
+        ("AGENT | IDLE | PERMISSION: APPROVAL FOR ME", False),
+        ("AGENT | RUNNING | PERMISSION: APPROVAL FOR ME", True),
+        ("AGENT | CANCELLING | PERMISSION: APPROVAL FOR ME", False),
+        ("TOOL REVIEW | 1 Continue | 2 Cancel | 3 Supplement | PERMISSION: APPROVAL FOR ME", True),
+        ("PERMISSION | 1 Approval for me | 2 Full access | PERMISSION: APPROVAL FOR ME", False),
+    ]
+
+
+def test_view_status_refreshes_after_permission_mode_changes() -> None:
+    statuses: list[str] = []
+
+    class StatusView:
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            del interrupt_enabled
+            statuses.append(status)
+
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._approval = TerminalApproval(permission_mode="approval_for_me")
+    approval = SimpleNamespace(pending=False, status="REVIEW")
+
+    app._update_view_state(StatusView(), False, approval, False)
+    app._approval.set_permission("full_access")
+    app._update_view_state(StatusView(), False, approval, False)
+
+    assert statuses == [
+        "AGENT | IDLE | PERMISSION: APPROVAL FOR ME",
+        "AGENT | IDLE | PERMISSION: FULL ACCESS",
+    ]
+
+
 def test_interactive_start_uses_full_screen_view_and_prints_resume_status(monkeypatch, capsys) -> None:
     commands: list[str] = []
 
@@ -85,6 +136,7 @@ def test_interactive_start_uses_full_screen_view_and_prints_resume_status(monkey
             type(self).last = self
             self.submissions = asyncio.Queue()
             self.submissions.put_nowait(None)
+            self.interrupts = asyncio.Queue()
             self.stopped = asyncio.Event()
             self.writes: list[str] = []
 
@@ -115,14 +167,15 @@ def test_interactive_start_uses_full_screen_view_and_prints_resume_status(monkey
     assert capsys.readouterr().out == "No saved session.\n"
 
 
-def test_interactive_start_accepts_messages_while_run_is_active(monkeypatch, capsys) -> None:
-    captured: list[str] = []
+def test_interactive_start_defers_active_run_messages_to_one_follow_up_run(monkeypatch, capsys) -> None:
+    calls: list[str] = []
 
     class BlockingConversation(StubConversation):
         def run_task(self, task: str, **kwargs) -> RunState:
-            assert task == "initial task"
-            time.sleep(0.05)
-            captured.extend(kwargs["steering"]())
+            calls.append(task)
+            assert kwargs["steering"] is None
+            if task == "initial task":
+                time.sleep(0.05)
             return RunState(task=task, mode="agent", status="completed")
 
     class InteractiveView:
@@ -132,6 +185,7 @@ def test_interactive_start_accepts_messages_while_run_is_active(monkeypatch, cap
             del loop, kwargs
             type(self).last = self
             self.submissions = asyncio.Queue()
+            self.interrupts = asyncio.Queue()
             self.stopped = asyncio.Event()
             self.initial_sent = False
             self.running_messages = 0
@@ -150,12 +204,13 @@ def test_interactive_start_accepts_messages_while_run_is_active(monkeypatch, cap
         def clear(self) -> None:
             self.writes.clear()
 
-        def set_ui(self, *, status: str) -> None:
-            if status.endswith("IDLE") and not self.initial_sent:
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            del interrupt_enabled
+            if "| IDLE" in status and not self.initial_sent:
                 self.initial_sent = True
                 self.submissions.put_nowait("initial task")
                 return
-            if status.endswith("RUNNING"):
+            if "| RUNNING" in status:
                 if self.running_messages == 0:
                     self.running_messages += 1
                     self.submissions.put_nowait("first steering")
@@ -164,7 +219,7 @@ def test_interactive_start_accepts_messages_while_run_is_active(monkeypatch, cap
                     self.running_messages += 1
                     self.submissions.put_nowait("second steering")
                     return
-            if status.endswith("IDLE") and self.running_messages == 2 and not self.quit_sent:
+            if "| IDLE" in status and self.running_messages == 2 and not self.quit_sent:
                 self.quit_sent = True
                 self.submissions.put_nowait("/quit")
 
@@ -176,7 +231,7 @@ def test_interactive_start_accepts_messages_while_run_is_active(monkeypatch, cap
 
     app.start()
 
-    assert captured == ["first steering", "second steering"]
+    assert calls == ["initial task", "first steering\n\nsecond steering"]
     assert InteractiveView.last is not None
     rendered = "".join(InteractiveView.last.writes)
     assert rendered.count("USER\ninitial task\n") == 1
@@ -187,27 +242,29 @@ def test_interactive_start_accepts_messages_while_run_is_active(monkeypatch, cap
     assert output == "No saved session.\n"
 
 
-def test_interactive_quit_cancels_active_run_then_exits(monkeypatch, capsys) -> None:
+def test_interactive_escape_cancels_active_run_without_exiting(monkeypatch, capsys) -> None:
     cancellation_seen: list[bool] = []
 
     class CancellableConversation(StubConversation):
         def run_task(self, task: str, **kwargs) -> RunState:
             assert task == "long task"
-            deadline = time.monotonic() + 1
+            deadline = time.monotonic() + 0.5
             while time.monotonic() < deadline and not kwargs["cancel_requested"]():
                 time.sleep(0.005)
             cancellation_seen.append(kwargs["cancel_requested"]())
             return RunState(task=task, mode="agent", status="cancelled")
 
-    class CancelView:
+    class InterruptView:
         last = None
 
         def __init__(self, loop, **kwargs) -> None:
             del loop, kwargs
             type(self).last = self
             self.submissions = asyncio.Queue()
+            self.interrupts = asyncio.Queue()
             self.stopped = asyncio.Event()
             self.started = False
+            self.interrupt_sent = False
             self.quit_sent = False
             self.writes: list[str] = []
 
@@ -223,11 +280,308 @@ def test_interactive_quit_cancels_active_run_then_exits(monkeypatch, capsys) -> 
         def clear(self) -> None:
             self.writes.clear()
 
-        def set_ui(self, *, status: str) -> None:
-            if status.endswith("IDLE") and not self.started:
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            del interrupt_enabled
+            if "| IDLE" in status and not self.started:
                 self.started = True
                 self.submissions.put_nowait("long task")
-            elif status.endswith("RUNNING") and not self.quit_sent:
+            elif "| RUNNING" in status and not self.interrupt_sent:
+                self.interrupt_sent = True
+                self.interrupts.put_nowait(None)
+            elif "| IDLE" in status and self.interrupt_sent and not self.quit_sent:
+                self.quit_sent = True
+                self.submissions.put_nowait("/quit")
+
+    monkeypatch.setattr(cli, "TerminalView", InterruptView)
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._conversation_service = CancellableConversation(RunState(task="unused", mode="agent"))
+    app._approval = TerminalApproval()
+
+    app.start()
+
+    assert cancellation_seen == [True]
+    assert InterruptView.last is not None
+    rendered = "".join(InterruptView.last.writes)
+    assert rendered.count("CANCELLING — waiting for current operation") == 1
+    assert capsys.readouterr().out == "No saved session.\n"
+
+
+def test_interactive_escape_sends_queued_messages_after_cancellation(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, bool]] = []
+
+    class CancellableConversation(StubConversation):
+        def run_task(self, task: str, **kwargs) -> RunState:
+            if not calls:
+                deadline = time.monotonic() + 0.5
+                while time.monotonic() < deadline and not kwargs["cancel_requested"]():
+                    time.sleep(0.005)
+                time.sleep(0.05)
+                calls.append((task, kwargs["cancel_requested"]()))
+                return RunState(task=task, mode="agent", status="cancelled")
+            calls.append((task, kwargs["cancel_requested"]()))
+            return RunState(task=task, mode="agent", status="completed")
+
+    class QueueThenInterruptView:
+        last = None
+
+        def __init__(self, loop, **kwargs) -> None:
+            del loop, kwargs
+            type(self).last = self
+            self.submissions = asyncio.Queue()
+            self.interrupts = asyncio.Queue()
+            self.stopped = asyncio.Event()
+            self.started = False
+            self.running_updates = 0
+            self.cancelling_updates = 0
+            self.quit_sent = False
+            self.writes: list[str] = []
+
+        async def run_async(self) -> None:
+            await self.stopped.wait()
+
+        def stop(self) -> None:
+            self.stopped.set()
+
+        def write(self, text: str, end: str = "\n") -> None:
+            self.writes.append(f"{text}{end}")
+
+        def clear(self) -> None:
+            pass
+
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            del interrupt_enabled
+            if "| IDLE" in status and not self.started:
+                self.started = True
+                self.submissions.put_nowait("initial task")
+                return
+            if "| RUNNING" in status and not calls:
+                if self.running_updates == 0:
+                    self.running_updates += 1
+                    self.submissions.put_nowait("first queued")
+                elif self.running_updates == 1:
+                    self.running_updates += 1
+                    self.submissions.put_nowait("second queued")
+                elif self.running_updates == 2:
+                    self.running_updates += 1
+                    self.interrupts.put_nowait(None)
+                return
+            if "| CANCELLING" in status and not calls:
+                if self.cancelling_updates == 0:
+                    self.cancelling_updates += 1
+                    self.submissions.put_nowait("third queued")
+                elif self.cancelling_updates == 1:
+                    self.cancelling_updates += 1
+                    self.interrupts.put_nowait(None)
+                return
+            if "| IDLE" in status and len(calls) == 2 and not self.quit_sent:
+                self.quit_sent = True
+                self.submissions.put_nowait("/quit")
+
+    monkeypatch.setattr(cli, "TerminalView", QueueThenInterruptView)
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._conversation_service = CancellableConversation(RunState(task="unused", mode="agent"))
+    app._approval = TerminalApproval()
+
+    app.start()
+
+    assert calls == [
+        ("initial task", True),
+        ("first queued\n\nsecond queued\n\nthird queued", False),
+    ]
+    assert QueueThenInterruptView.last is not None
+    assert QueueThenInterruptView.last.writes.count("CANCELLING — waiting for current operation\n") == 1
+    assert capsys.readouterr().out == "No saved session.\n"
+
+
+def test_interactive_escape_cancels_pending_tool_review(monkeypatch, capsys) -> None:
+    decisions: list[tuple[str, bool]] = []
+
+    class ReviewingConversation(StubConversation):
+        def run_task(self, task: str, **kwargs) -> RunState:
+            assert task == "review task"
+            decision = kwargs["interrupt"](
+                InterruptRequest("tool", "Approve tool?", {"tool": "write_file", "arguments": {}})
+            )
+            decisions.append((decision.choice, kwargs["cancel_requested"]()))
+            return RunState(task=task, mode="agent", status="cancelled")
+
+    class ReviewInterruptView:
+        def __init__(self, loop, **kwargs) -> None:
+            del loop, kwargs
+            self.submissions = asyncio.Queue()
+            self.interrupts = asyncio.Queue()
+            self.stopped = asyncio.Event()
+            self.started = False
+            self.interrupt_sent = False
+            self.quit_sent = False
+
+        async def run_async(self) -> None:
+            await self.stopped.wait()
+
+        def stop(self) -> None:
+            self.stopped.set()
+
+        def write(self, text: str, end: str = "\n") -> None:
+            del text, end
+
+        def clear(self) -> None:
+            pass
+
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            if "| IDLE" in status and not self.started:
+                self.started = True
+                self.submissions.put_nowait("review task")
+            elif status.startswith("TOOL REVIEW") and interrupt_enabled and not self.interrupt_sent:
+                self.interrupt_sent = True
+                self.interrupts.put_nowait(None)
+            elif "| IDLE" in status and decisions and not self.quit_sent:
+                self.quit_sent = True
+                self.submissions.put_nowait("/quit")
+
+    monkeypatch.setattr(cli, "TerminalView", ReviewInterruptView)
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._conversation_service = ReviewingConversation(RunState(task="unused", mode="agent"))
+    app._approval = TerminalApproval(write=app._write)
+
+    app.start()
+
+    assert decisions == [("cancel", True)]
+    assert capsys.readouterr().out == "No saved session.\n"
+
+
+def test_interactive_cancellation_resolves_tool_review_opened_after_escape(monkeypatch, capsys) -> None:
+    calls: list[str] = []
+    decisions: list[tuple[str, bool]] = []
+    fallback_used = False
+
+    class LateReviewConversation(StubConversation):
+        def run_task(self, task: str, **kwargs) -> RunState:
+            calls.append(task)
+            if len(calls) == 1:
+                deadline = time.monotonic() + 0.5
+                while time.monotonic() < deadline and not kwargs["cancel_requested"]():
+                    time.sleep(0.005)
+                decision = kwargs["interrupt"](
+                    InterruptRequest("tool", "Approve late tool?", {"tool": "write_file", "arguments": {}})
+                )
+                decisions.append((decision.choice, kwargs["cancel_requested"]()))
+                return RunState(task=task, mode="agent", status="cancelled")
+            return RunState(task=task, mode="agent", status="completed")
+
+    class LateReviewView:
+        def __init__(self, loop, **kwargs) -> None:
+            del kwargs
+            self.loop = loop
+            self.submissions = asyncio.Queue()
+            self.interrupts = asyncio.Queue()
+            self.stopped = asyncio.Event()
+            self.started = False
+            self.running_updates = 0
+            self.quit_sent = False
+            self.fallback: Timer | None = None
+
+        async def run_async(self) -> None:
+            await self.stopped.wait()
+
+        def stop(self) -> None:
+            if self.fallback is not None:
+                self.fallback.cancel()
+            self.stopped.set()
+
+        def write(self, text: str, end: str = "\n") -> None:
+            del text, end
+
+        def clear(self) -> None:
+            pass
+
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            nonlocal fallback_used
+            if "| IDLE" in status and not self.started:
+                self.started = True
+                self.submissions.put_nowait("initial task")
+                return
+            if "| RUNNING" in status and interrupt_enabled and len(calls) == 1:
+                if self.running_updates == 0:
+                    self.running_updates += 1
+                    self.submissions.put_nowait("queued follow-up")
+                elif self.running_updates == 1:
+                    self.running_updates += 1
+                    self.interrupts.put_nowait(None)
+
+                    def force_exit() -> None:
+                        nonlocal fallback_used
+                        fallback_used = True
+                        self.loop.call_soon_threadsafe(self.submissions.put_nowait, "/quit")
+
+                    self.fallback = Timer(1.0, force_exit)
+                    self.fallback.start()
+                return
+            if "| IDLE" in status and len(calls) == 2 and not self.quit_sent:
+                self.quit_sent = True
+                self.submissions.put_nowait("/quit")
+
+    monkeypatch.setattr(cli, "TerminalView", LateReviewView)
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._conversation_service = LateReviewConversation(RunState(task="unused", mode="agent"))
+    app._approval = TerminalApproval(write=app._write)
+
+    app.start()
+
+    assert fallback_used is False
+    assert decisions == [("cancel", True)]
+    assert calls == ["initial task", "queued follow-up"]
+    assert capsys.readouterr().out == "No saved session.\n"
+
+
+def test_interactive_quit_cancels_active_run_then_exits(monkeypatch, capsys) -> None:
+    cancellation_seen: list[bool] = []
+    calls: list[str] = []
+
+    class CancellableConversation(StubConversation):
+        def run_task(self, task: str, **kwargs) -> RunState:
+            assert task == "long task"
+            calls.append(task)
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and not kwargs["cancel_requested"]():
+                time.sleep(0.005)
+            cancellation_seen.append(kwargs["cancel_requested"]())
+            return RunState(task=task, mode="agent", status="cancelled")
+
+    class CancelView:
+        last = None
+
+        def __init__(self, loop, **kwargs) -> None:
+            del loop, kwargs
+            type(self).last = self
+            self.submissions = asyncio.Queue()
+            self.interrupts = asyncio.Queue()
+            self.stopped = asyncio.Event()
+            self.started = False
+            self.message_queued = False
+            self.quit_sent = False
+            self.writes: list[str] = []
+
+        async def run_async(self) -> None:
+            await self.stopped.wait()
+
+        def stop(self) -> None:
+            self.stopped.set()
+
+        def write(self, text: str, end: str = "\n") -> None:
+            self.writes.append(f"{text}{end}")
+
+        def clear(self) -> None:
+            self.writes.clear()
+
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            del interrupt_enabled
+            if "| IDLE" in status and not self.started:
+                self.started = True
+                self.submissions.put_nowait("long task")
+            elif "| RUNNING" in status and not self.message_queued:
+                self.message_queued = True
+                self.submissions.put_nowait("discard this queued message")
+            elif "| RUNNING" in status and not self.quit_sent:
                 self.quit_sent = True
                 self.submissions.put_nowait("/quit")
 
@@ -239,6 +593,7 @@ def test_interactive_quit_cancels_active_run_then_exits(monkeypatch, capsys) -> 
     app.start()
 
     assert cancellation_seen == [True]
+    assert calls == ["long task"]
     assert CancelView.last is not None
     output = "".join(CancelView.last.writes)
     assert output.count("CANCELLING — waiting for current operation") == 1
