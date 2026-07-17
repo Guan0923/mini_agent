@@ -6,13 +6,44 @@ from mini_agent.domain import (
     ArtifactMessage,
     AssistantMessage,
     StrategySelection,
+    ToolMessage,
     UserMessage,
     message_from_dict,
     message_to_dict,
 )
 from mini_agent.runtime import AgentRunner, ConversationService, SQLiteSessionStore
 from mini_agent.runtime.contracts import InterruptDecision
+from mini_agent.runtime.plan_review import REQUEST_PLAN_REVIEW_NAME
 from mini_agent.tools import ToolRegistry
+
+PLAN = "# Reviewed change\n\n## Summary\nImplement the reviewed change."
+
+
+def review_message(call_id: str = "review_1") -> AssistantMessage:
+    return AssistantMessage(
+        tool_messages=[
+            ToolMessage(
+                name=REQUEST_PLAN_REVIEW_NAME,
+                call_id=call_id,
+                arguments={"plan": PLAN},
+            )
+        ]
+    )
+
+
+def completed_review_message(call_id: str = "review_1") -> AssistantMessage:
+    return AssistantMessage(
+        tool_messages=[
+            ToolMessage(
+                name=REQUEST_PLAN_REVIEW_NAME,
+                call_id=call_id,
+                arguments={"plan": PLAN},
+                status="succeeded",
+                content="Plan submitted for review.",
+                retryable=False,
+            )
+        ]
+    )
 
 
 class PlanMessagePlanner:
@@ -23,7 +54,7 @@ class PlanMessagePlanner:
 
     def decide(self, runtime):
         if runtime.run.mode == "plan":
-            return AssistantMessage(content="1. Implement the reviewed change.")
+            return review_message()
         self.agent_histories.append(list(runtime.state.messages))
         return AssistantMessage(content="Implemented from ordinary messages.")
 
@@ -31,17 +62,10 @@ class PlanMessagePlanner:
         return StrategySelection("reactive", "The model can execute directly from conversation history.")
 
 
-class FormatRepairPlanner(PlanMessagePlanner):
-    def __init__(self) -> None:
-        super().__init__()
-        self.plan_responses = 0
-
+class ConversationPlanner(PlanMessagePlanner):
     def decide(self, runtime):
         if runtime.run.mode == "plan":
-            self.plan_responses += 1
-            if self.plan_responses == 1:
-                return AssistantMessage(content="Inspect the project, then implement the change.")
-            return AssistantMessage(content="1. Inspect the project.\n2. Implement the change.")
+            return AssistantMessage(content="Hello! What would you like to discuss?")
         return super().decide(runtime)
 
 
@@ -51,7 +75,7 @@ def build_service(tmp_path: Path, planner: PlanMessagePlanner) -> ConversationSe
     return ConversationService(runner, store)
 
 
-def test_plan_implement_keeps_complete_history_as_ordinary_messages(tmp_path: Path) -> None:
+def test_plan_implement_keeps_control_call_as_ordinary_history(tmp_path: Path) -> None:
     planner = PlanMessagePlanner()
     service = build_service(tmp_path, planner)
 
@@ -65,7 +89,7 @@ def test_plan_implement_keeps_complete_history_as_ordinary_messages(tmp_path: Pa
     assert result.strategy == "reactive"
     assert planner.agent_histories[-1] == [
         UserMessage(content="Plan the change"),
-        AssistantMessage(content="1. Implement the reviewed change."),
+        completed_review_message(),
         UserMessage(content="Implement the plan"),
     ]
     assert all(message.role != "artifact" for message in service.runtime.state.messages)
@@ -91,7 +115,7 @@ def test_plan_implement_clear_session_seeds_only_final_plan(tmp_path: Path) -> N
     assert service.active_session is not None
     assert service.active_session.session_id != source.session_id
     assert planner.agent_histories[-1] == [
-        AssistantMessage(content="1. Implement the reviewed change."),
+        AssistantMessage(content=PLAN),
         UserMessage(content="Implement the plan"),
     ]
 
@@ -123,29 +147,28 @@ def test_artifact_message_is_not_serializable_as_chat_history() -> None:
         message_to_dict(artifact)
 
 
-def test_plan_format_repair_preserves_all_messages_and_records_final_plan_once(tmp_path: Path) -> None:
-    planner = FormatRepairPlanner()
+def test_plan_conversation_completes_without_review_or_format_repair(tmp_path: Path) -> None:
+    planner = ConversationPlanner()
     service = build_service(tmp_path, planner)
+    events = []
 
     result = service.run_task(
-        "Plan the change",
+        "Hello",
         mode="plan",
-        interrupt=lambda _request: InterruptDecision("cancel"),
+        on_event=events.append,
+        interrupt=lambda _request: pytest.fail("ordinary conversation must not interrupt"),
     )
 
-    assert result.status == "cancelled"
+    assert result.status == "completed"
+    assert result.final_answer == "Hello! What would you like to discuss?"
     assert service.runtime is not None
     assert service.runtime.state.messages == [
-        UserMessage(content="Plan the change"),
-        AssistantMessage(content="Inspect the project, then implement the change."),
-        UserMessage(
-            content=(
-                "[Plan format correction]\nUse request_user_input for material clarification questions; "
-                "otherwise return a concise numbered plan starting with 1."
-            )
-        ),
-        AssistantMessage(content="1. Inspect the project.\n2. Implement the change."),
+        UserMessage(content="Hello"),
+        AssistantMessage(content="Hello! What would you like to discuss?"),
     ]
+    assert [event.kind for event in events].count("response") == 1
+    assert all(event.kind != "plan" for event in events)
+    assert all(event.kind != "model_repair" for event in events)
 
 
 def test_cancelled_plan_history_survives_restart(tmp_path: Path) -> None:
@@ -168,7 +191,7 @@ def test_cancelled_plan_history_survives_restart(tmp_path: Path) -> None:
     assert reopened.runtime is not None
     assert reopened.runtime.state.messages == [
         UserMessage(content="Plan the change"),
-        AssistantMessage(content="1. Implement the reviewed change."),
+        completed_review_message(),
     ]
 
 
@@ -201,5 +224,5 @@ def test_clear_session_failure_preserves_source_plan_history(tmp_path: Path) -> 
     assert service.active_session.session_id == source.session_id
     persisted = store.load_runtime(source.session_id)
     assert persisted is not None
-    assert persisted.messages[-1] == AssistantMessage(content="1. Implement the reviewed change.")
+    assert persisted.messages[-1] == completed_review_message()
     assert len(store.list_sessions()) == 1

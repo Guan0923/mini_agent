@@ -2,6 +2,7 @@ from pathlib import Path
 
 from mini_agent.domain import AgentAction, StrategySelection
 from mini_agent.runtime import LegacyAgentRunner as AgentRunner
+from mini_agent.runtime.plan_review import REQUEST_PLAN_REVIEW_NAME
 from mini_agent.tools import ToolRegistry
 from mini_agent.tui.cli import TerminalApp
 
@@ -23,7 +24,11 @@ class FullAccessPlanPlanner:
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         assert mode == "plan"
-        return AgentAction(type="final_answer", answer="1. Inspect the project.\n2. Apply the approved change.")
+        return AgentAction(
+            type="tool_call",
+            tool=REQUEST_PLAN_REVIEW_NAME,
+            arguments={"plan": "1. Inspect the project.\n2. Apply the approved change."},
+        )
 
 
 def test_permission_command_full_access_auto_approves_confirmed_tools(tmp_path: Path, monkeypatch) -> None:

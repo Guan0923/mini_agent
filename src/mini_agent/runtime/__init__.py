@@ -46,6 +46,7 @@ _EXPORTS = {
     "ToolHookResult": ("hooks", "ToolHookResult"),
     "UserQuestion": ("contracts", "UserQuestion"),
     "REQUEST_USER_INPUT_SPEC": ("user_input", "REQUEST_USER_INPUT_SPEC"),
+    "REQUEST_PLAN_REVIEW_SPEC": ("plan_review", "REQUEST_PLAN_REVIEW_SPEC"),
     "build_application": ("factory", "build_application"),
     "build_runner": ("factory", "build_runner"),
     "build_session_store": ("factory", "build_session_store"),

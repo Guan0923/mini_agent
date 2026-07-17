@@ -166,9 +166,9 @@ TUI 有两种模式，默认是 Agent 模式：模型每次选择工具调用或
 
 正常产品路径只会自动选择 `reactive` 或 `dynamic_replan`：前者适合简单、逐步确定的任务，后者会按实时工具结果生成并替换后续可执行阶段。`plan_execute` 仍可通过 `--strategy plan_execute` 显式启用，但它是“固定计划、失败即停止”的实验对照基线，自动路由和 `/plan` 都不会使用它。
 
-输入 `/plan` 会进入只读调研：本地计算、列目录和读取文件自动执行；网页搜索/抓取仍会要求确认；写入、移动、删除和命令执行会被阻止。若项目本身无法回答会实质影响方案的问题，模型可调用 Plan 专用内建控制工具 `request_user_input`；它不注册到 `ToolRegistry`，也不计入 `/tools` 展示的三个执行工具。一次调用包含 1–3 题，每题给出 2–3 个候选，终端在最后追加“以上都不对”供自由输入。模型可进行多轮问答，只有在信息充分并输出最终编号计划后才进入 `PLAN REVIEW`。
+输入 `/plan` 会进入只读规划与讨论模式：普通问候、解释和需求讨论直接作为对话返回；本地计算、列目录和读取文件可用于调研，网页搜索/抓取仍会要求确认，写入、移动和删除会被阻止。若项目本身无法回答会实质影响方案的问题，模型可单独调用 Plan 专用控制工具 `request_user_input`。只有当完整实施计划确实需要用户审核时，模型才单独调用 `request_plan_review` 并进入 `PLAN REVIEW`。两个控制工具都不注册到 `ToolRegistry`，也不计入 `/tools` 展示的执行工具。
 
-Plan 调研、问题调用、结构化答案、格式修正和最终编号计划都保存在 session runtime history。问题调用与答案只占一个普通 `AssistantMessage`：答案作为嵌套 `ToolMessage` 的结果保存，不额外复制为 `UserMessage`。`PLAN REVIEW` 只提供三个选择：`Implement` 完成当前 Plan run，在同一 session 追加 `UserMessage(content="Implement the plan")` 并启动独立 Agent run；`Implement and Clear Session` 创建新的隔离 session，只携带最终计划的 AssistantMessage 与实施指令；`Cancel and Stay in plan mode` 取消当前 run、保留完整 Plan 对话并停留在 Plan 模式。handoff 后由正常策略路由器选择执行方式，不强制 `dynamic_replan`。Plan Review 不提供 Supplement，也不依赖“执行”等关键词匹配。
+Plan 调研、控制工具调用和结构化结果都作为普通 typed messages 保存在 session runtime history。`request_plan_review` 的计划正文保存在该调用的参数中，同一历史不会再插入重复计划消息；隔离 handoff 仍通过 run 的 `final_answer` 为新 session 提供一条计划 AssistantMessage。`PLAN REVIEW` 保留三个选择：`Implement`、`Implement and Clear Session` 和 `Cancel and Stay in plan mode`。handoff 后仍由正常策略路由器选择执行方式，不强制 `dynamic_replan`。
 
 工具仅在其声明需要确认时才请求 Human-in-the-Loop：网页搜索/抓取、写文件、移动、删除和命令执行均会逐次确认；本地计算、列目录和读文件自动执行。TUI 默认使用 `Approval for me`；输入 `/permission` 可在当前程序内切换为 `Full access`，使所有工具审批自动 Continue。工具审批仍使用 `Continue / Cancel / Supplement`，Supplement 只属于 Tool Review，与 Plan Review 相互独立；`Full access` 不会跳过 `/plan` 生成提案后的 `PLAN REVIEW`，最终计划仍需人工选择 `Implement / Implement and Clear Session / Cancel and Stay in plan mode`。安全只读工具可按 `--max-retries` 同参数重试。若 reactive 或 `/plan` 调研中的工具最终失败，运行时会将截断后的调用和错误作为不可信上下文交给 LLM，请其最多连续纠错 `--max-tool-recoveries` 次（默认 2）；任一工具成功会重置该计数。不可自动重试的写入、移动、删除和命令调用不会因相同参数被重复执行。
 

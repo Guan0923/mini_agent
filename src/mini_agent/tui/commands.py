@@ -17,7 +17,7 @@ class CommandDefinition:
 
 COMMAND_DEFINITIONS = (
     CommandDefinition("agent", "/agent", "Enter normal Agent mode."),
-    CommandDefinition("plan", "/plan", "Create a plan and open Plan Review."),
+    CommandDefinition("plan", "/plan", "Enter read-only planning and discussion mode."),
     CommandDefinition("permission", "/permission", "Choose the in-memory tool approval mode."),
     CommandDefinition("sessions", "/sessions", "List saved sessions."),
     CommandDefinition("session", "/session", "Show the current session."),

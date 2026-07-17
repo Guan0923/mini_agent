@@ -18,6 +18,7 @@ from mini_agent.domain import (
     UserMessage,
 )
 from mini_agent.runtime.context import AgentRuntime, PreparedResponse
+from mini_agent.runtime.plan_review import REQUEST_PLAN_REVIEW_NAME, REQUEST_PLAN_REVIEW_SPEC
 from mini_agent.runtime.events import RuntimeEvent
 from mini_agent.runtime.hooks import (
     HookOutcome,
@@ -76,40 +77,39 @@ class LLMPlanner:
         allowed = self.read_only_tool_specs if runtime.run.mode == "plan" else self.tool_specs
         if runtime.run.mode == "plan":
             allowed = self._plan_mode_specs(allowed)
-            if any(spec.name == REQUEST_USER_INPUT_NAME for spec in allowed):
-                raise PlanningError(f"{REQUEST_USER_INPUT_NAME!r} is reserved for the Plan-mode control protocol.")
-            allowed = [*allowed, REQUEST_USER_INPUT_SPEC]
+            reserved_names = {REQUEST_USER_INPUT_NAME, REQUEST_PLAN_REVIEW_NAME}
+            collisions = sorted(spec.name for spec in allowed if spec.name in reserved_names)
+            if collisions:
+                names = ", ".join(repr(name) for name in collisions)
+                verb = "is" if len(collisions) == 1 else "are"
+                raise PlanningError(f"{names} {verb} reserved for the Plan-mode control protocol.")
+            allowed = [*allowed, REQUEST_USER_INPUT_SPEC, REQUEST_PLAN_REVIEW_SPEC]
             system = SystemMessage(
                 content=(
-                    "You are a terminal-based AI agent in read-only Plan mode. "
-                    "Your goal is to gather facts about the workspace and produce a concise, "
-                    "actionable implementation plan.\n\n"
-                    "## Reasoning Process\n"
-                    "1. **Understand the Goal**: What outcome is the user asking for? What "
-                    "constitutes success?\n"
-                    "2. **Explore the Workspace**: List directories, read relevant files, search "
-                    "for patterns. Ground yourself in the actual code before proposing changes.\n"
-                    "3. **Resolve Material Unknowns**: If a decision cannot be discovered from "
-                    "the workspace and materially changes the plan, call request_user_input. Ask "
-                    "one to three questions with two or three meaningful options each. Call it by "
-                    "itself, never alongside another tool. Continue planning after the answers.\n"
-                    "4. **Identify the Minimal Change**: What is the smallest safe edit or "
-                    "addition that achieves the goal? Avoid scope creep.\n"
-                    "5. **Draft the Plan**: Number each step. Each step should be one discrete "
-                    "action with a clear expected result. Include verification steps.\n"
-                    "6. **Output the Plan**: Present the numbered plan only after the important "
-                    "unknowns are resolved. Do not execute it — "
-                    "implementation happens in Agent mode.\n\n"
+                    "You are a terminal-based AI agent in read-only Plan mode. Help the user discuss, understand, "
+                    "and plan work without modifying the workspace. Plan mode does not require every response to be "
+                    "an implementation plan.\n\n"
+                    "## Interaction\n"
+                    "- Respond normally to greetings, explanations, status questions, and exploratory discussion.\n"
+                    "- When a concrete task benefits from repository context, inspect the workspace before making "
+                    "implementation claims.\n"
+                    "- If an important product or implementation decision cannot be discovered and materially "
+                    "changes the plan, call request_user_input by itself. Continue after the answer.\n"
+                    "- When the important unknowns are resolved and a complete implementation plan is genuinely "
+                    "useful for explicit user approval, call request_plan_review by itself with the full plan.\n"
+                    "- Do not call request_plan_review for ordinary conversation or merely because Plan mode is "
+                    "active. Do not execute an approved plan; implementation happens in Agent mode.\n\n"
+                    "## Recommended Plan Shape\n"
+                    "# Plan title\n\n"
+                    "## Summary\nContent\n\n"
+                    "## Key Changes\nContent\n\n"
+                    "## Test Plan\nContent\n\n"
+                    "## Assumptions\nContent\n\n"
+                    "This structure is guidance for request_plan_review, not a syntax requirement for ordinary "
+                    "responses.\n\n"
                     "## Read-Only Constraint\n"
-                    "You may only use run_command for reading files, listing directories, and "
-                    "searching content. The tool description includes platform-specific syntax. "
-                    "Do NOT attempt writes, deletes, or moves.\n\n"
-                    "## Output Format\n"
-                    "When you have gathered enough context and no material decision remains, respond "
-                    "with a numbered implementation "
-                    "plan (e.g. '1. Read file X. 2. Modify function Y to Z. 3. Run the tests.'). "
-                    "Each line should be a discrete, ordered action step. Do not ask clarification "
-                    "questions as ordinary assistant text; use request_user_input instead."
+                    "You may only use run_command for reading files, listing directories, and searching content. "
+                    "The tool description includes platform-specific syntax. Do NOT attempt writes, deletes, or moves."
                     + self._UNTRUSTED_TOOL_RESULT_POLICY
                 )
             )
@@ -196,7 +196,7 @@ class LLMPlanner:
 
     def select_strategy(self, runtime: AgentRuntime) -> StrategySelection:
         if runtime.run.mode == "plan":
-            return StrategySelection("reactive", "Plan mode drafts an artifact for explicit implementation review.")
+            return StrategySelection("reactive", "Plan mode supports read-only discussion and optional Plan Review.")
         raw = self._json_request(
             runtime,
             SystemMessage(

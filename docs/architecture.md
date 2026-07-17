@@ -56,7 +56,7 @@ SQLite `session_runtime` snapshots retain resumable state, while `session_runtim
 
 ## Plan Messages and Handoffs
 
-Plan mode preserves its research, tool calls, clarification rounds, format correction turns, and final proposal as ordinary typed messages before showing `PLAN REVIEW`. `request_user_input` is a Plan-only built-in control ToolSpec: it is exposed to the model beside read-only tools but is not registered with `ToolRegistry`, listed by `/tools`, or routed through tool approval. The runtime intercepts a sole control call, validates one to three typed questions, pauses through `InterruptRequest(kind="question")`, and stores the structured answers as that call's ToolMessage result before continuing the same Plan run. The final proposal is one `AssistantMessage`; no artifact file, duplicate answer message, or premature Plan Review is created.
+Plan mode is a read-only conversation workflow rather than an unconditional proposal generator. Plain assistant text completes with a `response` event. The built-in `request_user_input` control pauses for material clarification, while `request_plan_review` carries a non-empty Markdown plan into the existing `InterruptRequest(kind="plan")` review. Both controls are exposed beside read-only tools, must be called alone, and are not registered with `ToolRegistry` or listed by `/tools`. A submitted plan remains in the control ToolMessage arguments and becomes the run `final_answer` only after implementation approval, avoiding a duplicate proposal message in the same history.
 
 Review decisions behave as follows:
 

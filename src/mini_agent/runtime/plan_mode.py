@@ -24,19 +24,13 @@ class PlanModeWorkflow:
             return
         if cancel_if_requested(runtime):
             return
-        message = AssistantMessage(content=proposal)
-        self._record_proposal(runtime, message)
-        self._review(runtime, message)
+        if proposal.plan is None:
+            complete_run(runtime, proposal.message, event_kind="response")
+            return
+        self._review(runtime, proposal.message, proposal.plan)
 
     @staticmethod
-    def _record_proposal(runtime: AgentRuntime, message: AssistantMessage) -> None:
-        runtime.state.messages.append(message)
-        runtime.run.history = runtime.state.messages
-        runtime.save()
-
-    @staticmethod
-    def _review(runtime: AgentRuntime, message: AssistantMessage) -> None:
-        proposal = message.content or ""
+    def _review(runtime: AgentRuntime, message: AssistantMessage, proposal: str) -> None:
         request = InterruptRequest(
             "plan",
             "Choose how to handle this plan.",
@@ -91,4 +85,4 @@ class PlanModeWorkflow:
                 },
             )
         )
-        complete_run(runtime, message)
+        complete_run(runtime, message, final_answer=proposal, event_kind="plan")

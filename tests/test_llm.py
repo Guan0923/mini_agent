@@ -612,11 +612,24 @@ def test_plan_decision_exposes_request_user_input_without_registering_it() -> No
     planner.decide(runtime)
 
     assert registry.names() == []
-    assert [spec.name for spec in runtime.exchange.allowed_tools] == ["request_user_input"]
+    assert [spec.name for spec in runtime.exchange.allowed_tools] == [
+        "request_user_input",
+        "request_plan_review",
+    ]
     system = runtime.exchange.messages[0]
     assert isinstance(system, SystemMessage)
     assert "request_user_input" in (system.content or "")
+    assert "request_plan_review" in (system.content or "")
+    assert "does not require every response" in (system.content or "")
 
+
+@pytest.mark.parametrize("name", ["request_user_input", "request_plan_review"])
+def test_plan_decision_rejects_registered_control_name_collisions(name: str) -> None:
+    planner = LLMPlanner(ScriptedClient([]), [], [ToolSpec(name, "conflicting tool")])
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="Plan the change", mode="plan")
+
+    with pytest.raises(PlanningError, match="reserved for the Plan-mode control protocol"):
+        planner.decide(runtime)
 
 def test_llm_planner_rejects_unknown_native_tool() -> None:
     client = ScriptedClient(

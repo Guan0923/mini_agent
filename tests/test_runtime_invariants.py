@@ -1,6 +1,7 @@
 from mini_agent.domain import AssistantMessage, ToolMessage
 from mini_agent.runtime import AgentRunner, AgentRuntime
 from mini_agent.runtime.contracts import InterruptDecision
+from mini_agent.runtime.plan_review import REQUEST_PLAN_REVIEW_NAME
 from mini_agent.tools import Tool, ToolRegistry
 
 
@@ -74,7 +75,15 @@ class PlanProposalPlanner:
     name = "plan-proposal"
 
     def decide(self, runtime: AgentRuntime) -> AssistantMessage:
-        return AssistantMessage(content="1. Inspect the project.")
+        return AssistantMessage(
+            tool_messages=[
+                ToolMessage(
+                    name=REQUEST_PLAN_REVIEW_NAME,
+                    call_id="review_1",
+                    arguments={"plan": "1. Inspect the project."},
+                )
+            ]
+        )
 
 
 def test_plan_review_defaults_to_cancel_without_an_interrupt_handler() -> None:

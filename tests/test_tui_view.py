@@ -268,7 +268,7 @@ def test_command_completion_menu_accepts_selected_candidate() -> None:
 
             assert view.completion_menu.display is True
             assert [option.prompt for option in view.completion_menu._options] == [
-                "/plan — Create a plan and open Plan Review.",
+                "/plan — Enter read-only planning and discussion mode.",
                 "/permission — Choose the in-memory tool approval mode.",
             ]
 

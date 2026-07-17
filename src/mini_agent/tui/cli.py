@@ -557,7 +557,7 @@ class TerminalApp:
                 self._write("Usage: /plan")
                 return True
             self.mode = "plan"
-            self._write("Plan mode enabled: generated plans open Plan Review. Use /agent to return to Agent mode.")
+            self._write("Plan mode enabled: read-only discussion with Plan Review available when needed. Use /agent to return to Agent mode.")
             return True
         if command == "permission":
             if argument:

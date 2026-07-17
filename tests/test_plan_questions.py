@@ -6,6 +6,7 @@ import pytest
 from mini_agent.domain import AssistantMessage, StrategySelection, ToolMessage, UserMessage
 from mini_agent.runtime import AgentRunner, ConversationService, SQLiteSessionStore
 from mini_agent.runtime.contracts import InterruptDecision, QuestionOption, UserQuestion
+from mini_agent.runtime.plan_review import REQUEST_PLAN_REVIEW_NAME
 from mini_agent.runtime.user_input import (
     REQUEST_USER_INPUT_NAME,
     format_user_input_answers,
@@ -101,7 +102,15 @@ class QuestionThenPlanPlanner:
                         )
                     ]
                 )
-            return AssistantMessage(content="1. Store the result in SQLite.\n2. Run the tests.")
+            return AssistantMessage(
+                tool_messages=[
+                    ToolMessage(
+                        name=REQUEST_PLAN_REVIEW_NAME,
+                        call_id="review_1",
+                        arguments={"plan": PLAN},
+                    )
+                ]
+            )
         self.agent_histories.append(list(runtime.state.messages))
         return AssistantMessage(content="Implemented.")
 
@@ -120,8 +129,15 @@ class ScriptedPlanPlanner(QuestionThenPlanPlanner):
         return super().decide(runtime)
 
 
+PLAN = "# Storage plan\n\n## Summary\nStore the result in SQLite.\n\n## Test Plan\nRun the tests."
+
+
 def question_call(call_id: str = "question_1") -> ToolMessage:
     return ToolMessage(name=REQUEST_USER_INPUT_NAME, call_id=call_id, arguments=question_arguments())
+
+
+def review_call(call_id: str = "review_1") -> ToolMessage:
+    return ToolMessage(name=REQUEST_PLAN_REVIEW_NAME, call_id=call_id, arguments={"plan": PLAN})
 
 
 def build_service(tmp_path: Path, planner: QuestionThenPlanPlanner) -> ConversationService:
@@ -155,9 +171,12 @@ def test_plan_question_answer_is_saved_once_then_plan_review_starts(tmp_path: Pa
     assert json.loads(question_message.tool_messages[0].content or "") == {
         "answers": {"storage": {"answers": ["SQLite"]}}
     }
-    assert service.runtime.state.messages[2] == AssistantMessage(
-        content="1. Store the result in SQLite.\n2. Run the tests."
-    )
+    review_message = service.runtime.state.messages[2]
+    assert isinstance(review_message, AssistantMessage)
+    assert review_message.content is None
+    assert review_message.tool_messages[0].name == REQUEST_PLAN_REVIEW_NAME
+    assert review_message.tool_messages[0].arguments == {"plan": PLAN}
+    assert review_message.tool_messages[0].status == "succeeded"
     assert len([message for message in service.runtime.state.messages if message is question_message]) == 1
     assert [event.kind for event in result.events].count("user_input_requested") == 1
     assert [event.kind for event in result.events].count("user_input_received") == 1
@@ -186,7 +205,7 @@ def test_invalid_question_answers_are_returned_to_model_for_recovery(tmp_path: P
     planner = ScriptedPlanPlanner(
         [
             AssistantMessage(tool_messages=[question_call()]),
-            AssistantMessage(content="1. Use the default storage.\n2. Run the tests."),
+            AssistantMessage(tool_messages=[review_call()]),
         ]
     )
     service = build_service(tmp_path, planner)
@@ -204,7 +223,7 @@ def test_invalid_question_answers_are_returned_to_model_for_recovery(tmp_path: P
     assert failed.status == "failed"
     assert failed.retryable is True
     assert "exactly the requested question ids" in (failed.content or "")
-    assert service.runtime.state.messages[-1].content == "1. Use the default storage.\n2. Run the tests."
+    assert service.runtime.state.messages[-1].tool_messages[0].name == REQUEST_PLAN_REVIEW_NAME
 
 
 def test_request_user_input_must_not_be_mixed_with_execution_tools(tmp_path: Path) -> None:
@@ -220,7 +239,7 @@ def test_request_user_input_must_not_be_mixed_with_execution_tools(tmp_path: Pat
                     ),
                 ]
             ),
-            AssistantMessage(content="1. Inspect the project.\n2. Run the tests."),
+            AssistantMessage(tool_messages=[review_call()]),
         ]
     )
     service = build_service(tmp_path, planner)
@@ -290,7 +309,9 @@ def test_same_session_implement_replays_question_tool_history(tmp_path: Path) ->
     assert isinstance(history[1], AssistantMessage)
     assert history[1].tool_messages[0].name == REQUEST_USER_INPUT_NAME
     assert history[1].tool_messages[0].status == "succeeded"
-    assert history[-2].content == "1. Store the result in SQLite.\n2. Run the tests."
+    assert history[-2].tool_messages[0].name == REQUEST_PLAN_REVIEW_NAME
+    assert history[-2].tool_messages[0].arguments == {"plan": PLAN}
+    assert history[-2].tool_messages[0].status == "succeeded"
     assert history[-1] == UserMessage(content="Implement the plan")
 
 
@@ -307,6 +328,6 @@ def test_clear_session_implement_drops_question_tool_history(tmp_path: Path) -> 
 
     assert result.mode == "agent"
     assert planner.agent_histories[-1] == [
-        AssistantMessage(content="1. Store the result in SQLite.\n2. Run the tests."),
+        AssistantMessage(content=PLAN),
         UserMessage(content="Implement the plan"),
     ]

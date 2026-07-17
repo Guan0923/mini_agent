@@ -10,6 +10,7 @@ from mini_agent.domain import (
     PlanStep,
     StepEvaluation,
     StrategySelection,
+    ToolMessage,
 )
 from mini_agent.observability import JsonlRunLogger
 from mini_agent.planning import RuleBasedPlanner
@@ -17,6 +18,7 @@ from mini_agent.providers import ModelRequestError
 from mini_agent.runtime import LegacyAgentRunner as AgentRunner
 from mini_agent.runtime import RunnerSettings, SQLiteCheckpointStore
 from mini_agent.runtime.contracts import InterruptDecision, InterruptRequest
+from mini_agent.runtime.plan_review import REQUEST_PLAN_REVIEW_NAME
 from mini_agent.tools import Tool, ToolError, ToolRegistry
 
 
@@ -69,7 +71,7 @@ class PlanModePlanner:
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         assert mode == "plan"
-        return AgentAction(type="final_answer", answer="1. Write the planned file.")
+        return AgentAction(type="tool_call", tool=REQUEST_PLAN_REVIEW_NAME, arguments={"plan": "1. Write the planned file."})
 
     def create_dynamic_plan(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> ExecutionPlan:
         assert {"role": "assistant", "content": "1. Write the planned file."} in history
@@ -132,7 +134,11 @@ class PlanResearchPlanner:
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         assert mode == "plan"
         if history[-1]["content"].startswith("[Tool result]"):
-            return AgentAction(type="final_answer", answer="1. Read the note.\n2. Write the reviewed result.")
+            return AgentAction(
+                type="tool_call",
+                tool=REQUEST_PLAN_REVIEW_NAME,
+                arguments={"plan": "1. Read the note.\n2. Write the reviewed result."},
+            )
         return AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content note.txt"})
 
     def select_strategy(self, runtime) -> StrategySelection:
@@ -141,7 +147,7 @@ class PlanResearchPlanner:
     def create_dynamic_plan(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> ExecutionPlan:
         assert mode == "agent"
         assert history[-1] == {"role": "user", "content": "Implement the plan"}
-        assert any(item["role"] == "assistant" and item["content"].startswith("1. Read") for item in history)
+        assert any(item["role"] == "assistant" and REQUEST_PLAN_REVIEW_NAME in item["content"] for item in history)
         return ExecutionPlan(
             goal="Write the reviewed result.",
             steps=[
@@ -189,9 +195,12 @@ def test_plan_mode_researches_read_only_tools_then_hands_off_to_dynamic_executio
     proposals = [
         item
         for item in state.history
-        if isinstance(item, AssistantMessage) and (item.content or "").startswith("1. Read")
+        if isinstance(item, AssistantMessage)
+        and item.tool_messages
+        and item.tool_messages[0].name == REQUEST_PLAN_REVIEW_NAME
     ]
     assert len(proposals) == 1
+    assert proposals[0].tool_messages[0].arguments["plan"].startswith("1. Read")
 
 
 class PlanRecoveryPlanner:
@@ -200,7 +209,11 @@ class PlanRecoveryPlanner:
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         assert mode == "plan"
         if history[-1]["content"].startswith("[Tool error]"):
-            return AgentAction(type="final_answer", answer="1. Inspect the missing input before implementation.")
+            return AgentAction(
+                type="tool_call",
+                tool=REQUEST_PLAN_REVIEW_NAME,
+                arguments={"plan": "1. Inspect the missing input before implementation."},
+            )
         return AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content missing.txt"})
 
 
@@ -609,38 +622,32 @@ class UnnumberedPlanPlanner:
         return AgentAction(type="final_answer", answer="Inspect the project and make the change.")
 
 
-def test_plan_mode_rejects_an_unnumbered_proposal(tmp_path: Path) -> None:
-    state = AgentRunner(UnnumberedPlanPlanner(), ToolRegistry(tmp_path)).run("make a plan", mode="plan")
+def test_plan_mode_accepts_an_ordinary_unnumbered_response(tmp_path: Path) -> None:
+    state = AgentRunner(UnnumberedPlanPlanner(), ToolRegistry(tmp_path)).run("discuss a change", mode="plan")
 
-    assert state.status == "failed"
-    assert "numbered high-level plan" in (state.final_answer or "")
+    assert state.status == "completed"
+    assert state.final_answer == "Inspect the project and make the change."
 
 
-class PlanFormatRepairPlanner:
-    name = "plan-format-repair"
+class OrdinaryPlanConversationPlanner:
+    name = "ordinary-plan-conversation"
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        if history[-1]["content"].startswith("[Plan format correction]"):
-            return AgentAction(
-                type="final_answer", answer="1. Inspect the project.\n2. Implement the requested change."
-            )
         return AgentAction(type="final_answer", answer="Inspect the project and implement the requested change.")
 
 
-def test_plan_mode_repairs_an_unnumbered_proposal_once(tmp_path: Path) -> None:
+def test_plan_mode_does_not_format_repair_an_ordinary_response(tmp_path: Path) -> None:
     events = []
-    state = AgentRunner(PlanFormatRepairPlanner(), ToolRegistry(tmp_path)).run(
-        "make a plan",
+    state = AgentRunner(OrdinaryPlanConversationPlanner(), ToolRegistry(tmp_path)).run(
+        "discuss a change",
         mode="plan",
         on_event=events.append,
-        interrupt=lambda request: InterruptDecision("cancel")
-        if request.kind == "plan"
-        else pytest.fail("unexpected tool"),
+        interrupt=lambda _request: pytest.fail("ordinary responses must not open review"),
     )
 
-    assert state.status == "cancelled"
-    assert any(item["content"].startswith("[Plan format correction]") for item in state.history)
-    assert [event.kind for event in events].count("model_repair") == 1
+    assert state.status == "completed"
+    assert state.final_answer == "Inspect the project and implement the requested change."
+    assert [event.kind for event in events].count("model_repair") == 0
 
 
 class AutoFixedPlanPlanner:
@@ -863,7 +870,7 @@ class SinglePlanPlanner:
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         assert mode == "plan"
-        return AgentAction(type="final_answer", answer="1. Write original.txt.")
+        return AgentAction(type="tool_call", tool=REQUEST_PLAN_REVIEW_NAME, arguments={"plan": "1. Write original.txt."})
 
 
 def test_plan_mode_rejects_supplement_after_checkpointing_review(tmp_path: Path) -> None:
@@ -887,9 +894,11 @@ def test_plan_mode_rejects_supplement_after_checkpointing_review(tmp_path: Path)
     assert not (tmp_path / "revised.txt").exists()
     assert observed_checkpoint == ["plan"]
     proposals = [
-        item.content
+        item.tool_messages[0].arguments["plan"]
         for item in state.history
-        if isinstance(item, AssistantMessage) and item.content == "1. Write original.txt."
+        if isinstance(item, AssistantMessage)
+        and item.tool_messages
+        and item.tool_messages[0].name == REQUEST_PLAN_REVIEW_NAME
     ]
     assert proposals == ["1. Write original.txt."]
     saved = store.load(state.run_id)

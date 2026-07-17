@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from mini_agent.domain import AssistantMessage, UserMessage
 
 from .context import AgentRuntime
@@ -16,16 +18,22 @@ def planning_failure_data(error: Exception, planner: str) -> dict[str, object]:
     return data
 
 
-def complete_run(runtime: AgentRuntime, message: AssistantMessage) -> None:
+def complete_run(
+    runtime: AgentRuntime,
+    message: AssistantMessage,
+    *,
+    final_answer: str | None = None,
+    event_kind: Literal["response", "plan"] | None = None,
+) -> None:
     run = runtime.run
     if not any(existing is message for existing in runtime.state.messages):
         runtime.state.messages.append(message)
     run.history = runtime.state.messages
     run.status = "completed"
-    run.final_answer = message.content or ""
+    run.final_answer = (message.content or "") if final_answer is None else final_answer
     run.add_event("final", "Task completed")
     publish = runtime.services.publish or (lambda _event: None)
-    publish(RuntimeEvent("plan" if run.mode == "plan" else "response", run.final_answer))
+    publish(RuntimeEvent(event_kind or ("plan" if run.mode == "plan" else "response"), run.final_answer))
 
 
 def fail_run(runtime: AgentRuntime, message: str, **data: object) -> None:

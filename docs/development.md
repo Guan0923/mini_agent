@@ -47,7 +47,7 @@ mini-agent
 
 The rule planner is offline and deterministic. The default LLM planner reads provider settings from `.env`; never commit that file or real API keys.
 
-In Plan mode, the model may use the built-in `request_user_input` control ToolSpec after read-only exploration. It is not one of the three registered execution tools. Each call asks one to three single-choice questions with two or three model options; the TUI appends a final free-form option, collects all answers, and resumes the same Plan run with one structured ToolMessage result. Multiple question rounds are allowed within `max_actions`; `PLAN REVIEW` starts only after the model returns the final numbered plan.
+Plan mode supports ordinary read-only conversation plus two built-in control ToolSpecs. `request_user_input` asks material clarification questions after exploration cannot resolve them. `request_plan_review` submits a non-empty Markdown plan for explicit review only when a plan is useful and complete. Both controls must be called alone, are excluded from `ToolRegistry`, and persist as one structured ToolMessage. Plain assistant text completes as a normal `response`; only `request_plan_review` opens `PLAN REVIEW`.
 
 `PLAN REVIEW` offers exactly three choices. `Implement` completes the Plan run and starts a separate Agent run in the current session with the complete Plan conversation plus `Implement the plan`. `Implement and Clear Session` creates and activates a new isolated session containing only the final plan and implementation message. `Cancel and Stay in plan mode` cancels the run, retains the complete Plan conversation, and leaves the TUI in Plan mode. Plan Review has no Supplement option; Tool Review continues to use `Continue`, `Cancel`, and `Supplement`.
 

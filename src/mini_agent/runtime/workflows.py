@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from mini_agent.domain import AssistantMessage, ExecutionPlan, PlanningError, PlanStep, ToolMessage, UserMessage
 from mini_agent.planning import PlannerCapabilities
@@ -13,6 +13,7 @@ from .context import AgentRuntime
 from .contracts import InterruptRequest
 from .events import RuntimeEvent
 from .outcomes import cancel_run, complete_run, fail_run, planning_failure_data, record_plan_feedback
+from .plan_review import REQUEST_PLAN_REVIEW_NAME, parse_plan_review
 from .steering import SteeringUpdate, apply_steering, collect_steering, consume_steering
 from .steps import ToolStepExecutor, ToolStepResult
 from .user_input import (
@@ -23,6 +24,14 @@ from .user_input import (
 )
 
 _MAX_TOOL_CONTEXT_CHARS = 2_000
+
+
+@dataclass(frozen=True)
+class PlanProposalResult:
+    """One completed Plan-mode response, optionally submitted for review."""
+
+    message: AssistantMessage
+    plan: str | None = None
 
 
 def _publish(runtime: AgentRuntime, event: RuntimeEvent) -> None:
@@ -262,13 +271,12 @@ class PlanProposalWorkflow:
     def __init__(self) -> None:
         self._steps = ToolStepExecutor()
 
-    def prepare(self, runtime: AgentRuntime) -> str | None:
+    def prepare(self, runtime: AgentRuntime) -> PlanProposalResult | None:
         capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
         planner = capabilities.decision_planner
         if planner is None:
             fail_run(runtime, f"Planner {capabilities.name!r} does not support plan proposals.")
             return None
-        format_repair_used = False
         consecutive_failures = 0
         while len(runtime.run.actions) < runtime.state.runner_settings.max_actions:
             if cancel_if_requested(runtime):
@@ -287,35 +295,9 @@ class PlanProposalWorkflow:
             if consume_steering(runtime, phase="after_model_response") is not None:
                 continue
             if not response.tool_messages:
-                proposal = response.content or ""
-                if re.search(r"(?m)^\s*1[.)、]\s+\S", proposal):
-                    return proposal
-                if format_repair_used:
-                    fail_run(runtime, "Plan proposal must be a numbered high-level plan.")
-                    return None
-                format_repair_used = True
-                runtime.state.messages.extend(
-                    [
-                        response,
-                        UserMessage(
-                            content=(
-                                "[Plan format correction]\nUse request_user_input for material clarification questions; "
-                                "otherwise return a concise numbered plan starting with 1."
-                            )
-                        ),
-                    ]
-                )
-                runtime.run.history = runtime.state.messages
-                runtime.run.add_event("model_repair", "Requested numbered plan format", phase="plan_proposal")
-                _publish(
-                    runtime,
-                    RuntimeEvent(
-                        "model_repair",
-                        "Requested numbered plan format",
-                        {"phase": "plan_proposal", "attempt": 1},
-                    ),
-                )
-                continue
+                _start_assistant(runtime, response)
+                _finish_assistant(runtime)
+                return PlanProposalResult(response)
             if any(tool.name == REQUEST_USER_INPUT_NAME for tool in response.tool_messages):
                 answered = self._request_user_input(runtime, response)
                 if runtime.run.status != "running":
@@ -327,6 +309,15 @@ class PlanProposalWorkflow:
                     if consecutive_failures > runtime.state.runner_settings.max_tool_recoveries:
                         fail_run(runtime, "Stopped after repeated invalid request_user_input calls.")
                         return None
+                continue
+            if any(tool.name == REQUEST_PLAN_REVIEW_NAME for tool in response.tool_messages):
+                plan = self._request_plan_review(runtime, response)
+                if plan is not None:
+                    return PlanProposalResult(response, plan)
+                consecutive_failures += 1
+                if consecutive_failures > runtime.state.runner_settings.max_tool_recoveries:
+                    fail_run(runtime, "Stopped after repeated invalid request_plan_review calls.")
+                    return None
                 continue
             _start_assistant(runtime, response)
             steered = False
@@ -394,8 +385,45 @@ class PlanProposalWorkflow:
                 details = failed.content if failed is not None else "unknown error"
                 fail_run(runtime, f"Stopped: {details}")
                 return None
-        fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions without a plan proposal.")
+        fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions without a final answer.")
         return None
+
+    @staticmethod
+    def _request_plan_review(runtime: AgentRuntime, response: AssistantMessage) -> str | None:
+        _start_assistant(runtime, response)
+        for tool in response.tool_messages:
+            runtime.run.actions.append(tool)
+
+        if len(response.tool_messages) != 1:
+            error = "request_plan_review must be the only tool call in an assistant response."
+            for tool in response.tool_messages:
+                tool.status = "failed"
+                tool.content = error
+                tool.retryable = True
+            runtime.run.add_event("tool_failed", f"{REQUEST_PLAN_REVIEW_NAME} failed", error=error)
+            _publish(runtime, RuntimeEvent("tool_failed", error, {"tool": REQUEST_PLAN_REVIEW_NAME}))
+            _finish_assistant(runtime)
+            return None
+
+        tool = response.tool_messages[0]
+        runtime.state.active_tool_index = 0
+        runtime.run.add_event("model", "Plan Review call validated", tool=tool.name, mode=runtime.run.mode)
+        try:
+            plan = parse_plan_review(tool.arguments)
+        except ValueError as exc:
+            tool.status = "failed"
+            tool.content = str(exc)
+            tool.retryable = True
+            runtime.run.add_event("tool_failed", f"{REQUEST_PLAN_REVIEW_NAME} failed", error=str(exc))
+            _publish(runtime, RuntimeEvent("tool_failed", str(exc), {"tool": REQUEST_PLAN_REVIEW_NAME}))
+            _finish_assistant(runtime)
+            return None
+
+        tool.status = "succeeded"
+        tool.content = "Plan submitted for review."
+        tool.retryable = False
+        _finish_assistant(runtime)
+        return plan
 
     @staticmethod
     def _request_user_input(runtime: AgentRuntime, response: AssistantMessage) -> bool:
