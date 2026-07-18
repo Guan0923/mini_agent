@@ -44,6 +44,7 @@ EventKind = Literal[
     "steering_applied",
     "handoff_created",
     "cancelled",
+    "plan_progress",
 ]
 RunMode = Literal["agent", "plan"]
 RunStatus = Literal["running", "completed", "failed", "cancelled"]

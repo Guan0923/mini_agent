@@ -19,11 +19,11 @@ from mini_agent.domain import (
 )
 from mini_agent.tools import ToolError
 
-from .context import AgentRuntime, text_messages
-from .contracts import CancellationHandler, EventHandler, InterruptHandler, SteeringHandler
-from .events import RuntimeEvent
-from .execution import RuntimeRunner
-from .session_store import SessionStore
+from ..core.context import AgentRuntime, text_messages
+from ..core.contracts import CancellationHandler, EventHandler, InterruptHandler, SteeringHandler
+from ..core.events import RuntimeEvent
+from ..execution import RuntimeRunner
+from .store import SessionStore
 
 
 class TaskPreprocessor(Protocol):

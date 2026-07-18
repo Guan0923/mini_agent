@@ -6,7 +6,7 @@ import inspect
 from dataclasses import dataclass
 
 from mini_agent.domain import AgentAction, AssistantMessage, ToolMessage, message_to_dict
-from mini_agent.runtime.context import AgentRuntime
+from mini_agent.runtime.core.context import AgentRuntime
 
 from .base import (
     DynamicPlanCreator,

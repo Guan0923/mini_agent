@@ -2,7 +2,7 @@ from pathlib import Path
 
 from mini_agent.domain import AgentAction, StrategySelection
 from mini_agent.runtime import LegacyAgentRunner as AgentRunner
-from mini_agent.runtime.plan_review import REQUEST_PLAN_REVIEW_NAME
+from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from mini_agent.tools import ToolRegistry
 from mini_agent.tui.cli import TerminalApp
 

@@ -11,7 +11,7 @@ import pytest
 from mini_agent.domain import RunState
 from mini_agent.providers import ModelConfigurationError
 from mini_agent.runtime import RuntimeEvent, TaskPreparationError
-from mini_agent.runtime.contracts import InterruptRequest, QuestionOption, UserQuestion
+from mini_agent.runtime.core.contracts import InterruptRequest, QuestionOption, UserQuestion
 from mini_agent.tui import cli
 from mini_agent.tui.approval import TerminalApproval
 

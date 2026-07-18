@@ -218,8 +218,14 @@ P0 完成后再系统推进 P1，避免先扩展功能数量而缺少可靠性�
 ### 模块结构
 
 ```text
-tui/          终端交互，仅负责输入、输出与确认
-runtime/      应用服务、依赖装配、策略路由、工作流、工具执行、checkpoint 边界与运行状态收尾
+tui/          终端适配层；View 负责编排，choice/transcript concerns 管状态机，widgets 放可复用控件
+runtime/      公共 lazy exports；根目录不放具体实现
+  core/         AgentRuntime、事件、契约、配置与生命周期 hooks
+  application/  应用服务与依赖装配
+  execution/    runner、策略路由、工作流、步骤执行与运行结果
+  conversation/ session 编排、steering、文件引用与用户问答
+  planning/      Plan mode 与 Plan Review 协议
+  persistence/   checkpoint/artifact 端口与运行事件持久化转换
 observability/事件扇出与 JSONL 持久化日志 Sink
 planning/     规则/LLM 规划策略与显式能力协议
 tools/        工具契约、通用注册表、默认 workspace 工具 catalog、受限文件操作与跨平台命令执行
@@ -228,7 +234,7 @@ storage/      SQLite checkpoint/session 与未装配的 artifact 持久化适配
 domain/       Message、ToolMessage、ToolSpec、RunState 与运行轨迹等纯数据模型
 ```
 
-依赖只向内：TUI 只处理终端输入、确认和 `RuntimeEvent` 渲染；`ConversationService` 管理单轮执行与当前 session，`runtime.factory` 负责装配具体实现；`ToolRegistry` 只负责注册与调用策略，默认工具由独立 catalog 提供；SQLite 位于 `storage/`，不被执行工作流直接依赖。工具和模型提供方可以各自替换或单独测试。
+依赖只向内：TUI 只处理终端输入、确认和 `RuntimeEvent` 渲染；`ConversationService` 管理单轮执行与当前 session，`runtime.application.factory` 负责装配具体实现；runtime 根目录只提供公共 lazy exports，具体实现必须放入六个分类子包；`ToolRegistry` 只负责注册与调用策略，默认工具由独立 catalog 提供；SQLite 位于 `storage/`，不被执行工作流直接依赖。工具和模型提供方可以各自替换或单独测试。
 
 ### 大模型配置（无 SDK）
 

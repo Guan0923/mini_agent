@@ -9,8 +9,8 @@ from typing import Any
 
 from mini_agent.domain import ToolSpec, message_to_dict
 
-from .context import PreparedResponse, RuntimeExchange, RuntimeState
-from .events import RuntimeEvent
+from ..core.context import PreparedResponse, RuntimeExchange, RuntimeState
+from ..core.events import RuntimeEvent
 
 _SENSITIVE_KEY = re.compile(
     r"(?:^|[_-])(?:api[_-]?key|authorization|cookie|password|secret|token)(?:$|[_-])",

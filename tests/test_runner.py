@@ -16,8 +16,8 @@ from mini_agent.planning import RuleBasedPlanner
 from mini_agent.providers import ModelRequestError
 from mini_agent.runtime import LegacyAgentRunner as AgentRunner
 from mini_agent.runtime import RunnerSettings, SQLiteCheckpointStore
-from mini_agent.runtime.contracts import InterruptDecision, InterruptRequest
-from mini_agent.runtime.plan_review import REQUEST_PLAN_REVIEW_NAME
+from mini_agent.runtime.core.contracts import InterruptDecision, InterruptRequest
+from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from mini_agent.tools import Tool, ToolError, ToolRegistry
 
 
@@ -389,6 +389,38 @@ def test_dynamic_replan_replaces_unfinished_steps_after_tool_failure(tmp_path: P
     assert not (tmp_path / "old.txt").exists()
     assert "replan_requested" in [event.kind for event in events]
     assert "replan_applied" in [event.kind for event in events]
+
+
+def test_dynamic_replan_emits_plan_snapshots_for_creation_progress_and_replan(tmp_path: Path) -> None:
+    events = []
+    state = AgentRunner(DynamicRecoveryPlanner(), ToolRegistry(tmp_path)).run(
+        "recover from a missing source", lambda _: True, on_event=events.append
+    )
+
+    plan_event = next(event for event in events if event.kind == "plan")
+    assert plan_event.data["revision"] == 1
+    assert [step["status"] for step in plan_event.data["steps"]] == ["pending", "pending"]
+
+    progress_events = [event for event in events if event.kind == "plan_progress"]
+    started = next(event for event in progress_events if event.data["trigger"] == "step_started")
+    failed = next(event for event in progress_events if event.data["trigger"] == "step_failed")
+    assert started.data["changed_step_id"] == "missing-source"
+    assert [step["status"] for step in started.data["steps"]] == ["running", "pending"]
+    assert failed.data["changed_step_id"] == "missing-source"
+    assert [step["status"] for step in failed.data["steps"]] == ["failed", "pending"]
+    assert failed.data["steps"][0]["result"]
+
+    applied = next(event for event in events if event.kind == "replan_applied")
+    assert applied.data["revision"] == 2
+    assert [step["status"] for step in applied.data["previous_steps"]] == ["failed", "superseded"]
+    assert applied.data["steps"][0]["id"] == "fallback-write"
+    assert applied.data["steps"][0]["status"] == "pending"
+
+    event_kinds = [event.kind for event in events]
+    assert event_kinds.index("plan") < event_kinds.index("plan_progress")
+    assert event_kinds.index("plan_progress") < event_kinds.index("replan_requested")
+    assert event_kinds.index("replan_requested") < event_kinds.index("replan_applied")
+    assert state.status == "completed"
 
 
 class DeviatingPlanPlanner(DynamicRecoveryPlanner):

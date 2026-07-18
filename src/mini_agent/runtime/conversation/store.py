@@ -6,7 +6,7 @@ from typing import Protocol
 
 from mini_agent.domain import RunStatus, RuntimeMessage, Session, SessionSummary
 
-from .context import RuntimeState
+from ..core.context import RuntimeState
 
 
 class SessionStore(Protocol):

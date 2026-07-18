@@ -8,20 +8,20 @@ from dataclasses import dataclass
 from mini_agent.domain import AssistantMessage, ExecutionPlan, PlanningError, PlanStep, ToolMessage, message_to_dict
 from mini_agent.planning import PlannerCapabilities
 
-from .cancellation import cancel_if_requested
-from .context import AgentRuntime
-from .contracts import InterruptRequest
-from .events import RuntimeEvent
-from .outcomes import cancel_run, complete_run, fail_run, planning_failure_data, record_plan_feedback
-from .plan_review import REQUEST_PLAN_REVIEW_NAME, parse_plan_review
-from .steering import SteeringUpdate, apply_steering, collect_steering, consume_steering
-from .steps import ToolStepExecutor, ToolStepResult
-from .user_input import (
+from ..conversation.steering import SteeringUpdate, apply_steering, collect_steering, consume_steering
+from ..conversation.user_input import (
     REQUEST_USER_INPUT_NAME,
     format_user_input_answers,
     parse_user_input_questions,
     validate_user_input_answers,
 )
+from ..core.context import AgentRuntime
+from ..core.contracts import InterruptRequest
+from ..core.events import RuntimeEvent
+from ..planning.review import REQUEST_PLAN_REVIEW_NAME, parse_plan_review
+from .cancellation import cancel_if_requested
+from .outcomes import cancel_run, complete_run, fail_run, planning_failure_data, record_plan_feedback
+from .steps import ToolStepExecutor, ToolStepResult
 
 _MAX_TOOL_CONTEXT_CHARS = 2_000
 
@@ -181,6 +181,39 @@ def _truncate(value: str) -> str:
         return value
     omitted = len(value) - _MAX_TOOL_CONTEXT_CHARS
     return f"{value[:_MAX_TOOL_CONTEXT_CHARS]}… ({omitted} characters omitted)"
+
+
+def _plan_step_snapshots(plan: ExecutionPlan) -> list[dict[str, object]]:
+    """Return presentation-independent state for every plan step."""
+
+    return [
+        {
+            "index": index,
+            "id": step.id,
+            "description": step.description,
+            "status": step.status,
+            "result": step.result,
+        }
+        for index, step in enumerate(plan.steps, start=1)
+    ]
+
+
+def _publish_plan_progress(
+    runtime: AgentRuntime,
+    plan: ExecutionPlan,
+    *,
+    trigger: str,
+    changed_step_id: str | None = None,
+) -> None:
+    data = {
+        "revision": plan.revision,
+        "trigger": trigger,
+        "steps": _plan_step_snapshots(plan),
+        "changed_step_id": changed_step_id,
+    }
+    runtime.run.add_event("plan_progress", "Plan step status updated", **data)
+    _publish(runtime, RuntimeEvent("plan_progress", "Plan step status updated", data))
+    runtime.save()
 
 
 def _same_tool(first: ToolMessage, second: ToolMessage | None) -> bool:
@@ -665,8 +698,23 @@ class PlanWorkflow:
             fail_run(runtime, f"Plan has {len(plan.steps)} steps but only {remaining} actions remain.")
             return False
         runtime.run.plan = plan
-        runtime.run.add_event("plan", "Execution plan created", revision=plan.revision, step_count=len(plan.steps))
-        _publish(runtime, RuntimeEvent("plan", self._format_plan(plan), {"revision": plan.revision}))
+        snapshots = _plan_step_snapshots(plan)
+        runtime.run.add_event(
+            "plan",
+            "Execution plan created",
+            revision=plan.revision,
+            step_count=len(plan.steps),
+            trigger="created",
+            steps=snapshots,
+        )
+        _publish(
+            runtime,
+            RuntimeEvent(
+                "plan",
+                self._format_plan(plan),
+                {"revision": plan.revision, "trigger": "created", "steps": snapshots},
+            ),
+        )
         runtime.save()
         return True
 
@@ -709,6 +757,9 @@ class PlanWorkflow:
         runtime.run.add_event(
             "model", "Planned tool call validated", tool=step.tool_message.name, mode=runtime.run.mode
         )
+        plan = runtime.run.plan
+        if plan is not None:
+            _publish_plan_progress(runtime, plan, trigger="step_started", changed_step_id=step.id)
         outcome = self._steps.execute(runtime)
         if outcome.interrupt is None:
             if not outcome.success:
@@ -801,9 +852,16 @@ class DynamicReplanWorkflow(PlanWorkflow):
             if cancel_if_requested(runtime):
                 step.status = "completed" if outcome.success else "failed"
                 step.result = outcome.output if outcome.success else outcome.error
+                _publish_plan_progress(
+                    runtime,
+                    plan,
+                    trigger="step_completed" if outcome.success else "step_failed",
+                    changed_step_id=step.id,
+                )
                 return runtime.run
             if outcome.interrupt is not None:
                 step.status = "pending"
+                _publish_plan_progress(runtime, plan, trigger="step_interrupted", changed_step_id=step.id)
                 if outcome.interrupt.choice == "cancel":
                     cancel_run(runtime)
                     return runtime.run
@@ -820,6 +878,12 @@ class DynamicReplanWorkflow(PlanWorkflow):
                 else:
                     step.status = "failed"
                     step.result = outcome.error
+                _publish_plan_progress(
+                    runtime,
+                    plan,
+                    trigger="step_completed" if outcome.success else "step_failed",
+                    changed_step_id=step.id,
+                )
                 apply_steering(runtime, update, phase="after_plan_step")
                 if not self._replace(
                     runtime,
@@ -832,6 +896,7 @@ class DynamicReplanWorkflow(PlanWorkflow):
             if outcome.success:
                 step.status = "completed"
                 step.result = outcome.output
+                _publish_plan_progress(runtime, plan, trigger="step_completed", changed_step_id=step.id)
                 runtime.exchange.context = {"plan": plan, "step": step, "result": outcome.output or ""}
                 try:
                     evaluation = capabilities.dynamic_replanner.evaluate_step(runtime)
@@ -856,6 +921,7 @@ class DynamicReplanWorkflow(PlanWorkflow):
             else:
                 step.status = "failed"
                 step.result = outcome.error
+                _publish_plan_progress(runtime, plan, trigger="step_failed", changed_step_id=step.id)
                 reason = f"Step {step.id} failed: {outcome.error or 'unknown error'}"
 
             if not self._replace(runtime, reason, capabilities):
@@ -884,12 +950,30 @@ class DynamicReplanWorkflow(PlanWorkflow):
         for step in current.steps:
             if step.status == "pending":
                 step.status = "superseded"
+        previous_steps = _plan_step_snapshots(current)
         runtime.run.plan_history.append(current)
         runtime.run.plan = replacement
         runtime.run.replan_count += 1
         runtime.run.add_event(
-            "replan_applied", "Replacement plan applied", revision=replacement.revision, reason=reason
+            "replan_applied",
+            "Replacement plan applied",
+            revision=replacement.revision,
+            reason=reason,
+            previous_steps=previous_steps,
+            steps=_plan_step_snapshots(replacement),
         )
-        _publish(runtime, RuntimeEvent("replan_applied", self._format_plan(replacement), {"reason": reason}))
+        _publish(
+            runtime,
+            RuntimeEvent(
+                "replan_applied",
+                self._format_plan(replacement),
+                {
+                    "revision": replacement.revision,
+                    "reason": reason,
+                    "previous_steps": previous_steps,
+                    "steps": _plan_step_snapshots(replacement),
+                },
+            ),
+        )
         runtime.save()
         return True

@@ -13,7 +13,7 @@ from mini_agent.runtime import (
     SQLiteCheckpointStore,
     SQLiteSessionStore,
 )
-from mini_agent.runtime.config import log_full_messages_from_env
+from mini_agent.runtime.core.config import log_full_messages_from_env
 from mini_agent.tools import Tool, ToolRegistry
 
 

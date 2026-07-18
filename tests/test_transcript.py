@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 from mini_agent.runtime import RuntimeEvent
 from mini_agent.tui.view import TerminalView
@@ -25,6 +26,51 @@ def _tool(name: str, call_id: str, arguments: dict) -> dict:
         "content": None,
         "status": "pending",
     }
+
+
+def test_external_async_task_can_submit_and_render_markdown() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        view_task = asyncio.create_task(view.run_async(headless=True, size=(100, 30)))
+        try:
+            for _ in range(100):
+                if view._owner_ready:
+                    break
+                await asyncio.sleep(0.01)
+            assert view._owner_ready
+
+            view.begin_conversation("你好")
+            view.handle_runtime_event(RuntimeEvent("run_started", data={"run_id": "run-1"}))
+            view.handle_runtime_event(RuntimeEvent("response", "你好！", {"run_id": "run-1"}))
+            await asyncio.sleep(0.2)
+
+            assert not view_task.done()
+            assert [node.title_text for node in view._top_level_nodes] == ["USER", "ASSISTANT"]
+            assert [body.markdown_text for body in view.markdown_bodies] == ["你好", "你好！"]
+        finally:
+            view.exit()
+            await view_task
+
+    asyncio.run(scenario())
+
+
+def test_stream_render_coroutine_is_created_only_when_worker_starts() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(80, 20)) as pilot:
+            view.begin_conversation("initial")
+            await pilot.pause()
+            body = view.markdown_bodies[0]
+            scheduled: list[object] = []
+            body.run_worker = lambda work, **_kwargs: scheduled.append(work)  # type: ignore[method-assign]
+
+            body.set_markdown("updated")
+
+            assert len(scheduled) == 1
+            assert callable(scheduled[0])
+            assert not inspect.isawaitable(scheduled[0])
+
+    asyncio.run(scenario())
 
 
 def test_transcript_preserves_assistant_event_order_and_markdown_content() -> None:

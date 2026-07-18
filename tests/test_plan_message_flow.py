@@ -12,8 +12,8 @@ from mini_agent.domain import (
     message_to_dict,
 )
 from mini_agent.runtime import AgentRunner, ConversationService, SQLiteSessionStore
-from mini_agent.runtime.contracts import InterruptDecision
-from mini_agent.runtime.plan_review import REQUEST_PLAN_REVIEW_NAME
+from mini_agent.runtime.core.contracts import InterruptDecision
+from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from mini_agent.tools import ToolRegistry
 
 PLAN = "# Reviewed change\n\n## Summary\nImplement the reviewed change."

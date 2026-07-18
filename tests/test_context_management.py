@@ -18,7 +18,7 @@ from mini_agent.domain import (
 from mini_agent.planning.context_management import ContextManager
 from mini_agent.planning.llm import LLMPlanner
 from mini_agent.providers import DeepSeek, ModelConfig, ModelConfigurationError
-from mini_agent.runtime.context import AgentRuntime, PreparedResponse
+from mini_agent.runtime.core.context import AgentRuntime, PreparedResponse
 
 
 @dataclass

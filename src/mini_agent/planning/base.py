@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from mini_agent.domain import AssistantMessage, ExecutionPlan, StepEvaluation, StrategySelection
-from mini_agent.runtime.context import AgentRuntime
+from mini_agent.runtime.core.context import AgentRuntime
 
 
 @runtime_checkable

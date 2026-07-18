@@ -9,7 +9,7 @@ from jsonschema import Draft202012Validator
 
 from mini_agent.domain import ToolSpec
 
-from .contracts import QuestionOption, UserQuestion
+from ..core.contracts import QuestionOption, UserQuestion
 
 REQUEST_USER_INPUT_NAME = "request_user_input"
 OTHER_OPTION_LABEL = "其他"

@@ -15,13 +15,12 @@ from mini_agent.domain import (
 )
 from mini_agent.tools import ToolError
 
-from .cancellation import cancel_if_requested
-from .checkpointing import CheckpointStore
-from .config import RunnerSettings
-from .context import AgentRuntime, RunSummary, RuntimeServices, RuntimeState
-from .contracts import InterruptDecision, InterruptRequest
-from .events import RuntimeEvent
-from .hooks import (
+from ..conversation.steering import consume_steering
+from ..core.config import RunnerSettings
+from ..core.context import AgentRuntime, RunSummary, RuntimeServices, RuntimeState
+from ..core.contracts import InterruptDecision, InterruptRequest
+from ..core.events import RuntimeEvent
+from ..core.hooks import (
     AgentHook,
     HookCancellation,
     HookExecutionError,
@@ -31,11 +30,12 @@ from .hooks import (
     RunHookInfo,
     RunHookResult,
 )
+from ..persistence.checkpointing import CheckpointStore
+from ..planning.mode import PlanModeWorkflow
+from .cancellation import cancel_if_requested
 from .outcomes import cancel_run, fail_run
-from .plan_mode import PlanModeWorkflow
 from .publisher import RunEventPublisher
 from .routing import StrategyRouter
-from .steering import consume_steering
 from .workflows import DynamicReplanWorkflow, ReactiveWorkflow
 
 

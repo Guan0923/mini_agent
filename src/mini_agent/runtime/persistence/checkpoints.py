@@ -1,4 +1,4 @@
-"""Backward-compatible SQLite checkpoint adapter import."""
+"""SQLite checkpoint adapter import."""
 
 from mini_agent.storage import SQLiteCheckpointStore
 

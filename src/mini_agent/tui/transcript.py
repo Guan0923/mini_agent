@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Iterable
+from functools import partial
 
 from textual import events
 from textual.await_complete import AwaitComplete
@@ -11,7 +11,6 @@ from textual.containers import VerticalScroll
 from textual.timer import Timer
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.text_area import Selection
-
 
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -29,7 +28,7 @@ class MarkdownBody(Markdown):
         self.markdown_text = markdown
         self._revision += 1
         if self.is_mounted:
-            self.run_worker(self._render_stream(self._revision, markdown), exclusive=True)
+            self.run_worker(partial(self._render_stream, self._revision, markdown), exclusive=True)
         else:
             self._initial_markdown = markdown
 

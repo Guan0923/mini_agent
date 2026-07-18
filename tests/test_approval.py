@@ -1,4 +1,4 @@
-from mini_agent.runtime.contracts import InterruptRequest, QuestionOption, UserQuestion
+from mini_agent.runtime.core.contracts import InterruptRequest, QuestionOption, UserQuestion
 from mini_agent.tui.approval import TerminalApproval
 
 

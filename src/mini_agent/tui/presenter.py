@@ -6,6 +6,14 @@ from collections.abc import Callable
 
 from mini_agent.runtime import RuntimeEvent
 
+_PLAN_RESULT_MAX_CHARS = 240
+_PLAN_STATUS_DISPLAY = {
+    "completed": ("✓", "COMPLETED"),
+    "running": ("→", "RUNNING"),
+    "pending": ("•", "PENDING"),
+    "failed": ("✗", "FAILED"),
+    "superseded": ("↺", "SUPERSEDED"),
+}
 
 def _console_write(text: str, end: str = "\n") -> None:
     print(text, end=end, flush=end == "")
@@ -59,13 +67,21 @@ class TerminalPresenter:
         elif event.kind == "replan_requested":
             self._write(f"REPLAN REQUESTED\n{event.message}")
         elif event.kind == "replan_applied":
-            self._write(f"REPLAN APPLIED\n{event.message}")
+            if self._has_step_snapshot(event.data, "previous_steps") and self._has_step_snapshot(event.data, "steps"):
+                self._render_replan(event)
+            else:
+                self._write(f"REPLAN APPLIED\n{event.message}")
         elif event.kind == "response":
             if not event.data.get("streamed"):
                 self._write(f"RESPONSE\n{event.message}")
         elif event.kind == "plan":
-            if not event.data.get("streamed"):
+            if self._has_step_snapshot(event.data, "steps"):
+                self._render_plan(event.data)
+            elif not event.data.get("streamed"):
                 self._write(f"PLAN\n{event.message}")
+        elif event.kind == "plan_progress":
+            if self._has_step_snapshot(event.data, "steps"):
+                self._render_plan(event.data)
         elif event.kind == "error":
             self._write(f"ERROR {event.message}")
             diagnostics = event.data.get("provider_diagnostics")
@@ -93,3 +109,60 @@ class TerminalPresenter:
             self._write("CANCELLED")
         elif event.kind == "run_finished":
             self._write(f"RUN {event.data['run_id']} {event.message}")
+
+    @staticmethod
+    def _has_step_snapshot(data: dict[str, object], key: str) -> bool:
+        return isinstance(data.get(key), list)
+
+    @staticmethod
+    def _truncate_result(value: str) -> str:
+        if len(value) <= _PLAN_RESULT_MAX_CHARS:
+            return value
+        return f"{value[:_PLAN_RESULT_MAX_CHARS - 3]}..."
+
+    @classmethod
+    def _step_lines(
+        cls,
+        steps: list[object],
+        *,
+        statuses: frozenset[str] | None = None,
+    ) -> list[str]:
+        lines: list[str] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            status = str(step.get("status") or "pending")
+            if statuses is not None and status not in statuses:
+                continue
+            symbol, label = _PLAN_STATUS_DISPLAY.get(status, ("•", status.upper()))
+            index = step.get("index", "?")
+            description = str(step.get("description") or step.get("id") or "Unnamed step")
+            lines.append(f"{symbol} {index}. {description} — {label}")
+            result = step.get("result")
+            if isinstance(result, str) and result:
+                lines.append(f"  result: {cls._truncate_result(result)}")
+        return lines
+
+    def _render_plan(self, data: dict[str, object]) -> None:
+        self._write(f"PLAN REVISION {data.get('revision', '?')}")
+        steps = data.get("steps")
+        for line in self._step_lines(steps if isinstance(steps, list) else []):
+            self._write(line)
+
+    def _render_replan(self, event: RuntimeEvent) -> None:
+        previous_steps = event.data.get("previous_steps")
+        previous = previous_steps if isinstance(previous_steps, list) else []
+        self._write(f"REPLAN APPLIED — revision {event.data.get('revision', '?')}")
+        self._write(f"REASON: {event.data.get('reason') or event.message}")
+        self._write("COMPLETED STEPS")
+        completed = self._step_lines(previous, statuses=frozenset({"completed"}))
+        for line in completed or ["(none)"]:
+            self._write(line)
+        self._write("REPLACED STEPS")
+        replaced = self._step_lines(previous, statuses=frozenset({"superseded"}))
+        for line in replaced or ["(none)"]:
+            self._write(line)
+        self._write("NEW PLAN")
+        steps = event.data.get("steps")
+        for line in self._step_lines(steps if isinstance(steps, list) else []):
+            self._write(line)

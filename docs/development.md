@@ -63,10 +63,10 @@ These paths are ignored by Git. `LOG_FULL_MESSAGES=True` is the development defa
 ## Change boundaries
 
 - Domain types remain independent of the TUI, providers, and concrete storage. Active chat history contains only system, user, and assistant messages.
-- Runtime owns strategy execution, preprocessing, and checkpoint/session ports. `ConversationService` owns the active session, one durable turn at a time, same-session handoffs, and isolated-session handoffs requested by `RunHandoff.new_session`.
+- Runtime keeps only lazy public exports at the package root and groups implementations into `core`, `application`, `execution`, `conversation`, `planning`, and `persistence`. `ConversationService` owns the active session, one durable turn at a time, same-session handoffs, and isolated-session handoffs requested by `RunHandoff.new_session`.
 - Tools validate untrusted model arguments and remain workspace-confined. Keep default workspace assembly in `tools/catalog.py`; keep `ToolRegistry` independent of concrete tool implementations.
 - Provider adapters own wire conversion only and accept active chat messages, never artifact snapshots. Keep reusable HTTP and SSE mechanics in `providers/client.py`.
 - Storage adapters implement runtime ports and are chosen only by `runtime.factory`. Dormant artifact adapters remain independently testable but are not composed into AgentRunner.
-- TUI renders runtime events and owns terminal commands/approval prompts; keep the Plan Review and Tool Review decision sets separate, and do not implement tool behavior or session persistence in the TUI.
+- TUI renders runtime events and owns terminal commands/approval prompts; put reusable controls in `tui/widgets`, choice or transcript state transitions in their concern modules, and keep `TerminalView` focused on composition and lifecycle. Keep the Plan Review and Tool Review decision sets separate, and do not implement tool behavior or session persistence in the TUI.
 
 When adding behavior, add or update focused tests in `tests/`, then run the complete validation commands before opening a pull request.

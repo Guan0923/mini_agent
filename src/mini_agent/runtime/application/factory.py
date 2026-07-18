@@ -11,11 +11,11 @@ from mini_agent.providers import LLMClient, ModelConfig
 from mini_agent.storage import SQLiteCheckpointStore, SQLiteSessionStore
 from mini_agent.tools import ToolExecutor, WorkspaceFiles, build_tool_registry
 
-from .application import AgentApplication
-from .config import RunnerSettings, log_full_messages_from_env
-from .hooks import AgentHook
-from .references import FileReferenceExpander
-from .runner import AgentRunner
+from ..conversation.references import FileReferenceExpander
+from ..core.config import RunnerSettings, log_full_messages_from_env
+from ..core.hooks import AgentHook
+from ..execution.runner import AgentRunner
+from .services import AgentApplication
 
 PlannerName = Literal["llm", "rule"]
 

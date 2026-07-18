@@ -48,7 +48,7 @@ def test_domain_import_does_not_load_outer_layers() -> None:
 
 def test_runtime_event_import_does_not_load_application_graph() -> None:
     _run_isolated_import(
-        "import mini_agent.runtime.events",
+        "import mini_agent.runtime.core.events",
         ("mini_agent.planning", "mini_agent.providers", "mini_agent.storage", "mini_agent.tools", "requests"),
     )
 
@@ -56,8 +56,8 @@ def test_runtime_event_import_does_not_load_application_graph() -> None:
 def test_core_runtime_and_planning_do_not_import_provider_implementations() -> None:
     paths = [
         SOURCE / "mini_agent" / "planning" / "llm.py",
-        SOURCE / "mini_agent" / "runtime" / "routing.py",
-        SOURCE / "mini_agent" / "runtime" / "workflows.py",
+        SOURCE / "mini_agent" / "runtime" / "execution" / "routing.py",
+        SOURCE / "mini_agent" / "runtime" / "execution" / "workflows.py",
     ]
 
     for path in paths:
@@ -72,10 +72,27 @@ def test_deepseek_adapter_does_not_own_http_transport() -> None:
 
 def test_application_services_depend_on_runner_port() -> None:
     paths = [
-        SOURCE / "mini_agent" / "runtime" / "application.py",
-        SOURCE / "mini_agent" / "runtime" / "conversations.py",
+        SOURCE / "mini_agent" / "runtime" / "application" / "services.py",
+        SOURCE / "mini_agent" / "runtime" / "conversation" / "service.py",
     ]
 
     for path in paths:
         imports = _module_imports(path)
         assert not any(name == "runner" or name.endswith(".runner") for name in imports), path
+
+
+def test_runtime_implementations_are_grouped_by_responsibility() -> None:
+    runtime = SOURCE / "mini_agent" / "runtime"
+
+    expected_modules = {
+        "core": {"config.py", "context.py", "contracts.py", "events.py", "hooks.py"},
+        "application": {"factory.py", "services.py"},
+        "execution": {"runner.py", "routing.py", "steps.py", "workflows.py"},
+        "conversation": {"service.py", "store.py", "steering.py", "user_input.py"},
+        "planning": {"mode.py", "review.py"},
+        "persistence": {"artifacts.py", "checkpointing.py", "recording.py"},
+    }
+    for package, modules in expected_modules.items():
+        assert modules <= {path.name for path in (runtime / package).glob("*.py")}
+
+    assert {path.name for path in runtime.glob("*.py")} == {"__init__.py"}

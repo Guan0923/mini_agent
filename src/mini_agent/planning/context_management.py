@@ -15,8 +15,8 @@ from mini_agent.domain import (
     ToolSpec,
     UserMessage,
 )
-from mini_agent.runtime.context import AgentRuntime
-from mini_agent.runtime.events import RuntimeEvent
+from mini_agent.runtime.core.context import AgentRuntime
+from mini_agent.runtime.core.events import RuntimeEvent
 
 _CONTEXT_SUMMARY_NAME = "context_summary"
 _CONTEXT_SUMMARY_PREFIX = "[Conversation summary]"

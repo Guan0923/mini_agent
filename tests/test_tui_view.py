@@ -6,8 +6,8 @@ from textual import events
 from textual.color import Color
 from textual.widgets import Label, Rule
 
-from mini_agent.runtime.contracts import QuestionOption, UserQuestion
-from mini_agent.runtime.user_input import OTHER_OPTION_LABEL, parse_user_input_questions
+from mini_agent.runtime.conversation.user_input import OTHER_OPTION_LABEL, parse_user_input_questions
+from mini_agent.runtime.core.contracts import QuestionOption, UserQuestion
 from mini_agent.tui.view import RUNNING_STATUS_WORDS, TerminalView
 
 

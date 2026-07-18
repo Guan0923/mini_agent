@@ -6,8 +6,8 @@ from typing import Literal
 
 from mini_agent.domain import AssistantMessage, UserMessage
 
-from .context import AgentRuntime
-from .events import RuntimeEvent
+from ..core.context import AgentRuntime
+from ..core.events import RuntimeEvent
 
 
 def planning_failure_data(error: Exception, planner: str) -> dict[str, object]:

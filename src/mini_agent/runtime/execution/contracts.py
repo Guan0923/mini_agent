@@ -6,7 +6,7 @@ from typing import Protocol
 
 from mini_agent.domain import ChatMessage, RunState
 
-from .context import AgentRuntime, RuntimeStore
+from ..core.context import AgentRuntime, RuntimeStore
 
 
 class RuntimeRunner(Protocol):

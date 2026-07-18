@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .context import AgentRuntime
+from ..core.context import AgentRuntime
 
 
 class CheckpointStore(Protocol):

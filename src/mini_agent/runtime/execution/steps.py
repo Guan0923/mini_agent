@@ -6,10 +6,10 @@ from dataclasses import dataclass
 
 from mini_agent.tools import ToolError
 
-from .context import AgentRuntime
-from .contracts import InterruptDecision, InterruptRequest
-from .events import RuntimeEvent
-from .hooks import (
+from ..core.context import AgentRuntime
+from ..core.contracts import InterruptDecision, InterruptRequest
+from ..core.events import RuntimeEvent
+from ..core.hooks import (
     HookCancellation,
     HookOutcome,
     RunHookInfo,

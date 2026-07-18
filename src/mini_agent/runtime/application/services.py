@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .conversations import ConversationService, TaskPreprocessor
-from .execution import RuntimeRunner
-from .session_store import SessionStore
+from ..conversation.service import ConversationService, TaskPreprocessor
+from ..conversation.store import SessionStore
+from ..execution import RuntimeRunner
 
 
 @dataclass(frozen=True)

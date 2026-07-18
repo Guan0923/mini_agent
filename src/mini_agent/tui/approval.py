@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Literal
 
-from mini_agent.runtime.contracts import InterruptDecision, InterruptRequest, UserQuestion
-from mini_agent.runtime.user_input import OTHER_OPTION_LABEL
+from mini_agent.runtime.conversation.user_input import OTHER_OPTION_LABEL
+from mini_agent.runtime.core.contracts import InterruptDecision, InterruptRequest, UserQuestion
 
 PermissionMode = Literal["approval_for_me", "full_access"]
 

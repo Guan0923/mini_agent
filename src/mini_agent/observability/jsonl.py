@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from mini_agent.runtime.events import RuntimeEvent
-from mini_agent.runtime.recording import persistent_event
+from mini_agent.runtime.core.events import RuntimeEvent
+from mini_agent.runtime.persistence.recording import persistent_event
 
 
 class JsonlRunLogger:

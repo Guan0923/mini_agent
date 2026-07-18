@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 from mini_agent.domain import UserMessage
 
-from .context import AgentRuntime
-from .events import RuntimeEvent
+from ..core.context import AgentRuntime
+from ..core.events import RuntimeEvent
 
 
 @dataclass(frozen=True)

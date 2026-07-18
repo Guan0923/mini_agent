@@ -1,4 +1,4 @@
-"""Backward-compatible SQLite session adapter import."""
+"""SQLite session adapter import."""
 
 from mini_agent.storage import SQLiteSessionStore
 

@@ -14,7 +14,7 @@ from mini_agent.domain import (
     ToolMessage,
     UserMessage,
 )
-from mini_agent.runtime.context import AgentRuntime
+from mini_agent.runtime.core.context import AgentRuntime
 
 
 class RuleBasedPlanner:

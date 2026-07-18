@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mini_agent.domain import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, ToolSpec, UserMessage
-from mini_agent.runtime.context import AgentRuntime, PreparedResponse
+from mini_agent.runtime.core.context import AgentRuntime, PreparedResponse
 
 from .config import ModelConfig
 from .errors import (

@@ -16,7 +16,7 @@ from mini_agent.domain import (
     new_session_id,
 )
 from mini_agent.domain.state import utc_now
-from mini_agent.runtime.context import AgentRuntime, RuntimeState
+from mini_agent.runtime.core.context import AgentRuntime, RuntimeState
 
 
 class SQLiteCheckpointStore:

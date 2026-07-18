@@ -19,17 +19,17 @@ from mini_agent.domain import (
     ToolSpec,
     UserMessage,
 )
-from mini_agent.runtime.context import AgentRuntime, PreparedResponse
-from mini_agent.runtime.events import RuntimeEvent
-from mini_agent.runtime.hooks import (
+from mini_agent.runtime.conversation.user_input import REQUEST_USER_INPUT_NAME, REQUEST_USER_INPUT_SPEC
+from mini_agent.runtime.core.context import AgentRuntime, PreparedResponse
+from mini_agent.runtime.core.events import RuntimeEvent
+from mini_agent.runtime.core.hooks import (
     HookOutcome,
     ModelHookContext,
     ModelHookResult,
     RunHookInfo,
 )
-from mini_agent.runtime.plan_review import REQUEST_PLAN_REVIEW_NAME, REQUEST_PLAN_REVIEW_SPEC
-from mini_agent.runtime.recording import model_error_data, model_request_data, model_response_data
-from mini_agent.runtime.user_input import REQUEST_USER_INPUT_NAME, REQUEST_USER_INPUT_SPEC
+from mini_agent.runtime.persistence.recording import model_error_data, model_request_data, model_response_data
+from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME, REQUEST_PLAN_REVIEW_SPEC
 
 from .context_management import ContextManager
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
-from mini_agent.runtime.events import RuntimeEvent
+from mini_agent.runtime.core.events import RuntimeEvent
 
 
 class EventFanout:
