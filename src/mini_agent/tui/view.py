@@ -67,6 +67,7 @@ RUNNING_STATUS_WORDS = (
     "🎨 SHAPING",
     "✅ VERIFYING",
     "🏁 FINISHING",
+    "🏃 RUNNING",
 )
 _OMITTED_MARKER = "[Earlier terminal output omitted]\n"
 
@@ -332,7 +333,9 @@ class TerminalView(App[None]):
 
     def on_mount(self) -> None:
         self._owner_loop = asyncio.get_running_loop()
-        self.status_line.update(f" {self._status}")
+        if self._is_running_status(self._status):
+            self._choose_running_status()
+        self._render_status()
         self.input.focus()
         if self._is_running_status(self._status):
             self._schedule_running_status()
@@ -375,6 +378,8 @@ class TerminalView(App[None]):
                 self._stop_running_status()
             self._status = status
             self._interrupt_enabled = interrupt_enabled
+            if is_running and self._running_status is None:
+                self._choose_running_status()
             if is_running and self._status_timer is None:
                 self._schedule_running_status()
             self._refresh_status()
@@ -874,11 +879,14 @@ class TerminalView(App[None]):
         if not self._is_running_status(self._status):
             self._running_status = None
             return
-        choices = tuple(word for word in RUNNING_STATUS_WORDS if word != self._running_status)
-        self._running_status = self._status_random.choice(choices)
+        self._choose_running_status()
         if self._copy_notice_timer is None:
             self._render_status()
         self._schedule_running_status()
+    def _choose_running_status(self) -> None:
+        choices = tuple(word for word in RUNNING_STATUS_WORDS if word != self._running_status)
+        self._running_status = self._status_random.choice(choices)
+
 
     def _stop_running_status(self) -> None:
         if self._status_timer is not None:

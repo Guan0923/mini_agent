@@ -571,6 +571,7 @@ def test_copy_notice_restores_latest_status_without_stale_timer_overwrite(monkey
         monkeypatch.setattr(view, "copy_to_clipboard", lambda _text: None)
         async with view.run_test() as pilot:
             view.set_ui(status="AGENT | RUNNING")
+            agent_status = view._running_status
             view.transcript.load_text("copy")
             view.transcript.select_all()
             view.copy_transcript_selection()
@@ -578,22 +579,24 @@ def test_copy_notice_restores_latest_status_without_stale_timer_overwrite(monkey
 
             await asyncio.sleep(1.6)
             await pilot.pause()
-            assert str(view.status_line.content) == " AGENT | RUNNING"
+            assert str(view.status_line.content) == f" AGENT | {agent_status}"
 
             view.transcript.select_all()
             view.copy_transcript_selection()
             view.set_ui(status="PLAN | RUNNING")
-            assert str(view.status_line.content) == " PLAN | RUNNING"
+            plan_status = view._running_status
+            assert str(view.status_line.content) == f" PLAN | {plan_status}"
             await asyncio.sleep(1.6)
             await pilot.pause()
 
-            assert str(view.status_line.content) == " PLAN | RUNNING"
+            assert str(view.status_line.content) == f" PLAN | {plan_status}"
 
     asyncio.run(scenario())
 
 
 def test_running_status_catalog_contains_distinct_emoji_words() -> None:
-    assert len(RUNNING_STATUS_WORDS) >= 30
+    assert len(RUNNING_STATUS_WORDS) == 37
+    assert "🏃 RUNNING" in RUNNING_STATUS_WORDS
     assert all(word.strip() and any(ord(char) > 127 for char in word) for word in RUNNING_STATUS_WORDS)
 
 
@@ -637,14 +640,17 @@ def test_running_status_rotates_on_random_timer_and_stops_when_idle() -> None:
             )
             await pilot.pause()
 
-            assert str(view.status_line.content) == " AGENT | RUNNING | PERMISSION: FULL ACCESS"
+            assert random_source.selected
+            assert str(view.status_line.content) == (
+                f" AGENT | {random_source.selected[0]} | PERMISSION: FULL ACCESS"
+            )
             assert len(scheduled) == 1
             assert 5 <= scheduled[0][1] <= 10
 
             scheduled[0][2]()
-            assert random_source.selected
+            assert random_source.selected[1] != random_source.selected[0]
             assert str(view.status_line.content) == (
-                f" AGENT | {random_source.selected[0]} | PERMISSION: FULL ACCESS"
+                f" AGENT | {random_source.selected[1]} | PERMISSION: FULL ACCESS"
             )
             assert len(scheduled) == 2
             assert 5 <= scheduled[1][1] <= 10
@@ -652,13 +658,13 @@ def test_running_status_rotates_on_random_timer_and_stops_when_idle() -> None:
             view._copy_notice_timer = FakeTimer()
             view.status_line.update(" COPIED — 4 characters")
             scheduled[1][2]()
-            assert random_source.selected[1] != random_source.selected[0]
+            assert random_source.selected[2] != random_source.selected[1]
             assert str(view.status_line.content) == " COPIED — 4 characters"
 
             view._copy_notice_timer = None
             view._render_status()
             assert str(view.status_line.content) == (
-                f" AGENT | {random_source.selected[1]} | PERMISSION: FULL ACCESS"
+                f" AGENT | {random_source.selected[2]} | PERMISSION: FULL ACCESS"
             )
             view.set_ui(status="AGENT | IDLE | PERMISSION: FULL ACCESS")
             assert len(scheduled) == 3
