@@ -920,3 +920,77 @@ def test_context_usage_events_update_and_reset_the_active_view() -> None:
     app._reset_context_usage()
 
     assert view.calls == [(800, 1_000, 0.8), ()]
+
+
+def test_active_view_receives_runtime_events_without_presenter_output() -> None:
+    class EventView:
+        def __init__(self) -> None:
+            self.events: list[RuntimeEvent] = []
+            self.context_calls: list[tuple[object, ...]] = []
+
+        def handle_runtime_event(self, event: RuntimeEvent) -> None:
+            self.events.append(event)
+
+        def set_context_usage(self, *args: object) -> None:
+            self.context_calls.append(args)
+
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._view = EventView()
+    presented: list[RuntimeEvent] = []
+    app.presenter = SimpleNamespace(on_event=presented.append)
+    event = RuntimeEvent(
+        "context_usage",
+        data={"estimated_tokens": 800, "context_size": 1_000, "threshold": 0.8},
+    )
+
+    app._handle_runtime_event(event)
+    app._present_runtime_event(event)
+
+    assert app._view.events == [event]
+    assert app._view.context_calls == [(800, 1_000, 0.8)]
+    assert presented == []
+
+
+def test_view_routes_conversations_system_output_and_history() -> None:
+    class TranscriptView:
+        def __init__(self) -> None:
+            self.conversations: list[str] = []
+            self.system: list[tuple[str, str]] = []
+            self.histories: list[list[dict[str, str]]] = []
+
+        def begin_conversation(self, content: str) -> None:
+            self.conversations.append(content)
+
+        def write_system(self, text: str, end: str = "\n") -> None:
+            self.system.append((text, end))
+
+        def load_history(self, messages: list[dict[str, str]]) -> None:
+            self.histories.append(messages)
+
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    view = TranscriptView()
+    app._view = view
+    history = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    app._conversation_service.session_store = object()
+    app._conversation_service.active_session = SimpleNamespace(session_id="session_1")
+    app._conversation_service.history = lambda: history
+
+    app._write_user_message("hello")
+    app._write("SYSTEM EVENT", end="")
+    app._show_history()
+
+    assert view.conversations == ["hello"]
+    assert view.system == [("SYSTEM EVENT", "")]
+    assert view.histories == [history]
+
+
+def test_console_output_remains_the_fallback_without_an_active_view(capsys) -> None:
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+
+    app._write_user_message("hello")
+    app._write("SYSTEM EVENT")
+
+    assert capsys.readouterr().out == "USER\nhello\nSYSTEM EVENT\n"

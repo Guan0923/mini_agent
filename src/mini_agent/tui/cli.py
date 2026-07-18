@@ -226,13 +226,19 @@ class TerminalApp:
             )
         self.presenter = TerminalPresenter(self._write)
         self._approval = TerminalApproval(write=self._write)
-        sinks = [self._handle_runtime_event, self.presenter.on_event]
+        sinks = [self._handle_runtime_event, self._present_runtime_event]
         if log_dir is not None:
             sinks.append(JsonlRunLogger(log_dir, include_full_messages=self.runner.settings.log_full_messages))
         self._event_sink = EventFanout(sinks)
 
     def _handle_runtime_event(self, event: RuntimeEvent) -> None:
-        if event.kind != "context_usage" or self._view is None:
+        view = self._view
+        if view is None:
+            return
+        handle_event = getattr(view, "handle_runtime_event", None)
+        if callable(handle_event):
+            handle_event(event)
+        if event.kind != "context_usage":
             return
         estimated = event.data.get("estimated_tokens")
         context_size = event.data.get("context_size")
@@ -242,7 +248,13 @@ class TerminalApp:
             and isinstance(context_size, int)
             and isinstance(threshold, int | float)
         ):
-            self._view.set_context_usage(estimated, context_size, float(threshold))
+            view.set_context_usage(estimated, context_size, float(threshold))
+
+    def _present_runtime_event(self, event: RuntimeEvent) -> None:
+        """Keep the console presenter as the non-interactive fallback."""
+
+        if self._view is None:
+            self.presenter.on_event(event)
 
     def _reset_context_usage(self) -> None:
         if self._view is not None:
@@ -531,13 +543,22 @@ class TerminalApp:
     def _write(self, text: str, end: str = "\n") -> None:
         view = getattr(self, "_view", None)
         if view is not None:
-            view.write(text, end)
+            write_system = getattr(view, "write_system", None)
+            if callable(write_system):
+                write_system(text, end)
+            else:
+                view.write(text, end)
             return
         print(text, end=end, flush=end == "")
 
     def _write_user_message(self, content: str) -> None:
         """Echo only content that is about to enter the conversation."""
 
+        view = getattr(self, "_view", None)
+        begin_conversation = getattr(view, "begin_conversation", None)
+        if callable(begin_conversation):
+            begin_conversation(content)
+            return
         self._write(f"USER\n{content}")
 
     def _clear_display(self) -> None:
@@ -777,6 +798,11 @@ class TerminalApp:
         messages = self._conversation_service.history()
         if not messages:
             self._write("No conversation history.")
+            return
+        view = getattr(self, "_view", None)
+        load_history = getattr(view, "load_history", None)
+        if callable(load_history):
+            load_history(messages)
             return
         self._write(f"HISTORY {self.active_session.session_id}")
         for message in messages:
