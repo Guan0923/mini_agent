@@ -307,6 +307,8 @@ class TerminalView(App[None]):
     ) -> None:
         super().__init__()
         self._owner_loop = loop
+        self._owner_ready = False
+        self._pending_owner_callbacks: list[Callable[[], None]] = []
         self._transcript_limit = transcript_limit
         self._completer = completer or SlashCommandCompleter()
         self._suggestions: list[CommandSuggestion] = []
@@ -366,6 +368,9 @@ class TerminalView(App[None]):
 
     def on_mount(self) -> None:
         self._owner_loop = asyncio.get_running_loop()
+        self._owner_ready = True
+        if self._pending_owner_callbacks:
+            self.call_after_refresh(self._flush_pending_owner_callbacks)
         if self._is_running_status(self._status):
             self._choose_running_status()
         self._render_status()
@@ -374,6 +379,12 @@ class TerminalView(App[None]):
             self._schedule_running_status()
         if self._pending_chunks:
             self._schedule_flush()
+
+    def _flush_pending_owner_callbacks(self) -> None:
+        callbacks = self._pending_owner_callbacks
+        self._pending_owner_callbacks = []
+        for callback in callbacks:
+            callback()
 
     @property
     def follow_tail(self) -> bool:
@@ -1303,6 +1314,9 @@ class TerminalView(App[None]):
         self.status_line.update(f" {status}{suffix}")
 
     def _run_on_owner(self, callback) -> None:
+        if not self._owner_ready:
+            self._pending_owner_callbacks.append(callback)
+            return
         loop = self._owner_loop
         if loop is None or not loop.is_running():
             callback()
