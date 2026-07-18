@@ -1,0 +1,185 @@
+"""Nested Markdown transcript widgets used by the terminal view."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Iterable
+
+from textual import events
+from textual.containers import VerticalScroll
+from textual.timer import Timer
+from textual.widgets import Collapsible, Markdown, Static
+from textual.widgets.text_area import Selection
+
+
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+class MarkdownBody(Markdown):
+    """A Markdown widget with a synchronous source cache for streaming text."""
+
+    def __init__(self, markdown: str = "", **kwargs: object) -> None:
+        self.markdown_text = markdown
+        self._revision = 0
+        super().__init__(markdown, **kwargs)
+
+    def set_markdown(self, markdown: str) -> None:
+        """Replace content while keeping only the latest asynchronous render."""
+        self.markdown_text = markdown
+        self._revision += 1
+        if self.is_mounted:
+            self.run_worker(self._render_stream(self._revision, markdown), exclusive=True)
+
+    def append_markdown(self, delta: str) -> None:
+        self.set_markdown(f"{self.markdown_text}{delta}")
+
+    async def _render_stream(self, revision: int, markdown: str) -> None:
+        if revision != self._revision:
+            return
+        await self.update(markdown)
+
+
+class StatusLeaf(Static):
+    """A concise, non-expandable tool status."""
+
+    def __init__(self, status: str = "pending") -> None:
+        self.status = status
+        super().__init__(f"status: {status}", markup=False, classes="transcript-status")
+
+    def set_status(self, status: str) -> None:
+        self.status = status
+        self.update(f"status: {status}")
+
+
+class TranscriptNode(Collapsible):
+    """A titled transcript branch which may show activity while collapsed."""
+
+    def __init__(
+        self,
+        title: str,
+        *children: Static | Markdown | Collapsible,
+        collapsed: bool = False,
+        classes: str | None = None,
+    ) -> None:
+        self.title_text = title
+        self.activity = False
+        self._spinner_index = 0
+        self._activity_timer: Timer | None = None
+        super().__init__(
+            *children,
+            title=title,
+            collapsed=collapsed,
+            collapsed_symbol="▶",
+            expanded_symbol="▼",
+            classes=classes or "transcript-node",
+        )
+
+    @property
+    def display_title(self) -> str:
+        if self.activity and self.collapsed:
+            return f"{SPINNER_FRAMES[self._spinner_index]} {self.title_text}"
+        return f"{'▶' if self.collapsed else '▼'} {self.title_text}"
+
+    def _watch_collapsed(self, collapsed: bool) -> None:
+        super()._watch_collapsed(collapsed)
+        self._sync_title()
+
+    def set_activity(self, active: bool) -> None:
+        """Start or stop the collapsed-node activity indicator."""
+        if self.activity == active:
+            return
+        self.activity = active
+        if active and self.is_mounted:
+            self._activity_timer = self.set_interval(0.12, self._tick_activity)
+        elif not active and self._activity_timer is not None:
+            self._activity_timer.stop()
+            self._activity_timer = None
+        self._sync_title()
+
+    def _on_mount(self, event: events.Mount) -> None:
+        super()._on_mount(event)
+        if self.activity and self._activity_timer is None:
+            self._activity_timer = self.set_interval(0.12, self._tick_activity)
+        self._sync_title()
+
+    def _tick_activity(self) -> None:
+        if not self.activity:
+            return
+        self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
+        self._sync_title()
+
+    def _sync_title(self) -> None:
+        if self.activity and self.collapsed:
+            self._title.collapsed_symbol = SPINNER_FRAMES[self._spinner_index]
+        else:
+            self._title.collapsed_symbol = "▶"
+        self._title.expanded_symbol = "▼"
+        self.title = self.title_text
+        self._title._update_label()
+
+    def add_node(self, node: Static | Markdown | Collapsible) -> None:
+        """Append a nested child regardless of whether this node is mounted yet."""
+        if self.is_mounted:
+            self.query_one(Collapsible.Contents).mount(node)
+        else:
+            self._contents_list.append(node)
+
+
+class TranscriptScroll(VerticalScroll):
+    """The transcript container, with small compatibility helpers for old callers."""
+
+    def __init__(self) -> None:
+        super().__init__(id="transcript", classes="transcript-scroll")
+        self.soft_wrap = True
+        self.read_only = True
+        self._plain_text = ""
+        self.selection = Selection.cursor((0, 0))
+
+    @property
+    def text(self) -> str:
+        return self._plain_text
+
+    @property
+    def selected_text(self) -> str:
+        return self._plain_text if not self.selection.is_empty else ""
+
+    def append_text(self, text: str) -> None:
+        self._plain_text = f"{self._plain_text}{text}"
+
+    def load_text(self, text: str) -> None:
+        self._plain_text = text
+        self.selection = Selection.cursor((0, 0))
+
+    def select_all(self) -> None:
+        line_count = max(1, self._plain_text.count("\n") + 1)
+        last_column = len(self._plain_text.rsplit("\n", 1)[-1])
+        self.selection = Selection((0, 0), (line_count - 1, last_column))
+
+    def add_top_level(self, node: TranscriptNode) -> None:
+        self.mount(node)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button == 3:
+            callback = getattr(self.app, "copy_transcript_selection", None)
+            if callback is not None:
+                callback()
+            event.prevent_default()
+            event.stop()
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        callback = getattr(self.app, "pause_following", None)
+        if callback is not None:
+            callback()
+        super()._on_mouse_scroll_up(event)
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        super()._on_mouse_scroll_down(event)
+        callback = getattr(self.app, "_resume_follow_if_at_end", None)
+        if callback is not None:
+            self.call_after_refresh(callback)
+
+    def clear_nodes(self, nodes: Iterable[TranscriptNode]) -> None:
+        """Detach rendered nodes; callers clear their indexing state separately."""
+        for node in nodes:
+            if node.is_mounted:
+                node.remove()
