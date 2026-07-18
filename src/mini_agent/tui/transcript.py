@@ -164,6 +164,7 @@ class TranscriptScroll(VerticalScroll):
         self.read_only = True
         self._plain_text = ""
         self.selection = Selection.cursor((0, 0))
+        self._pending_top_levels: list[TranscriptNode] = []
 
     @property
     def text(self) -> str:
@@ -190,7 +191,17 @@ class TranscriptScroll(VerticalScroll):
         self.selection = Selection((0, 0), (line_count - 1, last_column))
 
     def add_top_level(self, node: TranscriptNode) -> None:
-        self.mount(node)
+        if self.is_attached:
+            self.mount(node)
+        else:
+            self._pending_top_levels.append(node)
+
+    def _on_mount(self, event: events.Mount) -> None:
+        super()._on_mount(event)
+        if self._pending_top_levels:
+            pending = self._pending_top_levels
+            self._pending_top_levels = []
+            self.mount(*pending)
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         if event.button == 3:
@@ -217,6 +228,8 @@ class TranscriptScroll(VerticalScroll):
 
     def clear_nodes(self, nodes: Iterable[TranscriptNode]) -> None:
         """Detach rendered nodes; callers clear their indexing state separately."""
+        pending = set(nodes)
+        self._pending_top_levels = [node for node in self._pending_top_levels if node not in pending]
         for node in nodes:
             if node.is_mounted:
                 node.remove()
