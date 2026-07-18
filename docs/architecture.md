@@ -66,7 +66,7 @@ Review decisions behave as follows:
 
 The handoff is sequential rather than a mode mutation inside one run: the Plan run remains an auditable producer, while the Agent run is an independently checkpointed consumer in either the existing or a fresh session. The Agent prompt explicitly declares prior Plan-mode restrictions inactive, and the normal strategy router selects the implementation strategy.
 
-Plan questions, Plan Review, and Tool Review intentionally use separate decision vocabularies. Questions return `answer` with an answer map or `cancel`; Plan Review accepts only the three choices above; Tool Review remains `Continue / Cancel / Supplement`, so tool feedback behavior is unchanged.
+Plan questions, Plan Review, and Tool Review intentionally use separate decision vocabularies. Questions return `answer` with an answer map (an empty list explicitly skips one question) or `cancel`; Plan Review accepts only the three choices above; Tool Review remains `Continue / Cancel / Supplement`, so tool feedback behavior is unchanged.
 
 ## Provider Boundary
 

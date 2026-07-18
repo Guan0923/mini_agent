@@ -59,9 +59,10 @@ class TerminalApproval:
             return "full_access"
         return None
 
-    def set_permission(self, mode: PermissionMode) -> None:
+    def set_permission(self, mode: PermissionMode, *, announce: bool = True) -> None:
         self._permission_mode = mode
-        self._write(f"PERMISSION SET — {self._permission_label(mode)}")
+        if announce:
+            self._write(f"PERMISSION SET — {self._permission_label(mode)}")
 
     def notify(self, message: str) -> None:
         self._write(message)

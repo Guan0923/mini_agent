@@ -99,7 +99,7 @@ def test_view_status_includes_permission_mode_for_every_state() -> None:
         ("AGENT | RUNNING | PERMISSION: APPROVAL FOR ME", True),
         ("AGENT | CANCELLING | PERMISSION: APPROVAL FOR ME", False),
         ("TOOL REVIEW | Select action | PERMISSION: APPROVAL FOR ME", True),
-        ("PERMISSION | 1 Approval for me | 2 Full access | PERMISSION: APPROVAL FOR ME", False),
+        ("PERMISSION | Select mode | PERMISSION: APPROVAL FOR ME", False),
     ]
 
 
@@ -292,7 +292,7 @@ def test_interactive_review_keeps_main_input_for_queued_follow_up(monkeypatch, c
                 self.quit_sent = True
                 self.submissions.put_nowait("/quit")
 
-        def begin_review(self, _title, _prompt, _choices, on_complete) -> None:
+        def begin_review(self, _title, _summary, _details, _choices, on_complete) -> None:
             if self.queued:
                 return
             self.queued = True
@@ -763,6 +763,8 @@ def test_interactive_approval_bridge_resolves_inline_tool_supplement() -> None:
                 "cancel",
                 "supplement",
             ]
+            assert view._top_level_nodes == []
+            assert view.review_details.display is True
             await pilot.press("up", "tab")
             editor = view.choice_menu.highlighted_row.editor
             editor.value = "Use a smaller change."
@@ -956,7 +958,7 @@ def test_view_routes_conversations_system_output_and_history() -> None:
         def __init__(self) -> None:
             self.conversations: list[str] = []
             self.system: list[tuple[str, str]] = []
-            self.histories: list[list[dict[str, str]]] = []
+            self.histories: list[tuple[str, list[dict[str, str]]]] = []
 
         def begin_conversation(self, content: str) -> None:
             self.conversations.append(content)
@@ -964,8 +966,8 @@ def test_view_routes_conversations_system_output_and_history() -> None:
         def write_system(self, text: str, end: str = "\n") -> None:
             self.system.append((text, end))
 
-        def load_history(self, messages: list[dict[str, str]]) -> None:
-            self.histories.append(messages)
+        def show_history(self, label: str, messages: list[dict[str, str]]) -> None:
+            self.histories.append((label, messages))
 
     app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
     view = TranscriptView()
@@ -975,7 +977,7 @@ def test_view_routes_conversations_system_output_and_history() -> None:
         {"role": "assistant", "content": "hi"},
     ]
     app._conversation_service.session_store = object()
-    app._conversation_service.active_session = SimpleNamespace(session_id="session_1")
+    app._conversation_service.active_session = SimpleNamespace(session_id="session_1", title="Session 1")
     app._conversation_service.history = lambda: history
 
     app._write_user_message("hello")
@@ -984,7 +986,7 @@ def test_view_routes_conversations_system_output_and_history() -> None:
 
     assert view.conversations == ["hello"]
     assert view.system == [("SYSTEM EVENT", "")]
-    assert view.histories == [history]
+    assert view.histories == [("session_1 — Session 1", history)]
 
 
 def test_console_output_remains_the_fallback_without_an_active_view(capsys) -> None:
