@@ -199,9 +199,14 @@ class TranscriptScroll(VerticalScroll):
     def _on_mount(self, event: events.Mount) -> None:
         super()._on_mount(event)
         if self._pending_top_levels:
-            pending = self._pending_top_levels
-            self._pending_top_levels = []
-            self.mount(*pending)
+            self.call_after_refresh(self._flush_pending_top_levels)
+
+    def _flush_pending_top_levels(self) -> None:
+        if not self.is_attached or not self._pending_top_levels:
+            return
+        pending = self._pending_top_levels
+        self._pending_top_levels = []
+        self.mount(*pending)
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         if event.button == 3:
