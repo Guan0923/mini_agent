@@ -91,6 +91,7 @@ class TranscriptNode(Collapsible):
         self.activity = False
         self._spinner_index = 0
         self._activity_timer: Timer | None = None
+        self._pending_nodes: list[Static | Markdown | Collapsible] = []
         super().__init__(
             *children,
             title=title,
@@ -123,6 +124,8 @@ class TranscriptNode(Collapsible):
         super()._on_mount(event)
         self._sync_activity_timer()
         self._sync_title()
+        if self._pending_nodes:
+            self.call_after_refresh(self._flush_pending_nodes)
 
     def _sync_activity_timer(self) -> None:
         should_run = self.activity and self.collapsed and self.is_mounted
@@ -148,11 +151,25 @@ class TranscriptNode(Collapsible):
         self._title._update_label()
 
     def add_node(self, node: Static | Markdown | Collapsible) -> None:
-        """Append a nested child regardless of whether this node is mounted yet."""
-        if self.is_mounted:
-            self.query_one(Collapsible.Contents).mount(node)
-        else:
-            self._contents_list.append(node)
+        """Append a child, deferring dynamic mount until Contents is attached."""
+        contents = next(iter(self.query(Collapsible.Contents)), None) if self.is_attached else None
+        if contents is not None and contents.is_attached:
+            contents.mount(node)
+            return
+        self._pending_nodes.append(node)
+        if self.is_attached:
+            self.call_after_refresh(self._flush_pending_nodes)
+
+    def _flush_pending_nodes(self) -> None:
+        if not self._pending_nodes or not self.is_attached:
+            return
+        contents = next(iter(self.query(Collapsible.Contents)), None)
+        if contents is None or not contents.is_attached:
+            self.call_after_refresh(self._flush_pending_nodes)
+            return
+        pending = self._pending_nodes
+        self._pending_nodes = []
+        contents.mount(*pending)
 
 
 class TranscriptScroll(VerticalScroll):

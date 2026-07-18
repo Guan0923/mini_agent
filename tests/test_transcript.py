@@ -237,3 +237,30 @@ def test_system_message_before_view_mount_is_queued_until_transcript_mounts() ->
             assert system.collapsed is True
 
     asyncio.run(scenario())
+
+
+def test_background_runtime_events_wait_for_assistant_mount_before_adding_children() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(100, 30)) as pilot:
+            view.begin_conversation("你好")
+            events = [
+                RuntimeEvent("run_started", data={"run_id": "run-1"}),
+                RuntimeEvent("thinking_start", data={"run_id": "run-1"}),
+                RuntimeEvent("thinking_delta", "你好！", {"run_id": "run-1"}),
+                RuntimeEvent("thinking_end", data={"run_id": "run-1"}),
+                RuntimeEvent("response_start", data={"run_id": "run-1"}),
+                RuntimeEvent("response_delta", "你好！有什么可以帮你？", {"run_id": "run-1"}),
+                RuntimeEvent("response_end", data={"run_id": "run-1"}),
+            ]
+            await asyncio.gather(*(asyncio.to_thread(view.handle_runtime_event, event) for event in events))
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+
+            assistant_children = view.transcript_nodes[2:]
+            assert assistant_children
+            assert all(node.is_attached for node in assistant_children)
+            assert all(node.is_mounted for node in assistant_children)
+
+    asyncio.run(scenario())
