@@ -54,6 +54,12 @@ def _build_tools(
                         "default": 1,
                         "description": "One-based first line to return.",
                     },
+                    "start_column": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1,
+                        "description": "One-based column within start_line.",
+                    },
                     "max_lines": {
                         "type": "integer",
                         "minimum": 1,
@@ -78,6 +84,7 @@ def _build_tools(
                     "pattern": {
                         "type": "string",
                         "minLength": 1,
+                        "maxLength": 4_096,
                         "description": "Workspace-relative glob pattern such as **/*.py.",
                     },
                     "path": {
@@ -121,6 +128,7 @@ def _build_tools(
                     "glob": {
                         "type": "string",
                         "minLength": 1,
+                        "maxLength": 4_096,
                         "default": "**/*",
                         "description": "Case-sensitive glob applied below path.",
                     },

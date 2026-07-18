@@ -5,11 +5,13 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import stat
 import tempfile
 from collections.abc import Iterator
-from functools import cache
 from pathlib import Path
 from typing import Any
+
+import regex as regex_engine
 
 from .base import ToolError
 
@@ -22,6 +24,10 @@ class WorkspaceFiles:
     _MAX_RESULTS = 1_000
     _MAX_SEARCH_FILE_BYTES = 2 * 1024 * 1024
     _MAX_MATCH_CHARS = 500
+    _MAX_GLOB_PATTERN_CHARS = 4_096
+    _MAX_GLOB_PATTERN_PARTS = 256
+    _REGEX_TIMEOUT_SECONDS = 0.1
+    _TEXT_CHUNK_CHARS = 8_192
     _IGNORED_DIRECTORIES = {
         ".git",
         ".mini_agent",
@@ -45,30 +51,85 @@ class WorkspaceFiles:
             raise ToolError(f"Not a file: {path}")
         return self._normalise_newlines(self._read_raw(file_path, path))
 
-    def read_file(self, path: str, start_line: int = 1, max_lines: int = 200) -> str:
-        """Read a bounded line range with stable LF output."""
+    def read_file(
+        self,
+        path: str,
+        start_line: int = 1,
+        max_lines: int = 200,
+        start_column: int = 1,
+    ) -> str:
+        """Read a bounded line range with stable LF output and resumable columns."""
 
         self._validate_integer("start_line", start_line, minimum=1)
         self._validate_integer("max_lines", max_lines, minimum=1, maximum=self._MAX_READ_LINES)
+        self._validate_integer("start_column", start_column, minimum=1)
         file_path = self._read_path(path)
         if not file_path.is_file():
             raise ToolError(f"Not a file: {path}")
 
-        content = self._normalise_newlines(self._read_raw(file_path, path))
-        lines = content.splitlines(keepends=True)
-        total_lines = len(lines)
-        first_index = start_line - 1
-        selected = lines[first_index : first_index + max_lines]
-        body = "".join(selected)
-        truncated = len(body) > self._MAX_OUTPUT_CHARS
-        if truncated:
-            body = body[: self._MAX_OUTPUT_CHARS]
+        last_selected_line = start_line + max_lines - 1
+        line_number = 1
+        column = 1
+        newline_count = 0
+        any_content = False
+        ends_with_newline = False
+        start_line_length = 0
+        body_chars: list[str] = []
+        last_returned_line: int | None = None
+        continuation: tuple[int, int] | None = None
 
-        end_line = start_line + len(selected) - 1 if selected else 0
+        for chunk in self._iter_text_chunks(file_path, path):
+            for character in chunk:
+                any_content = True
+                if line_number == start_line and character != "\n":
+                    start_line_length += 1
+
+                selected_line = start_line <= line_number <= last_selected_line
+                selected_column = line_number != start_line or column >= start_column
+                if selected_line and selected_column:
+                    if len(body_chars) < self._MAX_OUTPUT_CHARS:
+                        body_chars.append(character)
+                        last_returned_line = line_number
+                    elif continuation is None:
+                        continuation = (line_number, column)
+
+                if character == "\n":
+                    newline_count += 1
+                    line_number += 1
+                    column = 1
+                    ends_with_newline = True
+                else:
+                    column += 1
+                    ends_with_newline = False
+
+        total_lines = newline_count + (1 if any_content and not ends_with_newline else 0)
+        if start_line <= total_lines and start_column > start_line_length + 1:
+            raise ToolError(
+                f"start_column must be between 1 and {start_line_length + 1} for line {start_line}."
+            )
+
+        if start_line > total_lines:
+            first_display_line = 0
+            end_display_line = 0
+        else:
+            first_display_line = start_line
+            end_display_line = min(last_selected_line, total_lines)
+            if continuation is not None and last_returned_line is not None:
+                end_display_line = last_returned_line
+
         display_path = self._display_path(file_path)
-        header = f"{display_path}: lines {start_line if selected else 0}-{end_line} of {total_lines}"
-        if truncated:
-            body += "\n... output truncated at 20000 characters; request a smaller line range."
+        header = f"{display_path}: lines {first_display_line}-{end_display_line} of {total_lines}"
+        if start_column != 1 and first_display_line:
+            header += f", starting at column {start_column}"
+
+        body = "".join(body_chars)
+        if continuation is not None:
+            next_line, next_column = continuation
+            separator = "" if not body or body.endswith("\n") else "\n"
+            body += (
+                f"{separator}... output truncated at {self._MAX_OUTPUT_CHARS} characters; "
+                f"continue with start_line={next_line} and start_column={next_column}."
+            )
         return f"{header}\n{body}"
 
     def glob(self, pattern: str, path: str = ".", max_results: int = 200) -> str:
@@ -116,10 +177,10 @@ class WorkspaceFiles:
             raise ToolError("case_sensitive must be a boolean.")
         pattern_parts = self._pattern_parts(glob)
         self._validate_integer("max_results", max_results, minimum=1, maximum=self._MAX_RESULTS)
-        expression = pattern if regex else re.escape(pattern)
+        expression = pattern if regex else regex_engine.escape(pattern)
         try:
-            matcher = re.compile(expression, 0 if case_sensitive else re.IGNORECASE)
-        except re.error as exc:
+            matcher = regex_engine.compile(expression, 0 if case_sensitive else regex_engine.IGNORECASE)
+        except regex_engine.error as exc:
             raise ToolError(f"Invalid regular expression: {exc}") from exc
 
         root = self._read_path(path, allow_root=True)
@@ -154,7 +215,13 @@ class WorkspaceFiles:
                 continue
 
             for line_number, line in enumerate(text.splitlines(), start=1):
-                if matcher.search(line) is None:
+                try:
+                    match = matcher.search(line, timeout=self._REGEX_TIMEOUT_SECONDS)
+                except TimeoutError as exc:
+                    raise ToolError(
+                        f"Regular expression search timed out after {self._REGEX_TIMEOUT_SECONDS:g} seconds."
+                    ) from exc
+                if match is None:
                     continue
                 preview = line if len(line) <= self._MAX_MATCH_CHARS else f"{line[: self._MAX_MATCH_CHARS]}..."
                 result = f"{self._display_path(file_path)}:{line_number}:{preview}"
@@ -284,31 +351,41 @@ class WorkspaceFiles:
         if not isinstance(pattern, str) or not pattern.strip():
             raise ToolError("glob pattern must be a non-empty string.")
         normalised = pattern.replace("\\", "/")
+        if len(normalised) > self._MAX_GLOB_PATTERN_CHARS:
+            raise ToolError(f"glob pattern must not exceed {self._MAX_GLOB_PATTERN_CHARS} characters.")
         if normalised.startswith("/") or re.match(r"^[A-Za-z]:", normalised):
             raise ToolError("glob pattern must be relative.")
         parts = tuple(part for part in normalised.split("/") if part not in {"", "."})
         if not parts or ".." in parts:
             raise ToolError("glob pattern must stay inside the search path.")
+        if len(parts) > self._MAX_GLOB_PATTERN_PARTS:
+            raise ToolError(f"glob pattern must not contain more than {self._MAX_GLOB_PATTERN_PARTS} path segments.")
         return parts
 
     @staticmethod
     def _glob_matches(path_parts: tuple[str, ...], pattern_parts: tuple[str, ...]) -> bool:
-        @cache
-        def matches(path_index: int, pattern_index: int) -> bool:
-            if pattern_index == len(pattern_parts):
-                return path_index == len(path_parts)
-            pattern = pattern_parts[pattern_index]
-            if pattern == "**":
-                return matches(path_index, pattern_index + 1) or (
-                    path_index < len(path_parts) and matches(path_index + 1, pattern_index)
-                )
-            return (
-                path_index < len(path_parts)
-                and fnmatch.fnmatchcase(path_parts[path_index], pattern)
-                and matches(path_index + 1, pattern_index + 1)
-            )
+        def close_globstars(states: set[int]) -> set[int]:
+            closed = set(states)
+            for index, pattern in enumerate(pattern_parts):
+                if index in closed and pattern == "**":
+                    closed.add(index + 1)
+            return closed
 
-        return matches(0, 0)
+        states = close_globstars({0})
+        for part in path_parts:
+            next_states: set[int] = set()
+            for index in states:
+                if index == len(pattern_parts):
+                    continue
+                pattern = pattern_parts[index]
+                if pattern == "**":
+                    next_states.add(index)
+                elif fnmatch.fnmatchcase(part, pattern):
+                    next_states.add(index + 1)
+            states = close_globstars(next_states)
+            if not states:
+                return False
+        return len(pattern_parts) in close_globstars(states)
 
     def _exclusive_create(self, file_path: Path, content: str) -> None:
         opened = False
@@ -331,6 +408,7 @@ class WorkspaceFiles:
     def _atomic_replace(self, file_path: Path, content: str, *, expected_content: str) -> None:
         temporary_path: Path | None = None
         try:
+            original_mode = stat.S_IMODE(file_path.stat().st_mode)
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
@@ -344,6 +422,7 @@ class WorkspaceFiles:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
+            os.chmod(temporary_path, original_mode)
             current = self._read_raw(file_path, self._display_path(file_path))
             if current != expected_content:
                 raise ToolError(f"File changed during the operation: {self._display_path(file_path)}")
@@ -355,6 +434,16 @@ class WorkspaceFiles:
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
+
+    def _iter_text_chunks(self, file_path: Path, display_path: str) -> Iterator[str]:
+        try:
+            with file_path.open("r", encoding="utf-8", newline=None) as handle:
+                while chunk := handle.read(self._TEXT_CHUNK_CHARS):
+                    yield chunk
+        except UnicodeDecodeError as exc:
+            raise ToolError(f"File is not valid UTF-8: {display_path}") from exc
+        except OSError as exc:
+            raise ToolError(f"Unable to read {display_path}: {exc}") from exc
 
     @staticmethod
     def _read_raw(file_path: Path, display_path: str) -> str:

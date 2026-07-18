@@ -1,5 +1,4 @@
 import os
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -131,21 +130,38 @@ def test_workspace_command_filters_sensitive_environment_variables(tmp_path: Pat
         "PATH": "tools",
         "VISIBLE_SETTING": "visible",
         "API_KEY": "generic-key",
+        "AWS_ACCESS_KEY_ID": "access-key",
+        "AWS_SECRET_ACCESS_KEY": "aws-secret",
         "DEEPSEEK_API_KEY": "provider-key",
+        "GITHUB_PAT": "personal-access-token",
         "GITHUB_TOKEN": "token",
         "DATABASE_PASSWORD": "password",
         "CLIENT_SECRET": "secret",
+        "SSH_PRIVATE_KEY": "private-key",
+        "SERVICE_AUTH": "authorization",
+        "SESSION_COOKIE": "cookie",
         "lower_secret": "case-insensitive",
     }
 
-    def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    class FakeProcess:
+        pid = 1234
+        returncode = 0
+
+        @staticmethod
+        def communicate(timeout: int | None = None) -> tuple[str, str]:
+            return "", ""
+
+        def poll(self) -> int:
+            return self.returncode
+
+    def popen_factory(_args: list[str], **kwargs: Any) -> FakeProcess:
         calls.append(kwargs)
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return FakeProcess()
 
     output = WorkspaceCommand(
         tmp_path,
         is_windows=False,
-        runner=runner,
+        popen_factory=popen_factory,
         environment=environment,
     ).run("true")
 
