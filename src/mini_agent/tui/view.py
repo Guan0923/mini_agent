@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Lock
@@ -26,6 +27,47 @@ from .completion import CommandSuggestion, SlashCommandCompleter
 
 _FLUSH_INTERVAL_SECONDS = 1 / 30
 _COPY_NOTICE_SECONDS = 1.5
+_RUNNING_STATUS_MIN_SECONDS = 5.0
+_RUNNING_STATUS_MAX_SECONDS = 10.0
+
+RUNNING_STATUS_WORDS = (
+    "🧠 THINKING",
+    "🧪 BREWING",
+    "🧭 EXPLORING",
+    "🔌 CONNECTING",
+    "🧵 WEAVING",
+    "🔎 SCOUTING",
+    "🧩 ASSEMBLING",
+    "✨ POLISHING",
+    "📝 DRAFTING",
+    "📚 READING",
+    "🗺️ MAPPING",
+    "🛠️ BUILDING",
+    "⚙️ TUNING",
+    "📐 STRUCTURING",
+    "🔬 ANALYZING",
+    "💡 SPARKING",
+    "🌱 GROWING",
+    "🚀 LAUNCHING",
+    "🛰️ SCANNING",
+    "🧮 COMPUTING",
+    "🧹 SORTING",
+    "🧱 STACKING",
+    "🎯 FOCUSING",
+    "🛡️ VALIDATING",
+    "🔐 CHECKING",
+    "📦 PACKING",
+    "🔄 REFINING",
+    "🧵 THREADING",
+    "🧠 REASONING",
+    "🗣️ FORMULATING",
+    "📡 SIGNALING",
+    "🧰 TOOLING",
+    "🌊 FLOWING",
+    "🎨 SHAPING",
+    "✅ VERIFYING",
+    "🏁 FINISHING",
+)
 _OMITTED_MARKER = "[Earlier terminal output omitted]\n"
 
 
@@ -236,6 +278,7 @@ class TerminalView(App[None]):
         *,
         completer: SlashCommandCompleter | None = None,
         transcript_limit: int = 200_000,
+        status_random: random.Random | None = None,
     ) -> None:
         super().__init__()
         self._owner_loop = loop
@@ -252,6 +295,9 @@ class TerminalView(App[None]):
         self._copy_notice_timer: Timer | None = None
         self._choice_kind: Literal["question", "review"] | None = None
         self._questions: tuple[UserQuestion, ...] = ()
+        self._status_random = status_random or random.Random()
+        self._status_timer: Timer | None = None
+        self._running_status: str | None = None
         self._choice_lists: list[InlineChoiceList] = []
         self._question_index = 0
         self._question_answers: dict[str, list[str]] = {}
@@ -288,6 +334,8 @@ class TerminalView(App[None]):
         self._owner_loop = asyncio.get_running_loop()
         self.status_line.update(f" {self._status}")
         self.input.focus()
+        if self._is_running_status(self._status):
+            self._schedule_running_status()
         if self._pending_chunks:
             self._schedule_flush()
 
@@ -319,8 +367,16 @@ class TerminalView(App[None]):
 
     def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
         def update() -> None:
+            was_running = self._is_running_status(self._status)
+            is_running = self._is_running_status(status)
+            if is_running and (not was_running or status != self._status):
+                self._stop_running_status()
+            elif not is_running and (was_running or self._running_status is not None):
+                self._stop_running_status()
             self._status = status
             self._interrupt_enabled = interrupt_enabled
+            if is_running and self._status_timer is None:
+                self._schedule_running_status()
             self._refresh_status()
 
         self._run_on_owner(update)
@@ -443,6 +499,7 @@ class TerminalView(App[None]):
     def stop(self) -> None:
         def close() -> None:
             self.flush_now()
+            self._stop_running_status()
             self._writes_closed = True
             if self.is_running:
                 self.exit()
@@ -799,9 +856,42 @@ class TerminalView(App[None]):
         self._invalidate_copy_notice()
         self._render_status()
 
+    @staticmethod
+    def _is_running_status(status: str) -> bool:
+        return any(part.strip() == "RUNNING" for part in status.split("|"))
+
+    def _schedule_running_status(self) -> None:
+        if self._writes_closed or not self.is_running or not self._is_running_status(self._status):
+            return
+        delay = self._status_random.uniform(
+            _RUNNING_STATUS_MIN_SECONDS,
+            _RUNNING_STATUS_MAX_SECONDS,
+        )
+        self._status_timer = self.set_timer(delay, self._rotate_running_status)
+
+    def _rotate_running_status(self) -> None:
+        self._status_timer = None
+        if not self._is_running_status(self._status):
+            self._running_status = None
+            return
+        choices = tuple(word for word in RUNNING_STATUS_WORDS if word != self._running_status)
+        self._running_status = self._status_random.choice(choices)
+        if self._copy_notice_timer is None:
+            self._render_status()
+        self._schedule_running_status()
+
+    def _stop_running_status(self) -> None:
+        if self._status_timer is not None:
+            self._status_timer.stop()
+            self._status_timer = None
+        self._running_status = None
+
     def _render_status(self) -> None:
         suffix = " | PgUp/PgDn scroll" if not self._follow_tail else ""
-        self.status_line.update(f" {self._status}{suffix}")
+        status = self._status
+        if self._running_status is not None:
+            status = status.replace(" | RUNNING", f" | {self._running_status}", 1)
+        self.status_line.update(f" {status}{suffix}")
 
     def _run_on_owner(self, callback) -> None:
         loop = self._owner_loop

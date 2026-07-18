@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from pathlib import Path
 
-from mini_agent.domain import AssistantMessage, ExecutionPlan, PlanStep, ToolMessage, UserMessage
+from mini_agent.domain import AssistantMessage, ToolMessage, UserMessage
 from mini_agent.runtime import AgentRunner, ConversationService, SQLiteSessionStore
 from mini_agent.tools import Tool, ToolRegistry
 
@@ -229,40 +229,3 @@ def test_conversation_persists_merged_in_run_messages(tmp_path: Path) -> None:
         "start",
         "first update\n\nsecond update",
     ]
-
-
-def test_plan_execute_revises_before_starting_stale_step() -> None:
-    calls: list[str] = []
-
-    class SteeringPlanPlanner:
-        name = "steering-plan"
-
-        def create_plan(self, runtime):
-            return ExecutionPlan(
-                goal="Run stale work",
-                steps=[
-                    PlanStep(
-                        "stale",
-                        "Run stale work",
-                        ToolMessage(name="work", call_id="call_plan"),
-                    )
-                ],
-            )
-
-        def replan(self, runtime):
-            return ExecutionPlan(goal="Use the new direction", final_answer="updated plan accepted")
-
-    runner = AgentRunner(
-        SteeringPlanPlanner(),
-        ToolRegistry([Tool("work", "Work", lambda: calls.append("called") or "done")]),
-        strategy="plan_execute",
-    )
-    runtime = runner.new_runtime(task="start")
-    runtime.services.steering = sequence_handler([[], [], ["skip that step"], []])
-
-    result = runner.run(runtime)
-
-    assert result.status == "completed"
-    assert result.final_answer == "updated plan accepted"
-    assert calls == []
-    assert result.plan_history[0].steps[0].status == "superseded"

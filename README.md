@@ -164,7 +164,7 @@ python run.py "list files"
 
 TUI 有两种模式，默认是 Agent 模式：模型每次选择工具调用或直接回复，而不会预先生成完整计划。系统以 provider-neutral Message 保存完整上下文；顶层会话只包含 System/User/Assistant，工具调用和结果作为 ToolMessage 嵌套在 AssistantMessage 中。对 DeepSeek，工具决策使用原生 Tool Calls，SSE `reasoning_content` 会实时显示为 `THINKING`，最终文本显示为 `RESPONSE`。
 
-正常产品路径只会自动选择 `reactive` 或 `dynamic_replan`：前者适合简单、逐步确定的任务，后者会按实时工具结果生成并替换后续可执行阶段。`plan_execute` 仍可通过 `--strategy plan_execute` 显式启用，但它是“固定计划、失败即停止”的实验对照基线，自动路由和 `/plan` 都不会使用它。
+Agent 模式只支持 `reactive` 和 `dynamic_replan`：前者适合简单、逐步确定的任务，后者会按实时工具结果生成并替换后续可执行阶段。默认的 `auto` 会让模型在这两种策略中选择；模型返回其他值时，运行时会按 `--max-model-repairs` 发送纠正请求。
 
 输入 `/plan` 会进入只读规划与讨论模式：普通问候、解释和需求讨论直接作为对话返回；`read_file`、`glob` 和 `grep` 可用于本地调研，网页搜索/抓取仍会要求确认，`write_file`、`edit_file` 和 `run_command` 不会暴露。若项目本身无法回答会实质影响方案的问题，模型可单独调用 Plan 专用控制工具 `request_user_input`。只有当完整实施计划确实需要用户审核时，模型才单独调用 `request_plan_review` 并进入 `PLAN REVIEW`。两个控制工具都不注册到 `ToolRegistry`，也不计入 `/tools` 展示的执行工具。
 
@@ -261,9 +261,6 @@ python run.py "replace the unique heading in README.md"
 
 # 调整运行限制
 python run.py --max-actions 12 --max-retries 2 --max-tool-recoveries 2 "计算 (18 + 6) * 4"
-
-# 强制固定计划、顺序执行策略（仅用于策略对比或调试；自动路由不会选择它）
-python run.py --strategy plan_execute "读取 README.md"
 
 # 强制动态重规划，并限制最多两次重规划
 python run.py --strategy dynamic_replan --max-replans 2 "整理并更新项目说明"

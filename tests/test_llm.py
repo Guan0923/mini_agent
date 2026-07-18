@@ -798,28 +798,55 @@ def test_llm_json_parser_accepts_one_complete_json_code_fence() -> None:
     assert planner.consume_output_repairs() == []
 
 
-def test_runner_fails_cleanly_after_model_output_repairs_are_exhausted() -> None:
+def test_runner_repairs_an_invalid_strategy_and_continues() -> None:
     client = ScriptedClient(
         [
-            PreparedResponse(AssistantMessage(content="not-json")),
-            PreparedResponse(AssistantMessage(content="still-not-json")),
+            PreparedResponse(
+                AssistantMessage(content='{"strategy":"plan_execute","reason":"Use a fixed plan."}')
+            ),
+            PreparedResponse(AssistantMessage(content='{"strategy":"reactive","reason":"Answer directly."}')),
+            PreparedResponse(AssistantMessage(content="Recovered response.")),
         ]
     )
     planner = LLMPlanner(client, [], [])
     events = []
-    runner = AgentRunner(
-        planner,
-        ToolRegistry(),
-        strategy="plan_execute",
-        max_model_repairs=1,
+    runner = AgentRunner(planner, ToolRegistry(), max_model_repairs=1)
+    runtime = runner.new_runtime(task="answer", on_event=events.append)
+
+    state = runner.run(runtime)
+
+    strategy_requests = [
+        event for event in events if event.kind == "model_request" and event.data["operation"] == "strategy"
+    ]
+    repair_events = [event for event in events if event.kind == "model_repair"]
+    assert state.status == "completed"
+    assert state.strategy == "reactive"
+    assert state.final_answer == "Recovered response."
+    assert len(strategy_requests) == 2
+    assert "Model output correction" in strategy_requests[1].data["messages"][-1]["content"]
+    assert [event.data["outcome"] for event in repair_events] == ["repaired"]
+
+
+def test_runner_fails_after_invalid_strategy_repairs_are_exhausted() -> None:
+    client = ScriptedClient(
+        [
+            PreparedResponse(
+                AssistantMessage(content='{"strategy":"plan_execute","reason":"Use a fixed plan."}')
+            ),
+            PreparedResponse(AssistantMessage(content='{"strategy":"unknown","reason":"Try another mode."}')),
+        ]
     )
+    planner = LLMPlanner(client, [], [])
+    events = []
+    runner = AgentRunner(planner, ToolRegistry(), max_model_repairs=1)
     runtime = runner.new_runtime(task="answer", on_event=events.append)
 
     state = runner.run(runtime)
 
     assert state.status == "failed"
-    assert state.final_answer == "Planning failed: Model did not return valid JSON."
+    assert state.final_answer == "Strategy selection failed: Unsupported execution strategy: 'unknown'."
     assert [event.kind for event in events].count("model_repair") == 2
+    assert all(event.data["outcome"] == "failed" for event in events if event.kind == "model_repair")
     assert events[-2].kind == "error"
     assert events[-1].kind == "run_finished"
 

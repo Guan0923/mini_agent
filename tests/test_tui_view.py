@@ -8,7 +8,7 @@ from textual.widgets import Label, Rule
 
 from mini_agent.runtime.contracts import QuestionOption, UserQuestion
 from mini_agent.runtime.user_input import OTHER_OPTION_LABEL, parse_user_input_questions
-from mini_agent.tui.view import TerminalView
+from mini_agent.tui.view import RUNNING_STATUS_WORDS, TerminalView
 
 
 def questions() -> tuple[UserQuestion, ...]:
@@ -588,6 +588,83 @@ def test_copy_notice_restores_latest_status_without_stale_timer_overwrite(monkey
             await pilot.pause()
 
             assert str(view.status_line.content) == " PLAN | RUNNING"
+
+    asyncio.run(scenario())
+
+
+def test_running_status_catalog_contains_distinct_emoji_words() -> None:
+    assert len(RUNNING_STATUS_WORDS) >= 30
+    assert all(word.strip() and any(ord(char) > 127 for char in word) for word in RUNNING_STATUS_WORDS)
+
+
+def test_running_status_rotates_on_random_timer_and_stops_when_idle() -> None:
+    class FakeTimer:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    class FakeRandom:
+        def __init__(self) -> None:
+            self.delays: list[tuple[float, float]] = []
+            self.selected: list[str] = []
+
+        def uniform(self, lower: float, upper: float) -> float:
+            self.delays.append((lower, upper))
+            return 7.0
+
+        def choice(self, choices: tuple[str, ...]) -> str:
+            selected = choices[0]
+            self.selected.append(selected)
+            return selected
+
+    async def scenario() -> None:
+        random_source = FakeRandom()
+        view = TerminalView(status_random=random_source)
+        scheduled: list[tuple[FakeTimer, float, object]] = []
+
+        def fake_set_timer(delay: float, callback) -> FakeTimer:
+            timer = FakeTimer()
+            scheduled.append((timer, delay, callback))
+            return timer
+
+        async with view.run_test() as pilot:
+            view.set_timer = fake_set_timer
+            view.set_ui(
+                status="AGENT | RUNNING | PERMISSION: FULL ACCESS",
+                interrupt_enabled=True,
+            )
+            await pilot.pause()
+
+            assert str(view.status_line.content) == " AGENT | RUNNING | PERMISSION: FULL ACCESS"
+            assert len(scheduled) == 1
+            assert 5 <= scheduled[0][1] <= 10
+
+            scheduled[0][2]()
+            assert random_source.selected
+            assert str(view.status_line.content) == (
+                f" AGENT | {random_source.selected[0]} | PERMISSION: FULL ACCESS"
+            )
+            assert len(scheduled) == 2
+            assert 5 <= scheduled[1][1] <= 10
+
+            view._copy_notice_timer = FakeTimer()
+            view.status_line.update(" COPIED — 4 characters")
+            scheduled[1][2]()
+            assert random_source.selected[1] != random_source.selected[0]
+            assert str(view.status_line.content) == " COPIED — 4 characters"
+
+            view._copy_notice_timer = None
+            view._render_status()
+            assert str(view.status_line.content) == (
+                f" AGENT | {random_source.selected[1]} | PERMISSION: FULL ACCESS"
+            )
+            view.set_ui(status="AGENT | IDLE | PERMISSION: FULL ACCESS")
+            assert len(scheduled) == 3
+            active_timer = scheduled[2][0]
+            assert active_timer.stopped is True
+            assert str(view.status_line.content) == " AGENT | IDLE | PERMISSION: FULL ACCESS"
 
     asyncio.run(scenario())
 

@@ -886,6 +886,14 @@ def test_main_does_not_suggest_rule_planner_for_invalid_runtime_settings(tmp_pat
     assert "--planner rule" not in capsys.readouterr().err
 
 
+def test_main_rejects_removed_plan_execute_strategy(tmp_path, capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--workspace", str(tmp_path), "--strategy", "plan_execute"])
+
+    assert exc_info.value.code == 2
+    assert "invalid choice: 'plan_execute'" in capsys.readouterr().err
+
+
 def test_context_usage_events_update_and_reset_the_active_view() -> None:
     class ContextView:
         def __init__(self) -> None:

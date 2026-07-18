@@ -36,7 +36,7 @@ from .plan_mode import PlanModeWorkflow
 from .publisher import RunEventPublisher
 from .routing import StrategyRouter
 from .steering import consume_steering
-from .workflows import DynamicReplanWorkflow, PlanExecuteWorkflow, ReactiveWorkflow
+from .workflows import DynamicReplanWorkflow, ReactiveWorkflow
 
 
 class AgentRunner:
@@ -72,7 +72,6 @@ class AgentRunner:
         self._router = StrategyRouter()
         self._reactive = ReactiveWorkflow()
         self._plan_mode = PlanModeWorkflow()
-        self._plan_execute = PlanExecuteWorkflow()
         self._dynamic_replan = DynamicReplanWorkflow()
 
     def new_runtime(
@@ -207,9 +206,7 @@ class AgentRunner:
         self._execute(runtime)
 
     def _execute(self, runtime: AgentRuntime) -> None:
-        if runtime.run.strategy == "plan_execute":
-            self._plan_execute.run(runtime)
-        elif runtime.run.strategy == "dynamic_replan":
+        if runtime.run.strategy == "dynamic_replan":
             self._dynamic_replan.run(runtime)
         else:
             self._reactive.run(runtime)

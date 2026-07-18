@@ -314,94 +314,6 @@ def test_runner_persists_and_emits_model_format_repairs(tmp_path: Path) -> None:
     assert any(event.kind == "model_repair" for event in state.events)
 
 
-class FixedPlanPlanner:
-    name = "fixed-plan"
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        raise AssertionError("plan_execute should not call decide after the plan is created")
-
-    def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("plan_execute", "The test task has a fixed multi-step workflow.")
-
-    def create_plan(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> ExecutionPlan:
-        assert history[-1]["content"] == "calculate then write"
-        return ExecutionPlan(
-            goal="Calculate a value and write it to a file.",
-            steps=[
-                PlanStep(
-                    id="calculate",
-                    description="Calculate 2 + 2",
-                    action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "python -c 'print(2 + 2)'"}
-                    ),
-                ),
-                PlanStep(
-                    id="write",
-                    description="Write the fixed result",
-                    action=AgentAction(
-                        type="tool_call",
-                        tool="run_command",
-                        arguments={"command": "[System.IO.File]::WriteAllText('result.txt', '4')"},
-                    ),
-                ),
-            ],
-        )
-
-
-def test_plan_execute_persists_and_executes_a_fixed_plan(tmp_path: Path) -> None:
-    events = []
-    state = AgentRunner(FixedPlanPlanner(), ToolRegistry(tmp_path), strategy="plan_execute").run(
-        "calculate then write", lambda _: True, on_event=events.append
-    )
-
-    assert state.status == "completed"
-    assert state.strategy == "plan_execute"
-    assert state.plan is not None
-    assert [step.status for step in state.plan.steps] == ["completed", "completed"]
-    assert state.completed_steps == [1, 2]
-    assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "4"
-    assert [event.kind for event in events[:3]] == ["run_started", "strategy", "plan"]
-    assert state.final_answer is not None and "Execution plan completed" in state.final_answer
-
-
-class FailingPlanPlanner(FixedPlanPlanner):
-    name = "failing-plan"
-
-    def create_plan(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> ExecutionPlan:
-        return ExecutionPlan(
-            goal="Demonstrate a failed plan.",
-            steps=[
-                PlanStep(
-                    id="missing",
-                    description="Read a missing file",
-                    action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "Get-Content missing.txt"}
-                    ),
-                ),
-                PlanStep(
-                    id="must-not-run",
-                    description="Write a file",
-                    action=AgentAction(
-                        type="tool_call",
-                        tool="run_command",
-                        arguments={"command": "[System.IO.File]::WriteAllText('must-not-run.txt', 'no')"},
-                    ),
-                ),
-            ],
-        )
-
-
-def test_plan_execute_stops_after_a_failed_step(tmp_path: Path) -> None:
-    state = AgentRunner(FailingPlanPlanner(), ToolRegistry(tmp_path), strategy="plan_execute").run(
-        "run a failing plan", lambda _: True
-    )
-
-    assert state.status == "failed"
-    assert state.plan is not None
-    assert [step.status for step in state.plan.steps] == ["failed", "pending"]
-    assert not (tmp_path / "must-not-run.txt").exists()
-
-
 class DynamicRecoveryPlanner:
     name = "dynamic-recovery"
 
@@ -555,6 +467,7 @@ def test_dynamic_replan_stops_when_replan_budget_is_exhausted(tmp_path: Path) ->
         ({"max_transport_retries": -1}, "max_transport_retries"),
         ({"max_tool_recoveries": -1}, "max_tool_recoveries"),
         ({"max_replans": -1}, "max_replans"),
+        ({"strategy": "plan_execute"}, "strategy"),
         ({"strategy": "unknown"}, "strategy"),
     ],
 )
@@ -680,18 +593,18 @@ def test_plan_mode_does_not_format_repair_an_ordinary_response(tmp_path: Path) -
     assert [event.kind for event in events].count("model_repair") == 0
 
 
-class AutoFixedPlanPlanner:
-    name = "auto-fixed-plan"
+class InvalidStrategyPlanner:
+    name = "invalid-strategy"
 
     def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("plan_execute", "This should be rejected by automatic routing.")
+        return StrategySelection("unknown", "This should be rejected by automatic routing.")  # type: ignore[arg-type]
 
 
-def test_automatic_routing_rejects_experimental_plan_execute(tmp_path: Path) -> None:
-    state = AgentRunner(AutoFixedPlanPlanner(), ToolRegistry(tmp_path)).run("try the fixed baseline")
+def test_automatic_routing_rejects_an_invalid_planner_strategy(tmp_path: Path) -> None:
+    state = AgentRunner(InvalidStrategyPlanner(), ToolRegistry(tmp_path)).run("choose a strategy")
 
     assert state.status == "failed"
-    assert "Automatic strategy selection cannot use experimental plan_execute" in (state.final_answer or "")
+    assert "unsupported execution strategy: 'unknown'" in (state.final_answer or "")
 
 
 class OneWriteThenAnswerPlanner:
@@ -1005,6 +918,9 @@ class FeedbackReplanner:
             ],
         )
 
+    def evaluate_step(self, history, plan, step, result) -> StepEvaluation:
+        return StepEvaluation("continue", "The completed write keeps the remaining plan valid.")
+
 
 def test_supplement_uses_remaining_work_replan_after_completed_steps(tmp_path: Path) -> None:
     decisions = iter(
@@ -1014,7 +930,7 @@ def test_supplement_uses_remaining_work_replan_after_completed_steps(tmp_path: P
             InterruptDecision("continue"),
         ]
     )
-    state = AgentRunner(FeedbackReplanner(), ToolRegistry(tmp_path), strategy="plan_execute").run(
+    state = AgentRunner(FeedbackReplanner(), ToolRegistry(tmp_path), strategy="dynamic_replan").run(
         "write twice",
         lambda _: False,
         interrupt=lambda _request: next(decisions),

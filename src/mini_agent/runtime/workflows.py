@@ -614,29 +614,12 @@ class PlanWorkflow:
         runtime.save()
         return True
 
-    def prepare(self, runtime: AgentRuntime) -> ExecutionPlan | None:
-        if runtime.run.plan is not None:
-            return runtime.run.plan
-        while runtime.run.plan is None:
-            plan = self._create_plan(runtime)
-            if plan is None:
-                return None
-            if cancel_if_requested(runtime):
-                return None
-            if consume_steering(runtime, phase="after_plan_creation") is not None:
-                continue
-            return plan if self._activate(runtime, plan) else None
-        return runtime.run.plan
-
     def revise_with_feedback(self, runtime: AgentRuntime) -> bool:
         supplement = runtime.exchange.context.get("supplement")
         feedback = record_plan_feedback(runtime, supplement if isinstance(supplement, str) else None)
         if feedback is None:
             return False
         return self._revise(runtime, f"Human plan feedback: {feedback}")
-
-    def revise_with_steering(self, runtime: AgentRuntime) -> bool:
-        return self._revise(runtime, "The user supplied new instructions while the plan was running.")
 
     def _revise(self, runtime: AgentRuntime, reason: str) -> bool:
         previous = runtime.run.plan
@@ -698,70 +681,6 @@ class PlanWorkflow:
         if dynamic:
             prefix += f" with {replans} replans"
         return f"{prefix}.\n{details}" if details else f"{prefix}."
-
-
-class PlanExecuteWorkflow(PlanWorkflow):
-    def run(self, runtime: AgentRuntime):
-        if cancel_if_requested(runtime):
-            return runtime.run
-        plan = self.prepare(runtime)
-        if plan is None:
-            return runtime.run
-        if not plan.steps:
-            if consume_steering(runtime, phase="before_plan_completion") is not None:
-                if self.revise_with_steering(runtime):
-                    return self.run(runtime)
-                return runtime.run
-            complete_run(runtime, AssistantMessage(content=plan.final_answer or ""))
-            return runtime.run
-        for step in plan.steps:
-            if step.status != "pending":
-                continue
-            if cancel_if_requested(runtime):
-                return runtime.run
-            if consume_steering(runtime, phase="before_plan_step") is not None:
-                if self.revise_with_steering(runtime):
-                    return self.run(runtime)
-                return runtime.run
-            outcome = self._execute_step(runtime, step)
-            if cancel_if_requested(runtime):
-                step.status = "completed" if outcome.success else "failed"
-                step.result = outcome.output if outcome.success else outcome.error
-                return runtime.run
-            if outcome.interrupt is not None:
-                step.status = "pending"
-                if outcome.interrupt.choice == "cancel":
-                    cancel_run(runtime)
-                    return runtime.run
-                runtime.exchange.context = {"supplement": outcome.interrupt.supplement}
-                if not self.revise_with_feedback(runtime):
-                    return runtime.run
-                return self.run(runtime)
-            update = collect_steering(runtime)
-            if update is not None:
-                if outcome.success:
-                    step.status = "completed"
-                    step.result = outcome.output
-                else:
-                    step.status = "failed"
-                    step.result = outcome.error
-                apply_steering(runtime, update, phase="after_plan_step")
-                if self.revise_with_steering(runtime):
-                    return self.run(runtime)
-                return runtime.run
-            if not outcome.success:
-                step.status = "failed"
-                step.result = outcome.error
-                fail_run(runtime, f"Stopped: {step.tool_message.name} failed: {outcome.error}")
-                return runtime.run
-            step.status = "completed"
-            step.result = outcome.output
-        if consume_steering(runtime, phase="before_plan_completion") is not None:
-            if self.revise_with_steering(runtime):
-                return self.run(runtime)
-            return runtime.run
-        complete_run(runtime, AssistantMessage(content=self._format_completion([plan])))
-        return runtime.run
 
 
 class DynamicReplanWorkflow(PlanWorkflow):

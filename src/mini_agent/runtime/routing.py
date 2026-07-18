@@ -32,8 +32,8 @@ class StrategyRouter:
                 fail_run(runtime, f"Strategy selection failed: {exc}", **planning_failure_data(exc, capabilities.name))
                 return None
             _publish_repairs(runtime, capabilities)
-            if selection.strategy == "plan_execute":
-                fail_run(runtime, "Automatic strategy selection cannot use experimental plan_execute.")
+            if selection.strategy not in {"reactive", "dynamic_replan"}:
+                fail_run(runtime, f"Planner selected unsupported execution strategy: {selection.strategy!r}.")
                 return None
             source = "llm" if capabilities.name == "llm" else "planner"
         else:

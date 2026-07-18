@@ -34,8 +34,8 @@ class RunnerSettings:
             raise ValueError("max_actions must be at least one.")
         if self.max_replans < 0:
             raise ValueError("max_replans must be zero or greater.")
-        if self.strategy not in {"auto", "reactive", "plan_execute", "dynamic_replan"}:
-            raise ValueError("strategy must be 'auto', 'reactive', 'plan_execute', or 'dynamic_replan'.")
+        if self.strategy not in {"auto", "reactive", "dynamic_replan"}:
+            raise ValueError("strategy must be 'auto', 'reactive', or 'dynamic_replan'.")
         if not isinstance(self.log_full_messages, bool):
             raise ValueError("log_full_messages must be boolean.")
 
