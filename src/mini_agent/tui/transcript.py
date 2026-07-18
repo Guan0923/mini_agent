@@ -156,6 +156,9 @@ class TranscriptNode(Collapsible):
         if contents is not None and contents.is_attached:
             contents.mount(node)
             return
+        # Keep the child in Collapsible's compose list for the not-yet-composed
+        # case, and also track it for the already-composed-but-not-mounted case.
+        self._contents_list.append(node)
         self._pending_nodes.append(node)
         if self.is_attached:
             self.call_after_refresh(self._flush_pending_nodes)
@@ -167,9 +170,10 @@ class TranscriptNode(Collapsible):
         if contents is None or not contents.is_attached:
             self.call_after_refresh(self._flush_pending_nodes)
             return
-        pending = self._pending_nodes
+        pending = [node for node in self._pending_nodes if not node.is_attached]
         self._pending_nodes = []
-        contents.mount(*pending)
+        if pending:
+            contents.mount(*pending)
 
 
 class TranscriptScroll(VerticalScroll):
