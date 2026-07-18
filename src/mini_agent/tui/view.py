@@ -315,6 +315,7 @@ class TerminalView(App[None]):
         self._flush_scheduled = False
         self._writes_closed = False
         self._follow_tail = True
+        self._paused_scroll_y = 0.0
         self._status = "AGENT | IDLE"
         self._interrupt_enabled = False
         self._copy_notice_timer: Timer | None = None
@@ -334,6 +335,10 @@ class TerminalView(App[None]):
         self.transcript = TranscriptScroll()
         self.transcript_nodes: list[TranscriptNode] = []
         self.markdown_bodies: list[MarkdownBody] = []
+        self._top_level_nodes: list[TranscriptNode] = []
+        self._top_level_bodies: dict[TranscriptNode, list[MarkdownBody]] = {}
+        self._node_top_level: dict[TranscriptNode, TranscriptNode] = {}
+        self._completed_top_levels: set[TranscriptNode] = set()
         self._pending_assistants: list[TranscriptNode] = []
         self._assistant_by_run: dict[str, TranscriptNode] = {}
         self._thinking_by_run: dict[str, tuple[TranscriptNode, MarkdownBody]] = {}
@@ -381,9 +386,9 @@ class TerminalView(App[None]):
     def begin_conversation(self, user_input: str) -> None:
         """Append a USER / ASSISTANT pair before a run is assigned its run id."""
         def begin() -> None:
-            user = self._new_top_level("USER")
+            user = self._new_top_level("USER", completed=True)
             user_body = MarkdownBody(user_input)
-            self._register_body(user_body)
+            self._register_body(user_body, user)
             user.add_node(user_body)
             assistant = self._new_top_level("ASSISTANT")
             self._pending_assistants.append(assistant)
@@ -403,11 +408,12 @@ class TerminalView(App[None]):
             if self._streaming_system is None:
                 system = self._new_top_level("SYSTEM")
                 body = MarkdownBody("")
-                self._register_body(body)
+                self._register_body(body, system)
                 system.add_node(body)
                 self._streaming_system = (system, body)
             self._streaming_system[1].append_markdown(value)
             if end:
+                self._completed_top_levels.add(self._streaming_system[0])
                 self._streaming_system = None
             self._scroll_after_transcript_change()
 
@@ -420,9 +426,9 @@ class TerminalView(App[None]):
             for message in messages:
                 role = message.get("role", "system").lower()
                 title = "USER" if role == "user" else "ASSISTANT" if role == "assistant" else "SYSTEM"
-                node = self._new_top_level(title)
+                node = self._new_top_level(title, completed=True)
                 body = MarkdownBody(message.get("content", ""))
-                self._register_body(body)
+                self._register_body(body, node)
                 node.add_node(body)
             self._scroll_after_transcript_change()
 
@@ -601,6 +607,7 @@ class TerminalView(App[None]):
     def scroll_page_up(self) -> None:
         self._follow_tail = False
         self.transcript.scroll_page_up(animate=False)
+        self._remember_paused_scroll()
         self._refresh_status()
 
     def scroll_page_down(self) -> None:
@@ -609,21 +616,34 @@ class TerminalView(App[None]):
 
     def follow_latest(self) -> None:
         self._follow_tail = True
+        self._paused_scroll_y = 0.0
+        self.transcript.scroll_end(animate=False)
+        self.call_after_refresh(self._settle_follow_latest)
+        self._refresh_status()
+
+    def _settle_follow_latest(self) -> None:
+        if not self._follow_tail:
+            return
         self.transcript.scroll_end(animate=False)
         self.call_after_refresh(self.transcript.scroll_end, animate=False)
-        self._refresh_status()
 
     def pause_following(self) -> None:
         self._follow_tail = False
+        self._remember_paused_scroll()
         self._refresh_status()
 
+    def _remember_paused_scroll(self) -> None:
+        if not self._follow_tail:
+            self._paused_scroll_y = self.transcript.scroll_y
+
     def copy_transcript_selection(self) -> bool:
-        selected = self.transcript.selected_text
+        selected = self.screen.get_selected_text() or self.transcript.selected_text
         if not selected:
             self.input.focus()
             return False
         selection_end = self.transcript.selection.end
         self.copy_to_clipboard(selected)
+        self.screen.clear_selection()
         self.transcript.selection = Selection.cursor(selection_end)
         self._show_copy_notice(len(selected))
         self.input.focus()
@@ -884,7 +904,7 @@ class TerminalView(App[None]):
         return chunks
 
     def _append_transcript(self, value: str) -> None:
-        old_scroll = self.transcript.scroll_y
+        old_scroll = self.transcript.scroll_y if self._follow_tail else self._paused_scroll_y
         combined = f"{self.transcript.text}{value}"
         if len(combined) > self._transcript_limit:
             keep = max(0, self._transcript_limit - len(_OMITTED_MARKER))
@@ -892,16 +912,20 @@ class TerminalView(App[None]):
             self.transcript.load_text(combined)
         else:
             self.transcript.append_text(value)
-        self._append_system_output(value)
         if self._follow_tail:
             self.transcript.scroll_end(animate=False)
         else:
             self.transcript.scroll_to(y=old_scroll, animate=False)
         self.call_after_refresh(self._sync_transcript_scroll, old_scroll)
 
-    def _new_top_level(self, title: str) -> TranscriptNode:
+    def _new_top_level(self, title: str, *, completed: bool = False) -> TranscriptNode:
         node = TranscriptNode(title, collapsed=False)
         self.transcript_nodes.append(node)
+        self._top_level_nodes.append(node)
+        self._top_level_bodies[node] = []
+        self._node_top_level[node] = node
+        if completed:
+            self._completed_top_levels.add(node)
         self.transcript.add_top_level(node)
         return node
 
@@ -915,13 +939,15 @@ class TerminalView(App[None]):
     ) -> tuple[TranscriptNode, MarkdownBody]:
         body = MarkdownBody(markdown)
         node = TranscriptNode(title, body, collapsed=collapsed)
-        self._register_body(body)
+        self._register_body(body, assistant)
         self.transcript_nodes.append(node)
+        self._node_top_level[node] = assistant
         assistant.add_node(node)
         return node, body
 
-    def _register_body(self, body: MarkdownBody) -> None:
+    def _register_body(self, body: MarkdownBody, top_level: TranscriptNode) -> None:
         self.markdown_bodies.append(body)
+        self._top_level_bodies[top_level].append(body)
 
     def _assistant_for_run(self, run_id: str) -> TranscriptNode | None:
         assistant = self._assistant_by_run.get(run_id)
@@ -934,11 +960,12 @@ class TerminalView(App[None]):
         if self._streaming_system is None:
             system = self._new_top_level("SYSTEM")
             body = MarkdownBody("")
-            self._register_body(body)
+            self._register_body(body, system)
             system.add_node(body)
             self._streaming_system = (system, body)
         self._streaming_system[1].append_markdown(value)
         if value.endswith("\n"):
+            self._completed_top_levels.add(self._streaming_system[0])
             self._streaming_system = None
 
     def _handle_runtime_event_now(self, event: RuntimeEvent) -> None:
@@ -1001,6 +1028,7 @@ class TerminalView(App[None]):
             self._stop_run_activity(run_id)
             if event.message:
                 self._add_assistant_node(assistant, event.kind, collapsed=False, markdown=event.message)
+            self._completed_top_levels.add(assistant)
         elif event.kind not in {"model_request", "model_response", "context_usage"} and event.message:
             self._add_assistant_node(assistant, event.kind, collapsed=False, markdown=event.message)
         self._scroll_after_transcript_change()
@@ -1053,9 +1081,10 @@ class TerminalView(App[None]):
         node = TranscriptNode(
             f"tool_call: {name}", arguments_node, result_node, status, collapsed=True
         )
-        self._register_body(argument_body)
-        self._register_body(result_body)
+        self._register_body(argument_body, assistant)
+        self._register_body(result_body, assistant)
         self.transcript_nodes.append(node)
+        self._node_top_level[node] = assistant
         assistant.add_node(node)
         tool = _ToolTranscript(node, argument_body, result_body, status)
         self._tools_by_call[key] = tool
@@ -1114,9 +1143,13 @@ class TerminalView(App[None]):
                 tool.node.set_activity(False)
 
     def _reset_transcript_state(self) -> None:
-        self.transcript.clear_nodes(self.transcript_nodes)
+        self.transcript.clear_nodes(self._top_level_nodes)
         self.transcript_nodes = []
         self.markdown_bodies = []
+        self._top_level_nodes = []
+        self._top_level_bodies = {}
+        self._node_top_level = {}
+        self._completed_top_levels = set()
         self._pending_assistants = []
         self._assistant_by_run = {}
         self._thinking_by_run = {}
@@ -1127,14 +1160,64 @@ class TerminalView(App[None]):
         self._streaming_system = None
 
     def _scroll_after_transcript_change(self) -> None:
+        self._trim_completed_top_levels()
+        self.transcript.sync_text(self._structured_transcript_text())
         if self._follow_tail:
             self.call_after_refresh(self.transcript.scroll_end, animate=False)
+
+    def _structured_transcript_text(self) -> str:
+        sections: list[str] = []
+        for node in self._top_level_nodes:
+            sections.append(node.title_text)
+            sections.extend(
+                body.markdown_text
+                for body in self._top_level_bodies.get(node, ())
+                if body.markdown_text
+            )
+        return "\n".join(sections)
+
+    def _trim_completed_top_levels(self) -> None:
+        while len(self._structured_transcript_text()) > self._transcript_limit:
+            candidate = next(
+                (node for node in self._top_level_nodes if node in self._completed_top_levels),
+                None,
+            )
+            if candidate is None:
+                return
+            self._remove_top_level(candidate)
+
+    def _remove_top_level(self, node: TranscriptNode) -> None:
+        if node.is_mounted:
+            node.remove()
+        self._top_level_nodes.remove(node)
+        self._completed_top_levels.discard(node)
+        removed_bodies = set(self._top_level_bodies.pop(node, ()))
+        self.markdown_bodies = [body for body in self.markdown_bodies if body not in removed_bodies]
+        removed_nodes = {
+            child for child, top_level in self._node_top_level.items() if top_level is node
+        }
+        self.transcript_nodes = [child for child in self.transcript_nodes if child not in removed_nodes]
+        for child in removed_nodes:
+            self._node_top_level.pop(child, None)
+        self._pending_assistants = [assistant for assistant in self._pending_assistants if assistant is not node]
+        removed_runs = [run_id for run_id, assistant in self._assistant_by_run.items() if assistant is node]
+        for run_id in removed_runs:
+            self._assistant_by_run.pop(run_id, None)
+            self._thinking_by_run.pop(run_id, None)
+            self._response_by_run.pop(run_id, None)
+            self._last_response_by_run.pop(run_id, None)
+            self._seen_exchanges = {
+                item for item in self._seen_exchanges if item[0] != run_id
+            }
+            self._tools_by_call = {
+                key: tool for key, tool in self._tools_by_call.items() if key[0] != run_id
+            }
 
     def _sync_transcript_scroll(self, previous_scroll: float) -> None:
         if self._follow_tail:
             self.transcript.scroll_end(animate=False)
         else:
-            self.transcript.scroll_to(y=previous_scroll, animate=False)
+            self.transcript.scroll_to(y=self._paused_scroll_y, animate=False)
 
     def _clear_now(self) -> None:
         with self._pending_lock:
@@ -1143,12 +1226,15 @@ class TerminalView(App[None]):
         self._reset_transcript_state()
         self.transcript.load_text("")
         self._follow_tail = True
+        self._paused_scroll_y = 0.0
         self._refresh_status()
 
     def _resume_follow_if_at_end(self) -> None:
         if self.transcript.scroll_y >= self.transcript.max_scroll_y:
             self._follow_tail = True
             self._refresh_status()
+        else:
+            self._remember_paused_scroll()
 
     def _show_copy_notice(self, character_count: int) -> None:
         self._invalidate_copy_notice()

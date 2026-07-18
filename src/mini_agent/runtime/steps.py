@@ -70,6 +70,8 @@ class ToolStepExecutor:
             tool_message.status = "failed"
             tool_message.content = exc.reason
             tool_message.retryable = False
+            run.add_event("tool_failed", f"{tool} failed", call_id=tool_message.call_id, error=exc.reason)
+            publish(RuntimeEvent("tool_failed", exc.reason, {"tool": tool, "call_id": tool_message.call_id}))
             runtime.save()
             return ToolStepResult(
                 success=False,
@@ -106,20 +108,37 @@ class ToolStepExecutor:
             request = InterruptRequest(
                 "tool",
                 f"Call tool {tool}?",
-                {"run_id": run.run_id, "tool": tool, "arguments": tool_message.arguments},
+                {
+                    "run_id": run.run_id,
+                    "tool": tool,
+                    "call_id": tool_message.call_id,
+                    "arguments": tool_message.arguments,
+                },
             )
             run.add_event("approval_requested", "Tool approval requested", interrupt_kind="tool", **request.data)
             publish(RuntimeEvent("approval_requested", request.message, request.data))
             if runtime.services.interrupt is None:
-                return ToolStepResult(success=False, interrupt=InterruptDecision("cancel"))
+                failure = self._failure(runtime, tool, "Tool approval cancelled because no interrupt handler is available.")
+                return ToolStepResult(
+                    success=False,
+                    error=failure.error,
+                    interrupt=InterruptDecision("cancel"),
+                    retryable=failure.retryable,
+                )
             decision = runtime.services.interrupt(request)
             if decision.choice != "continue":
-                return ToolStepResult(success=False, interrupt=decision)
+                failure = self._failure(runtime, tool, "Tool approval was not granted.")
+                return ToolStepResult(
+                    success=False,
+                    error=failure.error,
+                    interrupt=decision,
+                    retryable=failure.retryable,
+                )
             run.add_event("approval_granted", "Tool approval granted", interrupt_kind="tool", **request.data)
             publish(RuntimeEvent("approval_granted", request.message, request.data))
 
-        run.add_event("tool_call", f"Calling {tool}", arguments=dict(tool_message.arguments))
-        publish(RuntimeEvent("tool_call", tool, {"arguments": tool_message.arguments}))
+        run.add_event("tool_call", f"Calling {tool}", call_id=tool_message.call_id, arguments=dict(tool_message.arguments))
+        publish(RuntimeEvent("tool_call", tool, {"call_id": tool_message.call_id, "arguments": tool_message.arguments}))
         for attempt in range(runtime.state.runner_settings.max_retries + 1):
             try:
                 result = tools.invoke(tool, tool_message.arguments, confirmed=True)
@@ -127,14 +146,20 @@ class ToolStepExecutor:
                 tool_message.content = result
                 tool_message.retryable = retryable
                 run.completed_steps.append(len(run.actions))
-                run.add_event("tool_result", f"{tool} succeeded", result=result)
-                publish(RuntimeEvent("tool_result", result, {"tool": tool}))
+                run.add_event("tool_result", f"{tool} succeeded", call_id=tool_message.call_id, result=result)
+                publish(RuntimeEvent("tool_result", result, {"tool": tool, "call_id": tool_message.call_id}))
                 runtime.save()
                 return ToolStepResult(success=True, output=result, retryable=retryable)
             except ToolError as exc:
                 if attempt < runtime.state.runner_settings.max_retries and retryable:
-                    run.add_event("retry", f"Retrying {tool}", error=str(exc), attempt=attempt + 1)
-                    publish(RuntimeEvent("retry", str(exc), {"tool": tool, "attempt": attempt + 1}))
+                    run.add_event(
+                        "retry", f"Retrying {tool}", call_id=tool_message.call_id, error=str(exc), attempt=attempt + 1
+                    )
+                    publish(
+                        RuntimeEvent(
+                            "retry", str(exc), {"tool": tool, "call_id": tool_message.call_id, "attempt": attempt + 1}
+                        )
+                    )
                     continue
                 return self._failure(runtime, tool, str(exc), retryable=retryable)
         return self._failure(runtime, tool, "Tool execution ended without an outcome.", retryable=retryable)
@@ -166,13 +191,15 @@ class ToolStepExecutor:
         run = runtime.run
         message = runtime.state.active_message
         index = runtime.state.active_tool_index
+        call_id = ""
         if message is not None and index is not None and 0 <= index < len(message.tool_messages):
             current = message.tool_messages[index]
+            call_id = current.call_id
             current.status = "failed"
             current.content = error
             current.retryable = retryable
-        run.add_event("tool_failed", f"{tool} failed", error=error)
+        run.add_event("tool_failed", f"{tool} failed", call_id=call_id, error=error)
         publish = runtime.services.publish or (lambda _event: None)
-        publish(RuntimeEvent("tool_failed", error, {"tool": tool}))
+        publish(RuntimeEvent("tool_failed", error, {"tool": tool, "call_id": call_id}))
         runtime.save()
         return ToolStepResult(success=False, error=error, retryable=retryable)

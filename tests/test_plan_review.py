@@ -74,6 +74,33 @@ def test_valid_plan_review_opens_existing_review_and_preserves_one_control_messa
     assert saved.tool_messages[0].content == "Plan submitted for review."
 
 
+def test_plan_review_tool_lifecycle_and_review_approval_share_call_id(tmp_path: Path) -> None:
+    events = []
+    planner = ScriptedPlanPlanner([AssistantMessage(tool_messages=[review_call(PLAN, "review_call")])])
+    runner = AgentRunner(planner, ToolRegistry(tmp_path))
+    runtime = runner.new_runtime(
+        task="Plan the change",
+        mode="plan",
+        on_event=events.append,
+        interrupt=lambda _request: InterruptDecision("implement"),
+    )
+
+    runner.run(runtime)
+
+    lifecycle = [
+        event
+        for event in events
+        if event.kind in {"tool_call", "tool_result", "approval_requested", "approval_granted"}
+    ]
+    assert [event.kind for event in lifecycle] == [
+        "tool_call",
+        "tool_result",
+        "approval_requested",
+        "approval_granted",
+    ]
+    assert [event.data["call_id"] for event in lifecycle] == ["review_call"] * 4
+
+
 def test_blank_plan_is_retryable_then_valid_plan_opens_review(tmp_path: Path) -> None:
     planner = ScriptedPlanPlanner(
         [

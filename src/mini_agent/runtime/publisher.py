@@ -40,6 +40,9 @@ class RunEventPublisher:
     def _record(self, event: RuntimeEvent) -> None:
         if event.kind in {"response_start", "response_delta", "response_end"}:
             return
+        if event.kind == "assistant_message":
+            self._record_non_stream_reasoning(event)
+            return
         if event.kind == "thinking_start":
             self._thinking_started_at = event.timestamp
             self._thinking_data = dict(event.data)
@@ -56,6 +59,29 @@ class RunEventPublisher:
         self._flush_thinking(completed=False)
         message, data = persistent_event(event, self._runtime.state.runner_settings.log_full_messages)
         self._append(event.kind, message, event.timestamp, data)
+
+    def _record_non_stream_reasoning(self, event: RuntimeEvent) -> None:
+        """Keep reasoning audit records without replaying non-stream UI events."""
+
+        if event.data.get("reasoning_streamed"):
+            return
+        message = event.data.get("message")
+        if not isinstance(message, dict):
+            return
+        reasoning = message.get("reasoning")
+        if not isinstance(reasoning, str) or not reasoning:
+            return
+        data = {
+            key: event.data[key]
+            for key in ("run_id", "task", "mode", "strategy", "status")
+            if key in event.data
+        }
+        data["streamed"] = False
+        text, data = persistent_event(
+            RuntimeEvent("thinking_delta", reasoning, data),
+            self._runtime.state.runner_settings.log_full_messages,
+        )
+        self._append("thinking", text, event.timestamp, data)
 
     def _flush_thinking(self, *, completed: bool, closing_data: dict[str, object] | None = None) -> None:
         if self._thinking_started_at is None:

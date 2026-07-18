@@ -20,7 +20,9 @@ def test_jsonl_logger_persists_the_complete_event_stream(tmp_path: Path) -> None
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
     assert log_path.exists()
-    assert len(records) == len(events)
+    persistent_events = [event for event in events if event.kind != "assistant_message"]
+    assert len(records) == len(persistent_events)
+    assert "assistant_message" not in [record["kind"] for record in records]
     assert records[0]["kind"] == "run_started"
     assert records[-1]["kind"] == "run_finished"
     assert all(record["run_id"] == state.run_id for record in records)

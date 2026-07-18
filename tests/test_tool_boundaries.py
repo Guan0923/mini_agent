@@ -97,7 +97,7 @@ def test_tool_call_trace_nests_arguments_that_match_event_field_names() -> None:
 
     event = next(event for event in state.events if event.kind == "tool_call")
     assert state.status == "completed"
-    assert event.data == {"arguments": {"message": "hello"}}
+    assert event.data == {"call_id": "call_1", "arguments": {"message": "hello"}}
 
 
 def test_env_file_loading_is_pure_and_process_values_take_precedence(tmp_path: Path, monkeypatch) -> None:

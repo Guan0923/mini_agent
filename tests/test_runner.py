@@ -271,6 +271,7 @@ def test_agent_mode_emits_reasoning_and_persists_conversation(tmp_path: Path) ->
         "thinking_start",
         "thinking_delta",
         "thinking_end",
+        "assistant_message",
         "response",
         "run_finished",
     ]

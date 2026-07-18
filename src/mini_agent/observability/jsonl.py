@@ -25,6 +25,9 @@ class JsonlRunLogger:
             raise ValueError("Persistent run logging requires a run_id in every event.")
         if event.kind in {"response_start", "response_delta", "response_end"}:
             return
+        if event.kind == "assistant_message":
+            self._write_non_stream_reasoning(event)
+            return
         if event.kind == "thinking_start":
             self._thinking[run_id] = (event.timestamp, dict(event.data), [])
             return
@@ -38,6 +41,23 @@ class JsonlRunLogger:
             return
         self._flush_thinking(run_id, event.data, completed=False)
         self._write(event)
+
+    def _write_non_stream_reasoning(self, event: RuntimeEvent) -> None:
+        if event.data.get("reasoning_streamed"):
+            return
+        message = event.data.get("message")
+        if not isinstance(message, dict):
+            return
+        reasoning = message.get("reasoning")
+        if not isinstance(reasoning, str) or not reasoning:
+            return
+        data = {
+            key: event.data[key]
+            for key in ("run_id", "task", "mode", "strategy", "status")
+            if key in event.data
+        }
+        data["streamed"] = False
+        self._write(RuntimeEvent("thinking_delta", reasoning, data, timestamp=event.timestamp), kind="thinking")
 
     def _flush_thinking(self, run_id: str, fallback_data: dict[str, Any], *, completed: bool = False) -> None:
         buffered = self._thinking.pop(run_id, None)

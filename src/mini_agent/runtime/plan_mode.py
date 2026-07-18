@@ -9,6 +9,7 @@ from .context import AgentRuntime
 from .contracts import InterruptRequest
 from .events import RuntimeEvent
 from .outcomes import cancel_run, complete_run, fail_run
+from .plan_review import REQUEST_PLAN_REVIEW_NAME
 from .workflows import PlanProposalWorkflow
 
 
@@ -47,12 +48,17 @@ class PlanModeWorkflow:
         *,
         content_streamed: bool,
     ) -> None:
+        call_id = next(
+            (tool.call_id for tool in message.tool_messages if tool.name == REQUEST_PLAN_REVIEW_NAME),
+            "",
+        )
         request = InterruptRequest(
             "plan",
             "Choose how to handle this plan.",
             {
                 "run_id": runtime.run.run_id,
                 "plan": proposal,
+                "call_id": call_id,
             },
         )
         runtime.run.add_event("approval_requested", "Plan implementation decision requested", **request.data)

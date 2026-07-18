@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.domain import AssistantMessage, PlanningError
+from mini_agent.domain import AssistantMessage, PlanningError, ToolMessage
 from mini_agent.observability import EventFanout, JsonlRunLogger
 from mini_agent.planning import LLMPlanner, RuleBasedPlanner
 from mini_agent.runtime import (
@@ -14,7 +14,7 @@ from mini_agent.runtime import (
     SQLiteSessionStore,
 )
 from mini_agent.runtime.config import log_full_messages_from_env
-from mini_agent.tools import ToolRegistry
+from mini_agent.tools import Tool, ToolRegistry
 
 
 class StaticCompletionClient:
@@ -45,6 +45,23 @@ class ReasoningPlanner:
 
     def decide(self, runtime) -> AssistantMessage:
         return AssistantMessage(content="done", reasoning="first thought; second thought")
+
+
+class OneToolThenAnswerPlanner:
+    name = "one-tool-then-answer"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, runtime) -> AssistantMessage:
+        self.calls += 1
+        if self.calls == 1:
+            return AssistantMessage(
+                content="I will use a tool.",
+                reasoning="I need the tool result.",
+                tool_messages=[ToolMessage(name="echo", call_id="call_echo", arguments={"value": "ok"})],
+            )
+        return AssistantMessage(content="done")
 
 
 class ExplodingPlanner:
@@ -273,6 +290,60 @@ def test_response_stream_is_renderable_but_not_persisted_chunk_by_chunk(tmp_path
     ]
     assert transient.isdisjoint(record["kind"] for record in records)
     assert [record["kind"] for record in records].count("response") == 1
+
+
+def test_assistant_message_bounds_non_stream_content_before_tool_execution_and_is_transient() -> None:
+    events = []
+    runner = AgentRunner(
+        OneToolThenAnswerPlanner(),
+        ToolRegistry([Tool("echo", "Echoes a value.", lambda value: value)]),
+        strategy="reactive",
+    )
+
+    state = runner.run(runner.new_runtime(task="use a tool", on_event=events.append))
+
+    assistant = next(event for event in events if event.kind == "assistant_message")
+    tool_call = next(event for event in events if event.kind == "tool_call")
+    assert events.index(assistant) < events.index(tool_call)
+    assert assistant.data["exchange_id"] is None
+    assert assistant.data["reasoning_streamed"] is False
+    assert assistant.data["content_streamed"] is False
+    assert assistant.data["message"] == {
+        "name": "assistant",
+        "role": "assistant",
+        "content": "I will use a tool.",
+        "reasoning": "I need the tool result.",
+        "logprobs": None,
+        "tool_messages": [
+            {
+                "name": "echo",
+                "role": "tool",
+                "content": None,
+                "call_id": "call_echo",
+                "arguments": {"value": "ok"},
+                "status": "pending",
+                "retryable": None,
+                "provider_options": {},
+            }
+        ],
+        "provider_options": {},
+    }
+    assert "thinking_start" not in [event.kind for event in events]
+    assert "assistant_message" not in [message.kind for message in state.runtime_messages]
+
+
+def test_tool_lifecycle_events_are_correlated_by_call_id() -> None:
+    events = []
+    runner = AgentRunner(
+        OneToolThenAnswerPlanner(),
+        ToolRegistry([Tool("echo", "Echoes a value.", lambda value: value)]),
+        strategy="reactive",
+    )
+
+    runner.run(runner.new_runtime(task="use a tool", on_event=events.append))
+
+    lifecycle = [event for event in events if event.kind in {"tool_call", "tool_result"}]
+    assert [event.data["call_id"] for event in lifecycle] == ["call_echo", "call_echo"]
 
 
 

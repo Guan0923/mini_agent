@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from mini_agent.domain import AssistantMessage, ExecutionPlan, PlanningError, PlanStep, ToolMessage
+from mini_agent.domain import AssistantMessage, ExecutionPlan, PlanningError, PlanStep, ToolMessage, message_to_dict
 from mini_agent.planning import PlannerCapabilities
 
 from .cancellation import cancel_if_requested
@@ -123,10 +123,57 @@ def _record_reasoning(runtime: AgentRuntime, message: AssistantMessage, streamed
     if not message.reasoning:
         return
     runtime.run.add_event("reasoning", "Model reasoning", content=message.reasoning)
-    if not streamed:
-        _publish(runtime, RuntimeEvent("thinking_start"))
-        _publish(runtime, RuntimeEvent("thinking_delta", message.reasoning))
-        _publish(runtime, RuntimeEvent("thinking_end"))
+
+
+def _publish_assistant_message(
+    runtime: AgentRuntime,
+    message: AssistantMessage,
+    streamed: _TextStreamResult,
+) -> None:
+    """Publish one transient boundary after a completed assistant response."""
+
+    _publish(
+        runtime,
+        RuntimeEvent(
+            "assistant_message",
+            data={
+                "message": message_to_dict(message),
+                "exchange_id": runtime.exchange.exchange_id,
+                "reasoning_streamed": streamed.reasoning,
+                "content_streamed": streamed.content,
+            },
+        ),
+    )
+
+
+def _publish_tool_call(runtime: AgentRuntime, tool: ToolMessage) -> None:
+    runtime.run.add_event("tool_call", f"Calling {tool.name}", call_id=tool.call_id, arguments=dict(tool.arguments))
+    _publish(
+        runtime,
+        RuntimeEvent("tool_call", tool.name, {"call_id": tool.call_id, "arguments": dict(tool.arguments)}),
+    )
+
+
+def _publish_tool_result(runtime: AgentRuntime, tool: ToolMessage) -> None:
+    result = tool.content or ""
+    runtime.run.add_event("tool_result", f"{tool.name} succeeded", call_id=tool.call_id, result=result)
+    _publish(runtime, RuntimeEvent("tool_result", result, {"tool": tool.name, "call_id": tool.call_id}))
+
+
+def _publish_tool_failure(runtime: AgentRuntime, tool: ToolMessage, error: str) -> None:
+    runtime.run.add_event("tool_failed", f"{tool.name} failed", call_id=tool.call_id, error=error)
+    _publish(runtime, RuntimeEvent("tool_failed", error, {"tool": tool.name, "call_id": tool.call_id}))
+
+
+def _fail_pending_tools(runtime: AgentRuntime, message: AssistantMessage, error: str) -> None:
+    """Close unexecuted tool calls after cancellation or steering."""
+
+    for tool in message.tool_messages:
+        if tool.status == "pending":
+            tool.status = "failed"
+            tool.content = error
+            tool.retryable = False
+            _publish_tool_failure(runtime, tool, error)
 
 
 def _truncate(value: str) -> str:
@@ -178,11 +225,7 @@ def _apply_tool_batch_steering(
 
     message = runtime.state.active_message
     if message is not None and next_tool_index > 0:
-        for tool in message.tool_messages[next_tool_index:]:
-            if tool.status == "pending":
-                tool.status = "failed"
-                tool.content = "Not executed because the user supplied new instructions."
-                tool.retryable = False
+        _fail_pending_tools(runtime, message, "Not executed because the user supplied new instructions.")
         _finish_assistant(runtime)
     else:
         runtime.state.active_message = None
@@ -221,11 +264,14 @@ class ReactiveWorkflow:
                 streamed = close()
             _publish_repairs(runtime, capabilities)
             _record_reasoning(runtime, response, streamed.reasoning)
+            _publish_assistant_message(runtime, response, streamed)
 
             if cancel_if_requested(runtime):
+                _fail_pending_tools(runtime, response, "Not executed because the run was cancelled.")
                 return runtime.run
 
             if consume_steering(runtime, phase="after_model_response") is not None:
+                _fail_pending_tools(runtime, response, "Not executed because the user supplied new instructions.")
                 continue
 
             if not response.tool_messages:
@@ -255,6 +301,8 @@ class ReactiveWorkflow:
                     stop_after_batch = f"Stopped: refusing to repeat non-retryable tool call {tool.name} after failure."
                     tool.status = "failed"
                     tool.content = stop_after_batch
+                    tool.retryable = False
+                    _publish_tool_failure(runtime, tool, stop_after_batch)
                     continue
                 outcome = _execute_tool(runtime, index, self._steps)
                 if cancel_if_requested(runtime):
@@ -292,6 +340,7 @@ class ReactiveWorkflow:
                     "tool_recovery",
                     f"Recovering from {tool.name} failure",
                     tool=tool.name,
+                    call_id=tool.call_id,
                     error=_truncate(error),
                     attempt=consecutive_failures,
                 )
@@ -300,7 +349,7 @@ class ReactiveWorkflow:
                     RuntimeEvent(
                         "tool_recovery",
                         _truncate(error),
-                        {"tool": tool.name, "attempt": consecutive_failures},
+                        {"tool": tool.name, "call_id": tool.call_id, "attempt": consecutive_failures},
                     ),
                 )
             if steered:
@@ -343,9 +392,12 @@ class PlanProposalWorkflow:
                 streamed = close()
             _publish_repairs(runtime, capabilities)
             _record_reasoning(runtime, response, streamed.reasoning)
+            _publish_assistant_message(runtime, response, streamed)
             if cancel_if_requested(runtime):
+                _fail_pending_tools(runtime, response, "Not executed because the run was cancelled.")
                 return None
             if consume_steering(runtime, phase="after_model_response") is not None:
+                _fail_pending_tools(runtime, response, "Not executed because the user supplied new instructions.")
                 continue
             if not response.tool_messages:
                 _start_assistant(runtime, response)
@@ -419,6 +471,7 @@ class PlanProposalWorkflow:
                             "tool_recovery",
                             f"Recovering from {tool.name} failure",
                             tool=tool.name,
+                            call_id=tool.call_id,
                             error=_truncate(error),
                             attempt=consecutive_failures,
                         )
@@ -427,7 +480,7 @@ class PlanProposalWorkflow:
                             RuntimeEvent(
                                 "tool_recovery",
                                 _truncate(error),
-                                {"tool": tool.name, "attempt": consecutive_failures},
+                                {"tool": tool.name, "call_id": tool.call_id, "attempt": consecutive_failures},
                             ),
                         )
             if steered:
@@ -446,6 +499,7 @@ class PlanProposalWorkflow:
         _start_assistant(runtime, response)
         for tool in response.tool_messages:
             runtime.run.actions.append(tool)
+            _publish_tool_call(runtime, tool)
 
         if len(response.tool_messages) != 1:
             error = "request_plan_review must be the only tool call in an assistant response."
@@ -453,8 +507,7 @@ class PlanProposalWorkflow:
                 tool.status = "failed"
                 tool.content = error
                 tool.retryable = True
-            runtime.run.add_event("tool_failed", f"{REQUEST_PLAN_REVIEW_NAME} failed", error=error)
-            _publish(runtime, RuntimeEvent("tool_failed", error, {"tool": REQUEST_PLAN_REVIEW_NAME}))
+                _publish_tool_failure(runtime, tool, error)
             _finish_assistant(runtime)
             return None
 
@@ -467,14 +520,14 @@ class PlanProposalWorkflow:
             tool.status = "failed"
             tool.content = str(exc)
             tool.retryable = True
-            runtime.run.add_event("tool_failed", f"{REQUEST_PLAN_REVIEW_NAME} failed", error=str(exc))
-            _publish(runtime, RuntimeEvent("tool_failed", str(exc), {"tool": REQUEST_PLAN_REVIEW_NAME}))
+            _publish_tool_failure(runtime, tool, str(exc))
             _finish_assistant(runtime)
             return None
 
         tool.status = "succeeded"
         tool.content = "Plan submitted for review."
         tool.retryable = False
+        _publish_tool_result(runtime, tool)
         _finish_assistant(runtime)
         return plan
 
@@ -483,6 +536,7 @@ class PlanProposalWorkflow:
         _start_assistant(runtime, response)
         for tool in response.tool_messages:
             runtime.run.actions.append(tool)
+            _publish_tool_call(runtime, tool)
 
         if len(response.tool_messages) != 1:
             error = "request_user_input must be the only tool call in an assistant response."
@@ -490,8 +544,7 @@ class PlanProposalWorkflow:
                 tool.status = "failed"
                 tool.content = error
                 tool.retryable = True
-            runtime.run.add_event("tool_failed", f"{REQUEST_USER_INPUT_NAME} failed", error=error)
-            _publish(runtime, RuntimeEvent("tool_failed", error, {"tool": REQUEST_USER_INPUT_NAME}))
+                _publish_tool_failure(runtime, tool, error)
             _finish_assistant(runtime)
             return False
 
@@ -518,10 +571,10 @@ class PlanProposalWorkflow:
         request = InterruptRequest(
             "question",
             "Answer the Plan-mode clarification questions.",
-            {"questions": question_data},
+            {"questions": question_data, "call_id": tool.call_id},
             questions=questions,
         )
-        runtime.run.add_event("user_input_requested", request.message, questions=question_data)
+        runtime.run.add_event("user_input_requested", request.message, call_id=tool.call_id, questions=question_data)
         _publish(runtime, RuntimeEvent("user_input_requested", request.message, request.data))
         runtime.save()
 
@@ -560,8 +613,12 @@ class PlanProposalWorkflow:
         tool.status = "succeeded"
         tool.content = format_user_input_answers(answers)
         tool.retryable = False
-        runtime.run.add_event("user_input_received", "Plan question answers received", answers=answers)
-        _publish(runtime, RuntimeEvent("user_input_received", "Plan question answers received", {"answers": answers}))
+        _publish_tool_result(runtime, tool)
+        runtime.run.add_event("user_input_received", "Plan question answers received", call_id=tool.call_id, answers=answers)
+        _publish(
+            runtime,
+            RuntimeEvent("user_input_received", "Plan question answers received", {"call_id": tool.call_id, "answers": answers}),
+        )
         _finish_assistant(runtime)
         return True
 
@@ -570,8 +627,7 @@ class PlanProposalWorkflow:
         tool.status = "failed"
         tool.content = error
         tool.retryable = retryable
-        runtime.run.add_event("tool_failed", f"{REQUEST_USER_INPUT_NAME} failed", error=error)
-        _publish(runtime, RuntimeEvent("tool_failed", error, {"tool": REQUEST_USER_INPUT_NAME}))
+        _publish_tool_failure(runtime, tool, error)
         _finish_assistant(runtime)
 
 

@@ -15,6 +15,7 @@ RuntimeEventKind = Literal[
     "response_start",
     "response_delta",
     "response_end",
+    "assistant_message",
     "model_request",
     "model_response",
     "model_error",

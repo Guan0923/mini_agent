@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Iterable
 
 from textual import events
+from textual.await_complete import AwaitComplete
 from textual.containers import VerticalScroll
 from textual.timer import Timer
 from textual.widgets import Collapsible, Markdown, Static
@@ -29,9 +30,34 @@ class MarkdownBody(Markdown):
         self._revision += 1
         if self.is_mounted:
             self.run_worker(self._render_stream(self._revision, markdown), exclusive=True)
+        else:
+            self._initial_markdown = markdown
 
     def append_markdown(self, delta: str) -> None:
         self.set_markdown(f"{self.markdown_text}{delta}")
+
+    def update(self, markdown: str) -> AwaitComplete:
+        transcript = next(
+            (ancestor for ancestor in self.ancestors if isinstance(ancestor, TranscriptScroll)),
+            None,
+        )
+        completed = super().update(markdown)
+
+        async def restore_scroll() -> None:
+            await completed
+            if transcript is None:
+                return
+            if getattr(self.app, "follow_tail", True):
+                settle = getattr(self.app, "_settle_follow_latest", None)
+                if settle is not None:
+                    self.call_after_refresh(settle)
+                else:
+                    self.call_after_refresh(transcript.scroll_end, animate=False)
+            else:
+                target = getattr(self.app, "_paused_scroll_y", transcript.scroll_y)
+                self.call_after_refresh(transcript.scroll_to, y=target, animate=False)
+
+        return AwaitComplete(restore_scroll())
 
     async def _render_stream(self, revision: int, markdown: str) -> None:
         if revision != self._revision:
@@ -82,6 +108,7 @@ class TranscriptNode(Collapsible):
 
     def _watch_collapsed(self, collapsed: bool) -> None:
         super()._watch_collapsed(collapsed)
+        self._sync_activity_timer()
         self._sync_title()
 
     def set_activity(self, active: bool) -> None:
@@ -89,18 +116,21 @@ class TranscriptNode(Collapsible):
         if self.activity == active:
             return
         self.activity = active
-        if active and self.is_mounted:
-            self._activity_timer = self.set_interval(0.12, self._tick_activity)
-        elif not active and self._activity_timer is not None:
-            self._activity_timer.stop()
-            self._activity_timer = None
+        self._sync_activity_timer()
         self._sync_title()
 
     def _on_mount(self, event: events.Mount) -> None:
         super()._on_mount(event)
-        if self.activity and self._activity_timer is None:
-            self._activity_timer = self.set_interval(0.12, self._tick_activity)
+        self._sync_activity_timer()
         self._sync_title()
+
+    def _sync_activity_timer(self) -> None:
+        should_run = self.activity and self.collapsed and self.is_mounted
+        if should_run and self._activity_timer is None:
+            self._activity_timer = self.set_interval(0.12, self._tick_activity)
+        elif not should_run and self._activity_timer is not None:
+            self._activity_timer.stop()
+            self._activity_timer = None
 
     def _tick_activity(self) -> None:
         if not self.activity:
@@ -150,6 +180,10 @@ class TranscriptScroll(VerticalScroll):
         self._plain_text = text
         self.selection = Selection.cursor((0, 0))
 
+    def sync_text(self, text: str) -> None:
+        """Refresh the compatibility/copy mirror without changing selection."""
+        self._plain_text = text
+
     def select_all(self) -> None:
         line_count = max(1, self._plain_text.count("\n") + 1)
         last_column = len(self._plain_text.rsplit("\n", 1)[-1])
@@ -171,6 +205,9 @@ class TranscriptScroll(VerticalScroll):
         if callback is not None:
             callback()
         super()._on_mouse_scroll_up(event)
+        remember = getattr(self.app, "_remember_paused_scroll", None)
+        if remember is not None:
+            self.call_after_refresh(remember)
 
     def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         super()._on_mouse_scroll_down(event)

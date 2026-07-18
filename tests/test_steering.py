@@ -75,7 +75,7 @@ def test_cancellation_after_model_response_discards_stale_tool_call() -> None:
 
     assert result.status == "cancelled"
     assert calls == []
-    assert [event.kind for event in result.events[-2:]] == ["cancelled", "run_finished"]
+    assert [event.kind for event in result.events[-3:]] == ["cancelled", "tool_failed", "run_finished"]
 
 
 def test_cancellation_during_tool_keeps_result_and_skips_remaining_tools() -> None:
