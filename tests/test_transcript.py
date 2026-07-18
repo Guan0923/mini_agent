@@ -232,6 +232,8 @@ def test_system_message_before_view_mount_is_queued_until_transcript_mounts() ->
             await pilot.pause()
             assert [node.title_text for node in view._top_level_nodes] == ["SYSTEM"]
             assert view.markdown_bodies[0].markdown_text == "Mini-Agent TUI startup\n"
-            assert view.transcript.query_one("TranscriptNode").title_text == "SYSTEM"
+            system = view.transcript.query_one("TranscriptNode")
+            assert system.title_text == "SYSTEM"
+            assert system.collapsed is True
 
     asyncio.run(scenario())

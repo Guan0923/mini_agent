@@ -919,7 +919,7 @@ class TerminalView(App[None]):
         self.call_after_refresh(self._sync_transcript_scroll, old_scroll)
 
     def _new_top_level(self, title: str, *, completed: bool = False) -> TranscriptNode:
-        node = TranscriptNode(title, collapsed=False)
+        node = TranscriptNode(title, collapsed=title == "SYSTEM")
         self.transcript_nodes.append(node)
         self._top_level_nodes.append(node)
         self._top_level_bodies[node] = []
