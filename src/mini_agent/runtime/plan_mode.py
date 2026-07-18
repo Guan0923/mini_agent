@@ -25,12 +25,28 @@ class PlanModeWorkflow:
         if cancel_if_requested(runtime):
             return
         if proposal.plan is None:
-            complete_run(runtime, proposal.message, event_kind="response")
+            complete_run(
+                runtime,
+                proposal.message,
+                event_kind="response",
+                response_streamed=proposal.content_streamed,
+            )
             return
-        self._review(runtime, proposal.message, proposal.plan)
+        self._review(
+            runtime,
+            proposal.message,
+            proposal.plan,
+            content_streamed=proposal.content_streamed,
+        )
 
     @staticmethod
-    def _review(runtime: AgentRuntime, message: AssistantMessage, proposal: str) -> None:
+    def _review(
+        runtime: AgentRuntime,
+        message: AssistantMessage,
+        proposal: str,
+        *,
+        content_streamed: bool,
+    ) -> None:
         request = InterruptRequest(
             "plan",
             "Choose how to handle this plan.",
@@ -85,4 +101,10 @@ class PlanModeWorkflow:
                 },
             )
         )
-        complete_run(runtime, message, final_answer=proposal, event_kind="plan")
+        complete_run(
+            runtime,
+            message,
+            final_answer=proposal,
+            event_kind="plan",
+            response_streamed=content_streamed,
+        )

@@ -633,11 +633,6 @@ def _parse_stream(runtime: AgentRuntime, events: Iterable[dict[str, Any]]) -> De
                 if role != "assistant":
                     raise ModelRequestError("DeepSeek streamed delta role must be 'assistant'.")
                 target["role"] = role
-            content = delta.get("content")
-            if content is not None:
-                if not isinstance(content, str):
-                    raise ModelRequestError("DeepSeek stream content must be text or null.")
-                target["content"].append(content)
             reasoning = delta.get("reasoning_content")
             if reasoning is not None:
                 if not isinstance(reasoning, str):
@@ -645,6 +640,13 @@ def _parse_stream(runtime: AgentRuntime, events: Iterable[dict[str, Any]]) -> De
                 target["reasoning"].append(reasoning)
                 if runtime.exchange.on_reasoning is not None:
                     runtime.exchange.on_reasoning(reasoning)
+            content = delta.get("content")
+            if content is not None:
+                if not isinstance(content, str):
+                    raise ModelRequestError("DeepSeek stream content must be text or null.")
+                target["content"].append(content)
+                if content and index == 0 and runtime.exchange.on_content is not None:
+                    runtime.exchange.on_content(content)
             finish_reason = raw_choice.get("finish_reason")
             if finish_reason is not None:
                 if not isinstance(finish_reason, str):

@@ -155,3 +155,34 @@ def test_repeated_invalid_plan_review_calls_stop_at_recovery_limit(tmp_path: Pat
     assert result.status == "failed"
     assert result.final_answer == "Stopped after repeated invalid request_plan_review calls."
     assert len(result.actions) == 3
+
+
+class StreamingPlanPlanner:
+    name = "streaming-plan-review"
+
+    def decide(self, runtime) -> AssistantMessage:
+        assert runtime.exchange.on_content is not None
+        runtime.exchange.on_content(PLAN)
+        return AssistantMessage(content=PLAN, tool_messages=[review_call(PLAN)])
+
+
+def test_streamed_plan_with_tool_call_is_retained_and_final_plan_is_marked_streamed(
+    tmp_path: Path,
+) -> None:
+    events = []
+    runner = AgentRunner(StreamingPlanPlanner(), ToolRegistry(tmp_path))
+    runtime = runner.new_runtime(
+        task="Plan the change",
+        mode="plan",
+        on_event=events.append,
+        interrupt=lambda _request: InterruptDecision("implement"),
+    )
+
+    result = runner.run(runtime)
+
+    assert result.status == "completed"
+    assert runtime.state.messages[1].content == PLAN
+    assert [event.kind for event in events].count("response_delta") == 1
+    final = next(event for event in events if event.kind == "plan")
+    assert final.message == PLAN
+    assert final.data["streamed"] is True

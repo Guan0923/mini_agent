@@ -55,7 +55,7 @@ def test_request_user_input_parser_rejects_duplicate_question_ids() -> None:
         parse_user_input_questions(arguments)
 
 
-def test_request_user_input_parser_rejects_more_than_three_options() -> None:
+def test_request_user_input_parser_accepts_more_than_three_options() -> None:
     arguments = question_arguments()
     arguments["questions"][0]["options"].extend(
         [
@@ -64,8 +64,37 @@ def test_request_user_input_parser_rejects_more_than_three_options() -> None:
         ]
     )
 
-    with pytest.raises(ValueError, match="too long"):
-        parse_user_input_questions(arguments)
+    questions = parse_user_input_questions(arguments)
+
+    assert [option.label for option in questions[0].options] == ["SQLite", "JSONL", "Text", "Memory"]
+
+
+@pytest.mark.parametrize("option_count", [0, 1])
+def test_request_user_input_parser_accepts_fewer_than_two_options(option_count: int) -> None:
+    arguments = question_arguments()
+    arguments["questions"][0]["options"] = arguments["questions"][0]["options"][:option_count]
+
+    questions = parse_user_input_questions(arguments)
+
+    assert len(questions[0].options) == option_count
+
+
+def test_request_user_input_parser_accepts_more_than_three_questions() -> None:
+    arguments = question_arguments()
+    template = arguments["questions"][0]
+    arguments["questions"] = [
+        {**template, "id": f"question_{index}"}
+        for index in range(4)
+    ]
+
+    questions = parse_user_input_questions(arguments)
+
+    assert [question.id for question in questions] == [f"question_{index}" for index in range(4)]
+
+
+def test_request_user_input_parser_rejects_empty_questions() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        parse_user_input_questions({"questions": []})
 
 
 def test_request_user_input_parser_rejects_whitespace_only_text() -> None:
@@ -74,6 +103,28 @@ def test_request_user_input_parser_rejects_whitespace_only_text() -> None:
 
     with pytest.raises(ValueError, match="must not be blank"):
         parse_user_input_questions(arguments)
+
+
+def test_request_user_input_parser_filters_exact_client_other_label() -> None:
+    arguments = question_arguments()
+    arguments["questions"][0]["options"].insert(
+        0,
+        {"label": "  其他  ", "description": "Provide a custom answer."},
+    )
+
+    questions = parse_user_input_questions(arguments)
+
+    assert [option.label for option in questions[0].options] == ["SQLite", "JSONL"]
+
+
+@pytest.mark.parametrize("label", ["以上都不对", "none of the above"])
+def test_request_user_input_parser_keeps_semantically_similar_other_labels(label: str) -> None:
+    arguments = question_arguments()
+    arguments["questions"][0]["options"][0]["label"] = label
+
+    questions = parse_user_input_questions(arguments)
+
+    assert questions[0].options[0].label == label
 
 
 def test_user_input_answers_use_codex_style_tool_result_shape() -> None:

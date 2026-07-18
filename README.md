@@ -166,11 +166,11 @@ TUI 有两种模式，默认是 Agent 模式：模型每次选择工具调用或
 
 正常产品路径只会自动选择 `reactive` 或 `dynamic_replan`：前者适合简单、逐步确定的任务，后者会按实时工具结果生成并替换后续可执行阶段。`plan_execute` 仍可通过 `--strategy plan_execute` 显式启用，但它是“固定计划、失败即停止”的实验对照基线，自动路由和 `/plan` 都不会使用它。
 
-输入 `/plan` 会进入只读规划与讨论模式：普通问候、解释和需求讨论直接作为对话返回；本地计算、列目录和读取文件可用于调研，网页搜索/抓取仍会要求确认，写入、移动和删除会被阻止。若项目本身无法回答会实质影响方案的问题，模型可单独调用 Plan 专用控制工具 `request_user_input`。只有当完整实施计划确实需要用户审核时，模型才单独调用 `request_plan_review` 并进入 `PLAN REVIEW`。两个控制工具都不注册到 `ToolRegistry`，也不计入 `/tools` 展示的执行工具。
+输入 `/plan` 会进入只读规划与讨论模式：普通问候、解释和需求讨论直接作为对话返回；`read_file`、`glob` 和 `grep` 可用于本地调研，网页搜索/抓取仍会要求确认，`write_file`、`edit_file` 和 `run_command` 不会暴露。若项目本身无法回答会实质影响方案的问题，模型可单独调用 Plan 专用控制工具 `request_user_input`。只有当完整实施计划确实需要用户审核时，模型才单独调用 `request_plan_review` 并进入 `PLAN REVIEW`。两个控制工具都不注册到 `ToolRegistry`，也不计入 `/tools` 展示的执行工具。
 
 Plan 调研、控制工具调用和结构化结果都作为普通 typed messages 保存在 session runtime history。`request_plan_review` 的计划正文保存在该调用的参数中，同一历史不会再插入重复计划消息；隔离 handoff 仍通过 run 的 `final_answer` 为新 session 提供一条计划 AssistantMessage。`PLAN REVIEW` 保留三个选择：`Implement`、`Implement and Clear Session` 和 `Cancel and Stay in plan mode`。handoff 后仍由正常策略路由器选择执行方式，不强制 `dynamic_replan`。
 
-工具仅在其声明需要确认时才请求 Human-in-the-Loop：网页搜索/抓取、写文件、移动、删除和命令执行均会逐次确认；本地计算、列目录和读文件自动执行。TUI 默认使用 `Approval for me`；输入 `/permission` 可在当前程序内切换为 `Full access`，使所有工具审批自动 Continue。工具审批仍使用 `Continue / Cancel / Supplement`，Supplement 只属于 Tool Review，与 Plan Review 相互独立；`Full access` 不会跳过 `/plan` 生成提案后的 `PLAN REVIEW`，最终计划仍需人工选择 `Implement / Implement and Clear Session / Cancel and Stay in plan mode`。安全只读工具可按 `--max-retries` 同参数重试。若 reactive 或 `/plan` 调研中的工具最终失败，运行时会将截断后的调用和错误作为不可信上下文交给 LLM，请其最多连续纠错 `--max-tool-recoveries` 次（默认 2）；任一工具成功会重置该计数。不可自动重试的写入、移动、删除和命令调用不会因相同参数被重复执行。
+工具仅在其声明需要确认时才请求 Human-in-the-Loop：网页搜索/抓取、`write_file`、`edit_file` 和 `run_command` 均会逐次确认；`read_file`、`glob` 和 `grep` 自动执行。TUI 默认使用 `Approval for me`；输入 `/permission` 可在当前程序内切换为 `Full access`，使所有工具审批自动 Continue。工具审批仍使用 `Continue / Cancel / Supplement`，Supplement 只属于 Tool Review，与 Plan Review 相互独立；`Full access` 不会跳过 `/plan` 生成提案后的 `PLAN REVIEW`，最终计划仍需人工选择 `Implement / Implement and Clear Session / Cancel and Stay in plan mode`。若 reactive 或 `/plan` 调研中的工具失败，运行时会将截断后的调用和错误作为不可信上下文交给 LLM，请其最多连续纠错 `--max-tool-recoveries` 次（默认 2）；任一工具成功会重置该计数。文件修改和命令工具不可自动重试，也不会因相同参数被重复执行。
 
 交互式 TUI 使用 alternate screen：可滚动消息区占满终端，状态栏和输入框固定在最底部；状态栏始终包含当前 permission 模式。输入框按显式换行和软换行从 1 行自动增高到最多 4 行，超过后保持 4 行并在内部滚动；Enter 提交完整消息，Ctrl+J 在光标处插入换行。退出后会恢复进入前的终端画面，并输出当前 session ID、`/use <session_id>` 与 `mini-agent --session-id <session_id>` 恢复方式。Agent 运行中提交的普通消息进入进程内的下一轮队列；当前 run 结束后，这些消息按提交顺序合并并自动启动一个 follow-up run。Esc 会协作式取消当前 active run（包括 Tool/Plan Review 和 Plan 问题），取消完成后发送队列；`/quit` 或 Ctrl+C 则取消、丢弃队列并退出。Plan 问题逐题显示在独立候选列表中：方向键循环选择，普通候选按 Enter 确认；选中“以上都不对”后按 Tab 进入自由输入，Enter 提交非空答案。非 Textual 运行使用数字选择并在最后一项后读取自由文本。
 
@@ -185,7 +185,7 @@ Agent 运行时输入框保持可用。期间提交的多条普通消息会按�
 当前已具备：
 
 - 可观察的「直接决策 → 工具调用 → 工具结果 → 再决策/最终回复」执行闭环；
-- 安全计算、文件列出、文件读取，以及需要用户确认的网页搜索/抓取、文件写入、移动、删除和跨平台命令执行工具；
+- workspace-confined 的范围读取、glob、grep、精确编辑和原子写入，以及需要用户确认的网页搜索/抓取和跨平台命令执行工具；
 - 安全同参数重试、LLM 工具失败恢复与结构化运行轨迹；
 - 可替换的规划器接口，为下一步接入 LLM 规划策略保留边界。
 
@@ -206,7 +206,7 @@ Agent 运行时输入框保持可用。期间提交的多条普通消息会按�
 
 #### P1：完整 Harness 工作流
 
-- [ ] **结构化代码工具**：提供 search、glob、范围读取、patch 和 git diff 等原生工具，减少模型通过通用 shell 完成代码操作。
+- [ ] **结构化代码工具**：已提供 grep、glob、范围读取、精确编辑和原子写入；继续补齐 patch 与 git diff，进一步减少模型通过通用 shell 完成代码操作。
 - [ ] **变更事务与审查**：支持 diff、批量审批、原子应用、失败回滚和 undo，使一次任务的文件修改形成可审查变更集。
 - [ ] **后台进程管理**：支持启动、轮询输出、查看状态和停止 dev server、watcher 等长期进程。
 - [ ] **Replay 与 Eval**：建立固定任务集、运行回放、自动评分、模型/策略对比和成本报告，将现有日志转化为可重复实验。
@@ -222,7 +222,7 @@ tui/          终端交互，仅负责输入、输出与确认
 runtime/      应用服务、依赖装配、策略路由、工作流、工具执行、checkpoint 边界与运行状态收尾
 observability/事件扇出与 JSONL 持久化日志 Sink
 planning/     规则/LLM 规划策略与显式能力协议
-tools/        工具契约、通用注册表、默认 workspace 工具 catalog、计算器、受限文件操作与跨平台命令执行
+tools/        工具契约、通用注册表、默认 workspace 工具 catalog、受限文件操作与跨平台命令执行
 providers/    LLM 门面、.env 配置和各厂商完整 API 适配器
 storage/      SQLite checkpoint/session 与未装配的 artifact 持久化适配器
 domain/       Message、ToolMessage、ToolSpec、RunState 与运行轨迹等纯数据模型
@@ -236,7 +236,7 @@ domain/       Message、ToolMessage、ToolSpec、RunState 与运行轨迹等纯�
 
 默认启动方式会通过 Python 的 `requests` 直接向 DeepSeek 的 `BASE_URL/v1/chat/completions` 发送 HTTP 请求；项目没有使用模型 SDK。`providers/client.py` 中的 `LLMClient` 负责 Provider 选择、通用 JSON/SSE 传输和请求诊断，`providers/deepseek.py` 中的 `DeepSeek` 只负责请求与响应协议转换。接入其他 API 时增加独立 provider adapter，不改变 Agent 内部 Message、Runtime 或通用传输实现。
 
-模型工具调用由 provider adapter 转成 AssistantMessage 内的 ToolMessage；Runtime 校验工具名和参数后按顺序执行，并在全部结果就绪后再次请求模型。策略选择、计划生成和重规划仍使用 JSON Output。`write_file`、`move_file`、`move_folder`、`delete_file`、`delete_folder` 和 `run_command` 都需经过终端的 Human-in-the-Loop 明确批准；直接调用 `ToolRegistry` 时仍需显式传入 `confirmed=True`。
+模型工具调用由 provider adapter 转成 AssistantMessage 内的 ToolMessage；Runtime 校验工具名和参数后按顺序执行，并在全部结果就绪后再次请求模型。策略选择、计划生成和重规划仍使用 JSON Output。`write_file`、`edit_file` 和 `run_command` 都需经过终端的 Human-in-the-Loop 明确批准；直接调用 `ToolRegistry` 时仍需显式传入 `confirmed=True`。
 
 DeepSeek tool arguments 和规划阶段的 JSON Output 都会在本地校验；无效 JSON、未知工具、缺失 call ID 或截断响应不会进入工具执行层。工具运行失败后的模型恢复预算与本地工具重试预算相互独立。
 
@@ -255,9 +255,9 @@ python run.py --planner rule "calculate (18 + 6) * 4"
 python run.py --planner rule "search Python documentation"
 python run.py --planner rule "fetch https://docs.python.org/3/"
 
-# 所有文件变更工具都会请求确认
-python run.py --planner rule "move file draft.txt to archive/draft.txt"
-python run.py --planner rule "delete folder recursive build"
+# 文件写入、精确编辑和通用命令都会请求确认
+python run.py "create draft.txt with an outline"
+python run.py "replace the unique heading in README.md"
 
 # 调整运行限制
 python run.py --max-actions 12 --max-retries 2 --max-tool-recoveries 2 "计算 (18 + 6) * 4"

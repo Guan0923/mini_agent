@@ -3,7 +3,15 @@ import json
 import pytest
 import requests
 
-from mini_agent.domain import AssistantMessage, ModelOutputError, PlanningError, SystemMessage, ToolMessage, ToolSpec, UserMessage
+from mini_agent.domain import (
+    AssistantMessage,
+    ModelOutputError,
+    PlanningError,
+    SystemMessage,
+    ToolMessage,
+    ToolSpec,
+    UserMessage,
+)
 from mini_agent.planning import LLMPlanner, RuleBasedPlanner
 from mini_agent.providers import (
     DeepSeek,
@@ -814,3 +822,56 @@ def test_runner_fails_cleanly_after_model_output_repairs_are_exhausted() -> None
     assert [event.kind for event in events].count("model_repair") == 2
     assert events[-2].kind == "error"
     assert events[-1].kind == "run_finished"
+
+
+def test_prepare_response_streams_reasoning_then_content_and_aggregates_both() -> None:
+    runtime = runtime_for()
+    callbacks: list[tuple[str, str]] = []
+    runtime.exchange.on_reasoning = lambda chunk: callbacks.append(("reasoning", chunk))
+    runtime.exchange.on_content = lambda chunk: callbacks.append(("content", chunk))
+    runtime.exchange.raw_response = iter(
+        [
+            {
+                "id": "stream-content",
+                "model": "deepseek-test",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "reasoning_content": "Think.", "content": "Hel"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "lo"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"total_tokens": 7},
+            },
+        ]
+    )
+
+    response = deepseek_for_test().prepare_response(runtime)
+
+    assert callbacks == [
+        ("reasoning", "Think."),
+        ("content", "Hel"),
+        ("content", "lo"),
+    ]
+    assert response.message.reasoning == "Think."
+    assert response.message.content == "Hello"
+    assert response.usage == {"total_tokens": 7}

@@ -139,4 +139,17 @@ def test_terminal_questionnaire_uses_numeric_choices_and_custom_input(monkeypatc
     assert decision.answers == {"storage": ["JSONL"], "scope": ["Only storage code"]}
     output = capsys.readouterr().out
     assert "PLAN QUESTIONS" in output
-    assert "[3] 以上都不对" in output
+    assert "[3] 其他" in output
+
+
+def test_terminal_questionnaire_with_no_model_options_uses_custom_input(monkeypatch, capsys) -> None:
+    question = UserQuestion("details", "Details", "What should be used?", ())
+    answers = iter(["1", "Custom value"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    decision = TerminalApproval()(
+        InterruptRequest("question", "Answer questions.", {"questions": []}, questions=(question,))
+    )
+
+    assert decision.answers == {"details": ["Custom value"]}
+    assert "[1] 其他" in capsys.readouterr().out

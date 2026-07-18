@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from mini_agent.tools import ToolError, ToolExecutor
+from mini_agent.tools import ToolError, ToolExecutor, WorkspaceFiles
 
 _FILE_REFERENCE_PATTERN = re.compile(r"(?<!\w)@(?P<path>[^\s@]+)")
 _TRAILING_PUNCTUATION = ".,;:!?)]}，。！？；："
@@ -13,8 +13,14 @@ _TRAILING_PUNCTUATION = ".,;:!?)]}，。！？；："
 class FileReferenceExpander:
     """Replace ``@path`` tokens with bounded, workspace-confined file content."""
 
-    def __init__(self, tools: ToolExecutor, max_file_chars: int = 120_000, max_total_chars: int = 240_000) -> None:
-        self._tools = tools
+    def __init__(
+        self,
+        files: WorkspaceFiles | ToolExecutor,
+        max_file_chars: int = 120_000,
+        max_total_chars: int = 240_000,
+    ) -> None:
+        self._files = files if isinstance(files, WorkspaceFiles) else None
+        self._tools = files if not isinstance(files, WorkspaceFiles) else None
         self._max_file_chars = max_file_chars
         self._max_total_chars = max_total_chars
 
@@ -50,7 +56,24 @@ class FileReferenceExpander:
         return "".join(pieces)
 
     def _read(self, path: str) -> str:
-        content = self._tools.invoke("run_command", {"command": f"Get-Content {path}"}, confirmed=True)
+        if self._files is not None:
+            content = self._files.read_text(path)
+        else:
+            assert self._tools is not None
+            result = self._tools.invoke(
+                "read_file",
+                {"path": path, "start_line": 1, "max_lines": 1_000},
+                confirmed=True,
+            )
+            header, separator, content = result.partition("\n")
+            range_match = re.search(r"lines (\d+)-(\d+) of (\d+)$", header)
+            if (
+                not separator
+                or range_match is None
+                or int(range_match.group(2)) < int(range_match.group(3))
+                or "output truncated" in content
+            ):
+                raise ToolError(f"Referenced file is too large to expand safely: {path}.")
         if len(content) > self._max_file_chars:
             raise ToolError(f"Referenced file is too large: {path} (limit {self._max_file_chars} characters).")
         return content

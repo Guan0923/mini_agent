@@ -9,7 +9,7 @@ from typing import Literal
 from mini_agent.planning import LLMPlanner, RuleBasedPlanner
 from mini_agent.providers import LLMClient, ModelConfig
 from mini_agent.storage import SQLiteCheckpointStore, SQLiteSessionStore
-from mini_agent.tools import ToolExecutor, build_tool_registry
+from mini_agent.tools import ToolExecutor, WorkspaceFiles, build_tool_registry
 
 from .application import AgentApplication
 from .config import RunnerSettings, log_full_messages_from_env
@@ -40,9 +40,10 @@ def build_application(
 ) -> AgentApplication:
     """Compose one interface-neutral application with its workspace dependencies."""
 
-    tools = build_tool_registry(workspace)
+    files = WorkspaceFiles(workspace)
+    tools = build_tool_registry(workspace, workspace_files=files)
     runner = _build_runner(workspace, planner_name, _settings_for(workspace, settings), tools, hooks)
-    return AgentApplication(runner, build_session_store(workspace), FileReferenceExpander(tools))
+    return AgentApplication(runner, build_session_store(workspace), FileReferenceExpander(files))
 
 
 def build_runner(

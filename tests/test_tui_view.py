@@ -7,7 +7,7 @@ from textual.color import Color
 from textual.widgets import Label, Rule
 
 from mini_agent.runtime.contracts import QuestionOption, UserQuestion
-from mini_agent.runtime.user_input import OTHER_OPTION_LABEL
+from mini_agent.runtime.user_input import OTHER_OPTION_LABEL, parse_user_input_questions
 from mini_agent.tui.view import TerminalView
 
 
@@ -33,19 +33,39 @@ def questions() -> tuple[UserQuestion, ...]:
         ),
     )
 
+def three_questions() -> tuple[UserQuestion, ...]:
+    return (
+        *questions(),
+        UserQuestion(
+            "format",
+            "Format",
+            "Which output format should be used?",
+            (
+                QuestionOption("Markdown", "Use a Markdown document."),
+                QuestionOption("Text", "Use plain text."),
+            ),
+        ),
+    )
+
+
 
 def test_textual_view_reserves_bottom_input_and_scrollable_transcript() -> None:
     async def scenario() -> None:
         view = TerminalView()
         async with view.run_test(size=(80, 20)):
             children = list(view.screen.children)
-            assert children[-2:] == [view.input, view.status_line]
+            status_bar = view.status_line.parent
+            assert status_bar is view.context_progress.parent
+            assert children[-2:] == [view.input, status_bar]
             assert list(view.query(Rule)) == []
             assert view.transcript.region.bottom == view.input.region.y
-            assert view.input.region.bottom == view.status_line.region.y
-            assert view.input.styles.height.value == 1
+            assert view.input.region.bottom == status_bar.region.y
+            assert view.status_line.region.right == view.context_progress.region.x
+            assert view.status_line.region.y == view.context_progress.region.y
+            assert view.input.styles.height.value == 3
             assert view.input.styles.margin.bottom == 0
             assert view.status_line.styles.height.value == 1
+            assert view.context_progress.styles.height.value == 1
             assert view.input.styles.background == Color.parse("#171c21")
             assert view.status_line.styles.background == Color.parse("#263442")
             assert view.transcript.soft_wrap is True
@@ -181,14 +201,14 @@ def test_enter_submits_complete_multiline_input() -> None:
     asyncio.run(scenario())
 
 
-def test_multiline_input_grows_to_four_rows_then_keeps_fixed_height() -> None:
+def test_multiline_input_keeps_three_rows_then_grows_to_four() -> None:
     async def scenario() -> None:
         view = TerminalView()
         async with view.run_test(size=(80, 20)) as pilot:
             for line_count in range(1, 5):
                 view.input.value = "\n".join(str(index) for index in range(line_count))
                 await pilot.pause()
-                assert view.input.styles.height.value == line_count
+                assert view.input.styles.height.value == max(3, line_count)
 
             view.input.value = "\n".join(str(index) for index in range(5))
             await pilot.pause()
@@ -288,14 +308,18 @@ def test_questionnaire_collects_selected_and_custom_answers() -> None:
             await pilot.pause()
 
             assert view.questionnaire_active is True
-            assert [str(option.prompt) for option in view.question_menu._options][-1] == OTHER_OPTION_LABEL
+            assert view.question_menu.rows[-1].choice.label == OTHER_OPTION_LABEL
 
             await pilot.press("down", "enter")
             assert "2/2" in str(view.question_header.render())
 
             await pilot.press("up", "tab")
             assert view.questionnaire_custom_input is True
-            view.input.value = "Only update storage code"
+            row = view.question_menu.highlighted_row
+            editor = row.editor
+            assert editor.parent is row
+            assert view.input.value == ""
+            editor.value = "Only update storage code"
             await pilot.press("enter")
 
             assert completed == [
@@ -305,6 +329,37 @@ def test_questionnaire_collects_selected_and_custom_answers() -> None:
                 }
             ]
             assert view.questionnaire_active is False
+
+    asyncio.run(scenario())
+
+
+def test_questionnaire_replaces_exact_model_other_with_client_other() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        completed: list[dict[str, list[str]]] = []
+        parsed = parse_user_input_questions(
+            {
+                "questions": [
+                    {
+                        "id": "details",
+                        "header": "Details",
+                        "question": "What should be used?",
+                        "options": [{"label": " 其他 ", "description": "Provide a custom answer."}],
+                    }
+                ]
+            }
+        )
+        async with view.run_test() as pilot:
+            view.begin_questionnaire(parsed, completed.append)
+            await pilot.pause()
+
+            assert [row.choice.label for row in view.question_menu.rows] == [OTHER_OPTION_LABEL]
+            await pilot.press("tab")
+            editor = view.question_menu.highlighted_row.editor
+            editor.value = "Custom value"
+            await pilot.press("enter")
+
+            assert completed == [{"details": ["Custom value"]}]
 
     asyncio.run(scenario())
 
@@ -356,7 +411,98 @@ def test_questionnaire_tab_on_regular_option_keeps_choice_mode() -> None:
 
             assert view.questionnaire_active is True
             assert view.questionnaire_custom_input is False
-            assert view.focused is view.input
+            assert view.focused is view.question_menu
+
+    asyncio.run(scenario())
+
+def test_questionnaire_switches_independent_lists_without_wrapping() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test() as pilot:
+            view.begin_questionnaire(three_questions(), lambda _answers: None)
+            await pilot.pause()
+
+            lists = view.question_lists
+            lists[0].index = 1
+            await pilot.press("right", "right", "right")
+
+            assert view.question_index == 2
+            assert [item.display for item in lists] == [False, False, True]
+
+            await pilot.press("left", "left", "left")
+
+            assert view.question_index == 0
+            assert lists[0].index == 1
+            assert [item.display for item in lists] == [True, False, False]
+
+    asyncio.run(scenario())
+
+
+def test_questionnaire_answers_next_unanswered_question_then_submits() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        completed: list[dict[str, list[str]]] = []
+        async with view.run_test() as pilot:
+            view.begin_questionnaire(three_questions(), completed.append)
+            await pilot.pause()
+
+            await pilot.press("right", "down", "enter")
+            assert view.question_index == 2
+
+            await pilot.press("enter")
+            assert view.question_index == 0
+
+            await pilot.press("enter")
+
+            assert completed == [
+                {
+                    "storage": ["SQLite"],
+                    "scope": ["Shared"],
+                    "format": ["Markdown"],
+                }
+            ]
+            assert view.questionnaire_active is False
+
+    asyncio.run(scenario())
+
+
+def test_inline_custom_input_keeps_arrow_keys_inside_editor() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test() as pilot:
+            view.begin_questionnaire(questions(), lambda _answers: None)
+            await pilot.pause()
+
+            await pilot.press("up", "tab")
+            editor = view.question_menu.highlighted_row.editor
+            editor.value = "Custom answer"
+            editor.cursor_position = len(editor.value)
+
+            await pilot.press("left")
+
+            assert view.question_index == 0
+            assert view.focused is editor
+            assert editor.cursor_position == len(editor.value) - 1
+
+            await pilot.press("escape", "right")
+            assert view.question_index == 1
+
+    asyncio.run(scenario())
+
+
+def test_main_input_still_submits_while_questionnaire_is_active() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test() as pilot:
+            view.begin_questionnaire(questions()[:1], lambda _answers: None)
+            await pilot.pause()
+            view.input.value = "queued follow-up"
+            view.input.focus()
+
+            await pilot.press("enter")
+
+            assert await asyncio.wait_for(view.submissions.get(), 1) == "queued follow-up"
+            assert view.questionnaire_active is True
 
     asyncio.run(scenario())
 
@@ -460,5 +606,48 @@ def test_copy_without_selection_leaves_clipboard_and_status_unchanged(monkeypatc
 
             assert copied == []
             assert str(view.status_line.content) == " AGENT | IDLE"
+
+    asyncio.run(scenario())
+
+
+def test_context_progress_renders_threshold_and_usage_states() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(80, 20)) as pilot:
+            unknown = view.context_progress.render()
+            assert "CONTEXT N/A" in unknown.plain
+            assert unknown.plain.count("┊") == 1
+
+            rendered = {}
+            for used in (790, 800, 1_000, 1_200):
+                view.set_context_usage(used, 1_000, 0.8)
+                await pilot.pause()
+                rendered[used] = view.context_progress.render()
+
+            assert "790 / 1,000 79%" in rendered[790].plain
+            assert "800 / 1,000 80%" in rendered[800].plain
+            assert "1,000 / 1,000 100%" in rendered[1_000].plain
+            assert "1,200 / 1,000 120%" in rendered[1_200].plain
+            assert len({value.plain.index("┊") for value in rendered.values()}) == 1
+            assert any("#65b8a6" in str(span.style) for span in rendered[790].spans)
+            assert any("#e3b65f" in str(span.style) for span in rendered[800].spans)
+            assert any("#e26464" in str(span.style) for span in rendered[1_000].spans)
+            assert any("#e26464" in str(span.style) for span in rendered[1_200].spans)
+
+    asyncio.run(scenario())
+
+
+def test_context_progress_keeps_marker_visible_in_narrow_layout() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(16, 12)) as pilot:
+            view.set_context_usage(800, 1_000, 0.8)
+            await pilot.pause()
+
+            rendered = view.context_progress.render()
+            assert "┊" in rendered.plain
+            assert len(rendered.plain) <= view.context_progress.size.width
+            assert view.input.region.bottom == view.context_progress.region.y
+            assert view.status_line.region.right == view.context_progress.region.x
 
     asyncio.run(scenario())

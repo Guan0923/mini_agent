@@ -163,6 +163,7 @@ class RuntimeExchange:
     prepared_response: PreparedResponse | None = None
     context: dict[str, Any] = field(default_factory=dict)
     on_reasoning: Callable[[str], None] | None = None
+    on_content: Callable[[str], None] | None = None
 
     def reset(self) -> None:
         self.operation = None
@@ -177,6 +178,7 @@ class RuntimeExchange:
         self.prepared_response = None
         self.context = {}
         self.on_reasoning = None
+        self.on_content = None
 
 
 class RuntimeStore(Protocol):

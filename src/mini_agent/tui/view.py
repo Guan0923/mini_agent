@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from threading import Lock
+from typing import Literal
 
+from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal
 from textual.message import Message
 from textual.timer import Timer
-from textual.widgets import OptionList, Static, TextArea
+from textual.widgets import Input, ListItem, ListView, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.widgets.text_area import Selection
 
@@ -23,6 +27,64 @@ from .completion import CommandSuggestion, SlashCommandCompleter
 _FLUSH_INTERVAL_SECONDS = 1 / 30
 _COPY_NOTICE_SECONDS = 1.5
 _OMITTED_MARKER = "[Earlier terminal output omitted]\n"
+
+
+@dataclass(frozen=True)
+class ChoiceItem:
+    id: str
+    label: str
+    description: str = ""
+    custom: bool = False
+
+
+class ChoiceRow(ListItem):
+    """One selectable choice that can replace its label with an inline editor."""
+
+    def __init__(self, choice: ChoiceItem) -> None:
+        self.choice = choice
+        text = f"{choice.label} - {choice.description}" if choice.description else choice.label
+        self.label = Static(text, classes="choice-label")
+        self.editor = Input(placeholder="Enter your answer", classes="choice-editor")
+        self.editor.display = False
+        super().__init__(self.label, self.editor, classes="choice-row")
+
+    def begin_edit(self, value: str = "") -> None:
+        self.label.display = False
+        self.editor.value = value
+        self.editor.placeholder = "Enter your answer"
+        self.editor.display = True
+        self.editor.focus()
+
+    def end_edit(self) -> None:
+        self.editor.value = ""
+        self.editor.display = False
+        self.label.display = True
+
+
+class InlineChoiceList(ListView, can_focus_children=True):
+    """ListView variant whose custom rows may focus an embedded Input."""
+
+    def __init__(self, items: tuple[ChoiceItem, ...], *, question_index: int | None = None) -> None:
+        self.question_index = question_index
+        self.rows = tuple(ChoiceRow(item) for item in items)
+        super().__init__(*self.rows, initial_index=0, classes="choice-list")
+
+    @property
+    def highlighted_row(self) -> ChoiceRow | None:
+        child = self.highlighted_child
+        return child if isinstance(child, ChoiceRow) else None
+
+    def action_cursor_down(self) -> None:
+        if self.index is not None and self.index == len(self.rows) - 1:
+            self.index = 0
+            return
+        super().action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        if self.index == 0:
+            self.index = len(self.rows) - 1
+            return
+        super().action_cursor_up()
 
 
 class TranscriptTextArea(TextArea):
@@ -53,7 +115,7 @@ class TerminalInput(TextArea):
     """Multiline editor that keeps the value/cursor surface used by the TUI."""
 
     class Submitted(Message):
-        def __init__(self, input: "TerminalInput", value: str) -> None:
+        def __init__(self, input: TerminalInput, value: str) -> None:
             super().__init__()
             self.input = input
             self.value = value
@@ -105,9 +167,15 @@ class TerminalView(App[None]):
         overflow-y: scroll;
     }
     #separator { color: #5f6b76; height: 1; }
-    #status { height: 1; padding: 0 1; background: #263442; color: #9fc3e8; }
+    #status-bar {
+        height: 1;
+        width: 100%;
+        background: #263442;
+    }
+    #status { width: 1fr; min-width: 1; padding: 0 1; background: #263442; color: #9fc3e8; }
+    #context-progress { width: 1fr; min-width: 1; height: 1; padding: 0 1; background: #263442; }
     #completion-menu { height: auto; max-height: 8; display: none; }
-    #question-header {
+    #choice-header {
         height: auto;
         max-height: 4;
         display: none;
@@ -115,15 +183,37 @@ class TerminalView(App[None]):
         color: #d7dde5;
         background: #171c21;
     }
-    #question-menu {
+    .choice-list {
         height: auto;
         max-height: 8;
         display: none;
         background: #171c21;
     }
+    .choice-row {
+        width: 1fr;
+        height: auto;
+        padding: 0 1;
+        background: #171c21;
+    }
+    .choice-row.-selected-answer {
+        color: #9fc3e8;
+    }
+    .choice-label {
+        width: 1fr;
+        height: auto;
+    }
+    .choice-editor {
+        width: 1fr;
+        height: 1;
+        display: none;
+        border: none;
+        padding: 0;
+        background: #171c21;
+        color: white;
+    }
     #input {
         width: 100%;
-        height: 1;
+        height: 3;
         margin-bottom: 0;
         border: none;
         padding: 0;
@@ -160,13 +250,14 @@ class TerminalView(App[None]):
         self._status = "AGENT | IDLE"
         self._interrupt_enabled = False
         self._copy_notice_timer: Timer | None = None
+        self._choice_kind: Literal["question", "review"] | None = None
         self._questions: tuple[UserQuestion, ...] = ()
+        self._choice_lists: list[InlineChoiceList] = []
         self._question_index = 0
         self._question_answers: dict[str, list[str]] = {}
-        self._questionnaire_custom_input = False
+        self._question_selections: dict[str, str] = {}
         self._questionnaire_callback: Callable[[dict[str, list[str]]], None] | None = None
-        self._input_before_questionnaire = ""
-        self._placeholder_before_questionnaire = ""
+        self._review_callback: Callable[[str, str | None], None] | None = None
         self.submissions: asyncio.Queue[str | None] = asyncio.Queue()
         self.interrupts: asyncio.Queue[None] = asyncio.Queue()
         self.transcript = TranscriptTextArea(
@@ -177,8 +268,8 @@ class TerminalView(App[None]):
             id="transcript",
         )
         self.status_line = Static(id="status")
-        self.question_header = Static(id="question-header")
-        self.question_menu = OptionList(id="question-menu")
+        self.context_progress = ContextProgress()
+        self.question_header = Static(id="choice-header")
         self.completion_menu = OptionList(id="completion-menu")
         self.input = TerminalInput(
             soft_wrap=True,
@@ -189,10 +280,9 @@ class TerminalView(App[None]):
     def compose(self) -> ComposeResult:
         yield self.transcript
         yield self.question_header
-        yield self.question_menu
         yield self.completion_menu
         yield self.input
-        yield self.status_line
+        yield Horizontal(self.status_line, self.context_progress, id="status-bar")
 
     def on_mount(self) -> None:
         self._owner_loop = asyncio.get_running_loop()
@@ -235,13 +325,43 @@ class TerminalView(App[None]):
 
         self._run_on_owner(update)
 
+    def set_context_usage(
+        self,
+        estimated_tokens: int | None = None,
+        context_size: int | None = None,
+        threshold: float = 0.8,
+    ) -> None:
+        self._run_on_owner(
+            lambda: self.context_progress.set_usage(estimated_tokens, context_size, threshold)
+        )
+
     @property
     def questionnaire_active(self) -> bool:
-        return bool(self._questions)
+        return self._choice_kind == "question"
 
     @property
     def questionnaire_custom_input(self) -> bool:
-        return self._questionnaire_custom_input
+        return self._editing_row() is not None
+
+    @property
+    def choice_menu(self) -> InlineChoiceList:
+        if self._choice_kind is None:
+            raise RuntimeError("No choice prompt is active.")
+        return self._active_choice_list()
+
+    @property
+    def question_menu(self) -> InlineChoiceList:
+        if not self.questionnaire_active:
+            raise RuntimeError("No questionnaire is active.")
+        return self.choice_menu
+
+    @property
+    def question_lists(self) -> tuple[InlineChoiceList, ...]:
+        return tuple(self._choice_lists) if self.questionnaire_active else ()
+
+    @property
+    def question_index(self) -> int:
+        return self._question_index
 
     def begin_questionnaire(
         self,
@@ -252,29 +372,73 @@ class TerminalView(App[None]):
             raise ValueError("Questionnaire requires at least one question.")
 
         def begin() -> None:
-            if self._questions:
-                raise RuntimeError("Only one questionnaire can be active at a time.")
+            self._ensure_no_choice_prompt()
+            self._choice_kind = "question"
             self._questions = questions
             self._question_index = 0
             self._question_answers = {}
-            self._questionnaire_custom_input = False
+            self._question_selections = {}
             self._questionnaire_callback = on_complete
-            self._input_before_questionnaire = self.input.value
-            self._placeholder_before_questionnaire = self.input.placeholder
-            self.input.value = ""
-            self.input.placeholder = "Up/Down select | Enter confirm | Tab custom answer"
-            self._hide_completions()
-            self._render_question()
-            self.input.focus()
+            lists = [
+                InlineChoiceList(
+                    (
+                        *(
+                            ChoiceItem(str(option_index), option.label, option.description)
+                            for option_index, option in enumerate(question.options)
+                        ),
+                        ChoiceItem("other", OTHER_OPTION_LABEL, custom=True),
+                    ),
+                    question_index=question_index,
+                )
+                for question_index, question in enumerate(questions)
+            ]
+            self._mount_choice_lists(lists)
+            self._show_question(0)
+
+        self._run_on_owner(begin)
+
+    def begin_review(
+        self,
+        title: str,
+        prompt: str,
+        choices: tuple[ChoiceItem, ...],
+        on_complete: Callable[[str, str | None], None],
+    ) -> None:
+        if not choices:
+            raise ValueError("Review requires at least one choice.")
+
+        def begin() -> None:
+            self._ensure_no_choice_prompt()
+            self._choice_kind = "review"
+            self._review_callback = on_complete
+            self.question_header.update(f"{title}\n{prompt}")
+            self.question_header.display = True
+            lists = [InlineChoiceList(choices)]
+            self._mount_choice_lists(lists)
+            self._show_choice_list(0)
 
         self._run_on_owner(begin)
 
     def cancel_questionnaire(self) -> None:
+        self.cancel_choice_prompt()
+
+    def cancel_choice_prompt(self) -> None:
         def cancel() -> None:
-            if self._questions:
-                self._clear_questionnaire()
+            if self._choice_kind is not None:
+                self._clear_choice_prompt()
 
         self._run_on_owner(cancel)
+
+    def _ensure_no_choice_prompt(self) -> None:
+        if self._choice_kind is not None:
+            raise RuntimeError("Only one terminal choice prompt can be active at a time.")
+
+    def _mount_choice_lists(self, lists: list[InlineChoiceList]) -> None:
+        self._choice_lists = lists
+        for choice_list in lists:
+            choice_list.display = False
+        self._hide_completions()
+        self.screen.mount(*lists, before=self.completion_menu)
 
     def stop(self) -> None:
         def close() -> None:
@@ -345,11 +509,6 @@ class TerminalView(App[None]):
         if event.text_area is not self.input:
             return
         self._resize_input()
-        if self.questionnaire_active:
-            self._hide_completions()
-            if not self._questionnaire_custom_input and self.input.value:
-                self.input.value = ""
-            return
         self._suggestions = self._completer.suggestions(self.input.value, self.input.cursor_position)
         self.completion_menu.clear_options()
         self.completion_menu.add_options(
@@ -364,16 +523,6 @@ class TerminalView(App[None]):
     def on_input_submitted(self, event: TerminalInput.Submitted) -> None:
         if event.input is not self.input:
             return
-        if self.questionnaire_active:
-            if self._questionnaire_custom_input:
-                answer = event.value.strip()
-                if not answer:
-                    self.input.placeholder = "Answer cannot be empty"
-                    return
-                self._accept_question_answer(answer)
-            else:
-                self._accept_highlighted_question_option()
-            return
         if self.completion_menu.display and self._suggestions:
             self._accept_completion()
             return
@@ -382,39 +531,39 @@ class TerminalView(App[None]):
         self.submissions.put_nowait(value)
 
     def _resize_input(self) -> None:
-        self.input.styles.height = max(1, min(self.input.wrapped_document.height, 4))
+        self.input.styles.height = max(3, min(self.input.wrapped_document.height, 4))
 
     def on_key(self, event: events.Key) -> None:
-        if event.key == "escape" and self._interrupt_enabled:
-            if self.interrupts.empty():
-                self.interrupts.put_nowait(None)
+        editing = self._editing_row()
+        if editing is not None and self.focused is editing.editor:
+            if event.key != "escape":
+                return
+            editing.end_edit()
+            self._active_choice_list().focus()
             event.prevent_default()
             event.stop()
             return
-        if self.questionnaire_active:
-            if self._questionnaire_custom_input:
-                if event.key != "escape":
-                    return
-                self._questionnaire_custom_input = False
-                self.input.value = ""
-                self.input.placeholder = "Up/Down select | Enter confirm | Tab custom answer"
-                self.input.focus()
-                event.prevent_default()
-                event.stop()
-                return
-            if event.key in {"down", "up"}:
-                option_count = len(self.question_menu._options)
-                current = self.question_menu.highlighted or 0
-                step = 1 if event.key == "down" else -1
-                self.question_menu.highlighted = (current + step) % option_count
+
+        focused = self.focused
+        if isinstance(focused, InlineChoiceList) and focused in self._choice_lists:
+            if event.key == "left" and self.questionnaire_active:
+                self._move_question(-1)
+            elif event.key == "right" and self.questionnaire_active:
+                self._move_question(1)
             elif event.key == "tab":
-                if self.question_menu.highlighted == len(self.question_menu._options) - 1:
-                    self._questionnaire_custom_input = True
-                    self.input.value = ""
-                    self.input.placeholder = "Enter your answer"
-                self.input.focus()
+                row = focused.highlighted_row
+                if row is not None and row.choice.custom:
+                    row.begin_edit(self._existing_custom_answer(focused))
+            elif event.key == "escape" and self._interrupt_enabled:
+                self._request_interrupt()
             else:
                 return
+            event.prevent_default()
+            event.stop()
+            return
+
+        if event.key == "escape" and self._interrupt_enabled:
+            self._request_interrupt()
             event.prevent_default()
             event.stop()
             return
@@ -433,6 +582,33 @@ class TerminalView(App[None]):
         event.prevent_default()
         event.stop()
 
+    @on(ListView.Selected)
+    def on_choice_selected(self, event: ListView.Selected) -> None:
+        choice_list = event.list_view
+        if not isinstance(choice_list, InlineChoiceList) or choice_list not in self._choice_lists:
+            return
+        row = event.item
+        if not isinstance(row, ChoiceRow) or row.choice.custom:
+            return
+        self._accept_choice(choice_list, row, None)
+
+    @on(Input.Submitted)
+    def on_choice_input_submitted(self, event: Input.Submitted) -> None:
+        editing = self._editing_row()
+        if editing is None or event.input is not editing.editor:
+            return
+        value = event.value.strip()
+        if not value:
+            editing.editor.placeholder = "Answer cannot be empty"
+            return
+        choice_list = self._choice_list_for_row(editing)
+        editing.end_edit()
+        self._accept_choice(choice_list, editing, value)
+
+    def _request_interrupt(self) -> None:
+        if self.interrupts.empty():
+            self.interrupts.put_nowait(None)
+
     def _accept_completion(self) -> None:
         index = self.completion_menu.highlighted or 0
         suggestion = self._suggestions[index]
@@ -446,63 +622,102 @@ class TerminalView(App[None]):
         self.completion_menu.display = False
         self._suggestions = []
 
-    def _render_question(self) -> None:
-        question = self._questions[self._question_index]
+    def _show_question(self, index: int) -> None:
+        self._question_index = index
+        question = self._questions[index]
         self.question_header.update(
-            f"PLAN QUESTION {self._question_index + 1}/{len(self._questions)} | {question.header}\n{question.question}"
+            f"PLAN QUESTION {index + 1}/{len(self._questions)} | {question.header}\n{question.question}"
         )
         self.question_header.display = True
-        self.question_menu.clear_options()
-        self.question_menu.add_options(
-            [
-                *(
-                    Option(f"{option.label} - {option.description}", id=str(index))
-                    for index, option in enumerate(question.options)
-                ),
-                Option(OTHER_OPTION_LABEL, id="other"),
-            ]
-        )
-        self.question_menu.highlighted = 0
-        self.question_menu.display = True
+        self._show_choice_list(index)
 
-    def _accept_highlighted_question_option(self) -> None:
-        question = self._questions[self._question_index]
-        selected = self.question_menu.highlighted or 0
-        if selected >= len(question.options):
-            self.input.placeholder = "Select Other and press Tab to enter an answer"
+    def _show_choice_list(self, index: int) -> None:
+        for list_index, choice_list in enumerate(self._choice_lists):
+            choice_list.display = list_index == index
+        self.call_after_refresh(self._choice_lists[index].focus)
+
+    def _move_question(self, step: int) -> None:
+        target = self._question_index + step
+        if 0 <= target < len(self._questions):
+            self._show_question(target)
+
+    def _active_choice_list(self) -> InlineChoiceList:
+        index = self._question_index if self.questionnaire_active else 0
+        return self._choice_lists[index]
+
+    def _editing_row(self) -> ChoiceRow | None:
+        for choice_list in self._choice_lists:
+            for row in choice_list.rows:
+                if row.editor.display:
+                    return row
+        return None
+
+    def _choice_list_for_row(self, target: ChoiceRow) -> InlineChoiceList:
+        for choice_list in self._choice_lists:
+            if target in choice_list.rows:
+                return choice_list
+        raise RuntimeError("Inline choice row is not attached to the active prompt.")
+
+    def _existing_custom_answer(self, choice_list: InlineChoiceList) -> str:
+        if not self.questionnaire_active or choice_list.question_index is None:
+            return ""
+        question = self._questions[choice_list.question_index]
+        if self._question_selections.get(question.id) != "other":
+            return ""
+        return self._question_answers.get(question.id, [""])[0]
+
+    def _accept_choice(
+        self,
+        choice_list: InlineChoiceList,
+        row: ChoiceRow,
+        custom_value: str | None,
+    ) -> None:
+        if self._choice_kind == "review":
+            callback = self._review_callback
+            choice_id = row.choice.id
+            self._clear_choice_prompt()
+            if callback is not None:
+                callback(choice_id, custom_value)
             return
-        self._accept_question_answer(question.options[selected].label)
 
-    def _accept_question_answer(self, answer: str) -> None:
-        question = self._questions[self._question_index]
+        if self._choice_kind != "question" or choice_list.question_index is None:
+            return
+        question_index = choice_list.question_index
+        question = self._questions[question_index]
+        answer = custom_value if custom_value is not None else row.choice.label
         self._question_answers[question.id] = [answer]
-        self._questionnaire_custom_input = False
-        self.input.value = ""
-        self._question_index += 1
-        if self._question_index < len(self._questions):
-            self.input.placeholder = "Up/Down select | Enter confirm | Tab custom answer"
-            self._render_question()
-            self.input.focus()
-            return
-        callback = self._questionnaire_callback
-        answers = dict(self._question_answers)
-        self._clear_questionnaire()
-        if callback is not None:
-            callback(answers)
+        self._question_selections[question.id] = row.choice.id
+        for candidate in choice_list.rows:
+            candidate.set_class(candidate is row, "-selected-answer")
 
-    def _clear_questionnaire(self) -> None:
-        previous_input = self._input_before_questionnaire
-        previous_placeholder = self._placeholder_before_questionnaire
+        unanswered = [
+            index for index, item in enumerate(self._questions) if item.id not in self._question_answers
+        ]
+        if not unanswered:
+            callback = self._questionnaire_callback
+            answers = {item.id: self._question_answers[item.id] for item in self._questions}
+            self._clear_choice_prompt()
+            if callback is not None:
+                callback(answers)
+            return
+
+        right = [index for index in unanswered if index > question_index]
+        target = right[0] if right else max(index for index in unanswered if index < question_index)
+        self._show_question(target)
+
+    def _clear_choice_prompt(self) -> None:
+        for choice_list in self._choice_lists:
+            choice_list.display = False
+            choice_list.remove()
+        self._choice_kind = None
         self._questions = ()
+        self._choice_lists = []
         self._question_index = 0
         self._question_answers = {}
-        self._questionnaire_custom_input = False
+        self._question_selections = {}
         self._questionnaire_callback = None
+        self._review_callback = None
         self.question_header.display = False
-        self.question_menu.display = False
-        self.question_menu.clear_options()
-        self.input.value = previous_input
-        self.input.placeholder = previous_placeholder
         self.input.focus()
 
     def _schedule_flush(self) -> None:
@@ -600,3 +815,69 @@ class TerminalView(App[None]):
         except RuntimeError:
             pass
         loop.call_soon_threadsafe(callback)
+
+
+class ContextProgress(Static):
+    """One-line context usage meter with the compression threshold marked."""
+
+    DEFAULT_CSS = "ContextProgress { width: 1fr; min-width: 1; height: 1; padding: 0 1; background: #263442; }"
+
+    def __init__(self) -> None:
+        super().__init__(id="context-progress")
+        self.estimated_tokens: int | None = None
+        self.context_size: int | None = None
+        self.threshold = 0.8
+
+    @property
+    def ratio(self) -> float | None:
+        if self.estimated_tokens is None or not self.context_size:
+            return None
+        return self.estimated_tokens / self.context_size
+
+    def set_usage(
+        self,
+        estimated_tokens: int | None,
+        context_size: int | None,
+        threshold: float = 0.8,
+    ) -> None:
+        self.estimated_tokens = estimated_tokens
+        self.context_size = context_size
+        self.threshold = max(0.0, min(threshold, 1.0))
+        self.refresh()
+
+    def render(self) -> Text:
+        width = max(1, self.size.width - 2)
+        ratio = self.ratio
+        if ratio is None:
+            detailed = "CONTEXT N/A "
+            compact = "CTX N/A "
+        else:
+            percent = ratio * 100
+            detailed = f"CONTEXT {self.estimated_tokens:,} / {self.context_size:,} {percent:.0f}% "
+            compact = f"CTX {percent:.0f}% "
+        if width - len(detailed) >= 8:
+            label = detailed
+        elif width - len(compact) >= 4:
+            label = compact
+        elif width >= 8:
+            label = "CTX "
+        else:
+            label = ""
+        bar_width = max(1, width - len(label))
+        marker = min(bar_width - 1, max(0, round(self.threshold * (bar_width - 1))))
+        filled = 0 if ratio is None else min(bar_width, max(0, round(ratio * bar_width)))
+        bar = ["━" if index < filled else "─" for index in range(bar_width)]
+        bar[marker] = "┊"
+        text = Text(label + "".join(bar), no_wrap=True, overflow="crop")
+        text.stylize("#8a96a3", 0, len(label))
+        fill_color = "#65b8a6"
+        if ratio is not None and ratio >= 1:
+            fill_color = "#e26464"
+        elif ratio is not None and ratio >= self.threshold:
+            fill_color = "#e3b65f"
+        text.stylize("#47515b", len(label), len(text))
+        for index in range(filled):
+            if index != marker:
+                text.stylize(fill_color, len(label) + index, len(label) + index + 1)
+        text.stylize("#d7dde5 bold", len(label) + marker, len(label) + marker + 1)
+        return text

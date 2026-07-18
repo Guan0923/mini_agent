@@ -79,9 +79,9 @@ def test_context_manager_removes_incomplete_messages_and_pending_tools() -> None
     assert assistant.tool_messages == [complete]
     assert runtime.run.turn_start_index == 1
     assert messages[1:] == runtime.state.messages
-    assert events[-1].kind == "context_cleaned"
-    assert events[-1].data["removed_messages"] == 1
-    assert events[-1].data["removed_tool_calls"] == 1
+    cleaned = next(event for event in events if event.kind == "context_cleaned")
+    assert cleaned.data["removed_messages"] == 1
+    assert cleaned.data["removed_tool_calls"] == 1
 
 
 def test_provider_total_tokens_trigger_compression_and_keep_current_run() -> None:
@@ -375,3 +375,52 @@ def test_model_config_loads_context_defaults_and_overrides(tmp_path: Path) -> No
     assert default.tokenizer_model == "deepseek-ai/DeepSeek-V3"
     assert configured.context_size == 2_048_000
     assert configured.tokenizer_model == "deepseek-ai/custom-tokenizer"
+
+
+def test_context_manager_publishes_usage_below_threshold() -> None:
+    runtime = runtime_for([UserMessage(content="current")], turn_start_index=0)
+    events = []
+    runtime.services.publish = events.append
+
+    ContextManager(FakeEstimator([79])).prepare(
+        runtime,
+        SystemMessage(content="system"),
+        summarize=lambda _transcript: "unused",
+    )
+
+    usage = [event for event in events if event.kind == "context_usage"]
+    assert len(usage) == 1
+    assert usage[0].data == {
+        "estimated_tokens": 79,
+        "context_size": 100,
+        "threshold": 0.8,
+        "threshold_tokens": 80,
+        "ratio": 0.79,
+        "phase": "before_compression",
+    }
+
+
+def test_context_manager_publishes_usage_before_and_after_compression() -> None:
+    runtime = runtime_for(
+        [
+            UserMessage(content="old"),
+            AssistantMessage(content="answer"),
+            UserMessage(content="current"),
+        ],
+        turn_start_index=2,
+    )
+    events = []
+    runtime.services.publish = events.append
+
+    ContextManager(FakeEstimator([80, 20])).prepare(
+        runtime,
+        SystemMessage(content="system"),
+        summarize=lambda _transcript: "summary",
+    )
+
+    usage = [event for event in events if event.kind == "context_usage"]
+    assert [(event.data["phase"], event.data["estimated_tokens"]) for event in usage] == [
+        ("before_compression", 80),
+        ("after_compression", 20),
+    ]
+    assert all(event.data["threshold_tokens"] == 80 for event in usage)

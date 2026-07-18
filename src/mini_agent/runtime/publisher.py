@@ -38,6 +38,8 @@ class RunEventPublisher:
             runtime.services.on_event(enriched)
 
     def _record(self, event: RuntimeEvent) -> None:
+        if event.kind in {"response_start", "response_delta", "response_end"}:
+            return
         if event.kind == "thinking_start":
             self._thinking_started_at = event.timestamp
             self._thinking_data = dict(event.data)

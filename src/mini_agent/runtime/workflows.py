@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from mini_agent.domain import AssistantMessage, ExecutionPlan, PlanningError, PlanStep, ToolMessage, UserMessage
+from mini_agent.domain import AssistantMessage, ExecutionPlan, PlanningError, PlanStep, ToolMessage
 from mini_agent.planning import PlannerCapabilities
 
 from .cancellation import cancel_if_requested
@@ -32,29 +32,72 @@ class PlanProposalResult:
 
     message: AssistantMessage
     plan: str | None = None
+    content_streamed: bool = False
 
 
 def _publish(runtime: AgentRuntime, event: RuntimeEvent) -> None:
     (runtime.services.publish or (lambda _event: None))(event)
 
 
-def _reasoning_stream(runtime: AgentRuntime) -> Callable[[], bool]:
-    streamed = False
+@dataclass(frozen=True)
+class _TextStreamResult:
+    reasoning: bool
+    content: bool
+
+
+def _model_text_stream(
+    runtime: AgentRuntime,
+    *,
+    stream_content: bool = False,
+) -> Callable[[], _TextStreamResult]:
+    reasoning_open = False
+    response_open = False
+    reasoning_streamed = False
+    content_streamed = False
+
+    def close_reasoning() -> None:
+        nonlocal reasoning_open
+        if reasoning_open:
+            _publish(runtime, RuntimeEvent("thinking_end"))
+            reasoning_open = False
+
+    def close_response() -> None:
+        nonlocal response_open
+        if response_open:
+            _publish(runtime, RuntimeEvent("response_end"))
+            response_open = False
 
     def on_reasoning(chunk: str) -> None:
-        nonlocal streamed
-        if not streamed:
+        nonlocal reasoning_open, reasoning_streamed
+        if not chunk:
+            return
+        close_response()
+        if not reasoning_open:
             _publish(runtime, RuntimeEvent("thinking_start"))
-            streamed = True
+            reasoning_open = True
+            reasoning_streamed = True
         _publish(runtime, RuntimeEvent("thinking_delta", chunk))
 
-    runtime.exchange.on_reasoning = on_reasoning
+    def on_content(chunk: str) -> None:
+        nonlocal response_open, content_streamed
+        if not chunk:
+            return
+        close_reasoning()
+        if not response_open:
+            _publish(runtime, RuntimeEvent("response_start"))
+            response_open = True
+            content_streamed = True
+        _publish(runtime, RuntimeEvent("response_delta", chunk))
 
-    def close() -> bool:
+    runtime.exchange.on_reasoning = on_reasoning
+    runtime.exchange.on_content = on_content if stream_content else None
+
+    def close() -> _TextStreamResult:
         runtime.exchange.on_reasoning = None
-        if streamed:
-            _publish(runtime, RuntimeEvent("thinking_end"))
-        return streamed
+        runtime.exchange.on_content = None
+        close_reasoning()
+        close_response()
+        return _TextStreamResult(reasoning_streamed, content_streamed)
 
     return close
 
@@ -163,7 +206,7 @@ class ReactiveWorkflow:
         while len(runtime.run.actions) < runtime.state.runner_settings.max_actions:
             if cancel_if_requested(runtime):
                 return runtime.run
-            close = _reasoning_stream(runtime)
+            close = _model_text_stream(runtime, stream_content=True)
             try:
                 response = planner.decide(runtime)
             except PlanningError as exc:
@@ -171,9 +214,13 @@ class ReactiveWorkflow:
                 _publish_repairs(runtime, capabilities)
                 fail_run(runtime, f"Decision failed: {exc}", **planning_failure_data(exc, capabilities.name))
                 return runtime.run
-            streamed = close()
+            except BaseException:
+                close()
+                raise
+            else:
+                streamed = close()
             _publish_repairs(runtime, capabilities)
-            _record_reasoning(runtime, response, streamed)
+            _record_reasoning(runtime, response, streamed.reasoning)
 
             if cancel_if_requested(runtime):
                 return runtime.run
@@ -182,7 +229,7 @@ class ReactiveWorkflow:
                 continue
 
             if not response.tool_messages:
-                complete_run(runtime, response)
+                complete_run(runtime, response, response_streamed=streamed.content)
                 return runtime.run
             if len(runtime.run.actions) + len(response.tool_messages) > runtime.state.runner_settings.max_actions:
                 fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions.")
@@ -281,7 +328,7 @@ class PlanProposalWorkflow:
         while len(runtime.run.actions) < runtime.state.runner_settings.max_actions:
             if cancel_if_requested(runtime):
                 return None
-            close = _reasoning_stream(runtime)
+            close = _model_text_stream(runtime, stream_content=True)
             try:
                 response = planner.decide(runtime)
             except PlanningError as exc:
@@ -289,9 +336,13 @@ class PlanProposalWorkflow:
                 _publish_repairs(runtime, capabilities)
                 fail_run(runtime, f"Plan creation failed: {exc}", **planning_failure_data(exc, capabilities.name))
                 return None
-            streamed = close()
+            except BaseException:
+                close()
+                raise
+            else:
+                streamed = close()
             _publish_repairs(runtime, capabilities)
-            _record_reasoning(runtime, response, streamed)
+            _record_reasoning(runtime, response, streamed.reasoning)
             if cancel_if_requested(runtime):
                 return None
             if consume_steering(runtime, phase="after_model_response") is not None:
@@ -299,7 +350,7 @@ class PlanProposalWorkflow:
             if not response.tool_messages:
                 _start_assistant(runtime, response)
                 _finish_assistant(runtime)
-                return PlanProposalResult(response)
+                return PlanProposalResult(response, content_streamed=streamed.content)
             if any(tool.name == REQUEST_USER_INPUT_NAME for tool in response.tool_messages):
                 answered = self._request_user_input(runtime, response)
                 if runtime.run.status != "running":
@@ -315,7 +366,7 @@ class PlanProposalWorkflow:
             if any(tool.name == REQUEST_PLAN_REVIEW_NAME for tool in response.tool_messages):
                 plan = self._request_plan_review(runtime, response)
                 if plan is not None:
-                    return PlanProposalResult(response, plan)
+                    return PlanProposalResult(response, plan, streamed.content)
                 consecutive_failures += 1
                 if consecutive_failures > runtime.state.runner_settings.max_tool_recoveries:
                     fail_run(runtime, "Stopped after repeated invalid request_plan_review calls.")
@@ -536,7 +587,7 @@ class PlanWorkflow:
         if creator is None:
             fail_run(runtime, f"Planner {capabilities.name!r} does not support plan creation.")
             return None
-        close = _reasoning_stream(runtime)
+        close = _model_text_stream(runtime)
         try:
             plan = (
                 creator.create_dynamic_plan(runtime)

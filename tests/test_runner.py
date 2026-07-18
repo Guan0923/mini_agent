@@ -10,7 +10,6 @@ from mini_agent.domain import (
     PlanStep,
     StepEvaluation,
     StrategySelection,
-    ToolMessage,
 )
 from mini_agent.observability import JsonlRunLogger
 from mini_agent.planning import RuleBasedPlanner
@@ -25,7 +24,7 @@ from mini_agent.tools import Tool, ToolError, ToolRegistry
 def test_runner_executes_calculation(tmp_path: Path) -> None:
     events = []
     state = AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)).run(
-        "run command python -c 'print((18 + 6) * 4)'", lambda _: False, on_event=events.append
+        "run command python -c 'print((18 + 6) * 4)'", lambda _: True, on_event=events.append
     )
 
     assert state.status == "completed"
@@ -71,7 +70,9 @@ class PlanModePlanner:
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         assert mode == "plan"
-        return AgentAction(type="tool_call", tool=REQUEST_PLAN_REVIEW_NAME, arguments={"plan": "1. Write the planned file."})
+        return AgentAction(
+            type="tool_call", tool=REQUEST_PLAN_REVIEW_NAME, arguments={"plan": "1. Write the planned file."}
+        )
 
     def create_dynamic_plan(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> ExecutionPlan:
         assert {"role": "assistant", "content": "1. Write the planned file."} in history
@@ -82,7 +83,9 @@ class PlanModePlanner:
                     id="write",
                     description="Write the planned file",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('blocked.txt', 'no')"}
+                        type="tool_call",
+                        tool="run_command",
+                        arguments={"command": "[System.IO.File]::WriteAllText('blocked.txt', 'no')"},
                     ),
                 )
             ],
@@ -139,7 +142,7 @@ class PlanResearchPlanner:
                 tool=REQUEST_PLAN_REVIEW_NAME,
                 arguments={"plan": "1. Read the note.\n2. Write the reviewed result."},
             )
-        return AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content note.txt"})
+        return AgentAction(type="tool_call", tool="read_file", arguments={"path": "note.txt"})
 
     def select_strategy(self, runtime) -> StrategySelection:
         return StrategySelection("dynamic_replan", "The reviewed plan needs staged execution.")
@@ -155,7 +158,7 @@ class PlanResearchPlanner:
                     id="write",
                     description="Write the reviewed result",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('result.txt', 'done')"}
+                        type="tool_call", tool="write_file", arguments={"path": "result.txt", "content": "done"}
                     ),
                 )
             ],
@@ -182,7 +185,7 @@ def test_plan_mode_researches_read_only_tools_then_hands_off_to_dynamic_executio
     assert state.status == "completed"
     assert state.mode == "agent"
     assert state.strategy == "dynamic_replan"
-    assert requests == ["plan"]
+    assert requests == ["plan", "tool"]
     assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "done"
     tool_turn = next(
         message
@@ -214,7 +217,7 @@ class PlanRecoveryPlanner:
                 tool=REQUEST_PLAN_REVIEW_NAME,
                 arguments={"plan": "1. Inspect the missing input before implementation."},
             )
-        return AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content missing.txt"})
+        return AgentAction(type="tool_call", tool="read_file", arguments={"path": "missing.txt"})
 
 
 def test_plan_mode_feeds_a_failed_read_back_to_the_planner(tmp_path: Path) -> None:
@@ -237,7 +240,7 @@ def test_plan_mode_feeds_a_failed_read_back_to_the_planner(tmp_path: Path) -> No
         if tool.status == "failed"
     )
     assert tool_error.role == "tool"
-    assert tool_error.content is not None and ("Command exited" in tool_error.content or "run_command" in tool_error.content)
+    assert tool_error.content is not None and "Not a file" in tool_error.content
     assert [event.data["attempt"] for event in events if event.kind == "tool_recovery"] == [1]
 
 
@@ -328,13 +331,17 @@ class FixedPlanPlanner:
                 PlanStep(
                     id="calculate",
                     description="Calculate 2 + 2",
-                    action=AgentAction(type="tool_call", tool="run_command", arguments={"command": "python -c 'print(2 + 2)'"}),
+                    action=AgentAction(
+                        type="tool_call", tool="run_command", arguments={"command": "python -c 'print(2 + 2)'"}
+                    ),
                 ),
                 PlanStep(
                     id="write",
                     description="Write the fixed result",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('result.txt', '4')"}
+                        type="tool_call",
+                        tool="run_command",
+                        arguments={"command": "[System.IO.File]::WriteAllText('result.txt', '4')"},
                     ),
                 ),
             ],
@@ -367,13 +374,17 @@ class FailingPlanPlanner(FixedPlanPlanner):
                 PlanStep(
                     id="missing",
                     description="Read a missing file",
-                    action=AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content missing.txt"}),
+                    action=AgentAction(
+                        type="tool_call", tool="run_command", arguments={"command": "Get-Content missing.txt"}
+                    ),
                 ),
                 PlanStep(
                     id="must-not-run",
                     description="Write a file",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('must-not-run.txt', 'no')"}
+                        type="tool_call",
+                        tool="run_command",
+                        arguments={"command": "[System.IO.File]::WriteAllText('must-not-run.txt', 'no')"},
                     ),
                 ),
             ],
@@ -407,13 +418,17 @@ class DynamicRecoveryPlanner:
                 PlanStep(
                     id="missing-source",
                     description="Read the preferred source file",
-                    action=AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content missing.txt"}),
+                    action=AgentAction(
+                        type="tool_call", tool="run_command", arguments={"command": "Get-Content missing.txt"}
+                    ),
                 ),
                 PlanStep(
                     id="old-write",
                     description="Write the original result",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('result.txt', '4')"}
+                        type="tool_call",
+                        tool="run_command",
+                        arguments={"command": "[System.IO.File]::WriteAllText('result.txt', '4')"},
                     ),
                 ),
             ],
@@ -428,16 +443,18 @@ class DynamicRecoveryPlanner:
         assert "[Tool call] run_command" in history[-2]["content"]
         assert "[Tool error]" in history[-1]["content"]
         return ExecutionPlan(
-        goal="Use the fallback result.",
-        steps=[
+            goal="Use the fallback result.",
+            steps=[
                 PlanStep(
                     id="fallback-write",
                     description="Write a fallback result",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('fallback.txt', 'fallback')"}
+                        type="tool_call",
+                        tool="run_command",
+                        arguments={"command": "[System.IO.File]::WriteAllText('fallback.txt', 'fallback')"},
                     ),
                 )
-        ],
+            ],
         )
 
 
@@ -471,13 +488,17 @@ class DeviatingPlanPlanner(DynamicRecoveryPlanner):
                 PlanStep(
                     id="calculate",
                     description="Calculate a value",
-                    action=AgentAction(type="tool_call", tool="run_command", arguments={"command": "python -c 'print(2 + 2)'"}),
+                    action=AgentAction(
+                        type="tool_call", tool="run_command", arguments={"command": "python -c 'print(2 + 2)'"}
+                    ),
                 ),
                 PlanStep(
                     id="old-write",
                     description="Write the old result",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('old.txt', 'old')"}
+                        type="tool_call",
+                        tool="run_command",
+                        arguments={"command": "[System.IO.File]::WriteAllText('old.txt', 'old')"},
                     ),
                 ),
             ],
@@ -496,7 +517,9 @@ class DeviatingPlanPlanner(DynamicRecoveryPlanner):
                     id="verified-write",
                     description="Write the verified result",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('verified.txt', '4')"}
+                        type="tool_call",
+                        tool="run_command",
+                        arguments={"command": "[System.IO.File]::WriteAllText('verified.txt', '4')"},
                     ),
                 )
             ],
@@ -541,16 +564,18 @@ def test_runner_settings_validate_limits(kwargs: dict[str, object], message: str
 
 
 def test_local_read_only_tool_skips_approval(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("read safely", encoding="utf-8")
     events = []
     state = AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)).run(
-        "run command python -c 'print(2 + 2)'",
+        "read note.txt",
         lambda _: False,
         on_event=events.append,
         interrupt=lambda _request: InterruptDecision("cancel"),
     )
 
     assert state.status == "completed"
-    assert "tool_call" in [event.kind for event in events]
+    assert state.final_answer is not None and "read safely" in state.final_answer
+    assert "approval_requested" not in [event.kind for event in events]
 
 
 class WebSearchPlanner:
@@ -577,10 +602,13 @@ class PlanWriteAttemptPlanner:
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         assert mode == "plan"
-        return AgentAction(type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('blocked.txt', 'no')"})
+        return AgentAction(
+            type="tool_call",
+            tool="run_command",
+            arguments={"command": "[System.IO.File]::WriteAllText('blocked.txt', 'no')"},
+        )
 
 
-@pytest.mark.skip(reason="run_command is read_only and always available; plan write blocking is by prompt, not tool filtering")
 def test_plan_mode_blocks_write_tools_during_planning(tmp_path: Path) -> None:
     events = []
     state = AgentRunner(PlanWriteAttemptPlanner(), ToolRegistry(tmp_path), max_tool_recoveries=0).run(
@@ -672,10 +700,13 @@ class OneWriteThenAnswerPlanner:
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         if history[-1]["content"].startswith("[Tool result]"):
             return AgentAction(type="final_answer", answer="written")
-        return AgentAction(type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('output.txt', 'done')"})
+        return AgentAction(
+            type="tool_call",
+            tool="run_command",
+            arguments={"command": "[System.IO.File]::WriteAllText('output.txt', 'done')"},
+        )
 
 
-@pytest.mark.skip(reason="run_command no longer requires tool-level confirmation")
 def test_tool_interrupt_cancel_prevents_confirmed_call(tmp_path: Path) -> None:
     events = []
     state = AgentRunner(OneWriteThenAnswerPlanner(), ToolRegistry(tmp_path), strategy="reactive").run(
@@ -698,10 +729,10 @@ class RecoveringToolPlanner:
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         self.histories.append(list(history))
         if history[-1]["content"].startswith("[Tool error]"):
-            return AgentAction(type="tool_call", tool="run_command", arguments={"command": "python -c 'print(2 + 2)'"})
+            return AgentAction(type="tool_call", tool="glob", arguments={"pattern": "**/*"})
         if history[-1]["content"].startswith("[Tool result]"):
             return AgentAction(type="final_answer", answer="recovered")
-        return AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content missing.txt"})
+        return AgentAction(type="tool_call", tool="read_file", arguments={"path": "missing.txt"})
 
     def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
         return StrategySelection("reactive", "The tool error can be corrected with another action.")
@@ -789,15 +820,15 @@ class ResettingRecoveryPlanner:
         if last.startswith("[Tool error]"):
             if self.stage == 0:
                 self.stage = 1
-                return AgentAction(type="tool_call", tool="run_command", arguments={"command": "python -c 'print(1 + 1)'"})
+                return AgentAction(type="tool_call", tool="glob", arguments={"pattern": "**/*"})
             self.stage = 3
-            return AgentAction(type="tool_call", tool="run_command", arguments={"command": "python -c 'print(2 + 2)'"})
+            return AgentAction(type="tool_call", tool="glob", arguments={"pattern": "**/*"})
         if last.startswith("[Tool result]"):
             if self.stage == 1:
                 self.stage = 2
-                return AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content missing-again.txt"})
+                return AgentAction(type="tool_call", tool="read_file", arguments={"path": "missing-again.txt"})
             return AgentAction(type="final_answer", answer="recovered twice")
-        return AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content missing-first.txt"})
+        return AgentAction(type="tool_call", tool="read_file", arguments={"path": "missing-first.txt"})
 
     def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
         return StrategySelection("reactive", "A successful tool call resets the recovery counter.")
@@ -817,7 +848,7 @@ def test_successful_tool_call_resets_consecutive_recovery_count(tmp_path: Path) 
 class RepeatingWritePlanner:
     name = "repeating-write"
 
-    _ACTION = AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content ", "content": "unsafe"})
+    _ACTION = AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content missing.txt"})
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         return self._ACTION
@@ -826,7 +857,6 @@ class RepeatingWritePlanner:
         return StrategySelection("reactive", "The test rejects a repeated non-retryable call.")
 
 
-@pytest.mark.skip(reason="run_command no longer requires tool-level confirmation")
 def test_reactive_recovery_refuses_to_repeat_a_non_retryable_tool_call(tmp_path: Path) -> None:
     events = []
     state = AgentRunner(RepeatingWritePlanner(), ToolRegistry(tmp_path), max_retries=0).run(
@@ -841,7 +871,6 @@ def test_reactive_recovery_refuses_to_repeat_a_non_retryable_tool_call(tmp_path:
     assert "refusing to repeat non-retryable" in (state.final_answer or "")
 
 
-@pytest.mark.skip(reason="run_command no longer requires tool-level confirmation")
 def test_human_interrupt_continue_is_the_only_runtime_confirmation(tmp_path: Path) -> None:
     confirmations = []
     state = AgentRunner(OneWriteThenAnswerPlanner(), ToolRegistry(tmp_path), strategy="reactive").run(
@@ -851,11 +880,10 @@ def test_human_interrupt_continue_is_the_only_runtime_confirmation(tmp_path: Pat
     )
 
     assert state.status == "completed"
-    assert (tmp_path / "approved.txt").read_text(encoding="utf-8") == "ok"
+    assert (tmp_path / "output.txt").read_text(encoding="utf-8") == "done"
     assert confirmations == []
 
 
-@pytest.mark.skip(reason="run_command no longer requires tool-level confirmation")
 def test_default_runner_confirmation_still_protects_mutating_tools(tmp_path: Path) -> None:
     confirmations = []
     state = AgentRunner(OneWriteThenAnswerPlanner(), ToolRegistry(tmp_path), strategy="reactive").run(
@@ -863,7 +891,7 @@ def test_default_runner_confirmation_still_protects_mutating_tools(tmp_path: Pat
     )
 
     assert state.status == "cancelled"
-    assert not (tmp_path / "approved.txt").exists()
+    assert not (tmp_path / "output.txt").exists()
     assert len(confirmations) == 1
 
 
@@ -872,7 +900,9 @@ class SinglePlanPlanner:
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         assert mode == "plan"
-        return AgentAction(type="tool_call", tool=REQUEST_PLAN_REVIEW_NAME, arguments={"plan": "1. Write original.txt."})
+        return AgentAction(
+            type="tool_call", tool=REQUEST_PLAN_REVIEW_NAME, arguments={"plan": "1. Write original.txt."}
+        )
 
 
 def test_plan_mode_rejects_supplement_after_checkpointing_review(tmp_path: Path) -> None:
@@ -939,14 +969,18 @@ class FeedbackReplanner:
                     id="first",
                     description="Write the first file",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('approved.txt', 'ok')"}
+                        type="tool_call",
+                        tool="write_file",
+                        arguments={"path": "approved.txt", "content": "ok"},
                     ),
                 ),
                 PlanStep(
                     id="second",
                     description="Write the second file",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('first.txt', '1')"}
+                        type="tool_call",
+                        tool="write_file",
+                        arguments={"path": "first.txt", "content": "1"},
                     ),
                 ),
             ],
@@ -963,14 +997,15 @@ class FeedbackReplanner:
                     id="revised",
                     description="Write the revised file",
                     action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "[System.IO.File]::WriteAllText('second.txt', '2')"}
+                        type="tool_call",
+                        tool="write_file",
+                        arguments={"path": "second.txt", "content": "2"},
                     ),
                 )
             ],
         )
 
 
-@pytest.mark.skip(reason="Test needs plan->agent handoff update for 3-tool set")
 def test_supplement_uses_remaining_work_replan_after_completed_steps(tmp_path: Path) -> None:
     decisions = iter(
         [
@@ -988,4 +1023,4 @@ def test_supplement_uses_remaining_work_replan_after_completed_steps(tmp_path: P
     assert state.status == "completed"
     assert state.plan is not None and state.plan.revision == 2
     assert [step.status for step in state.plan_history[0].steps] == ["completed", "superseded"]
-    assert state.plan.steps[0].result == "Wrote 1 characters to revised.txt."
+    assert state.plan.steps[0].result == "Created second.txt with 1 characters."

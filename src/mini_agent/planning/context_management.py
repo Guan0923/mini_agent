@@ -88,6 +88,7 @@ class ContextManager:
         estimated = self.estimator.estimate_tokens(messages, exposed_tools, parameters)
         provider_total = self._provider_total(runtime)
         threshold_tokens = int(self.estimator.context_size * self.threshold)
+        self._publish_usage(runtime, estimated, phase="before_compression")
         if max(estimated, provider_total or 0) < threshold_tokens:
             return messages
 
@@ -125,12 +126,32 @@ class ContextManager:
                     },
                 )
                 estimated = estimated_after
+                self._publish_usage(runtime, estimated, phase="after_compression")
 
         if estimated >= self.estimator.context_size:
             raise PlanningError(
                 "The current request still exceeds the model context window after context cleanup and compression."
             )
         return messages
+
+    def _publish_usage(self, runtime: AgentRuntime, estimated: int, *, phase: str) -> None:
+        context_size = self.estimator.context_size
+        threshold_tokens = int(context_size * self.threshold)
+        publish = runtime.services.publish or (lambda _event: None)
+        publish(
+            RuntimeEvent(
+                "context_usage",
+                "Context usage estimated",
+                {
+                    "estimated_tokens": estimated,
+                    "context_size": context_size,
+                    "threshold": self.threshold,
+                    "threshold_tokens": threshold_tokens,
+                    "ratio": estimated / context_size,
+                    "phase": phase,
+                },
+            )
+        )
 
     @staticmethod
     def _provider_total(runtime: AgentRuntime) -> int | None:

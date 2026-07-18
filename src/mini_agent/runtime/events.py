@@ -12,6 +12,9 @@ RuntimeEventKind = Literal[
     "thinking_start",
     "thinking_delta",
     "thinking_end",
+    "response_start",
+    "response_delta",
+    "response_end",
     "model_request",
     "model_response",
     "model_error",
@@ -22,6 +25,7 @@ RuntimeEventKind = Literal[
     "strategy",
     "context_cleaned",
     "context_compressed",
+    "context_usage",
     "model_repair",
     "tool_call",
     "tool_result",
@@ -45,8 +49,8 @@ RuntimeEventKind = Literal[
     "cancelled",
 ]
 
-# Reasoning stream chunks are high-volume presentation data, not durable state
-# transitions. Checkpoint only the events from which a run can be inspected or
+# Text stream chunks are high-volume presentation data, not durable state
+# transitions. Checkpoint only events from which a run can be inspected or
 # resumed safely.
 CHECKPOINT_EVENT_KINDS: frozenset[RuntimeEventKind] = frozenset(
     {

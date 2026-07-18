@@ -10,7 +10,7 @@ import pytest
 
 from mini_agent.domain import RunState
 from mini_agent.providers import ModelConfigurationError
-from mini_agent.runtime import TaskPreparationError
+from mini_agent.runtime import RuntimeEvent, TaskPreparationError
 from mini_agent.runtime.contracts import InterruptRequest, QuestionOption, UserQuestion
 from mini_agent.tui import cli
 from mini_agent.tui.approval import TerminalApproval
@@ -86,7 +86,7 @@ def test_view_status_includes_permission_mode_for_every_state() -> None:
     app._approval = TerminalApproval(permission_mode="approval_for_me")
     view = StatusView()
     idle_approval = SimpleNamespace(pending=False, status="REVIEW")
-    review_approval = SimpleNamespace(pending=True, status="TOOL REVIEW | 1 Continue | 2 Cancel | 3 Supplement")
+    review_approval = SimpleNamespace(pending=True, status="TOOL REVIEW | Select action")
 
     app._update_view_state(view, False, idle_approval, False)
     app._update_view_state(view, True, idle_approval, False)
@@ -98,7 +98,7 @@ def test_view_status_includes_permission_mode_for_every_state() -> None:
         ("AGENT | IDLE | PERMISSION: APPROVAL FOR ME", False),
         ("AGENT | RUNNING | PERMISSION: APPROVAL FOR ME", True),
         ("AGENT | CANCELLING | PERMISSION: APPROVAL FOR ME", False),
-        ("TOOL REVIEW | 1 Continue | 2 Cancel | 3 Supplement | PERMISSION: APPROVAL FOR ME", True),
+        ("TOOL REVIEW | Select action | PERMISSION: APPROVAL FOR ME", True),
         ("PERMISSION | 1 Approval for me | 2 Full access | PERMISSION: APPROVAL FOR ME", False),
     ]
 
@@ -241,6 +241,80 @@ def test_interactive_start_defers_active_run_messages_to_one_follow_up_run(monke
     output = capsys.readouterr().out
     assert output == "No saved session.\n"
 
+
+
+def test_interactive_review_keeps_main_input_for_queued_follow_up(monkeypatch, capsys) -> None:
+    calls: list[str] = []
+
+    class ReviewingConversation(StubConversation):
+        def run_task(self, task: str, **kwargs) -> RunState:
+            calls.append(task)
+            if task == "initial task":
+                decision = kwargs["interrupt"](
+                    InterruptRequest("tool", "Approve tool?", {"tool": "write_file", "arguments": {}})
+                )
+                assert decision.choice == "continue"
+            return RunState(task=task, mode="agent", status="completed")
+
+    class ReviewQueueView:
+        last = None
+
+        def __init__(self, loop, **kwargs) -> None:
+            del kwargs
+            type(self).last = self
+            self.loop = loop
+            self.submissions = asyncio.Queue()
+            self.interrupts = asyncio.Queue()
+            self.stopped = asyncio.Event()
+            self.started = False
+            self.queued = False
+            self.quit_sent = False
+            self.writes: list[str] = []
+
+        async def run_async(self) -> None:
+            await self.stopped.wait()
+
+        def stop(self) -> None:
+            self.stopped.set()
+
+        def write(self, text: str, end: str = "\n") -> None:
+            self.writes.append(f"{text}{end}")
+
+        def clear(self) -> None:
+            self.writes.clear()
+
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            del interrupt_enabled
+            if "| IDLE" in status and not self.started:
+                self.started = True
+                self.submissions.put_nowait("initial task")
+            elif "| IDLE" in status and len(calls) == 2 and not self.quit_sent:
+                self.quit_sent = True
+                self.submissions.put_nowait("/quit")
+
+        def begin_review(self, _title, _prompt, _choices, on_complete) -> None:
+            if self.queued:
+                return
+            self.queued = True
+            self.submissions.put_nowait("queued during review")
+            self.loop.call_later(0.01, on_complete, "continue", None)
+
+        def cancel_choice_prompt(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli, "TerminalView", ReviewQueueView)
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._conversation_service = ReviewingConversation(RunState(task="unused", mode="agent"))
+    app._approval = TerminalApproval(write=app._write)
+
+    app.start()
+
+    assert calls == ["initial task", "queued during review"]
+    assert ReviewQueueView.last is not None
+    rendered = "".join(ReviewQueueView.last.writes)
+    assert "USER\nqueued during review\n" in rendered
+    assert "MESSAGE QUEUED\n" in rendered
+    assert capsys.readouterr().out == "No saved session.\n"
 
 def test_interactive_escape_cancels_active_run_without_exiting(monkeypatch, capsys) -> None:
     cancellation_seen: list[bool] = []
@@ -669,6 +743,66 @@ def test_interactive_approval_bridge_resolves_textual_questionnaire() -> None:
     assert decision.answers == {"storage": ["JSONL"]}
     assert active is False
 
+def test_interactive_approval_bridge_resolves_inline_tool_supplement() -> None:
+    async def scenario():
+        view = cli.TerminalView(asyncio.get_running_loop())
+        async with view.run_test() as pilot:
+            bridge = cli._InteractiveApproval(TerminalApproval(), asyncio.get_running_loop(), view)
+            request = InterruptRequest(
+                "tool",
+                "Call tool?",
+                {"tool": "write_file", "arguments": {"path": "note.txt"}},
+            )
+            decision_task = asyncio.create_task(asyncio.to_thread(bridge, request))
+            await bridge.changed.wait()
+            bridge.changed.clear()
+            await pilot.pause()
+
+            assert [row.choice.id for row in view.choice_menu.rows] == [
+                "continue",
+                "cancel",
+                "supplement",
+            ]
+            await pilot.press("up", "tab")
+            editor = view.choice_menu.highlighted_row.editor
+            editor.value = "Use a smaller change."
+            await pilot.press("enter")
+            return await asyncio.wait_for(decision_task, 1)
+
+    decision = asyncio.run(scenario())
+
+    assert decision.choice == "supplement"
+    assert decision.supplement == "Use a smaller change."
+
+
+def test_interactive_approval_bridge_resolves_plan_choice_from_list() -> None:
+    async def scenario():
+        view = cli.TerminalView(asyncio.get_running_loop())
+        async with view.run_test() as pilot:
+            bridge = cli._InteractiveApproval(TerminalApproval(), asyncio.get_running_loop(), view)
+            request = InterruptRequest(
+                "plan",
+                "Choose how to handle this plan.",
+                {"plan": "1. Edit README."},
+            )
+            decision_task = asyncio.create_task(asyncio.to_thread(bridge, request))
+            await bridge.changed.wait()
+            bridge.changed.clear()
+            await pilot.pause()
+
+            assert [row.choice.id for row in view.choice_menu.rows] == [
+                "implement",
+                "implement_clear_session",
+                "cancel",
+            ]
+            await pilot.press("down", "enter")
+            return await asyncio.wait_for(decision_task, 1)
+
+    decision = asyncio.run(scenario())
+
+    assert decision.choice == "implement_clear_session"
+
+
 
 class StubTerminalApp:
     result: RunState | None = None
@@ -750,3 +884,31 @@ def test_main_does_not_suggest_rule_planner_for_invalid_runtime_settings(tmp_pat
 
     assert exc_info.value.code == 2
     assert "--planner rule" not in capsys.readouterr().err
+
+
+def test_context_usage_events_update_and_reset_the_active_view() -> None:
+    class ContextView:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def set_context_usage(self, *args) -> None:
+            self.calls.append(args)
+
+    app = object.__new__(cli.TerminalApp)
+    view = ContextView()
+    app._view = view
+
+    app._handle_runtime_event(
+        RuntimeEvent(
+            "context_usage",
+            data={
+                "estimated_tokens": 800,
+                "context_size": 1_000,
+                "threshold": 0.8,
+            },
+        )
+    )
+    app._handle_runtime_event(RuntimeEvent("strategy"))
+    app._reset_context_usage()
+
+    assert view.calls == [(800, 1_000, 0.8), ()]

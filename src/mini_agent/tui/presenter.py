@@ -16,6 +16,7 @@ class TerminalPresenter:
 
     def __init__(self, write: Callable[[str, str], None] | None = None) -> None:
         self._thinking_open = False
+        self._response_open = False
         self._write = write or _console_write
 
     def on_event(self, event: RuntimeEvent) -> None:
@@ -30,6 +31,15 @@ class TerminalPresenter:
             if self._thinking_open:
                 self._write("")
             self._thinking_open = False
+        elif event.kind == "response_start":
+            self._write("RESPONSE")
+            self._response_open = True
+        elif event.kind == "response_delta":
+            self._write(event.message, "")
+        elif event.kind == "response_end":
+            if self._response_open:
+                self._write("")
+            self._response_open = False
         elif event.kind == "strategy":
             self._write(f"STRATEGY {event.message} — {event.data['reason']}")
         elif event.kind == "model_repair":
@@ -51,9 +61,11 @@ class TerminalPresenter:
         elif event.kind == "replan_applied":
             self._write(f"REPLAN APPLIED\n{event.message}")
         elif event.kind == "response":
-            self._write(f"RESPONSE\n{event.message}")
+            if not event.data.get("streamed"):
+                self._write(f"RESPONSE\n{event.message}")
         elif event.kind == "plan":
-            self._write(f"PLAN\n{event.message}")
+            if not event.data.get("streamed"):
+                self._write(f"PLAN\n{event.message}")
         elif event.kind == "error":
             self._write(f"ERROR {event.message}")
             diagnostics = event.data.get("provider_diagnostics")

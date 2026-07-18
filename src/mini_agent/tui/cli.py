@@ -18,6 +18,7 @@ from mini_agent.runtime import (
     AgentRunner,
     ConversationService,
     RunnerSettings,
+    RuntimeEvent,
     SessionStore,
     TaskPreparationError,
     build_application,
@@ -35,7 +36,7 @@ from .approval import TerminalApproval
 from .commands import COMMAND_ARGUMENT_NAMES, COMMAND_PATTERN, render_help
 from .completion import SlashCommandCompleter
 from .presenter import TerminalPresenter
-from .view import TerminalView
+from .view import ChoiceItem, TerminalView
 
 HELP = render_help()
 
@@ -76,8 +77,8 @@ class _InteractiveApproval:
         if request.kind == "question":
             return "PLAN QUESTIONS | Select answers"
         if request.kind == "plan":
-            return "PLAN REVIEW | 1 Implement | 2 Implement + clear | 3 Cancel"
-        return "TOOL REVIEW | 1 Continue | 2 Cancel | 3 Supplement"
+            return "PLAN REVIEW | Select action"
+        return "TOOL REVIEW | Select action"
 
     def __call__(self, request: InterruptRequest) -> InterruptDecision:
         automatic = self._approval.automatic_decision(request)
@@ -114,10 +115,44 @@ class _InteractiveApproval:
             return
         self._pending = (request, decision)
         self._supplement = False
-        if request.kind == "question" and self._view is not None:
+        if (
+            self._view is None
+            or request.kind == "question"
+            and not callable(getattr(self._view, "begin_questionnaire", None))
+            or request.kind in {"plan", "tool"}
+            and not callable(getattr(self._view, "begin_review", None))
+        ):
+            self._approval.render_request(request)
+        elif request.kind == "question":
             self._view.begin_questionnaire(request.questions, self._complete_questionnaire)
+        elif request.kind == "plan":
+            self._approval.render_request(request)
+            self._view.begin_review(
+                "PLAN REVIEW",
+                request.message,
+                (
+                    ChoiceItem("implement", "Implement", "Implement in the current session."),
+                    ChoiceItem(
+                        "implement_clear_session",
+                        "Implement and Clear Session",
+                        "Start implementation in a new session.",
+                    ),
+                    ChoiceItem("cancel", "Cancel and Stay in plan mode", "Do not implement this plan."),
+                ),
+                self._complete_review,
+            )
         else:
             self._approval.render_request(request)
+            self._view.begin_review(
+                "TOOL REVIEW",
+                request.message,
+                (
+                    ChoiceItem("continue", "Continue", "Run this tool call."),
+                    ChoiceItem("cancel", "Cancel", "Stop the current run."),
+                    ChoiceItem("supplement", "Supplement", "Send additional instructions.", custom=True),
+                ),
+                self._complete_review,
+            )
         self.changed.set()
 
     def _complete_questionnaire(self, answers: dict[str, list[str]]) -> None:
@@ -129,16 +164,34 @@ class _InteractiveApproval:
         future.set_result(InterruptDecision("answer", answers=answers))
         self.changed.set()
 
+    def _complete_review(self, choice: str, supplement: str | None) -> None:
+        if self._pending is None or self._pending[0].kind not in {"plan", "tool"}:
+            return
+        request, future = self._pending
+        allowed = (
+            {"implement", "implement_clear_session", "cancel"}
+            if request.kind == "plan"
+            else {"continue", "cancel", "supplement"}
+        )
+        self._pending = None
+        self._supplement = False
+        if choice not in allowed:
+            future.set_exception(ValueError(f"Invalid {request.kind} review choice: {choice}"))
+        else:
+            future.set_result(InterruptDecision(choice, supplement=supplement))
+        self.changed.set()
+
     def cancel_pending(self) -> None:
         """Resolve an active review so cooperative run cancellation can continue."""
 
         if self._pending is None:
             return
-        request, future = self._pending
+        _request, future = self._pending
         self._pending = None
         self._supplement = False
-        if self._view is not None and request.kind == "question":
-            self._view.cancel_questionnaire()
+        cancel_prompt = getattr(self._view, "cancel_choice_prompt", None)
+        if callable(cancel_prompt):
+            cancel_prompt()
         future.set_result(InterruptDecision("cancel"))
         self.changed.set()
 
@@ -173,10 +226,27 @@ class TerminalApp:
             )
         self.presenter = TerminalPresenter(self._write)
         self._approval = TerminalApproval(write=self._write)
-        sinks = [self.presenter.on_event]
+        sinks = [self._handle_runtime_event, self.presenter.on_event]
         if log_dir is not None:
             sinks.append(JsonlRunLogger(log_dir, include_full_messages=self.runner.settings.log_full_messages))
         self._event_sink = EventFanout(sinks)
+
+    def _handle_runtime_event(self, event: RuntimeEvent) -> None:
+        if event.kind != "context_usage" or self._view is None:
+            return
+        estimated = event.data.get("estimated_tokens")
+        context_size = event.data.get("context_size")
+        threshold = event.data.get("threshold", 0.8)
+        if (
+            isinstance(estimated, int)
+            and isinstance(context_size, int)
+            and isinstance(threshold, int | float)
+        ):
+            self._view.set_context_usage(estimated, context_size, float(threshold))
+
+    def _reset_context_usage(self) -> None:
+        if self._view is not None:
+            self._view.set_context_usage()
 
     @property
     def session_store(self) -> SessionStore | None:
@@ -298,8 +368,6 @@ class TerminalApp:
                                 exit_requested = True
                         elif exit_after_run:
                             pass
-                        elif approval.pending:
-                            approval.submit(task)
                         elif permission_pending:
                             selected = self._approval.parse_permission(task)
                             if selected is None:
@@ -633,6 +701,7 @@ class TerminalApp:
             self._write("Session storage is not configured.")
             return
         self._clear_display()
+        self._reset_context_usage()
         self._conversation_service.prepare_new_session(title)
         self.last_state = None
         self._print_active_session()
@@ -649,6 +718,7 @@ class TerminalApp:
         except ValueError:
             self._write(f"Unknown session: {session_id}")
             return
+        self._reset_context_usage()
         self.last_state = None
         self._print_active_session()
 

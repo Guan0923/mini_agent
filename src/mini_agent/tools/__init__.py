@@ -3,6 +3,7 @@
 from .base import ConfirmationRequired, Tool, ToolError, ToolExecutor
 from .catalog import build_tool_registry
 from .command import WorkspaceCommand
+from .filesystem import WorkspaceFiles
 from .registry import ToolRegistry
 from .web import DdgrWebSearch, SafeWebFetcher
 
@@ -15,5 +16,6 @@ __all__ = [
     "ToolExecutor",
     "ToolRegistry",
     "WorkspaceCommand",
+    "WorkspaceFiles",
     "build_tool_registry",
 ]

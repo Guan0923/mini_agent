@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from mini_agent.domain import AssistantMessage, PlanningError
-from mini_agent.observability import JsonlRunLogger
+from mini_agent.observability import EventFanout, JsonlRunLogger
 from mini_agent.planning import LLMPlanner, RuleBasedPlanner
 from mini_agent.runtime import (
     AgentRunner,
@@ -216,3 +216,86 @@ def test_log_full_messages_rejects_invalid_env_value(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="LOG_FULL_MESSAGES"):
         log_full_messages_from_env(env_path, environ={})
+
+
+class StreamingCompletionClient:
+    def run(self, runtime) -> PreparedResponse:
+        if runtime.exchange.operation == "strategy":
+            return PreparedResponse(
+                AssistantMessage(content='{"strategy":"reactive","reason":"Direct response."}')
+            )
+        assert runtime.exchange.on_reasoning is not None
+        assert runtime.exchange.on_content is not None
+        runtime.exchange.on_reasoning("Think.")
+        runtime.exchange.on_content("Hel")
+        runtime.exchange.on_content("lo")
+        return PreparedResponse(
+            AssistantMessage(content="Hello", reasoning="Think."),
+            usage={"total_tokens": 7},
+        )
+
+
+def test_response_stream_is_renderable_but_not_persisted_chunk_by_chunk(tmp_path: Path) -> None:
+    events = []
+    logger = JsonlRunLogger(tmp_path / "logs")
+    planner = LLMPlanner(StreamingCompletionClient(), [], [])
+    runner = AgentRunner(planner, ToolRegistry(), strategy="auto")
+    runtime = runner.new_runtime(
+        task="say hello",
+        on_event=EventFanout([events.append, logger]),
+    )
+
+    state = runner.run(runtime)
+
+    stream_kinds = [
+        event.kind
+        for event in events
+        if event.kind.startswith("thinking_") or event.kind.startswith("response_")
+    ]
+    assert stream_kinds == [
+        "thinking_start",
+        "thinking_delta",
+        "thinking_end",
+        "response_start",
+        "response_delta",
+        "response_delta",
+        "response_end",
+    ]
+    final = next(event for event in events if event.kind == "response")
+    assert final.message == "Hello"
+    assert final.data["streamed"] is True
+    transient = {"response_start", "response_delta", "response_end"}
+    assert transient.isdisjoint(message.kind for message in state.runtime_messages)
+
+    records = [
+        json.loads(line)
+        for line in logger.path_for(state.run_id).read_text(encoding="utf-8").splitlines()
+    ]
+    assert transient.isdisjoint(record["kind"] for record in records)
+    assert [record["kind"] for record in records].count("response") == 1
+
+
+
+class ExplodingStreamingPlanner:
+    name = "exploding-stream"
+
+    def decide(self, runtime) -> AssistantMessage:
+        assert runtime.exchange.on_content is not None
+        runtime.exchange.on_content("partial")
+        raise RuntimeError("stream interrupted")
+
+
+def test_unexpected_failure_closes_open_response_stream() -> None:
+    events = []
+    runner = AgentRunner(ExplodingStreamingPlanner(), ToolRegistry(), strategy="reactive")
+    runtime = runner.new_runtime(task="fail while streaming", on_event=events.append)
+
+    with pytest.raises(RuntimeError, match="stream interrupted"):
+        runner.run(runtime)
+
+    kinds = [event.kind for event in events]
+    assert kinds.index("response_start") < kinds.index("response_delta")
+    assert kinds.index("response_delta") < kinds.index("response_end")
+    assert kinds[-1] == "response_end"
+    transient = {"response_start", "response_delta", "response_end"}
+    assert transient.isdisjoint(message.kind for message in runtime.run.runtime_messages)

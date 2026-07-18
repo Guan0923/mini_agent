@@ -47,3 +47,19 @@ def test_presenter_renders_model_diagnostics_for_errors(capsys) -> None:
         "ERROR Planning failed: Model response did not contain JSON content.\n"
         "MODEL DIAGNOSTICS finish_reason=stop content_chars=217 reasoning_chars=241\n"
     )
+
+
+def test_presenter_streams_response_once_and_suppresses_final_duplicate(capsys) -> None:
+    presenter = TerminalPresenter()
+
+    presenter.on_event(RuntimeEvent("thinking_start"))
+    presenter.on_event(RuntimeEvent("thinking_delta", "Reasoning"))
+    presenter.on_event(RuntimeEvent("thinking_end"))
+    presenter.on_event(RuntimeEvent("response_start"))
+    presenter.on_event(RuntimeEvent("response_delta", "Hel"))
+    presenter.on_event(RuntimeEvent("response_delta", "lo"))
+    presenter.on_event(RuntimeEvent("response_end"))
+    presenter.on_event(RuntimeEvent("response", "Hello", {"streamed": True}))
+
+    presenter.on_event(RuntimeEvent("plan", "Hello", {"streamed": True}))
+    assert capsys.readouterr().out == "THINKING\nReasoning\nRESPONSE\nHello\n"

@@ -24,6 +24,7 @@ def complete_run(
     *,
     final_answer: str | None = None,
     event_kind: Literal["response", "plan"] | None = None,
+    response_streamed: bool = False,
 ) -> None:
     run = runtime.run
     if not any(existing is message for existing in runtime.state.messages):
@@ -33,7 +34,8 @@ def complete_run(
     run.final_answer = (message.content or "") if final_answer is None else final_answer
     run.add_event("final", "Task completed")
     publish = runtime.services.publish or (lambda _event: None)
-    publish(RuntimeEvent(event_kind or ("plan" if run.mode == "plan" else "response"), run.final_answer))
+    kind = event_kind or ("plan" if run.mode == "plan" else "response")
+    publish(RuntimeEvent(kind, run.final_answer, {"streamed": response_streamed}))
 
 
 def fail_run(runtime: AgentRuntime, message: str, **data: object) -> None:

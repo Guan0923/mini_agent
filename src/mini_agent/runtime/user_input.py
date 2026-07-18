@@ -12,7 +12,7 @@ from mini_agent.domain import ToolSpec
 from .contracts import QuestionOption, UserQuestion
 
 REQUEST_USER_INPUT_NAME = "request_user_input"
-OTHER_OPTION_LABEL = "以上都不对"
+OTHER_OPTION_LABEL = "其他"
 
 _PARAMETERS: dict[str, Any] = {
     "type": "object",
@@ -22,7 +22,6 @@ _PARAMETERS: dict[str, Any] = {
         "questions": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 3,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -33,8 +32,6 @@ _PARAMETERS: dict[str, Any] = {
                     "question": {"type": "string", "minLength": 1},
                     "options": {
                         "type": "array",
-                        "minItems": 2,
-                        "maxItems": 3,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
@@ -57,8 +54,8 @@ REQUEST_USER_INPUT_SPEC = ToolSpec(
         "Pause the current Plan-mode run and ask the user one to three material clarification questions. "
         "Use this only after read-only exploration cannot resolve an important product or implementation choice. "
         "Each question must provide two or three mutually exclusive options with concise trade-off descriptions. "
-        "The client adds a separate free-form 'none of the above' option. Call this control tool by itself; do not "
-        "combine it with request_plan_review, web_search, web_fetch, or run_command in the same response."
+        "The client adds a separate free-form 'Other' option. Call this control tool by itself; do not "
+        "combine it with request_plan_review, web_search, web_fetch, read_file, glob, or grep in the same response."
     ),
     parameters=_PARAMETERS,
 )
@@ -95,10 +92,10 @@ def parse_user_input_questions(arguments: dict[str, Any]) -> tuple[UserQuestion,
         for raw_option in raw_question["options"]:
             label = _required_text(raw_option["label"], "option label")
             normalized = label.casefold()
+            if normalized == OTHER_OPTION_LABEL.casefold():
+                continue
             if normalized in seen_labels:
                 raise ValueError(f"Question {question_id!r} option labels must be unique.")
-            if label == OTHER_OPTION_LABEL or normalized == "none of the above":
-                raise ValueError(f"Question {question_id!r} must not provide the client-owned other option.")
             seen_labels.add(normalized)
             options.append(
                 QuestionOption(

@@ -85,14 +85,12 @@ class RuleBasedPlanner:
         web = self._web_tool(task, runtime)
         if web is not None:
             return web
-        file_match = re.search(
-            r"(?:read|show|cat|查看|读取)\s+[`'\"]?([^`'\"\s]+)", task, flags=re.IGNORECASE
-        )
+        file_match = re.search(r"(?:read|show|cat|查看|读取)\s+[`'\"]?([^`'\"\s]+)", task, flags=re.IGNORECASE)
         if file_match:
             path = file_match.group(1).rstrip("。.!！")
-            return self._tool("run_command", {"command": f"cat {path}"}, runtime)
+            return self._tool("read_file", {"path": path}, runtime)
         if re.search(r"(?:list|ls|files|目录|文件)", task, flags=re.IGNORECASE):
-            return self._tool("run_command", {"command": "ls -la"}, runtime)
+            return self._tool("glob", {"pattern": "**/*"}, runtime)
         command = re.search(r"(?:run|execute)\s+(?:command\s+)?(.+)$|执行命令\s+(.+)$", task, re.IGNORECASE)
         if command:
             value = next(group for group in command.groups() if group is not None).strip()

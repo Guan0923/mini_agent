@@ -11,7 +11,7 @@ from mini_agent.runtime.recording import persistent_event
 
 
 class JsonlRunLogger:
-    """Append every event from a run to ``<log_dir>/<run_id>.jsonl``."""
+    """Append durable run events to the per-run JSONL file."""
 
     def __init__(self, log_dir: Path, include_full_messages: bool = True) -> None:
         self._log_dir = log_dir
@@ -23,6 +23,8 @@ class JsonlRunLogger:
         run_id = event.data.get("run_id")
         if not isinstance(run_id, str) or not run_id:
             raise ValueError("Persistent run logging requires a run_id in every event.")
+        if event.kind in {"response_start", "response_delta", "response_end"}:
+            return
         if event.kind == "thinking_start":
             self._thinking[run_id] = (event.timestamp, dict(event.data), [])
             return

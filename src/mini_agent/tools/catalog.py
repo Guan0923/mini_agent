@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .base import Tool
 from .command import WorkspaceCommand
+from .filesystem import WorkspaceFiles
 from .registry import ToolRegistry
 from .web import DdgrWebSearch, SafeWebFetcher
 
@@ -27,13 +28,123 @@ def _build_tools(
     *,
     web_search: DdgrWebSearch | None = None,
     web_fetch: SafeWebFetcher | None = None,
+    workspace_files: WorkspaceFiles | None = None,
 ) -> tuple[Tool, ...]:
-    """Create the minimal tool set for one workspace."""
+    """Create the standard tool set for one workspace."""
 
+    files = workspace_files or WorkspaceFiles(workspace)
     commands = WorkspaceCommand(workspace)
     search = web_search or DdgrWebSearch()
     fetcher = web_fetch or SafeWebFetcher()
     return (
+        Tool(
+            "read_file",
+            (
+                "Reads a bounded line range from one UTF-8 text file inside the workspace. "
+                "Output uses LF line endings and includes the returned and total line ranges. "
+                "Use start_line and max_lines to continue through large files."
+            ),
+            files.read_file,
+            _object_schema(
+                {
+                    "path": {"type": "string", "minLength": 1, "description": "Workspace-relative file path."},
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1,
+                        "description": "One-based first line to return.",
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1_000,
+                        "default": 200,
+                        "description": "Maximum number of lines to return.",
+                    },
+                },
+                ["path"],
+            ),
+        ),
+        Tool(
+            "glob",
+            (
+                "Lists regular files inside the workspace whose relative paths match a case-sensitive glob. "
+                "Use forward slashes; *, ?, and character sets match one path segment, while ** matches "
+                "zero or more directories. Results are sorted and bounded."
+            ),
+            files.glob,
+            _object_schema(
+                {
+                    "pattern": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Workspace-relative glob pattern such as **/*.py.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "default": ".",
+                        "description": "Workspace-relative directory to search.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1_000,
+                        "default": 200,
+                        "description": "Maximum number of file paths to return.",
+                    },
+                },
+                ["pattern"],
+            ),
+        ),
+        Tool(
+            "grep",
+            (
+                "Searches UTF-8 workspace files line by line and returns path:line:text matches. "
+                "Search is literal and case-sensitive by default; enable regex only when needed. "
+                "Use the glob argument to restrict file paths. Binary, oversized, and non-UTF-8 files are skipped."
+            ),
+            files.grep,
+            _object_schema(
+                {
+                    "pattern": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Literal text or regular expression to find.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "default": ".",
+                        "description": "Workspace-relative file or directory to search.",
+                    },
+                    "glob": {
+                        "type": "string",
+                        "minLength": 1,
+                        "default": "**/*",
+                        "description": "Case-sensitive glob applied below path.",
+                    },
+                    "regex": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Interpret pattern as a Python regular expression.",
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Match letter case.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1_000,
+                        "default": 200,
+                        "description": "Maximum number of matching lines to return.",
+                    },
+                },
+                ["pattern"],
+            ),
+        ),
         Tool(
             "web_search",
             (
@@ -100,43 +211,67 @@ def _build_tools(
             retryable=True,
         ),
         Tool(
+            "write_file",
+            (
+                "Creates a UTF-8 text file inside the workspace. Existing files are rejected unless "
+                "overwrite=true. Use edit_file for targeted changes; before replacing a complete existing "
+                "file, read its current content and preserve everything that should remain."
+            ),
+            files.write_file,
+            _object_schema(
+                {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Workspace-relative destination file.",
+                    },
+                    "content": {"type": "string", "description": "Complete UTF-8 file content."},
+                    "overwrite": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Explicitly replace an existing regular file.",
+                    },
+                },
+                ["path", "content"],
+            ),
+            requires_confirmation=True,
+            read_only=False,
+        ),
+        Tool(
+            "edit_file",
+            (
+                "Edits an existing UTF-8 workspace file by replacing one exact text block. old_text must "
+                "occur exactly once; zero or multiple matches fail without changes. Include enough surrounding "
+                "context to make the match unique. Use an empty new_text to delete the matched block."
+            ),
+            files.edit_file,
+            _object_schema(
+                {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Workspace-relative existing file.",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Exact, uniquely matching text to replace.",
+                    },
+                    "new_text": {"type": "string", "description": "Replacement text; may be empty."},
+                },
+                ["path", "old_text", "new_text"],
+            ),
+            requires_confirmation=True,
+            read_only=False,
+        ),
+        Tool(
             "run_command",
             (
-                "Executes a shell command from the workspace directory: Bash on Unix-like systems "
-                "or PowerShell on Windows.\n\n"
-                "This is your PRIMARY tool for all local operations. Use it for:\n\n"
-                "**Reading files**\n"
-                "- Unix: cat path/to/file, head -n 50 path/to/file, tail -n 20 path/to/file\n"
-                "- PowerShell: Get-Content path\\to\\file, Get-Content path\\to\\file -Head 50\n\n"
-                "**Listing directories**\n"
-                "- Unix: ls -la, find . -name '*.py', tree\n"
-                "- PowerShell: Get-ChildItem, Get-ChildItem -Recurse -Filter *.py\n\n"
-                "**Writing files**\n"
-                "- Unix: cat > file.txt << 'EOF' ... EOF (heredoc), echo '...' > file.txt\n"
-                "- PowerShell: @' ... '@ | Out-File -FilePath file.txt -Encoding UTF8\n\n"
-                "**Deleting files/directories**\n"
-                "- Unix: rm file.txt, rm -r folder/\n"
-                "- PowerShell: Remove-Item file.txt, Remove-Item -Recurse folder\\\n\n"
-                "**Moving/renaming**\n"
-                "- Unix: mv source dest\n"
-                "- PowerShell: Move-Item source dest\n\n"
-                "**Searching file content**\n"
-                "- Unix: grep -r 'pattern' ., grep -n 'pattern' file.py\n"
-                "- PowerShell: Select-String -Pattern 'pattern' -Path file.py\n\n"
-                "**Arithmetic and computation**\n"
-                "- Use python -c 'print(...)' for calculations, data processing, or quick scripts.\n\n"
-                "**Running tests, builds, and scripts**\n"
-                "- pytest: python -m pytest -q\n"
-                "- Python scripts: python path/to/script.py\n"
-                "- Any other development tool in the workspace.\n\n"
-                "**Cross-platform awareness**\n"
-                "- Always use the platform-appropriate syntax listed above.\n"
-                "- On Windows, PowerShell commands run with -NoLogo -NoProfile -NonInteractive.\n"
-                "- Output is limited to 20,000 characters and timed out after timeout_seconds (max 120).\n"
-                "- Sensitive environment variables (API_KEY, PASSWORD, SECRET, TOKEN) are "
-                "automatically filtered from the command's environment.\n\n"
-                "**Before running a destructive command** (rm, Remove-Item, mv, Move-Item, writes "
-                "that overwrite), explain what you are about to do and why it is necessary."
+                "Executes a general Bash command on Unix-like systems or PowerShell command on Windows from "
+                "the workspace. Use read_file, glob, grep, write_file, or edit_file for ordinary file work. "
+                "Use this fallback for tests, builds, Git, scripts, computation, and operations without a "
+                "dedicated tool. Commands may modify files or access paths outside the workspace and therefore "
+                "require approval. Output is limited to 20,000 characters; timeout_seconds is at most 120."
             ),
             commands.run,
             _object_schema(
@@ -155,8 +290,8 @@ def _build_tools(
                 },
                 ["command"],
             ),
-            requires_confirmation=False,
-            read_only=True,
+            requires_confirmation=True,
+            read_only=False,
         ),
     )
 
@@ -166,7 +301,15 @@ def build_tool_registry(
     *,
     web_search: DdgrWebSearch | None = None,
     web_fetch: SafeWebFetcher | None = None,
+    workspace_files: WorkspaceFiles | None = None,
 ) -> ToolRegistry:
-    """Build the standard registry with the 3-tool set."""
+    """Build the standard workspace tool registry."""
 
-    return ToolRegistry(_build_tools(workspace, web_search=web_search, web_fetch=web_fetch))
+    return ToolRegistry(
+        _build_tools(
+            workspace,
+            web_search=web_search,
+            web_fetch=web_fetch,
+            workspace_files=workspace_files,
+        )
+    )
