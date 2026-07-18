@@ -8,7 +8,9 @@ from textual.widgets import Label, Rule
 
 from mini_agent.runtime.conversation.user_input import OTHER_OPTION_LABEL, parse_user_input_questions
 from mini_agent.runtime.core.contracts import QuestionOption, UserQuestion
+from mini_agent.tui.history import HistoryScreen
 from mini_agent.tui.view import RUNNING_STATUS_WORDS, TerminalView
+from mini_agent.tui.widgets import TerminalInput
 
 
 def questions() -> tuple[UserQuestion, ...]:
@@ -75,6 +77,36 @@ def test_textual_view_reserves_bottom_input_and_scrollable_transcript() -> None:
 
     asyncio.run(scenario())
 
+
+
+def test_history_screen_is_read_only_scrollable_and_restores_main_view() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        messages = [
+            {"role": "user" if index % 2 == 0 else "assistant", "content": f"message {index}"}
+            for index in range(60)
+        ]
+        async with view.run_test(size=(60, 12)) as pilot:
+            view.input.value = "preserved draft"
+            view.show_history("session-1", messages)
+            await pilot.pause()
+            await pilot.pause()
+
+            screen = view.screen
+            assert isinstance(screen, HistoryScreen)
+            assert list(screen.query(TerminalInput)) == []
+            assert screen.history_log.scroll_y == screen.history_log.max_scroll_y
+
+            await pilot.press("pageup")
+            await pilot.pause()
+            assert screen.history_log.scroll_y < screen.history_log.max_scroll_y
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(view.screen, HistoryScreen)
+            assert view.input.value == "preserved draft"
+
+    asyncio.run(scenario())
 
 def test_stop_finishes_running_textual_app() -> None:
     async def scenario() -> None:
@@ -490,19 +522,50 @@ def test_inline_custom_input_keeps_arrow_keys_inside_editor() -> None:
     asyncio.run(scenario())
 
 
-def test_main_input_still_submits_while_questionnaire_is_active() -> None:
+def test_main_input_is_hidden_while_questionnaire_is_active() -> None:
     async def scenario() -> None:
         view = TerminalView()
         async with view.run_test() as pilot:
+            view.input.value = "draft"
             view.begin_questionnaire(questions()[:1], lambda _answers: None)
             await pilot.pause()
-            view.input.value = "queued follow-up"
-            view.input.focus()
 
-            await pilot.press("enter")
+            assert view.input.display is False
+            assert view.input.value == "draft"
+            assert view.focused is view.question_menu
+            assert view.submissions.empty()
 
-            assert await asyncio.wait_for(view.submissions.get(), 1) == "queued follow-up"
-            assert view.questionnaire_active is True
+    asyncio.run(scenario())
+
+
+def test_questionnaire_other_enter_submits_an_explicit_skip() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        completed: list[dict[str, list[str]]] = []
+        async with view.run_test() as pilot:
+            view.begin_questionnaire(questions()[:1], completed.append)
+            await pilot.pause()
+
+            await pilot.press("up", "enter")
+
+            assert completed == [{"storage": []}]
+            assert view.input.display is True
+
+    asyncio.run(scenario())
+
+
+def test_questionnaire_other_mouse_click_submits_an_explicit_skip() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        completed: list[dict[str, list[str]]] = []
+        async with view.run_test() as pilot:
+            view.begin_questionnaire(questions()[:1], completed.append)
+            await pilot.pause()
+
+            await pilot.click(view.question_menu.rows[-1])
+            await pilot.pause()
+
+            assert completed == [{"storage": []}]
 
     asyncio.run(scenario())
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from concurrent.futures import Future
 
 from mini_agent.runtime.core.contracts import InterruptDecision, InterruptRequest
@@ -97,10 +98,11 @@ class InteractiveApproval:
         elif request.kind == "question":
             self._view.begin_questionnaire(request.questions, self._complete_questionnaire)
         elif request.kind == "plan":
-            self._approval.render_request(request)
+
             self._view.begin_review(
                 "PLAN REVIEW",
                 request.message,
+                self._plan_details(request),
                 (
                     ChoiceItem("implement", "Implement", "Implement in the current session."),
                     ChoiceItem(
@@ -113,10 +115,11 @@ class InteractiveApproval:
                 self._complete_review,
             )
         else:
-            self._approval.render_request(request)
+
             self._view.begin_review(
                 "TOOL REVIEW",
                 request.message,
+                self._tool_details(request),
                 (
                     ChoiceItem("continue", "Continue", "Run this tool call."),
                     ChoiceItem("cancel", "Cancel", "Stop the current run."),
@@ -125,6 +128,24 @@ class InteractiveApproval:
                 self._complete_review,
             )
         self.changed.set()
+
+    @staticmethod
+    def _plan_details(request: InterruptRequest) -> str:
+        plan = request.data.get("plan")
+        if isinstance(plan, str):
+            return plan
+        goal = request.data.get("goal", "")
+        steps = request.data.get("steps", ())
+        rendered = [f"**Goal:** {goal}"] if goal else []
+        if isinstance(steps, list):
+            rendered.extend(f"{index}. {step}" for index, step in enumerate(steps, start=1))
+        return "\n\n".join(rendered)
+
+    @staticmethod
+    def _tool_details(request: InterruptRequest) -> str:
+        name = str(request.data.get("tool", "unknown"))
+        arguments = json.dumps(request.data.get("arguments", {}), ensure_ascii=False, indent=2, default=str)
+        return f"**Tool:** {name}\n\n    " + arguments.replace("\n", "\n    ")
 
     def _complete_questionnaire(self, answers: dict[str, list[str]]) -> None:
         if self._pending is None or self._pending[0].kind != "question":

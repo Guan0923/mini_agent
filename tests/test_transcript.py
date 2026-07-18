@@ -64,8 +64,11 @@ def test_stream_render_coroutine_is_created_only_when_worker_starts() -> None:
             scheduled: list[object] = []
             body.run_worker = lambda work, **_kwargs: scheduled.append(work)  # type: ignore[method-assign]
 
-            body.set_markdown("updated")
+            for index in range(100):
+                body.set_markdown(f"updated {index}")
+            await pilot.pause()
 
+            assert body.markdown_text == "updated 99"
             assert len(scheduled) == 1
             assert callable(scheduled[0])
             assert not inspect.isawaitable(scheduled[0])
@@ -257,7 +260,7 @@ def test_transcript_limit_only_removes_completed_top_level_nodes() -> None:
             view.handle_runtime_event(RuntimeEvent("response_delta", "a" * 50, {"run_id": "run-1"}))
             await pilot.pause()
 
-            assert [node.title_text for node in view._top_level_nodes] == ["ASSISTANT"]
+            assert [node.title_text for node in view._top_level_nodes] == ["USER", "ASSISTANT"]
             assert len(view.transcript_text) > 30
 
             view.handle_runtime_event(RuntimeEvent("run_finished", data={"run_id": "run-1"}))
@@ -267,6 +270,44 @@ def test_transcript_limit_only_removes_completed_top_level_nodes() -> None:
 
     asyncio.run(scenario())
 
+
+
+def test_run_finished_completes_assistant_without_rendering_a_child() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(80, 20)) as pilot:
+            view.begin_conversation("finish")
+            view.handle_runtime_event(RuntimeEvent("run_started", data={"run_id": "run-1"}))
+            view.handle_runtime_event(RuntimeEvent("thinking_start", data={"run_id": "run-1"}))
+            view.handle_runtime_event(
+                RuntimeEvent("run_finished", "completed", {"run_id": "run-1"})
+            )
+            await pilot.pause()
+
+            labels = [node.title_text for node in view.transcript_nodes]
+            assert "run_finished" not in labels
+            assert view._assistant_by_run["run-1"] in view._completed_top_levels
+            assert all(not node.activity for node in view.transcript_nodes)
+
+    asyncio.run(scenario())
+
+
+def test_transcript_node_limit_trims_only_complete_conversation_groups() -> None:
+    async def scenario() -> None:
+        view = TerminalView(transcript_node_limit=3)
+        async with view.run_test(size=(80, 20)) as pilot:
+            view.begin_conversation("first")
+            view.handle_runtime_event(RuntimeEvent("run_started", data={"run_id": "run-1"}))
+            view.handle_runtime_event(RuntimeEvent("response", "first answer", {"run_id": "run-1"}))
+            view.handle_runtime_event(RuntimeEvent("run_finished", "completed", {"run_id": "run-1"}))
+            view.begin_conversation("second")
+            await pilot.pause()
+
+            assert [node.title_text for node in view._top_level_nodes] == ["USER", "ASSISTANT"]
+            assert "second" in view.transcript_text
+            assert "first answer" not in view.transcript_text
+
+    asyncio.run(scenario())
 
 def test_system_message_before_view_mount_is_queued_until_transcript_mounts() -> None:
     async def scenario() -> None:
@@ -284,6 +325,21 @@ def test_system_message_before_view_mount_is_queued_until_transcript_mounts() ->
 
     asyncio.run(scenario())
 
+
+
+def test_same_frame_system_writes_share_one_transcript_node() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(80, 20)) as pilot:
+            view.write_system("first")
+            view.write_system("second")
+            await pilot.pause()
+            await pilot.pause()
+
+            assert [node.title_text for node in view._top_level_nodes] == ["SYSTEM"]
+            assert view.markdown_bodies[0].markdown_text == "first\nsecond\n"
+
+    asyncio.run(scenario())
 
 def test_background_runtime_events_wait_for_assistant_mount_before_adding_children() -> None:
     async def scenario() -> None:

@@ -91,7 +91,8 @@ class ChoicePromptMixin:
     def begin_review(
         self,
         title: str,
-        prompt: str,
+        summary: str,
+        details: str,
         choices: tuple[ChoiceItem, ...],
         on_complete: Callable[[str, str | None], None],
     ) -> None:
@@ -102,8 +103,10 @@ class ChoicePromptMixin:
             self._ensure_no_choice_prompt()
             self._choice_kind = "review"
             self._review_callback = on_complete
-            self.question_header.update(f"{title}\n{prompt}")
+            self.question_header.update(f"{title}\n{summary}")
             self.question_header.display = True
+            self.review_details.update(details)
+            self.review_details.display = bool(details)
             lists = [InlineChoiceList(choices)]
             self._mount_choice_lists(lists)
             self._show_choice_list(0)
@@ -129,6 +132,7 @@ class ChoicePromptMixin:
         for choice_list in lists:
             choice_list.display = False
         self._hide_completions()
+        self.input.display = False
         self.screen.mount(*lists, before=self.completion_menu)
 
     def _handle_choice_selected(self, event: ListView.Selected) -> None:
@@ -136,7 +140,10 @@ class ChoicePromptMixin:
         if not isinstance(choice_list, InlineChoiceList) or choice_list not in self._choice_lists:
             return
         row = event.item
-        if not isinstance(row, ChoiceRow) or row.choice.custom:
+        if not isinstance(row, ChoiceRow):
+            return
+        if row.choice.custom and self._choice_kind == "review":
+            row.begin_edit()
             return
         self._accept_choice(choice_list, row, None)
 
@@ -194,7 +201,8 @@ class ChoicePromptMixin:
         question = self._questions[choice_list.question_index]
         if self._question_selections.get(question.id) != "other":
             return ""
-        return self._question_answers.get(question.id, [""])[0]
+        answers = self._question_answers.get(question.id, [])
+        return answers[0] if answers else ""
 
     def _accept_choice(
         self,
@@ -214,8 +222,11 @@ class ChoicePromptMixin:
             return
         question_index = choice_list.question_index
         question = self._questions[question_index]
-        answer = custom_value if custom_value is not None else row.choice.label
-        self._question_answers[question.id] = [answer]
+        if row.choice.custom:
+            answers = [custom_value] if custom_value is not None else []
+        else:
+            answers = [row.choice.label]
+        self._question_answers[question.id] = answers
         self._question_selections[question.id] = row.choice.id
         for candidate in choice_list.rows:
             candidate.set_class(candidate is row, "-selected-answer")
@@ -248,4 +259,6 @@ class ChoicePromptMixin:
         self._questionnaire_callback = None
         self._review_callback = None
         self.question_header.display = False
+        self.review_details.display = False
+        self.input.display = True
         self.input.focus()

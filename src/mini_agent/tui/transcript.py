@@ -6,7 +6,6 @@ from collections.abc import Iterable
 from functools import partial
 
 from textual import events
-from textual.await_complete import AwaitComplete
 from textual.containers import VerticalScroll
 from textual.timer import Timer
 from textual.widgets import Collapsible, Markdown, Static
@@ -21,43 +20,33 @@ class MarkdownBody(Markdown):
     def __init__(self, markdown: str = "", **kwargs: object) -> None:
         self.markdown_text = markdown
         self._revision = 0
+        self._render_scheduled = False
         super().__init__(markdown, **kwargs)
 
     def set_markdown(self, markdown: str) -> None:
-        """Replace content while keeping only the latest asynchronous render."""
+        """Cache the latest source and render it at most once per refresh."""
+
         self.markdown_text = markdown
         self._revision += 1
-        if self.is_mounted:
-            self.run_worker(partial(self._render_stream, self._revision, markdown), exclusive=True)
-        else:
+        if not self.is_mounted:
             self._initial_markdown = markdown
+            return
+        if not self._render_scheduled:
+            self._render_scheduled = True
+            self.call_after_refresh(self._flush_render)
 
     def append_markdown(self, delta: str) -> None:
         self.set_markdown(f"{self.markdown_text}{delta}")
 
-    def update(self, markdown: str) -> AwaitComplete:
-        transcript = next(
-            (ancestor for ancestor in self.ancestors if isinstance(ancestor, TranscriptScroll)),
-            None,
+    def _flush_render(self) -> None:
+        self._render_scheduled = False
+        if not self.is_mounted:
+            self._initial_markdown = self.markdown_text
+            return
+        self.run_worker(
+            partial(self._render_stream, self._revision, self.markdown_text),
+            exclusive=True,
         )
-        completed = super().update(markdown)
-
-        async def restore_scroll() -> None:
-            await completed
-            if transcript is None:
-                return
-            if getattr(self.app, "follow_tail", True):
-                settle = getattr(self.app, "_settle_follow_latest", None)
-                if settle is not None:
-                    self.call_after_refresh(settle)
-                else:
-                    self.call_after_refresh(transcript.scroll_end, animate=False)
-            else:
-                target = getattr(self.app, "_paused_scroll_y", transcript.scroll_y)
-                self.call_after_refresh(transcript.scroll_to, y=target, animate=False)
-
-        return AwaitComplete(restore_scroll())
-
     async def _render_stream(self, revision: int, markdown: str) -> None:
         if revision != self._revision:
             return

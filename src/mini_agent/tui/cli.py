@@ -31,6 +31,7 @@ from .completion import SlashCommandCompleter
 from .interactive_approval import InteractiveApproval as _InteractiveApproval
 from .presenter import TerminalPresenter
 from .view import TerminalView
+from .widgets import ChoiceItem
 
 HELP = render_help()
 
@@ -127,6 +128,7 @@ class TerminalApp:
         self._write("Mini-Agent TUI — type /help for commands, /quit to exit.")
         self._print_active_session()
         pending_messages: Queue[str] = Queue()
+        permission_decisions: asyncio.Queue[str] = asyncio.Queue()
         approval = _InteractiveApproval(self._approval, loop, view)
         active_run: asyncio.Task[RunState | None] | None = None
         permission_pending = False
@@ -158,6 +160,9 @@ class TerminalApp:
                 submission = asyncio.create_task(view.submissions.get())
                 interrupt_request = asyncio.create_task(view.interrupts.get())
                 approval_change = asyncio.create_task(approval.changed.wait())
+                permission_change = (
+                    asyncio.create_task(permission_decisions.get()) if permission_pending else None
+                )
                 waiters: set[asyncio.Task[object]] = {  # type: ignore[arg-type]
                     submission,
                     interrupt_request,
@@ -166,6 +171,8 @@ class TerminalApp:
                 }
                 if active_run is not None:
                     waiters.add(active_run)  # type: ignore[arg-type]
+                if permission_change is not None:
+                    waiters.add(permission_change)  # type: ignore[arg-type]
                 done, _pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
 
                 if view_task in done:
@@ -179,6 +186,8 @@ class TerminalApp:
                         await self._cancel_task(interrupt_request)
                     if approval_change not in done:
                         await self._cancel_task(approval_change)
+                    if permission_change is not None and permission_change not in done:
+                        await self._cancel_task(permission_change)
                     break
 
                 exit_requested = False
@@ -189,6 +198,19 @@ class TerminalApp:
                     approval.changed.clear()
                     if (cancellation_pending or exit_after_run) and approval.pending:
                         approval.cancel_pending()
+
+                if permission_change is not None and permission_change in done:
+                    selected = permission_change.result()
+                    permission_pending = False
+                    if selected != "cancel":
+                        mode = self._approval.parse_permission(selected)
+                        if mode is None:
+                            raise ValueError(f"Invalid permission choice: {selected}")
+                        self._approval.set_permission(mode, announce=False)
+                        if deferred_task is not None:
+                            self._write_user_message(deferred_task)
+                            active_run = launch(deferred_task)
+                    deferred_task = None
 
                 if submission in done:
                     submitted = submission.result()
@@ -220,16 +242,7 @@ class TerminalApp:
                         elif exit_after_run:
                             pass
                         elif permission_pending:
-                            selected = self._approval.parse_permission(task)
-                            if selected is None:
-                                self._write("Choose 1 or 2.")
-                            else:
-                                self._approval.set_permission(selected)
-                                permission_pending = False
-                                if deferred_task is not None:
-                                    self._write_user_message(deferred_task)
-                                    active_run = launch(deferred_task)
-                                    deferred_task = None
+                            pass
                         elif active_run is not None:
                             if task:
                                 if any(kind == "command" for kind, _value, _argument in self._split_input(task)):
@@ -245,7 +258,26 @@ class TerminalApp:
                             if request_permission:
                                 permission_pending = True
                                 deferred_task = next_task
-                                self._approval.render_permission()
+                                current = self._approval.permission_mode.replace("_", " ").title()
+                                view.begin_review(
+                                    "PERMISSION",
+                                    f"Current: {current}",
+                                    "Choose how tools that require confirmation are handled.",
+                                    (
+                                        ChoiceItem(
+                                            "approval_for_me",
+                                            "Approval for me",
+                                            "Ask before tools that require confirmation.",
+                                        ),
+                                        ChoiceItem(
+                                            "full_access",
+                                            "Full access",
+                                            "Automatically approve tool calls.",
+                                        ),
+                                        ChoiceItem("cancel", "Cancel"),
+                                    ),
+                                    lambda choice, _supplement: permission_decisions.put_nowait(choice),
+                                )
                             elif next_task is not None:
                                 self._write_user_message(next_task)
                                 active_run = launch(next_task)
@@ -280,6 +312,8 @@ class TerminalApp:
                     await self._cancel_task(interrupt_request)
                 if approval_change not in done:
                     await self._cancel_task(approval_change)
+                if permission_change is not None and permission_change not in done:
+                    await self._cancel_task(permission_change)
                 if exit_requested:
                     break
         finally:
@@ -321,7 +355,12 @@ class TerminalApp:
         if not task:
             return True, None
         next_task: str | None = None
-        for kind, value, argument in self._split_input(task):
+        parts = self._split_input(task)
+        if any(kind == "command" and value == "history" for kind, value, _argument in parts):
+            if task.strip() != "/history":
+                self._write("Usage: /history")
+                return True, None
+        for kind, value, argument in parts:
             if kind == "task":
                 next_task = value
                 continue
@@ -334,7 +373,12 @@ class TerminalApp:
             return True, None, False
         next_task: str | None = None
         permission_requested = False
-        for kind, value, argument in self._split_input(task):
+        parts = self._split_input(task)
+        if any(kind == "command" and value == "history" for kind, value, _argument in parts):
+            if task.strip() != "/history":
+                self._write("Usage: /history")
+                return True, None, False
+        for kind, value, argument in parts:
             if kind == "task":
                 next_task = value
                 continue
@@ -365,7 +409,7 @@ class TerminalApp:
             status = approval.status
             interrupt_enabled = True
         elif permission_pending:
-            status = "PERMISSION | 1 Approval for me | 2 Full access"
+            status = "PERMISSION | Select mode"
             interrupt_enabled = False
         elif running:
             status = f"{mode} | RUNNING"
@@ -436,7 +480,12 @@ class TerminalApp:
     def _handle(self, task: str) -> bool:
         if not task:
             return True
-        for kind, value, argument in self._split_input(task):
+        parts = self._split_input(task)
+        if any(kind == "command" and value == "history" for kind, value, _argument in parts):
+            if task.strip() != "/history":
+                self._write("Usage: /history")
+                return True
+        for kind, value, argument in parts:
             if kind == "task":
                 self.run_task(value)
                 continue
@@ -624,30 +673,37 @@ class TerminalApp:
             self._write(f"LAST RUN {summary.last_run_id} {summary.last_run_status}")
 
     def _show_history(self) -> None:
+        view = getattr(self, "_view", None)
+        show_history = getattr(view, "show_history", None)
         if self.session_store is None:
-            self._write("Session storage is not configured.")
+            if callable(show_history):
+                show_history("No session storage", [])
+            else:
+                self._write("Session storage is not configured.")
             return
         if self.active_session is None:
-            self._write(
-                "No conversation history."
-                if self._conversation_service.pending_session_title is not None
-                else "No active session."
-            )
+            if callable(show_history):
+                pending = self._conversation_service.pending_session_title
+                show_history(f"Pending: {pending}" if pending else "No active session", [])
+            else:
+                self._write(
+                    "No conversation history."
+                    if self._conversation_service.pending_session_title is not None
+                    else "No active session."
+                )
             return
         messages = self._conversation_service.history()
+        if callable(show_history):
+            session = self.active_session
+            show_history(f"{session.session_id} — {session.title}", messages)
+            return
         if not messages:
             self._write("No conversation history.")
-            return
-        view = getattr(self, "_view", None)
-        load_history = getattr(view, "load_history", None)
-        if callable(load_history):
-            load_history(messages)
             return
         self._write(f"HISTORY {self.active_session.session_id}")
         for message in messages:
             role = message["role"].upper()
             self._write(f"{role}\n{message['content']}")
-
     def _print_active_session(self) -> None:
         if self.active_session is not None:
             self._write(f"SESSION {self.active_session.session_id} — {self.active_session.title}")

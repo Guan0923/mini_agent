@@ -119,7 +119,7 @@ def validate_user_input_answers(
     questions: tuple[UserQuestion, ...],
     answers: dict[str, list[str]] | None,
 ) -> dict[str, list[str]]:
-    """Require exactly one non-empty answer for every requested question."""
+    """Require one non-empty answer or an explicit skip for every question."""
 
     if not isinstance(answers, dict):
         raise ValueError("Question answers must be an object.")
@@ -129,7 +129,12 @@ def validate_user_input_answers(
     normalized: dict[str, list[str]] = {}
     for question in questions:
         values = answers[question.id]
-        if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], str) or not values[0].strip():
+        if not isinstance(values, list) or len(values) > 1:
+            raise ValueError(f"Question {question.id!r} requires one answer or an empty list.")
+        if not values:
+            normalized[question.id] = []
+            continue
+        if not isinstance(values[0], str) or not values[0].strip():
             raise ValueError(f"Question {question.id!r} requires exactly one non-empty answer.")
         normalized[question.id] = [values[0].strip()]
     return normalized

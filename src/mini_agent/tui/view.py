@@ -13,7 +13,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.timer import Timer
-from textual.widgets import Input, ListView, OptionList, Static, TextArea
+from textual.widgets import Input, ListView, Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.widgets.text_area import Selection
 
@@ -21,6 +21,7 @@ from mini_agent.runtime.core.events import RuntimeEvent
 
 from .choice_prompt import ChoicePromptMixin
 from .completion import CommandSuggestion, SlashCommandCompleter
+from .history import HistoryScreen
 from .transcript import MarkdownBody
 from .transcript_rendering import TranscriptRenderingMixin
 from .widgets import (
@@ -130,6 +131,14 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
         color: #d7dde5;
         background: #171c21;
     }
+    #review-details {
+        height: auto;
+        max-height: 12;
+        display: none;
+        padding: 0 1;
+        background: #171c21;
+        overflow-y: auto;
+    }
     .choice-list {
         height: auto;
         max-height: 8;
@@ -183,6 +192,7 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
         *,
         completer: SlashCommandCompleter | None = None,
         transcript_limit: int = 200_000,
+        transcript_node_limit: int = 250,
         status_random: random.Random | None = None,
     ) -> None:
         super().__init__()
@@ -191,7 +201,7 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
         self._pending_owner_callbacks: list[Callable[[], None]] = []
         self._completer = completer or SlashCommandCompleter()
         self._suggestions: list[CommandSuggestion] = []
-        self._init_transcript_state(transcript_limit)
+        self._init_transcript_state(transcript_limit, transcript_node_limit)
         self._writes_closed = False
         self._follow_tail = True
         self._paused_scroll_y = 0.0
@@ -207,6 +217,7 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
         self.status_line = Static(id="status")
         self.context_progress = ContextProgress()
         self.question_header = Static(id="choice-header")
+        self.review_details = Markdown(id="review-details")
         self.completion_menu = OptionList(id="completion-menu")
         self.input = TerminalInput(
             soft_wrap=True,
@@ -217,6 +228,7 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
     def compose(self) -> ComposeResult:
         yield self.transcript
         yield self.question_header
+        yield self.review_details
         yield self.completion_menu
         yield self.input
         yield Horizontal(self.status_line, self.context_progress, id="status-bar")
@@ -252,11 +264,15 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
     def begin_conversation(self, user_input: str) -> None:
         """Append a USER / ASSISTANT pair before a run is assigned its run id."""
         def begin() -> None:
+            self._flush_system_output()
             user = self._new_top_level("USER", completed=True)
             user_body = MarkdownBody(user_input)
             self._register_body(user_body, user)
             user.add_node(user_body)
             assistant = self._new_top_level("ASSISTANT")
+            group = (user, assistant)
+            self._top_level_groups[user] = group
+            self._top_level_groups[assistant] = group
             self._pending_assistants.append(assistant)
             self._streaming_system = None
             self._scroll_after_transcript_change()
@@ -270,20 +286,17 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
             return
 
         def write_system() -> None:
-            self.transcript.append_text(value)
-            if self._streaming_system is None:
-                system = self._new_top_level("SYSTEM")
-                body = MarkdownBody("")
-                self._register_body(body, system)
-                system.add_node(body)
-                self._streaming_system = (system, body)
-            self._streaming_system[1].append_markdown(value)
-            if end:
-                self._completed_top_levels.add(self._streaming_system[0])
-                self._streaming_system = None
-            self._scroll_after_transcript_change()
+            self._pending_system_chunks.append(value)
+            if not self._system_flush_scheduled:
+                self._system_flush_scheduled = True
+                self.call_after_refresh(self._flush_system_output)
 
         self._run_on_owner(write_system)
+
+    def show_history(self, session_label: str, messages: list[dict[str, str]]) -> None:
+        """Push a read-only history screen without replacing the live transcript."""
+
+        self._run_on_owner(lambda: self.push_screen(HistoryScreen(session_label, messages)))
 
     def load_history(self, messages: list[dict[str, str]]) -> None:
         """Replace the rendered transcript with persisted user and assistant messages."""
@@ -369,19 +382,30 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
             self._append_transcript("".join(chunks))
 
     def scroll_page_up(self) -> None:
+        if isinstance(self.screen, HistoryScreen):
+            self.screen.action_page_up()
+            return
+        if self.review_details.display:
+            self.review_details.scroll_page_up(animate=False)
+            return
         self._follow_tail = False
         self.transcript.scroll_page_up(animate=False)
         self._remember_paused_scroll()
         self._refresh_status()
 
     def scroll_page_down(self) -> None:
+        if isinstance(self.screen, HistoryScreen):
+            self.screen.action_page_down()
+            return
+        if self.review_details.display:
+            self.review_details.scroll_page_down(animate=False)
+            return
         self.transcript.scroll_page_down(animate=False)
         self.call_after_refresh(self._resume_follow_if_at_end)
 
     def follow_latest(self) -> None:
         self._follow_tail = True
         self._paused_scroll_y = 0.0
-        self.transcript.scroll_end(animate=False)
         self.call_after_refresh(self._settle_follow_latest)
         self._refresh_status()
 
@@ -389,7 +413,6 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
         if not self._follow_tail:
             return
         self.transcript.scroll_end(animate=False)
-        self.call_after_refresh(self.transcript.scroll_end, animate=False)
 
     def pause_following(self) -> None:
         self._follow_tail = False
@@ -426,6 +449,8 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
         self.submissions.put_nowait("/quit")
 
     def action_control_d(self) -> None:
+        if self._choice_kind is not None:
+            return
         if self.input.value:
             cursor = self.input.cursor_position
             self.input.value = self.input.value[:cursor] + self.input.value[cursor + 1 :]

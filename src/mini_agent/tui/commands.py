@@ -21,7 +21,7 @@ COMMAND_DEFINITIONS = (
     CommandDefinition("permission", "/permission", "Choose the in-memory tool approval mode."),
     CommandDefinition("sessions", "/sessions", "List saved sessions."),
     CommandDefinition("session", "/session", "Show the current session."),
-    CommandDefinition("history", "/history", "Show the current session conversation."),
+    CommandDefinition("history", "/history", "Open the read-only current-session history view."),
     CommandDefinition("new", "/new <title>", "Clear the terminal and prepare a new session."),
     CommandDefinition("clear", "/clear <title>", "Clear the terminal and prepare a new session."),
     CommandDefinition("use", "/use <session_id>", "Switch to a saved session."),

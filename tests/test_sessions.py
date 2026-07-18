@@ -270,9 +270,8 @@ def test_tui_executes_commands_before_one_merged_task(tmp_path: Path, capsys, mo
     monkeypatch.setattr(app, "run_task", tasks.append)
 
     assert app._handle("task before /history task after /agent") is True
-    output = capsys.readouterr().out
-    assert output.index("No active session.") < output.index("Agent mode enabled.")
-    assert tasks == ["task before task after"]
+    assert capsys.readouterr().out == "Usage: /history\n"
+    assert tasks == []
 
     for value in ("你好 /plan", "/plan 你好"):
         app.mode = "agent"

@@ -9,6 +9,7 @@ from mini_agent.runtime.conversation.user_input import (
     REQUEST_USER_INPUT_NAME,
     format_user_input_answers,
     parse_user_input_questions,
+    validate_user_input_answers,
 )
 from mini_agent.runtime.core.contracts import InterruptDecision, QuestionOption, UserQuestion
 from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
@@ -132,6 +133,25 @@ def test_user_input_answers_use_codex_style_tool_result_shape() -> None:
 
     assert json.loads(result) == {"answers": {"storage": {"answers": ["SQLite"]}}}
 
+
+
+def test_user_input_answers_allow_explicit_skips() -> None:
+    questions = parse_user_input_questions(question_arguments())
+
+    answers = validate_user_input_answers(questions, {"storage": []})
+
+    assert answers == {"storage": []}
+    assert json.loads(format_user_input_answers(answers)) == {
+        "answers": {"storage": {"answers": []}}
+    }
+
+
+@pytest.mark.parametrize("value", [[""], ["one", "two"]])
+def test_user_input_answers_reject_invalid_non_skip_values(value: list[str]) -> None:
+    questions = parse_user_input_questions(question_arguments())
+
+    with pytest.raises(ValueError):
+        validate_user_input_answers(questions, {"storage": value})
 
 class QuestionThenPlanPlanner:
     name = "question-then-plan"
