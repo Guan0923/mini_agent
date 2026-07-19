@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from functools import partial
 
 from textual import events
 from textual.containers import VerticalScroll
@@ -21,6 +20,7 @@ class MarkdownBody(Markdown):
         self.markdown_text = markdown
         self._revision = 0
         self._render_scheduled = False
+        self._render_running = False
         super().__init__(markdown, **kwargs)
 
     def set_markdown(self, markdown: str) -> None:
@@ -43,14 +43,23 @@ class MarkdownBody(Markdown):
         if not self.is_mounted:
             self._initial_markdown = self.markdown_text
             return
-        self.run_worker(
-            partial(self._render_stream, self._revision, self.markdown_text),
-            exclusive=True,
-        )
-    async def _render_stream(self, revision: int, markdown: str) -> None:
-        if revision != self._revision:
+        if self._render_running:
             return
-        await self.update(markdown)
+        self._render_running = True
+        self.run_worker(self._render_latest)
+
+    async def _render_latest(self) -> None:
+        """Serialize Markdown updates and catch up to the newest revision."""
+
+        try:
+            while self.is_mounted:
+                revision = self._revision
+                markdown = self.markdown_text
+                await self.update(markdown)
+                if revision == self._revision:
+                    return
+        finally:
+            self._render_running = False
 
 
 class StatusLeaf(Static):

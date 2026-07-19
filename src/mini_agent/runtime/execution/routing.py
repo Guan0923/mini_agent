@@ -8,7 +8,7 @@ from mini_agent.planning import PlannerCapabilities
 from ..core.context import AgentRuntime
 from ..core.events import RuntimeEvent
 from .outcomes import fail_run, planning_failure_data
-from .workflows import _publish_repairs
+from .workflows import _claim_model_turn, _publish_repairs
 
 
 class StrategyRouter:
@@ -24,6 +24,8 @@ class StrategyRouter:
         elif settings.strategy == "auto":
             if capabilities.strategy_selector is None:
                 fail_run(runtime, f"Planner {capabilities.name!r} does not support automatic strategy selection.")
+                return None
+            if not _claim_model_turn(runtime, "strategy"):
                 return None
             try:
                 selection = capabilities.strategy_selector.select_strategy(runtime)

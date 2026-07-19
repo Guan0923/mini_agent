@@ -206,7 +206,7 @@ class TranscriptRenderingMixin:
             if event.message:
                 self._add_assistant_node(assistant, event.kind, collapsed=False, markdown=event.message)
             self._completed_top_levels.add(assistant)
-        elif event.kind not in {"model_request", "model_response", "context_usage"} and event.message:
+        elif event.kind not in {"model_request", "model_response", "context_usage", "strategy"} and event.message:
             self._add_assistant_node(assistant, event.kind, collapsed=False, markdown=event.message)
         self._scroll_after_transcript_change()
 

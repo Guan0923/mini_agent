@@ -20,6 +20,17 @@ from mini_agent.runtime.core.context import AgentRuntime
 class RuleBasedPlanner:
     name = "rule"
 
+    def finalize(self, runtime: AgentRuntime, reason: str) -> AssistantMessage:
+        recent = ", ".join(f"{tool.name} ({tool.status})" for tool in runtime.run.actions[-3:])
+        detail = f" Recent tool calls: {recent}." if recent else ""
+        return AssistantMessage(
+            content=(
+                f"The run stopped because {reason} "
+                f"It completed {len(runtime.run.actions)} tool calls before stopping.{detail} "
+                "Continue the task in a new turn if more work is required."
+            )
+        )
+
     def decide(self, runtime: AgentRuntime) -> AssistantMessage:
         run = runtime.run
         last = runtime.state.messages[-1] if runtime.state.messages else UserMessage(content=run.task)

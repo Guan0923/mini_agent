@@ -16,6 +16,7 @@ from .base import (
     PlanCreator,
     Planner,
     PlanReplanner,
+    RunFinalizer,
     StrategySelector,
 )
 
@@ -144,6 +145,7 @@ class PlannerCapabilities:
     plan_replanner: PlanReplanner | None
     dynamic_replanner: DynamicReplanner | None
     output_repair_reporter: OutputRepairReporter | None
+    run_finalizer: RunFinalizer | None
 
     @classmethod
     def from_planner(cls, planner: object) -> PlannerCapabilities:
@@ -154,6 +156,7 @@ class PlannerCapabilities:
         dynamic_create = getattr(planner, "create_dynamic_plan", None)
         replan = getattr(planner, "replan", None)
         evaluate = getattr(planner, "evaluate_step", None)
+        finalize = getattr(planner, "finalize", None)
         return cls(
             name=name if isinstance(name, str) and name else planner.__class__.__name__,
             decision_planner=(planner if _uses_runtime(decide) else _LegacyDecision(planner))
@@ -177,4 +180,5 @@ class PlannerCapabilities:
             if callable(evaluate) and callable(replan)
             else None,
             output_repair_reporter=planner if isinstance(planner, OutputRepairReporter) else None,
+            run_finalizer=planner if callable(finalize) else None,
         )

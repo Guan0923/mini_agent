@@ -266,7 +266,7 @@ python run.py "create draft.txt with an outline"
 python run.py "replace the unique heading in README.md"
 
 # 调整运行限制
-python run.py --max-actions 12 --max-retries 2 --max-tool-recoveries 2 "计算 (18 + 6) * 4"
+python run.py --max-model-turns 8 --max-tool-calls 32 --max-retries 2 "计算 (18 + 6) * 4"
 
 # 强制动态重规划，并限制最多两次重规划
 python run.py --strategy dynamic_replan --max-replans 2 "整理并更新项目说明"

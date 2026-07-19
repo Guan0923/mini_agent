@@ -92,6 +92,8 @@ class LLMPlanner:
                     "- Respond normally to greetings, explanations, status questions, and exploratory discussion.\n"
                     "- When a concrete task benefits from repository context, inspect the workspace before making "
                     "implementation claims.\n"
+                    "- Keep exploration bounded to files needed for the user's request. Once the evidence is "
+                    "sufficient, stop calling tools and answer or submit the plan.\n"
                     "- If an important product or implementation decision cannot be discovered and materially "
                     "changes the plan, call request_user_input by itself. Continue after the answer.\n"
                     "- When the important unknowns are resolved and a complete implementation plan is genuinely "
@@ -127,6 +129,8 @@ class LLMPlanner:
                     "2. **Assess What You Know**: What information do you already have from the "
                     "conversation or workspace? What must you discover before you can act? Read "
                     "files or list directories to ground yourself — do not guess.\n\n"
+                    "Keep discovery bounded to necessary evidence; once you can complete the task or explain the "
+                    "result, stop exploring and provide the final response.\n\n"
                     "3. **Decompose the Task**: For multi-step work, break it into ordered "
                     "sub-tasks. Each sub-task should have a clear input, a single action, "
                     "and a verifiable output. Identify dependencies.\n\n"
@@ -181,6 +185,33 @@ class LLMPlanner:
             raise ModelOutputError(
                 "Model returned neither text nor a tool call.",
                 operation="decision",
+                invalid_output=self._message_preview(message),
+            )
+        return message
+
+    def finalize(self, runtime: AgentRuntime, reason: str) -> AssistantMessage:
+        system = SystemMessage(
+            content=(
+                "The run cannot make more planning or tool decisions because its execution budget is exhausted. "
+                "Produce the final user-facing response from the conversation and completed tool results. "
+                "Be concise and truthful: summarize completed work, identify anything unfinished, explain the "
+                "budget limit, and state how the user can continue. Do not claim the task succeeded and do not "
+                f"request or describe another tool call. Budget reason: {reason}" + self._UNTRUSTED_TOOL_RESULT_POLICY
+            )
+        )
+        prepared = self._request(
+            runtime,
+            self._messages_for_request(runtime, system, tools=[]),
+            operation="finalize",
+            output_mode="text",
+            allowed_tools=[],
+            stream=False,
+        )
+        message = prepared.message
+        if message.tool_messages or not (message.content and message.content.strip()):
+            raise ModelOutputError(
+                "Budget finalization must return non-empty text without tool calls.",
+                operation="finalize",
                 invalid_output=self._message_preview(message),
             )
         return message

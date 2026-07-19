@@ -183,6 +183,100 @@ def _truncate(value: str) -> str:
     return f"{value[:_MAX_TOOL_CONTEXT_CHARS]}… ({omitted} characters omitted)"
 
 
+def _budget_fallback(runtime: AgentRuntime, reason: str) -> str:
+    recent = ", ".join(f"{tool.name} ({tool.status})" for tool in runtime.run.actions[-3:])
+    details = f" Recent tool calls: {recent}." if recent else ""
+    return (
+        f"Execution budget exhausted: {reason} "
+        f"The run completed {len(runtime.run.actions)} tool calls before stopping.{details} "
+        "Continue the task in a new turn if more work is required."
+    )
+
+
+def _fail_for_budget(runtime: AgentRuntime, limit_type: str, reason: str) -> None:
+    settings = runtime.state.runner_settings
+    limit = settings.max_model_turns if limit_type == "model_turns" else settings.max_tool_calls
+    capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
+    answer = ""
+    source = "fallback"
+    finalization_error: str | None = None
+    if capabilities.run_finalizer is not None:
+        try:
+            message = capabilities.run_finalizer.finalize(runtime, reason)
+            if message.tool_messages or not (message.content and message.content.strip()):
+                raise PlanningError("Budget finalizer returned invalid output.")
+            runtime.state.messages.append(message)
+            runtime.run.history = runtime.state.messages
+            runtime.save()
+            answer = message.content.strip()
+            source = "planner"
+        except Exception as exc:
+            finalization_error = _truncate(str(exc) or exc.__class__.__name__)
+            _publish_repairs(runtime, capabilities)
+    if not answer:
+        answer = _budget_fallback(runtime, reason)
+    data: dict[str, object] = {
+        "limit_type": limit_type,
+        "limit": limit,
+        "model_turns": runtime.run.model_turns,
+        "tool_calls": len(runtime.run.actions),
+        "finalizer": source,
+    }
+    if finalization_error is not None:
+        data["finalization_error"] = finalization_error
+    fail_run(runtime, answer, **data)
+
+
+def _claim_model_turn(runtime: AgentRuntime, operation: str) -> bool:
+    limit = runtime.state.runner_settings.max_model_turns
+    if runtime.run.model_turns >= limit:
+        _fail_for_budget(
+            runtime,
+            "model_turns",
+            f"the maximum of {limit} model turns was reached before a final answer.",
+        )
+        return False
+    runtime.run.model_turns += 1
+    runtime.run.add_event(
+        "model",
+        "Logical model turn started",
+        operation=operation,
+        model_turn=runtime.run.model_turns,
+        limit=limit,
+    )
+    runtime.save()
+    return True
+
+
+def _tool_batch_fits(runtime: AgentRuntime, response: AssistantMessage) -> bool:
+    return len(runtime.run.actions) + len(response.tool_messages) <= runtime.state.runner_settings.max_tool_calls
+
+
+def _reject_over_budget_tools(runtime: AgentRuntime, response: AssistantMessage) -> None:
+    limit = runtime.state.runner_settings.max_tool_calls
+    remaining = max(0, limit - len(runtime.run.actions))
+    reason = (
+        f"the model requested {len(response.tool_messages)} tool calls, but only "
+        f"{remaining} of {limit} tool calls remained."
+    )
+    _start_assistant(runtime, response)
+    _fail_pending_tools(runtime, response, f"Not executed because {reason}")
+    _finish_assistant(runtime)
+    _fail_for_budget(runtime, "tool_calls", reason)
+
+
+def _ensure_tool_budget(runtime: AgentRuntime) -> bool:
+    limit = runtime.state.runner_settings.max_tool_calls
+    if len(runtime.run.actions) < limit:
+        return True
+    _fail_for_budget(
+        runtime,
+        "tool_calls",
+        f"the maximum of {limit} tool calls was reached before a final answer.",
+    )
+    return False
+
+
 def _plan_step_snapshots(plan: ExecutionPlan) -> list[dict[str, object]]:
     """Return presentation-independent state for every plan step."""
 
@@ -279,8 +373,12 @@ class ReactiveWorkflow:
         consecutive_failures = 0
         blocked: ToolMessage | None = None
 
-        while len(runtime.run.actions) < runtime.state.runner_settings.max_actions:
+        while True:
             if cancel_if_requested(runtime):
+                return runtime.run
+            if not _ensure_tool_budget(runtime):
+                return runtime.run
+            if not _claim_model_turn(runtime, "decision"):
                 return runtime.run
             close = _model_text_stream(runtime, stream_content=True)
             try:
@@ -310,8 +408,8 @@ class ReactiveWorkflow:
             if not response.tool_messages:
                 complete_run(runtime, response, response_streamed=streamed.content)
                 return runtime.run
-            if len(runtime.run.actions) + len(response.tool_messages) > runtime.state.runner_settings.max_actions:
-                fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions.")
+            if not _tool_batch_fits(runtime, response):
+                _reject_over_budget_tools(runtime, response)
                 return runtime.run
 
             _start_assistant(runtime, response)
@@ -392,9 +490,6 @@ class ReactiveWorkflow:
                 fail_run(runtime, stop_after_batch)
                 return runtime.run
 
-        fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions without a final answer.")
-        return runtime.run
-
 
 class PlanProposalWorkflow:
     def __init__(self) -> None:
@@ -407,8 +502,12 @@ class PlanProposalWorkflow:
             fail_run(runtime, f"Planner {capabilities.name!r} does not support plan proposals.")
             return None
         consecutive_failures = 0
-        while len(runtime.run.actions) < runtime.state.runner_settings.max_actions:
+        while True:
             if cancel_if_requested(runtime):
+                return None
+            if not _ensure_tool_budget(runtime):
+                return None
+            if not _claim_model_turn(runtime, "decision"):
                 return None
             close = _model_text_stream(runtime, stream_content=True)
             try:
@@ -436,6 +535,9 @@ class PlanProposalWorkflow:
                 _start_assistant(runtime, response)
                 _finish_assistant(runtime)
                 return PlanProposalResult(response, content_streamed=streamed.content)
+            if not _tool_batch_fits(runtime, response):
+                _reject_over_budget_tools(runtime, response)
+                return None
             if any(tool.name == REQUEST_USER_INPUT_NAME for tool in response.tool_messages):
                 answered = self._request_user_input(runtime, response)
                 if runtime.run.status != "running":
@@ -524,8 +626,6 @@ class PlanProposalWorkflow:
                 details = failed.content if failed is not None else "unknown error"
                 fail_run(runtime, f"Stopped: {details}")
                 return None
-        fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions without a final answer.")
-        return None
 
     @staticmethod
     def _request_plan_review(runtime: AgentRuntime, response: AssistantMessage) -> str | None:
@@ -676,6 +776,8 @@ class PlanWorkflow:
         if creator is None:
             fail_run(runtime, f"Planner {capabilities.name!r} does not support plan creation.")
             return None
+        if not _claim_model_turn(runtime, "plan"):
+            return None
         close = _model_text_stream(runtime)
         try:
             plan = (
@@ -693,9 +795,13 @@ class PlanWorkflow:
         return plan
 
     def _activate(self, runtime: AgentRuntime, plan: ExecutionPlan) -> bool:
-        remaining = runtime.state.runner_settings.max_actions - len(runtime.run.actions)
+        remaining = runtime.state.runner_settings.max_tool_calls - len(runtime.run.actions)
         if len(plan.steps) > remaining:
-            fail_run(runtime, f"Plan has {len(plan.steps)} steps but only {remaining} actions remain.")
+            _fail_for_budget(
+                runtime,
+                "tool_calls",
+                f"the plan requires {len(plan.steps)} tool calls, but only {remaining} remained.",
+            )
             return False
         runtime.run.plan = plan
         snapshots = _plan_step_snapshots(plan)
@@ -733,6 +839,8 @@ class PlanWorkflow:
             fail_run(runtime, "Planner cannot revise the active plan.")
             return False
         runtime.exchange.context = {"plan": previous, "reason": reason}
+        if not _claim_model_turn(runtime, "replan"):
+            return False
         try:
             replacement = replanner.replan(runtime)
         except PlanningError as exc:
@@ -835,8 +943,7 @@ class DynamicReplanWorkflow(PlanWorkflow):
                         ),
                     )
                 return runtime.run
-            if len(runtime.run.actions) >= runtime.state.runner_settings.max_actions:
-                fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_actions} actions.")
+            if not _ensure_tool_budget(runtime):
                 return runtime.run
 
             if consume_steering(runtime, phase="before_plan_step") is not None:
@@ -898,6 +1005,8 @@ class DynamicReplanWorkflow(PlanWorkflow):
                 step.result = outcome.output
                 _publish_plan_progress(runtime, plan, trigger="step_completed", changed_step_id=step.id)
                 runtime.exchange.context = {"plan": plan, "step": step, "result": outcome.output or ""}
+                if not _claim_model_turn(runtime, "evaluate"):
+                    return runtime.run
                 try:
                     evaluation = capabilities.dynamic_replanner.evaluate_step(runtime)
                 except PlanningError as exc:
@@ -937,6 +1046,8 @@ class DynamicReplanWorkflow(PlanWorkflow):
             fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_replans} replans: {reason}")
             return False
         runtime.exchange.context = {"plan": current, "reason": reason}
+        if not _claim_model_turn(runtime, "replan"):
+            return False
         try:
             replacement = capabilities.dynamic_replanner.replan(runtime)
         except PlanningError as exc:

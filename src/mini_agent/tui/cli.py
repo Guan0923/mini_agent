@@ -28,6 +28,8 @@ from mini_agent.runtime.core.contracts import CancellationHandler, InterruptHand
 from .approval import TerminalApproval
 from .commands import COMMAND_ARGUMENT_NAMES, COMMAND_PATTERN, render_help
 from .completion import SlashCommandCompleter
+from .diagnostics import TuiDiagnosticLogger
+from .exit_reporting import classify_tui_exit
 from .interactive_approval import InteractiveApproval as _InteractiveApproval
 from .presenter import TerminalPresenter
 from .view import TerminalView
@@ -47,6 +49,9 @@ class TerminalApp:
         self.last_state = None
         self.mode = "agent"
         self._view: TerminalView | None = None
+        self._last_tui_run_id: str | None = None
+        self._log_dir = log_dir
+        self._tui_diagnostics: TuiDiagnosticLogger | None = None
         if isinstance(runner, ConversationService):
             if session_store is not None or session_id is not None:
                 raise ValueError("Provide a composed conversation or legacy runner/session arguments, not both.")
@@ -73,6 +78,16 @@ class TerminalApp:
 
     def _handle_runtime_event(self, event: RuntimeEvent) -> None:
         view = self._view
+        diagnostics = getattr(self, "_tui_diagnostics", None)
+        if diagnostics is not None:
+            run_id = event.data.get("run_id")
+            if isinstance(run_id, str):
+                self._last_tui_run_id = run_id
+            session = self.active_session
+            diagnostics.set_context(
+                session_id=session.session_id if session is not None else None,
+                run_id=run_id if isinstance(run_id, str) else None,
+            )
         if view is None:
             return
         handle_event = getattr(view, "handle_runtime_event", None)
@@ -118,12 +133,24 @@ class TerminalApp:
 
         return self._conversation_service.conversation
 
-    def start(self) -> None:
-        asyncio.run(self._start_interactive())
+    def start(self) -> int:
+        return asyncio.run(self._start_interactive())
 
-    async def _start_interactive(self) -> None:
+    async def _start_interactive(self) -> int:
         loop = asyncio.get_running_loop()
-        view = TerminalView(loop, completer=SlashCommandCompleter())
+        log_dir = getattr(self, "_log_dir", None)
+        diagnostics = TuiDiagnosticLogger(log_dir) if log_dir is not None else None
+        self._tui_diagnostics = diagnostics
+        session = self.active_session
+        if diagnostics is not None:
+            diagnostics.set_context(session_id=session.session_id if session is not None else None)
+        view = TerminalView(
+            loop,
+            completer=SlashCommandCompleter(),
+            diagnostic_sink=diagnostics.record if diagnostics is not None else None,
+        )
+        if diagnostics is not None:
+            diagnostics.record("tui_started", {"mode": self.mode})
         self._view = view
         self._write("Mini-Agent TUI — type /help for commands, /quit to exit.")
         self._print_active_session()
@@ -136,6 +163,9 @@ class TerminalApp:
         cancel_requested = Event()
         cancellation_pending = False
         exit_after_run = False
+        normal_exit_requested = False
+        view_ended_early = False
+        view_task_error: BaseException | None = None
 
         def launch(task: str) -> asyncio.Task[RunState | None]:
             return asyncio.create_task(
@@ -176,10 +206,25 @@ class TerminalApp:
                 done, _pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
 
                 if view_task in done:
+                    view_ended_early = True
+                    if diagnostics is not None:
+                        diagnostics.record(
+                            "view_task_completed",
+                            {
+                                "cancelled": view_task.cancelled(),
+                                "cancelling": view_task.cancelling(),
+                                "app_exit_requested": getattr(view, "_exit", None),
+                                "message_pump_closed": getattr(view, "_closed", None),
+                                "message_pump_closing": getattr(view, "_closing", None),
+                                "textual_return_code": getattr(view, "return_code", None),
+                            },
+                        )
                     try:
                         view_task.result()
                     except (EOFError, KeyboardInterrupt):
-                        pass
+                        normal_exit_requested = True
+                    except BaseException as error:
+                        view_task_error = error
                     if submission not in done:
                         await self._cancel_task(submission)
                     if interrupt_request not in done:
@@ -315,13 +360,59 @@ class TerminalApp:
                 if permission_change is not None and permission_change not in done:
                     await self._cancel_task(permission_change)
                 if exit_requested:
+                    normal_exit_requested = True
                     break
         finally:
-            view.stop()
+            try:
+                view.stop()
+            except BaseException as error:
+                if view_task_error is None:
+                    view_task_error = error
             if not view_task.done():
-                await view_task
+                try:
+                    await view_task
+                except (EOFError, KeyboardInterrupt):
+                    normal_exit_requested = True
+                except BaseException as error:
+                    if view_task_error is None:
+                        view_task_error = error
+            report = classify_tui_exit(
+                view,
+                task_error=view_task_error,
+                view_ended_early=view_ended_early,
+                normal_exit_requested=normal_exit_requested,
+            )
+            if diagnostics is not None:
+                diagnostics.record(
+                    "tui_exit",
+                    {
+                        "reason": report.reason,
+                        "exit_code": report.exit_code,
+                        "textual_return_code": report.textual_return_code,
+                        **report.snapshot,
+                    },
+                    report.error,
+                )
+                diagnostics.close()
+            self._tui_diagnostics = None
             self._view = None
+        if report.exit_code:
+            if report.error is not None:
+                error_message = " ".join(str(report.error).splitlines())
+                summary = f"{type(report.error).__name__}: {error_message}"
+            else:
+                summary = f"Textual return code {report.textual_return_code}"
+            self._write(f"TUI ERROR {report.reason} — {summary}")
+            session = self.active_session
+            run_id = (
+                self.last_state.run_id if self.last_state is not None else getattr(self, "_last_tui_run_id", None)
+            )
+            if session is not None or run_id is not None:
+                self._write(f"TUI CONTEXT session={getattr(session, 'session_id', None)} run={run_id}")
+            if diagnostics is not None:
+                self._write(f"TUI DIAGNOSTICS {diagnostics.path.resolve()}")
         self._print_resume_hint()
+        return report.exit_code
 
     def run_task(
         self,
@@ -742,7 +833,15 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         help="Execution strategy override (default: auto).",
     )
-    parser.add_argument("--max-actions", type=int, default=8, help="Maximum model decisions per task (default: 8).")
+    parser.add_argument(
+        "--max-model-turns", type=int, default=8, help="Maximum logical model turns per task (default: 8)."
+    )
+    parser.add_argument("--max-tool-calls", type=int, help="Maximum accepted tool calls per task (default: 32).")
+    parser.add_argument(
+        "--max-actions",
+        type=int,
+        help="Deprecated alias for --max-tool-calls; cannot be combined with it.",
+    )
     parser.add_argument("--max-retries", type=int, default=1, help="Retries for a failed tool call (default: 1).")
     parser.add_argument(
         "--max-model-repairs",
@@ -766,16 +865,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-dir", default="logs", help="Directory for persistent JSONL run logs (default: logs).")
     parser.add_argument("--session-id", help="Resume an existing workspace session by ID.")
     args = parser.parse_args(argv)
+    if args.max_actions is not None and args.max_tool_calls is not None:
+        parser.error("--max-actions and --max-tool-calls cannot be used together.")
+    tool_budget: dict[str, int] = {}
+    if args.max_actions is not None:
+        tool_budget["max_actions"] = args.max_actions
+    elif args.max_tool_calls is not None:
+        tool_budget["max_tool_calls"] = args.max_tool_calls
     workspace = args.workspace
     try:
         settings = RunnerSettings(
-            max_actions=args.max_actions,
+            max_model_turns=args.max_model_turns,
             max_retries=args.max_retries,
             max_model_repairs=args.max_model_repairs,
             max_transport_retries=args.max_transport_retries,
             max_tool_recoveries=args.max_tool_recoveries,
             max_replans=args.max_replans,
             strategy=args.strategy,
+            **tool_budget,
             log_full_messages=log_full_messages_from_env(workspace / ".env"),
         )
         application = build_application(workspace, args.planner, settings)
@@ -788,5 +895,4 @@ def main(argv: list[str] | None = None) -> int:
     if args.task:
         state = app.run_task(" ".join(args.task))
         return 0 if state is not None and state.status == "completed" else 1
-    app.start()
-    return 0
+    return app.start()

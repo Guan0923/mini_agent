@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Callable
-from threading import get_ident
+from threading import Lock, get_ident
+from time import monotonic
+from traceback import format_exception, format_stack
 
-from textual import events, on
+from rich.console import RenderableType
+from textual import events, messages, on
 from textual._context import active_app
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -21,6 +24,8 @@ from mini_agent.runtime.core.events import RuntimeEvent
 
 from .choice_prompt import ChoicePromptMixin
 from .completion import CommandSuggestion, SlashCommandCompleter
+from .diagnostic_mixin import TuiDiagnosticMixin
+from .diagnostics import DiagnosticSink
 from .history import HistoryScreen
 from .transcript import MarkdownBody
 from .transcript_rendering import TranscriptRenderingMixin
@@ -88,7 +93,7 @@ __all__ = [
     "TranscriptTextArea",
 ]
 
-class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
+class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMixin, App[None]):
     """Own the Textual widgets and expose the small interface used by TerminalApp."""
 
     CSS = """
@@ -194,11 +199,16 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
         transcript_limit: int = 200_000,
         transcript_node_limit: int = 250,
         status_random: random.Random | None = None,
+        diagnostic_sink: DiagnosticSink | None = None,
     ) -> None:
         super().__init__()
         self._owner_loop = loop
         self._owner_ready = False
         self._pending_owner_callbacks: list[Callable[[], None]] = []
+        self._diagnostic_sink = diagnostic_sink
+        self._diagnostic_lock = Lock()
+        self._last_runtime_event: dict[str, object] = {}
+        self._stream_diagnostics: dict[tuple[str, str], tuple[int, int, float]] = {}
         self._completer = completer or SlashCommandCompleter()
         self._suggestions: list[CommandSuggestion] = []
         self._init_transcript_state(transcript_limit, transcript_node_limit)
@@ -238,6 +248,7 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
         self._owner_ready = True
         if self._pending_owner_callbacks:
             self.call_after_refresh(self._flush_pending_owner_callbacks)
+        self._diagnose("view_mounted", self.diagnostic_snapshot())
         if self._is_running_status(self._status):
             self._choose_running_status()
         self._render_status()
@@ -246,6 +257,24 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
             self._schedule_running_status()
         if self._pending_chunks:
             self._schedule_flush()
+
+    async def _process_messages_loop(self) -> None:
+        """Record CancelledError origins before Textual silently ends the app."""
+
+        try:
+            await super()._process_messages_loop()
+        except asyncio.CancelledError as error:
+            task = asyncio.current_task()
+            self._diagnose(
+                "message_loop_cancelled",
+                {
+                    "task_cancelling": task.cancelling() if task is not None else None,
+                    "traceback": "".join(format_exception(error)),
+                    **self.diagnostic_snapshot(),
+                },
+                error,
+            )
+            raise
 
     def _flush_pending_owner_callbacks(self) -> None:
         callbacks = self._pending_owner_callbacks
@@ -315,7 +344,28 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
 
     def handle_runtime_event(self, event: RuntimeEvent) -> None:
         """Route runtime events into their run's ordered ASSISTANT branch."""
-        self._run_on_owner(lambda: self._handle_runtime_event_now(event))
+        metadata = self._runtime_event_metadata(event)
+        is_stream_delta = event.kind in {"response_delta", "thinking_delta"}
+        self._update_stream_diagnostics(event)
+        if not is_stream_delta:
+            self._diagnose("runtime_event_queued", metadata)
+
+        def handle() -> None:
+            started = monotonic()
+            if not is_stream_delta:
+                self._diagnose("runtime_event_started", {**metadata, **self.diagnostic_snapshot()})
+            self._handle_runtime_event_now(event)
+            if not is_stream_delta:
+                self._diagnose(
+                    "runtime_event_finished",
+                    {
+                        **metadata,
+                        "elapsed_ms": round((monotonic() - started) * 1_000, 3),
+                        **self.diagnostic_snapshot(),
+                    },
+                )
+
+        self._run_on_owner(handle, diagnostic_name=f"runtime_event:{event.kind}", diagnostic_data=metadata)
 
     def write(self, text: str, end: str = "\n") -> None:
         value = f"{text}{end}"
@@ -367,6 +417,7 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
         if self._writes_closed:
             return
         self._writes_closed = True
+        self._diagnose("view_stop_requested", self.diagnostic_snapshot())
 
         def close() -> None:
             self.flush_now()
@@ -444,6 +495,49 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
 
     def action_follow_latest(self) -> None:
         self.follow_latest()
+
+    async def action_quit(self) -> None:
+        """Record Textual's built-in quit action before preserving its behavior."""
+
+        self._diagnose(
+            "quit_action",
+            {"focused_widget": type(self.focused).__name__ if self.focused is not None else None},
+        )
+        await super().action_quit()
+    async def _on_exit_app(self) -> None:
+        """Record dispatch of Textual's ExitApp message."""
+
+        self._diagnose("exit_app_message", {"stack": "".join(format_stack())})
+        await super()._on_exit_app()
+
+    async def _on_close_messages(self, message: messages.CloseMessages) -> None:
+        """Record direct message-pump closure requests."""
+
+        sender = getattr(message, "_sender", None)
+        self._diagnose(
+            "close_messages_message",
+            {"sender_type": type(sender).__name__ if sender is not None else None, "stack": "".join(format_stack())},
+        )
+        await super()._on_close_messages(message)
+
+
+    def exit(
+        self,
+        result: None = None,
+        return_code: int = 0,
+        message: RenderableType | None = None,
+    ) -> None:
+        """Record every direct App.exit call before closing the message loop."""
+
+        self._diagnose(
+            "view_exit_called",
+            {
+                "return_code": return_code,
+                "message_present": message is not None,
+                "stack": "".join(format_stack()),
+            },
+        )
+        super().exit(result, return_code, message)
 
     def action_control_c(self) -> None:
         self.submissions.put_nowait("/quit")
@@ -633,14 +727,35 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, App[None]):
             status = status.replace(" | RUNNING", f" | {self._running_status}", 1)
         self.status_line.update(f" {status}{suffix}")
 
-    def _run_on_owner(self, callback) -> None:
+    def _run_on_owner(
+        self,
+        callback: Callable[[], None],
+        *,
+        diagnostic_name: str = "owner_callback",
+        diagnostic_data: dict[str, object] | None = None,
+    ) -> None:
+        def guarded() -> None:
+            try:
+                callback()
+            except Exception as error:
+                self._diagnose(
+                    "owner_callback_failed",
+                    {
+                        "callback": diagnostic_name,
+                        **dict(diagnostic_data or {}),
+                        **self.diagnostic_snapshot(),
+                    },
+                    error,
+                )
+                raise
+
         if not self._owner_ready:
-            self._pending_owner_callbacks.append(callback)
+            self._pending_owner_callbacks.append(guarded)
             return
         try:
             if active_app.get() is self and self._thread_id == get_ident():
-                callback()
+                guarded()
                 return
         except LookupError:
             pass
-        self.call_later(callback)
+        self.call_later(guarded)

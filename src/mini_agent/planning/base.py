@@ -19,6 +19,11 @@ class Planner(NamedPlanner, Protocol):
 
 
 @runtime_checkable
+class RunFinalizer(NamedPlanner, Protocol):
+    def finalize(self, runtime: AgentRuntime, reason: str) -> AssistantMessage: ...
+
+
+@runtime_checkable
 class PlanCreator(NamedPlanner, Protocol):
     def create_plan(self, runtime: AgentRuntime) -> ExecutionPlan: ...
 

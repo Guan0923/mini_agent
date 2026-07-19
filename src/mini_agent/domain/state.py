@@ -190,6 +190,7 @@ class RunState:
     plan_history: list[ExecutionPlan] = field(default_factory=list)
     replan_count: int = 0
     final_answer: str | None = None
+    model_turns: int = 0
     status: RunStatus = "running"
     handoff: RunHandoff | None = None
 
@@ -233,6 +234,7 @@ class RunState:
             "plan_history": [self._plan_to_dict(plan) for plan in self.plan_history],
             "replan_count": self.replan_count,
             "final_answer": self.final_answer,
+            "model_turns": self.model_turns,
             "status": self.status,
             "handoff": asdict(self.handoff) if self.handoff else None,
         }
@@ -314,6 +316,7 @@ class RunState:
             plan_history=[plan(item) for item in data.get("plan_history", [])],
             replan_count=data.get("replan_count", 0),
             final_answer=data.get("final_answer"),
+            model_turns=int(data.get("model_turns", 0)),
             status=data.get("status", "running"),
             handoff=handoff,
         )

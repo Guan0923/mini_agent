@@ -23,7 +23,7 @@ from .config import RunnerSettings
 from .contracts import CancellationHandler, Confirm, EventHandler, InterruptHandler, SteeringHandler
 from .hooks import HookManager
 
-RuntimeOperation = Literal["decision", "strategy", "plan", "evaluate", "replan", "summarize"]
+RuntimeOperation = Literal["decision", "strategy", "plan", "evaluate", "replan", "summarize", "finalize"]
 OutputMode = Literal["text", "json", "tools"]
 RuntimeStatus = Literal["idle", "running"]
 
@@ -70,7 +70,8 @@ class RuntimeState:
                 "max_model_repairs": self.runner_settings.max_model_repairs,
                 "max_transport_retries": self.runner_settings.max_transport_retries,
                 "max_tool_recoveries": self.runner_settings.max_tool_recoveries,
-                "max_actions": self.runner_settings.max_actions,
+                "max_model_turns": self.runner_settings.max_model_turns,
+                "max_tool_calls": self.runner_settings.max_tool_calls,
                 "max_replans": self.runner_settings.max_replans,
                 "strategy": self.runner_settings.strategy,
                 "log_full_messages": self.runner_settings.log_full_messages,

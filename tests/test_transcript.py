@@ -75,6 +75,51 @@ def test_stream_render_coroutine_is_created_only_when_worker_starts() -> None:
 
     asyncio.run(scenario())
 
+def test_stream_render_serializes_in_flight_markdown_updates() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(80, 20)) as pilot:
+            view.begin_conversation("initial")
+            await pilot.pause()
+            body = view.markdown_bodies[0]
+
+            first_started = asyncio.Event()
+            release_first = asyncio.Event()
+            calls: list[str] = []
+            was_cancelled = False
+
+            async def fake_update(markdown: str) -> None:
+                nonlocal was_cancelled
+                calls.append(markdown)
+                if len(calls) == 1:
+                    first_started.set()
+                    try:
+                        await release_first.wait()
+                    except asyncio.CancelledError:
+                        was_cancelled = True
+                        raise
+
+            body.update = fake_update  # type: ignore[method-assign]
+            body.set_markdown("first revision")
+            await asyncio.wait_for(first_started.wait(), 1)
+
+            body.set_markdown("second revision")
+            await asyncio.sleep(0.05)
+            assert calls == ["first revision"]
+            assert was_cancelled is False
+
+            release_first.set()
+            for _ in range(100):
+                if calls == ["first revision", "second revision"]:
+                    break
+                await asyncio.sleep(0.01)
+
+            assert calls == ["first revision", "second revision"]
+            assert was_cancelled is False
+
+    asyncio.run(scenario())
+
+
 
 def test_transcript_preserves_assistant_event_order_and_markdown_content() -> None:
     async def scenario() -> None:
@@ -291,6 +336,28 @@ def test_run_finished_completes_assistant_without_rendering_a_child() -> None:
 
     asyncio.run(scenario())
 
+
+def test_strategy_event_is_not_rendered_as_an_assistant_child() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(80, 20)) as pilot:
+            view.begin_conversation("choose a strategy")
+            view.handle_runtime_event(RuntimeEvent("run_started", data={"run_id": "run-1"}))
+            view.handle_runtime_event(
+                RuntimeEvent(
+                    "strategy",
+                    "reactive",
+                    {"run_id": "run-1", "reason": "Simple task."},
+                )
+            )
+            view.handle_runtime_event(RuntimeEvent("response", "done", {"run_id": "run-1"}))
+            await pilot.pause()
+
+            labels = [node.title_text for node in view.transcript_nodes]
+            assert "strategy" not in labels
+            assert "response_content" in labels
+
+    asyncio.run(scenario())
 
 def test_transcript_node_limit_trims_only_complete_conversation_groups() -> None:
     async def scenario() -> None:

@@ -817,8 +817,9 @@ class StubTerminalApp:
     def run_task(self, task: str) -> RunState | None:
         return self.result
 
-    def start(self) -> None:
+    def start(self) -> int:
         type(self).started = True
+        return 0
 
 
 @pytest.fixture
