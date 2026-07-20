@@ -96,3 +96,18 @@ def test_runtime_implementations_are_grouped_by_responsibility() -> None:
         assert modules <= {path.name for path in (runtime / package).glob("*.py")}
 
     assert {path.name for path in runtime.glob("*.py")} == {"__init__.py"}
+
+
+def test_high_churn_model_and_tool_protocols_are_grouped_by_responsibility() -> None:
+    planning = SOURCE / "mini_agent" / "planning"
+    tools = SOURCE / "mini_agent" / "tools"
+
+    planner_imports = _module_imports(planning / "llm.py")
+    assert "model_requests" in planner_imports
+    assert "model_outputs" in planner_imports
+
+    default_tools = tools / "default_tools"
+    assert {"command.py", "filesystem.py", "schema.py", "web.py"} <= {
+        path.name for path in default_tools.glob("*.py")
+    }
+    assert "default_tools" in _module_imports(tools / "catalog.py")

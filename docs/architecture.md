@@ -89,8 +89,10 @@ Tool decisions use DeepSeek native Tool Calls. Strategy selection, plan creation
 - `ConversationService` and `AgentApplication` depend on the `RuntimeRunner` protocol; only the composition root selects `AgentRunner`.
 - `PlanModeWorkflow` owns final proposal recording, review, and handoff so the runner only dispatches run modes and strategies.
 - Lifecycle hooks use narrow provider-neutral contexts: before hooks may cancel, model hooks may replace messages/tools/request parameters, and tool hooks may replace arguments before validation and approval. After hooks receive snapshots in reverse registration order.
-- `planning` converts prepared model responses into decisions and plans through runtime-only capability protocols.
+- `planning` converts prepared model responses into decisions and plans through runtime-only capability protocols. Model
+  request lifecycle handling lives in `model_requests.py`, while structured output validation lives in `model_outputs.py`.
 - `tools` owns handlers, executable JSON Schema validation, registration, workspace confinement, and confirmation metadata.
+  `catalog.py` is a thin composition boundary; grouped default definitions live under `tools/default_tools/`.
 - `providers` owns `LLMClient` selection, generic JSON/SSE transport, and vendor-specific request/response adapters.
 - `storage` persists RuntimeState checkpoints, session snapshots, and compact conversation projections. Dormant artifact adapters remain available but are not composed into the runtime.
 - `tui` handles terminal commands, approval input, RuntimeEvent presentation, and the process-local full-screen transcript only. `TerminalView` composes lifecycle and input routing, `ChoicePromptMixin` and `TranscriptRenderingMixin` own their respective state machines, `interactive_approval.py` bridges blocking runtime decisions, and `widgets/` contains reusable Textual controls. Worker threads enqueue display chunks; the Textual event loop owns all widget mutation and rendering.

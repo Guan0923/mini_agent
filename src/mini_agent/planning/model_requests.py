@@ -1,0 +1,138 @@
+"""Execute provider-neutral model requests with runtime hooks and events."""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from mini_agent.domain import ToolSpec
+from mini_agent.runtime.core.context import AgentRuntime, PreparedResponse
+from mini_agent.runtime.core.events import RuntimeEvent
+from mini_agent.runtime.core.hooks import HookOutcome, ModelHookContext, ModelHookResult, RunHookInfo
+from mini_agent.runtime.persistence.recording import model_error_data, model_request_data, model_response_data
+
+
+class RuntimeCompletionClient(Protocol):
+    def run(self, runtime: AgentRuntime) -> PreparedResponse: ...
+
+
+class ModelRequestExecutor:
+    """Own the mutable exchange, hooks, and observability for one model call."""
+
+    def __init__(self, client: RuntimeCompletionClient) -> None:
+        self._client = client
+
+    def run(
+        self,
+        runtime: AgentRuntime,
+        messages: list,
+        *,
+        operation: str,
+        output_mode: str,
+        allowed_tools: list[ToolSpec] | None = None,
+        operation_tools: list[ToolSpec] | None = None,
+        stream: bool | None = None,
+    ) -> PreparedResponse:
+        exchange = runtime.exchange
+        exchange.operation = operation  # type: ignore[assignment]
+        exchange.output_mode = output_mode  # type: ignore[assignment]
+        exchange.messages = messages
+        exchange.allowed_tools = list(allowed_tools or [])
+        exchange.operation_tools = list(operation_tools if operation_tools is not None else allowed_tools or [])
+        exchange.stream = (
+            exchange.on_reasoning is not None or exchange.on_content is not None
+            if stream is None
+            else stream
+        )
+        exchange.exchange_id = runtime.next_exchange_id()
+
+        parameters = dict(runtime.state.request_parameters)
+        overrides = exchange.context.get("request_parameters")
+        if isinstance(overrides, dict):
+            parameters.update(overrides)
+        context = ModelHookContext(
+            run=RunHookInfo(
+                runtime.state.session_id,
+                runtime.run.run_id,
+                runtime.run.task,
+                runtime.run.mode,
+            ),
+            operation=operation,
+            exchange_id=exchange.exchange_id,
+            output_mode=output_mode,
+            stream=exchange.stream,
+            messages=list(exchange.messages),
+            allowed_tools=list(exchange.operation_tools),
+            request_parameters=parameters,
+        )
+
+        previous_parameters = exchange.context.get("request_parameters")
+        had_parameters = "request_parameters" in exchange.context
+        try:
+            return runtime.services.hooks.run_model(
+                context,
+                lambda hook_context: self._send(runtime, hook_context, output_mode),
+                self._hook_outcome,
+                runtime.services.publish or (lambda _event: None),
+            )
+        finally:
+            if had_parameters:
+                exchange.context["request_parameters"] = previous_parameters
+            else:
+                exchange.context.pop("request_parameters", None)
+
+    def _send(
+        self,
+        runtime: AgentRuntime,
+        hook_context: ModelHookContext,
+        output_mode: str,
+    ) -> PreparedResponse:
+        exchange = runtime.exchange
+        exchange.messages = list(hook_context.messages)
+        exchange.operation_tools = list(hook_context.allowed_tools)
+        if output_mode == "tools":
+            exchange.allowed_tools = list(hook_context.allowed_tools)
+        exchange.context["request_parameters"] = dict(hook_context.request_parameters)
+
+        if getattr(self._client, "records_runtime_events", False):
+            return self._client.run(runtime)
+
+        publish = runtime.services.publish or (lambda _event: None)
+        publish(
+            RuntimeEvent(
+                "model_request",
+                f"Model {exchange.operation} request",
+                model_request_data(runtime.state, exchange),
+            )
+        )
+        try:
+            prepared = self._client.run(runtime)
+        except Exception as exc:
+            publish(
+                RuntimeEvent(
+                    "model_error",
+                    f"Model {exchange.operation} failed",
+                    model_error_data(runtime.state, exchange, exc),
+                )
+            )
+            raise
+        publish(
+            RuntimeEvent(
+                "model_response",
+                f"Model {exchange.operation} response",
+                model_response_data(runtime.state, exchange, prepared),
+            )
+        )
+        return prepared
+
+    @staticmethod
+    def _hook_outcome(prepared: PreparedResponse) -> HookOutcome:
+        return HookOutcome(
+            status="succeeded",
+            result=ModelHookResult(
+                prepared.message,
+                prepared.usage,
+                prepared.response_id,
+                prepared.model,
+                prepared.finish_reason,
+            ),
+        )

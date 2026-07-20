@@ -4,38 +4,26 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any
 
 from mini_agent.domain import (
     AssistantMessage,
     ExecutionPlan,
     ModelOutputError,
     PlanningError,
-    PlanStep,
     StepEvaluation,
     StrategySelection,
     SystemMessage,
-    ToolMessage,
     ToolSpec,
     UserMessage,
 )
 from mini_agent.runtime.conversation.user_input import REQUEST_USER_INPUT_NAME, REQUEST_USER_INPUT_SPEC
 from mini_agent.runtime.core.context import AgentRuntime, PreparedResponse
-from mini_agent.runtime.core.events import RuntimeEvent
-from mini_agent.runtime.core.hooks import (
-    HookOutcome,
-    ModelHookContext,
-    ModelHookResult,
-    RunHookInfo,
-)
-from mini_agent.runtime.persistence.recording import model_error_data, model_request_data, model_response_data
 from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME, REQUEST_PLAN_REVIEW_SPEC
 
 from .context_management import ContextManager
-
-
-class RuntimeCompletionClient(Protocol):
-    def run(self, runtime: AgentRuntime) -> PreparedResponse: ...
+from .model_outputs import execution_plan_json, parse_execution_plan, parse_json_object
+from .model_requests import ModelRequestExecutor, RuntimeCompletionClient
 
 
 class LLMPlanner:
@@ -53,6 +41,7 @@ class LLMPlanner:
         read_only_tool_specs: list[ToolSpec] | list[str],
     ) -> None:
         self.client = client
+        self._model_requests = ModelRequestExecutor(client)
         self.tool_specs = self._coerce_specs(tool_specs)
         self.read_only_tool_specs = self._coerce_specs(read_only_tool_specs)
         self._output_repairs: list[dict[str, str | int]] = []
@@ -512,96 +501,15 @@ class LLMPlanner:
         operation_tools: list[ToolSpec] | None = None,
         stream: bool | None = None,
     ) -> PreparedResponse:
-        runtime.exchange.operation = operation  # type: ignore[assignment]
-        runtime.exchange.output_mode = output_mode  # type: ignore[assignment]
-        runtime.exchange.messages = messages
-        runtime.exchange.allowed_tools = list(allowed_tools or [])
-        runtime.exchange.operation_tools = list(operation_tools if operation_tools is not None else allowed_tools or [])
-        runtime.exchange.stream = (
-            runtime.exchange.on_reasoning is not None or runtime.exchange.on_content is not None
-            if stream is None
-            else stream
-        )
-        runtime.exchange.exchange_id = runtime.next_exchange_id()
-        publish = runtime.services.publish or (lambda _event: None)
-        parameters = dict(runtime.state.request_parameters)
-        overrides = runtime.exchange.context.get("request_parameters")
-        if isinstance(overrides, dict):
-            parameters.update(overrides)
-        context = ModelHookContext(
-            run=RunHookInfo(
-                runtime.state.session_id,
-                runtime.run.run_id,
-                runtime.run.task,
-                runtime.run.mode,
-            ),
+        return self._model_requests.run(
+            runtime,
+            messages,
             operation=operation,
-            exchange_id=runtime.exchange.exchange_id,
             output_mode=output_mode,
-            stream=runtime.exchange.stream,
-            messages=list(runtime.exchange.messages),
-            allowed_tools=list(runtime.exchange.operation_tools),
-            request_parameters=parameters,
+            allowed_tools=allowed_tools,
+            operation_tools=operation_tools,
+            stream=stream,
         )
-
-        def request(hook_context: ModelHookContext) -> PreparedResponse:
-            runtime.exchange.messages = list(hook_context.messages)
-            runtime.exchange.operation_tools = list(hook_context.allowed_tools)
-            if output_mode == "tools":
-                runtime.exchange.allowed_tools = list(hook_context.allowed_tools)
-            runtime.exchange.context["request_parameters"] = dict(hook_context.request_parameters)
-            if getattr(self.client, "records_runtime_events", False):
-                return self.client.run(runtime)
-            publish(
-                RuntimeEvent(
-                    "model_request",
-                    f"Model {operation} request",
-                    model_request_data(runtime.state, runtime.exchange),
-                )
-            )
-            try:
-                prepared = self.client.run(runtime)
-            except Exception as exc:
-                publish(
-                    RuntimeEvent(
-                        "model_error",
-                        f"Model {operation} failed",
-                        model_error_data(runtime.state, runtime.exchange, exc),
-                    )
-                )
-                raise
-            publish(
-                RuntimeEvent(
-                    "model_response",
-                    f"Model {operation} response",
-                    model_response_data(runtime.state, runtime.exchange, prepared),
-                )
-            )
-            return prepared
-
-        previous_parameters = runtime.exchange.context.get("request_parameters")
-        had_parameters = "request_parameters" in runtime.exchange.context
-        try:
-            return runtime.services.hooks.run_model(
-                context,
-                request,
-                lambda prepared: HookOutcome(
-                    status="succeeded",
-                    result=ModelHookResult(
-                        prepared.message,
-                        prepared.usage,
-                        prepared.response_id,
-                        prepared.model,
-                        prepared.finish_reason,
-                    ),
-                ),
-                publish,
-            )
-        finally:
-            if had_parameters:
-                runtime.exchange.context["request_parameters"] = previous_parameters
-            else:
-                runtime.exchange.context.pop("request_parameters", None)
 
     def _json_request(
         self,
@@ -666,17 +574,7 @@ class LLMPlanner:
 
     @staticmethod
     def _json_object(raw: str, operation: str | None = None) -> dict[str, Any]:
-        normalized = raw.lstrip("\ufeff").strip()
-        lines = normalized.splitlines()
-        if len(lines) >= 2 and lines[0].strip().lower() in {"```", "```json"} and lines[-1].strip() == "```":
-            normalized = "\n".join(lines[1:-1]).strip()
-        try:
-            payload = json.loads(normalized)
-        except json.JSONDecodeError as exc:
-            raise ModelOutputError("Model did not return valid JSON.", operation=operation, invalid_output=raw) from exc
-        if not isinstance(payload, dict):
-            raise ModelOutputError("Model JSON must be an object.", operation=operation, invalid_output=raw)
-        return payload
+        return parse_json_object(raw, operation)
 
     def _parse_execution_plan(
         self,
@@ -684,76 +582,8 @@ class LLMPlanner:
         runtime: AgentRuntime,
         allowed_specs: list[ToolSpec],
     ) -> ExecutionPlan:
-        payload = self._json_object(raw)
-        goal = payload.get("goal")
-        steps = payload.get("steps")
-        if not isinstance(goal, str) or not goal.strip() or not isinstance(steps, list):
-            raise ModelOutputError(
-                "Execution plan requires a goal and a steps array.", operation="plan", invalid_output=raw
-            )
-        allowed = {spec.name for spec in allowed_specs}
-        parsed_steps: list[PlanStep] = []
-        seen_ids: set[str] = set()
-        for item in steps:
-            if not isinstance(item, dict):
-                raise ModelOutputError("Each plan step must be an object.", operation="plan", invalid_output=raw)
-            step_id = item.get("id")
-            description = item.get("description")
-            success = item.get("success_criteria", "")
-            name = item.get("tool")
-            arguments = item.get("arguments")
-            if not isinstance(step_id, str) or not step_id or step_id in seen_ids:
-                raise ModelOutputError(
-                    "Plan step ids must be unique non-empty strings.", operation="plan", invalid_output=raw
-                )
-            if not isinstance(description, str) or not description.strip():
-                raise ModelOutputError(
-                    "Plan step description must be non-empty text.", operation="plan", invalid_output=raw
-                )
-            if name not in allowed:
-                raise ModelOutputError(
-                    f"Model requested unavailable tool: {name!r}.", operation="plan", invalid_output=raw
-                )
-            if not isinstance(arguments, dict):
-                raise ModelOutputError("Plan step arguments must be an object.", operation="plan", invalid_output=raw)
-            seen_ids.add(step_id)
-            call_id = runtime.next_tool_call_id()
-            parsed_steps.append(
-                PlanStep(
-                    id=step_id,
-                    description=description.strip(),
-                    success_criteria=success.strip() if isinstance(success, str) else "",
-                    tool_message=ToolMessage(name=name, call_id=call_id, arguments=arguments),
-                )
-            )
-        final_answer = payload.get("final_answer")
-        if not parsed_steps and (not isinstance(final_answer, str) or not final_answer.strip()):
-            raise ModelOutputError("A zero-step plan requires final_answer.", operation="plan", invalid_output=raw)
-        if parsed_steps and final_answer is not None:
-            raise ModelOutputError(
-                "A plan with steps must not contain final_answer.", operation="plan", invalid_output=raw
-            )
-        return ExecutionPlan(
-            goal=goal.strip(),
-            steps=parsed_steps,
-            final_answer=final_answer.strip() if isinstance(final_answer, str) else None,
-        )
+        return parse_execution_plan(raw, allowed_specs, runtime.next_tool_call_id)
 
     @staticmethod
     def _plan_json(plan: ExecutionPlan) -> str:
-        return json.dumps(
-            {
-                "goal": plan.goal,
-                "steps": [
-                    {
-                        "id": step.id,
-                        "description": step.description,
-                        "tool": step.tool_message.name,
-                        "arguments": step.tool_message.arguments,
-                        "status": step.status,
-                    }
-                    for step in plan.steps
-                ],
-            },
-            ensure_ascii=False,
-        )
+        return execution_plan_json(plan)

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from concurrent.futures import Future
 
 from mini_agent.runtime.core.contracts import InterruptDecision, InterruptRequest
 
 from .approval import TerminalApproval
+from .tool_review import format_tool_review
 from .view import TerminalView
 from .widgets import ChoiceItem
 
@@ -143,9 +143,7 @@ class InteractiveApproval:
 
     @staticmethod
     def _tool_details(request: InterruptRequest) -> str:
-        name = str(request.data.get("tool", "unknown"))
-        arguments = json.dumps(request.data.get("arguments", {}), ensure_ascii=False, indent=2, default=str)
-        return f"**Tool:** {name}\n\n    " + arguments.replace("\n", "\n    ")
+        return format_tool_review(request).markdown()
 
     def _complete_questionnaire(self, answers: dict[str, list[str]]) -> None:
         if self._pending is None or self._pending[0].kind != "question":

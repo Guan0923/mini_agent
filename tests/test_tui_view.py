@@ -6,6 +6,7 @@ from textual import events
 from textual.color import Color
 from textual.widgets import Label, Rule
 
+from mini_agent.runtime import RuntimeEvent
 from mini_agent.runtime.conversation.user_input import OTHER_OPTION_LABEL, parse_user_input_questions
 from mini_agent.runtime.core.contracts import QuestionOption, UserQuestion
 from mini_agent.tui.history import HistoryScreen
@@ -72,11 +73,39 @@ def test_textual_view_reserves_bottom_input_and_scrollable_transcript() -> None:
             assert view.status_line.styles.background == Color.parse("#263442")
             assert view.transcript.soft_wrap is True
             assert view.transcript.read_only is True
+            assert view.transcript.styles.background == Color.parse("#0b1016")
             assert view.transcript.styles.overflow_y == "scroll"
             assert list(view.query(Label)) == []
 
     asyncio.run(scenario())
 
+
+def test_conversation_roles_use_distinct_headerless_color_blocks() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(80, 20)) as pilot:
+            view.begin_conversation("question")
+            view.handle_runtime_event(RuntimeEvent("run_started", data={"run_id": "run-1"}))
+            view.handle_runtime_event(RuntimeEvent("response", "answer", {"run_id": "run-1"}))
+            await pilot.pause()
+            await pilot.pause()
+
+            user, assistant = view._top_level_nodes
+            response = next(node for node in view.transcript_nodes if node.title_text == "response_content")
+
+            assert user.has_class("transcript-user")
+            assert assistant.has_class("transcript-assistant")
+            assert user.styles.background == Color.parse("#17233a")
+            assert assistant.styles.background == Color.parse("#132b27")
+            assert user.styles.border_left[1] == Color.parse("#4f8cff")
+            assert assistant.styles.border_left[1] == Color.parse("#35c6a3")
+            assert user._title.display is False
+            assert assistant._title.display is False
+            assert response._title.display is True
+            assert response.styles.background == Color.parse("#132b27")
+            assert view.transcript_text == "question\nanswer"
+
+    asyncio.run(scenario())
 
 
 def test_history_screen_is_read_only_scrollable_and_restores_main_view() -> None:

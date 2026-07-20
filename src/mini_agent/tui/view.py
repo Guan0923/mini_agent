@@ -102,18 +102,50 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
         height: 1fr;
         border: none;
         padding: 0 1;
-        background: #101418;
+        background: #0b1016;
         color: #d7dde5;
         overflow-y: scroll;
     }
     .transcript-node {
         width: 1fr;
         height: auto;
-        background: #101418;
+        background: #0b1016;
         padding: 0;
     }
     .transcript-node > Contents {
         padding: 0 0 0 2;
+    }
+    .transcript-role {
+        margin-bottom: 1;
+        padding: 0 1;
+    }
+    .transcript-role > CollapsibleTitle {
+        display: none;
+    }
+    .transcript-role > Contents {
+        padding: 0 0 0 1;
+    }
+    .transcript-user {
+        background: #17233a;
+        color: #e6efff;
+        border-left: solid #4f8cff;
+    }
+    .transcript-user > Contents {
+        background: #17233a;
+    }
+    .transcript-assistant {
+        background: #132b27;
+        color: #e4f7f1;
+        border-left: solid #35c6a3;
+    }
+    .transcript-assistant > Contents {
+        background: #132b27;
+    }
+    .transcript-assistant .transcript-node {
+        background: #132b27;
+    }
+    .transcript-assistant .transcript-node > Contents {
+        background: #132b27;
     }
     .transcript-status {
         padding-left: 2;
@@ -200,12 +232,14 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
         transcript_node_limit: int = 250,
         status_random: random.Random | None = None,
         diagnostic_sink: DiagnosticSink | None = None,
+        log_full_messages: bool = True,
     ) -> None:
         super().__init__()
         self._owner_loop = loop
         self._owner_ready = False
         self._pending_owner_callbacks: list[Callable[[], None]] = []
         self._diagnostic_sink = diagnostic_sink
+        self._log_full_messages = log_full_messages
         self._diagnostic_lock = Lock()
         self._last_runtime_event: dict[str, object] = {}
         self._stream_diagnostics: dict[tuple[str, str], tuple[int, int, float]] = {}
@@ -293,7 +327,6 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
     def begin_conversation(self, user_input: str) -> None:
         """Append a USER / ASSISTANT pair before a run is assigned its run id."""
         def begin() -> None:
-            self._flush_system_output()
             user = self._new_top_level("USER", completed=True)
             user_body = MarkdownBody(user_input)
             self._register_body(user_body, user)
@@ -303,24 +336,23 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
             self._top_level_groups[user] = group
             self._top_level_groups[assistant] = group
             self._pending_assistants.append(assistant)
-            self._streaming_system = None
             self._scroll_after_transcript_change()
 
         self._run_on_owner(begin)
 
     def write_system(self, text: str, end: str = "\n") -> None:
-        """Render non-conversation output as a top-level SYSTEM branch."""
+        """Keep non-conversation output in diagnostics without rendering it."""
         value = f"{text}{end}"
         if not value or self._writes_closed:
             return
-
-        def write_system() -> None:
-            self._pending_system_chunks.append(value)
-            if not self._system_flush_scheduled:
-                self._system_flush_scheduled = True
-                self.call_after_refresh(self._flush_system_output)
-
-        self._run_on_owner(write_system)
+        data: dict[str, object] = {
+            "hidden": True,
+            "message_chars": len(text),
+            "end": end,
+        }
+        if self._log_full_messages:
+            data["message"] = text
+        self._diagnose("system_output_hidden", data)
 
     def show_history(self, session_label: str, messages: list[dict[str, str]]) -> None:
         """Push a read-only history screen without replacing the live transcript."""
@@ -333,8 +365,9 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
             self._reset_transcript_state()
             for message in messages:
                 role = message.get("role", "system").lower()
-                title = "USER" if role == "user" else "ASSISTANT" if role == "assistant" else "SYSTEM"
-                node = self._new_top_level(title, completed=True)
+                if role not in {"user", "assistant"}:
+                    continue
+                node = self._new_top_level(role.upper(), completed=True)
                 body = MarkdownBody(message.get("content", ""))
                 self._register_body(body, node)
                 node.add_node(body)

@@ -82,7 +82,13 @@ class TranscriptRenderingMixin:
         self.call_after_refresh(self._sync_transcript_scroll, old_scroll)
 
     def _new_top_level(self, title: str, *, completed: bool = False) -> TranscriptNode:
-        node = TranscriptNode(title, collapsed=title == "SYSTEM")
+        role = title.casefold()
+        classes = (
+            f"transcript-node transcript-role transcript-{role}"
+            if role in {"user", "assistant"}
+            else "transcript-node"
+        )
+        node = TranscriptNode(title, collapsed=False, classes=classes)
         self.transcript_nodes.append(node)
         self._top_level_nodes.append(node)
         self._top_level_bodies[node] = []
@@ -142,7 +148,6 @@ class TranscriptRenderingMixin:
         self._scroll_after_transcript_change()
 
     def _handle_runtime_event_now(self, event: RuntimeEvent) -> None:
-        self._flush_system_output()
         data = event.data
         run_id = str(data.get("run_id", ""))
         if event.kind == "run_started":
@@ -154,7 +159,6 @@ class TranscriptRenderingMixin:
         assistant = self._assistant_for_run(run_id)
         if assistant is None:
             return
-        self._streaming_system = None
         if event.kind == "thinking_start":
             node, body = self._add_assistant_node(assistant, "think_content", collapsed=True)
             node.set_activity(True)
@@ -206,7 +210,13 @@ class TranscriptRenderingMixin:
             if event.message:
                 self._add_assistant_node(assistant, event.kind, collapsed=False, markdown=event.message)
             self._completed_top_levels.add(assistant)
-        elif event.kind not in {"model_request", "model_response", "context_usage", "strategy"} and event.message:
+        elif event.kind not in {
+            "model_request",
+            "model_response",
+            "model_repair",
+            "context_usage",
+            "strategy",
+        } and event.message:
             self._add_assistant_node(assistant, event.kind, collapsed=False, markdown=event.message)
         self._scroll_after_transcript_change()
 
@@ -355,7 +365,8 @@ class TranscriptRenderingMixin:
     def _structured_transcript_text(self) -> str:
         sections: list[str] = []
         for node in self._top_level_nodes:
-            sections.append(node.title_text)
+            if not node.has_class("transcript-role"):
+                sections.append(node.title_text)
             sections.extend(
                 body.markdown_text
                 for body in self._top_level_bodies.get(node, ())

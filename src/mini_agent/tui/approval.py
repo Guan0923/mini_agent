@@ -8,6 +8,8 @@ from typing import Literal
 from mini_agent.runtime.conversation.user_input import OTHER_OPTION_LABEL
 from mini_agent.runtime.core.contracts import InterruptDecision, InterruptRequest, UserQuestion
 
+from .tool_review import format_tool_review
+
 PermissionMode = Literal["approval_for_me", "full_access"]
 
 
@@ -100,7 +102,7 @@ class TerminalApproval:
                     self._write(f"{index}. {step}")
             return
 
-        self._write(f"\nTOOL REVIEW\n{request.data['tool']} {request.data['arguments']}")
+        self._write(f"\nTOOL REVIEW\n{format_tool_review(request).plain()}")
 
     @staticmethod
     def input_prompt(request: InterruptRequest, *, supplement: bool = False) -> str:

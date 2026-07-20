@@ -144,10 +144,13 @@ class TerminalApp:
         session = self.active_session
         if diagnostics is not None:
             diagnostics.set_context(session_id=session.session_id if session is not None else None)
+        runner = getattr(self, "runner", None)
+        settings = getattr(runner, "settings", None)
         view = TerminalView(
             loop,
             completer=SlashCommandCompleter(),
             diagnostic_sink=diagnostics.record if diagnostics is not None else None,
+            log_full_messages=getattr(settings, "log_full_messages", True),
         )
         if diagnostics is not None:
             diagnostics.record("tui_started", {"mode": self.mode})

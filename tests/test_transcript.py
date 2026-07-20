@@ -359,6 +359,32 @@ def test_strategy_event_is_not_rendered_as_an_assistant_child() -> None:
 
     asyncio.run(scenario())
 
+
+def test_model_repair_event_is_hidden_while_following_response_is_rendered() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(80, 20)) as pilot:
+            view.begin_conversation("answer")
+            view.handle_runtime_event(RuntimeEvent("run_started", data={"run_id": "run-1"}))
+            view.handle_runtime_event(
+                RuntimeEvent(
+                    "model_repair",
+                    "Malformed model output was repaired automatically.",
+                    {"run_id": "run-1", "phase": "decision", "outcome": "repaired"},
+                )
+            )
+            view.handle_runtime_event(RuntimeEvent("response", "corrected answer", {"run_id": "run-1"}))
+            await pilot.pause()
+
+            labels = [node.title_text for node in view.transcript_nodes]
+            assert "model_repair" not in labels
+            assert "response_content" in labels
+            assert "Malformed model output" not in view.transcript_text
+            assert "corrected answer" in view.transcript_text
+
+    asyncio.run(scenario())
+
+
 def test_transcript_node_limit_trims_only_complete_conversation_groups() -> None:
     async def scenario() -> None:
         view = TerminalView(transcript_node_limit=3)
@@ -376,35 +402,77 @@ def test_transcript_node_limit_trims_only_complete_conversation_groups() -> None
 
     asyncio.run(scenario())
 
-def test_system_message_before_view_mount_is_queued_until_transcript_mounts() -> None:
+def test_system_message_before_view_mount_is_logged_without_rendering() -> None:
     async def scenario() -> None:
-        view = TerminalView()
+        records: list[tuple[str, dict[str, object]]] = []
+        view = TerminalView(
+            diagnostic_sink=lambda kind, data, _error: records.append((kind, dict(data or {})))
+        )
         view.write_system("Mini-Agent TUI startup")
 
         async with view.run_test(size=(80, 20)) as pilot:
             await pilot.pause()
-            await pilot.pause()
-            assert [node.title_text for node in view._top_level_nodes] == ["SYSTEM"]
-            assert view.markdown_bodies[0].markdown_text == "Mini-Agent TUI startup\n"
-            system = view.transcript.query_one("TranscriptNode")
-            assert system.title_text == "SYSTEM"
-            assert system.collapsed is True
+
+            assert view._top_level_nodes == []
+            assert view.markdown_bodies == []
+            assert view.transcript_text == ""
+
+        hidden = [data for kind, data in records if kind == "system_output_hidden"]
+        assert hidden == [
+            {
+                "hidden": True,
+                "message_chars": len("Mini-Agent TUI startup"),
+                "end": "\n",
+                "message": "Mini-Agent TUI startup",
+            }
+        ]
 
     asyncio.run(scenario())
 
 
 
-def test_same_frame_system_writes_share_one_transcript_node() -> None:
+def test_multiple_system_writes_never_create_transcript_nodes() -> None:
     async def scenario() -> None:
-        view = TerminalView()
+        records: list[tuple[str, dict[str, object]]] = []
+        view = TerminalView(
+            diagnostic_sink=lambda kind, data, _error: records.append((kind, dict(data or {}))),
+            log_full_messages=False,
+        )
         async with view.run_test(size=(80, 20)) as pilot:
             view.write_system("first")
             view.write_system("second")
             await pilot.pause()
+
+            assert view._top_level_nodes == []
+            assert view.markdown_bodies == []
+            assert view.transcript_text == ""
+
+        hidden = [data for kind, data in records if kind == "system_output_hidden"]
+        assert hidden == [
+            {"hidden": True, "message_chars": 5, "end": "\n"},
+            {"hidden": True, "message_chars": 6, "end": "\n"},
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_history_load_skips_system_and_keeps_role_content_only() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(80, 20)) as pilot:
+            view.load_history(
+                [
+                    {"role": "system", "content": "hidden notice"},
+                    {"role": "user", "content": "question"},
+                    {"role": "assistant", "content": "answer"},
+                ]
+            )
             await pilot.pause()
 
-            assert [node.title_text for node in view._top_level_nodes] == ["SYSTEM"]
-            assert view.markdown_bodies[0].markdown_text == "first\nsecond\n"
+            assert [node.title_text for node in view._top_level_nodes] == ["USER", "ASSISTANT"]
+            assert all(node.has_class("transcript-role") for node in view._top_level_nodes)
+            assert view.transcript_text == "question\nanswer"
+            assert "hidden notice" not in view.transcript_text
 
     asyncio.run(scenario())
 

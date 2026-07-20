@@ -207,6 +207,33 @@ def test_textual_quit_action_records_exit_call_stack(tmp_path) -> None:
     assert "action_quit" in exit_record["data"]["stack"]
 
 
+
+
+@pytest.mark.parametrize(("log_full_messages", "contains_message"), [(True, True), (False, False)])
+def test_hidden_system_output_respects_full_message_policy(
+    tmp_path,
+    log_full_messages: bool,
+    contains_message: bool,
+) -> None:
+    secret = "SYSTEM_SECRET_TEXT"
+    logger = TuiDiagnosticLogger(tmp_path / "logs")
+    view = TerminalView(
+        diagnostic_sink=logger.record,
+        log_full_messages=log_full_messages,
+    )
+
+    view.write_system(secret, end="")
+    logger.close()
+
+    raw = logger.path.read_text(encoding="utf-8")
+    record = next(item for item in _records(logger.path) if item["kind"] == "system_output_hidden")
+    assert record["data"]["hidden"] is True
+    assert record["data"]["message_chars"] == len(secret)
+    assert record["data"]["end"] == ""
+    assert ("message" in record["data"]) is contains_message
+    assert (secret in raw) is contains_message
+
+
 def test_stream_and_tool_diagnostics_exclude_content_and_arguments(tmp_path) -> None:
     secret_response = "SECRET_RESPONSE_CONTENT"
     secret_argument = "SECRET_TOOL_ARGUMENT"
