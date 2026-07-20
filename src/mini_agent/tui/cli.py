@@ -678,6 +678,17 @@ class TerminalApp:
                 return True
             self._write("\n".join(self.runner.tools.names()))
             return True
+        if command == "skills":
+            if argument:
+                self._write("Usage: /skills")
+                return True
+            catalog = getattr(self.runner, "skill_catalog", None)
+            definitions = catalog.definitions() if catalog is not None else ()
+            if not definitions:
+                self._write("No project Skills found in .mini_agent/skills.")
+                return True
+            self._write("\n".join(f"{skill.name} — {skill.description}" for skill in definitions))
+            return True
         if command == "trace":
             if argument:
                 self._write("Usage: /trace")

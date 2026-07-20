@@ -178,6 +178,25 @@ Plan 调研、控制工具调用和结构化结果都作为普通 typed messages
 
 交互模式支持带注释的命令实时补全：输入 `/p` 会显示 `/plan — Create a plan and open Plan Review.` 和 `/permission — Choose the in-memory tool approval mode.`，按 Tab 接受候选，方向键选择候选，Enter 提交；接受候选时只插入命令本身。已识别命令会按文本顺序先执行，剩余普通文字按原顺序合并为一次 task；例如 `你好 /plan` 和 `/plan 你好` 都会先启用 Plan mode，再运行一次“你好”。`/new`、`/clear` 和 `/use` 会消费其后的文字直到下一个命令作为参数，其他命令后的文字仍属于 task；`/quit` 会停止处理当前行且不会提交 task；`/history` 必须独立提交，不能与普通任务混合。命令可以出现在任务句子中，但前面必须有空格；文件路径和 URL 中的 `/` 不会被识别为命令。任务中可以使用 `@相对路径` 引用工作区文件，例如 `请总结 @README.md`；文件内容会在本次任务中以内嵌引用形式提供给 Agent，引用路径必须位于 workspace 内。每次运行会在 `<workspace>/logs/<run_id>.jsonl` 记录有序 runtime messages，包括模型请求/规范化响应、计划、审批、工具调用和结果；SQLite 同时保存按 session/run 查询的同一审计轨迹、`session_runtime` 快照、checkpoint 和供 `/history` 使用的 user/assistant 文本投影。`LOG_FULL_MESSAGES=True`（默认）记录完整消息正文；设为 `False` 时记录长度、哈希和最多 200 字符预览。两种模式都会脱敏 API key、Authorization、Cookie、token、password 与 secret 字段，且不会记录 HTTP headers 或原始 provider payload。每个 turn 结束时，Runtime 的 usage 会被该 turn 最后一次模型响应 usage 覆盖。使用 `--session-id <session_id>` 可在新的 CLI 进程中继续已有对话。
 
+### 项目级 Skills
+
+Mini-Agent 会在启动时发现 `<workspace>/.mini_agent/skills/<skill-name>/SKILL.md`。目录不存在时功能保持关闭；存在无效 Skill 时启动会直接报出文件和原因。Skill 名称只能使用小写字母、数字与连字符，且必须与目录名一致。`SKILL.md` 最大 64 KiB、正文最多 500 行，frontmatter 只允许 `name` 和 `description`：
+
+```markdown
+---
+name: review-python
+description: Review Python changes for correctness, typing, and tests.
+---
+
+# Workflow
+
+Read the changed files, inspect relevant tests, then report concrete findings.
+```
+
+只要项目中存在 Skill，LLM planner 会在每个普通任务开始时增加一次受 `--max-model-turns` 约束的 JSON 选择请求；该请求只看到名称和描述。选中后，完整正文才会作为低于核心系统安全规则的项目指令进入本次 run 的后续模型请求。输入 `$review-python` 可显式激活已发现的同名 Skill；其他 `$...` 保持普通文本。`/skills` 列出已发现的名称和描述。
+
+激活结果会以包含正文、相对根目录和 SHA-256 的快照保存在 `RunState`，所以 checkpoint 恢复不会读取已被修改的磁盘版本；Plan Review 批准后的 Agent handoff 会携带同一快照。Skill 可引用自身的 `scripts/`、`references/` 和 `assets/`，但访问仍必须经过现有 workspace-confined 工具，命令与写入审批不会被 Skill 绕过。`--planner rule` 不做自动选择，显式 `$name` 会返回“Skill execution requires the LLM planner.”。当前版本不创建、安装、编辑或远程下载 Skill。
+
 Agent 运行时输入框保持可用。期间提交的多条普通消息会按顺序进入进程内队列，并在当前 run 完成后合并启动一次新的 follow-up run；它们不会改变正在执行的 run。已经开始的外部操作不会被强制中止，Esc 会先进入 `CANCELLING`，等待协作式取消完成后再发送队列。运行期间斜杠命令不可用，工具或计划审批出现时输入框会优先切换为审批选项。
 
 模型 reasoning 等高频输出会先进入线程安全队列，再以约 30 FPS 合并刷新，因此不会改写输入 Buffer、光标或补全菜单。屏幕 transcript 保留最近 200,000 个字符，完整轨迹仍由 SQLite 与 JSONL 保存。默认自动跟随最新输出；PageUp 或鼠标滚轮可暂停跟随，PageDown 或 Ctrl+End 回到末尾后恢复自动跟随。
@@ -188,6 +207,7 @@ Agent 运行时输入框保持可用。期间提交的多条普通消息会按�
 - workspace-confined 的范围读取、glob、grep、精确编辑和原子写入，以及需要用户确认的网页搜索/抓取和跨平台命令执行工具；
 - 安全同参数重试、LLM 工具失败恢复与结构化运行轨迹；
 - 可替换的规划器接口，为下一步接入 LLM 规划策略保留边界。
+- 项目级 Skill 发现、语义选择、显式激活、运行快照和 Plan→Agent 交接；
 
 ### 当前需要完成：Harness 能力补全
 

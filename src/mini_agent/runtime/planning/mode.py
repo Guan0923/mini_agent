@@ -83,6 +83,7 @@ class PlanModeWorkflow:
             "agent",
             "Implement the plan",
             new_session=new_session,
+            active_skills=tuple(runtime.run.active_skills),
         )
         runtime.run.add_event(
             "approval_granted",

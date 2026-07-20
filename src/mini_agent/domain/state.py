@@ -15,9 +15,11 @@ from .messages import (
     tool_message_from_dict,
     tool_message_to_dict,
 )
+from .skills import SkillSnapshot
 
 EventKind = Literal[
     "run_started",
+    "skills_selected",
     "strategy",
     "context_cleaned",
     "context_compressed",
@@ -70,6 +72,7 @@ class RunHandoff:
     mode: RunMode
     task: str
     new_session: bool = False
+    active_skills: tuple[SkillSnapshot, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -193,6 +196,7 @@ class RunState:
     model_turns: int = 0
     status: RunStatus = "running"
     handoff: RunHandoff | None = None
+    active_skills: list[SkillSnapshot] = field(default_factory=list)
 
     def add_event(self, kind: EventKind, message: str, **data: Any) -> None:
         self.events.append(TraceEvent(kind=kind, message=message, data=data))
@@ -237,6 +241,7 @@ class RunState:
             "model_turns": self.model_turns,
             "status": self.status,
             "handoff": asdict(self.handoff) if self.handoff else None,
+            "active_skills": [skill.to_dict() for skill in self.active_skills],
         }
 
     @classmethod
@@ -285,6 +290,11 @@ class RunState:
                 new_session=(
                     handoff_data["new_session"] if isinstance(handoff_data.get("new_session"), bool) else False
                 ),
+                active_skills=tuple(
+                    SkillSnapshot.from_dict(dict(item))
+                    for item in handoff_data.get("active_skills", [])
+                    if isinstance(item, dict)
+                ),
             )
 
         return cls(
@@ -318,6 +328,11 @@ class RunState:
             final_answer=data.get("final_answer"),
             model_turns=int(data.get("model_turns", 0)),
             status=data.get("status", "running"),
+            active_skills=[
+                SkillSnapshot.from_dict(dict(item))
+                for item in data.get("active_skills", [])
+                if isinstance(item, dict)
+            ],
             handoff=handoff,
         )
 

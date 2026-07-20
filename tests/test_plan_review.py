@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.domain import AssistantMessage, ToolMessage, UserMessage
+from mini_agent.domain import AssistantMessage, SkillSnapshot, ToolMessage, UserMessage
 from mini_agent.runtime import AgentRunner
 from mini_agent.runtime.core.contracts import InterruptDecision
 from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME, parse_plan_review
@@ -51,10 +51,12 @@ def test_valid_plan_review_opens_existing_review_and_preserves_one_control_messa
     planner = ScriptedPlanPlanner([AssistantMessage(tool_messages=[review_call(PLAN)])])
     runner = AgentRunner(planner, ToolRegistry(tmp_path))
     requests = []
+    skill = SkillSnapshot("demo", "Demo", "Instructions", ".mini_agent/skills/demo", "abc")
     runtime = runner.new_runtime(
         task="Plan the change",
         mode="plan",
         interrupt=lambda request: requests.append(request) or InterruptDecision("implement"),
+        active_skills=[skill],
     )
 
     result = runner.run(runtime)
@@ -62,6 +64,7 @@ def test_valid_plan_review_opens_existing_review_and_preserves_one_control_messa
     assert result.status == "completed"
     assert result.final_answer == PLAN
     assert result.handoff is not None
+    assert result.handoff.active_skills == (skill,)
     assert [request.kind for request in requests] == ["plan"]
     assert requests[0].data["plan"] == PLAN
     assert runtime.state.messages[0] == UserMessage(content="Plan the change")

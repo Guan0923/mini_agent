@@ -68,6 +68,15 @@ The handoff is sequential rather than a mode mutation inside one run: the Plan r
 
 Plan questions, Plan Review, and Tool Review intentionally use separate decision vocabularies. Questions return `answer` with an answer map (an empty list explicitly skips one question) or `cancel`; Plan Review accepts only the three choices above; Tool Review remains `Continue / Cancel / Supplement`, so tool feedback behavior is unchanged.
 
+## Project Skills
+
+`SkillCatalog` discovers direct child manifests under `<workspace>/.mini_agent/skills`. Discovery is fail-fast and validates UTF-8, bounded size and line count, exact `name`/`description` YAML metadata, directory-name equality, duplicate names, and resolved path confinement. Optional resources remain ordinary workspace files; Skills do not register tools or expand permissions.
+
+`SkillActivator` runs before both Plan-mode dispatch and Agent strategy routing. With an LLM planner and a non-empty catalog, it claims one model turn and invokes the `SkillSelector` capability with metadata only. The runtime unions semantic selections with installed names explicitly referenced as `$name`, resolves them in stable catalog order, snapshots full instructions/root/hash into `RunState.active_skills`, and emits `skills_selected`. Empty catalogs add no request; planners without the capability retain normal behavior unless a known Skill was explicitly requested, which fails clearly.
+
+`LLMPlanner` appends active snapshots to each later operation's system message before context estimation. The appended policy keeps every preceding system constraint authoritative and cannot bypass tool schemas, workspace confinement, or approval. Checkpoints serialize snapshots directly, and Plan Review copies them into `RunHandoff`, so implementation uses the exact approved Skill version even across an isolated session. A later ordinary user turn starts with an empty active set and selects again.
+
+
 ## Provider Boundary
 
 `providers/client.py` exposes the provider-selecting `LLMClient` facade and the schema-neutral `JsonHttpTransport`. The facade selects a wire adapter from `ModelConfig.provider`, coordinates transport, and records request diagnostics:

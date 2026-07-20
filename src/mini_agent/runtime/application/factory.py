@@ -8,6 +8,7 @@ from typing import Literal
 
 from mini_agent.planning import LLMPlanner, RuleBasedPlanner
 from mini_agent.providers import LLMClient, ModelConfig
+from mini_agent.skills import SkillCatalog
 from mini_agent.storage import SQLiteCheckpointStore, SQLiteSessionStore
 from mini_agent.tools import ToolExecutor, WorkspaceFiles, build_tool_registry
 
@@ -68,6 +69,7 @@ def _build_runner(
     tools: ToolExecutor,
     hooks: Iterable[AgentHook],
 ) -> AgentRunner:
+    skills = SkillCatalog.discover(workspace)
     if planner_name == "rule":
         planner = RuleBasedPlanner()
     else:
@@ -87,6 +89,7 @@ def _build_runner(
         log_full_messages=settings.log_full_messages,
         checkpoints=SQLiteCheckpointStore(session_database_path(workspace)),
         hooks=hooks,
+        skill_catalog=skills,
     )
 
 

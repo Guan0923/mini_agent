@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from mini_agent.domain import AssistantMessage, ExecutionPlan, StepEvaluation, StrategySelection
+from mini_agent.domain.skills import SkillSelection
 from mini_agent.runtime.core.context import AgentRuntime
 
 
@@ -31,6 +32,11 @@ class PlanCreator(NamedPlanner, Protocol):
 @runtime_checkable
 class StrategySelector(Protocol):
     def select_strategy(self, runtime: AgentRuntime) -> StrategySelection: ...
+
+
+@runtime_checkable
+class SkillSelector(Protocol):
+    def select_skills(self, runtime: AgentRuntime) -> SkillSelection: ...
 
 
 @runtime_checkable

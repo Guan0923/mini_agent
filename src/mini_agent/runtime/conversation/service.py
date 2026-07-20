@@ -12,6 +12,7 @@ from mini_agent.domain import (
     RunState,
     Session,
     SessionSummary,
+    SkillSnapshot,
     UserMessage,
     message_from_dict,
     new_run_id,
@@ -84,6 +85,7 @@ class ConversationService:
             interrupt=interrupt,
             steering=steering,
             cancel_requested=cancel_requested,
+            active_skills=handoff.active_skills,
         )
         if follow_up.handoff is not None:
             raise RuntimeError("Nested run handoffs are not supported.")
@@ -131,6 +133,7 @@ class ConversationService:
         interrupt: InterruptHandler | None,
         steering: SteeringHandler | None,
         cancel_requested: CancellationHandler | None,
+        active_skills: tuple[SkillSnapshot, ...] = (),
     ) -> RunState:
         if self.session_store is not None:
             session = self.ensure_session(prepared)
@@ -155,6 +158,7 @@ class ConversationService:
             run_id=run_id,
             turn_start_index=turn_start_index,
             history=self.runtime.state.messages,
+            active_skills=list(active_skills),
         )
         self.runtime.state.active_message = None
         self.runtime.state.active_tool_index = None

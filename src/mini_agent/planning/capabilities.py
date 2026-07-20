@@ -17,6 +17,7 @@ from .base import (
     Planner,
     PlanReplanner,
     RunFinalizer,
+    SkillSelector,
     StrategySelector,
 )
 
@@ -140,6 +141,7 @@ class PlannerCapabilities:
     name: str
     decision_planner: Planner | None
     strategy_selector: StrategySelector | None
+    skill_selector: SkillSelector | None
     plan_creator: PlanCreator | None
     dynamic_plan_creator: DynamicPlanCreator | None
     plan_replanner: PlanReplanner | None
@@ -152,6 +154,7 @@ class PlannerCapabilities:
         name = planner.name if isinstance(planner, NamedPlanner) else planner.__class__.__name__
         decide = getattr(planner, "decide", None)
         select = getattr(planner, "select_strategy", None)
+        select_skills = getattr(planner, "select_skills", None)
         create = getattr(planner, "create_plan", None)
         dynamic_create = getattr(planner, "create_dynamic_plan", None)
         replan = getattr(planner, "replan", None)
@@ -165,6 +168,7 @@ class PlannerCapabilities:
             strategy_selector=(planner if _uses_runtime(select) else _LegacyStrategy(planner))
             if callable(select)
             else None,
+            skill_selector=planner if _uses_runtime(select_skills) else None,
             plan_creator=(planner if _uses_runtime(create) else _LegacyPlanCreator(planner))
             if callable(create)
             else None,

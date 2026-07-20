@@ -9,6 +9,7 @@ from mini_agent.domain.state import utc_now
 
 RuntimeEventKind = Literal[
     "run_started",
+    "skills_selected",
     "thinking_start",
     "thinking_delta",
     "thinking_end",
@@ -57,6 +58,7 @@ RuntimeEventKind = Literal[
 CHECKPOINT_EVENT_KINDS: frozenset[RuntimeEventKind] = frozenset(
     {
         "run_started",
+        "skills_selected",
         "model_request",
         "model_response",
         "model_error",

@@ -27,6 +27,7 @@ COMMAND_DEFINITIONS = (
     CommandDefinition("use", "/use <session_id>", "Switch to a saved session."),
     CommandDefinition("help", "/help", "Show this help."),
     CommandDefinition("tools", "/tools", "List available tools."),
+    CommandDefinition("skills", "/skills", "List discovered project Skills."),
     CommandDefinition("trace", "/trace", "Print the last run trace as JSON."),
     CommandDefinition("quit", "/quit", "Exit."),
 )
@@ -45,6 +46,7 @@ def render_help() -> str:
     lines.extend(
         [
             "  @path                  Include a workspace file in the task context.",
+            "  $name                  Explicitly activate a discovered project Skill.",
             "",
             "Recognized commands run in text order before one merged task.",
             "Commands with arguments use a space, for example: /new Research notes",

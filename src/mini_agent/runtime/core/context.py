@@ -23,7 +23,16 @@ from .config import RunnerSettings
 from .contracts import CancellationHandler, Confirm, EventHandler, InterruptHandler, SteeringHandler
 from .hooks import HookManager
 
-RuntimeOperation = Literal["decision", "strategy", "plan", "evaluate", "replan", "summarize", "finalize"]
+RuntimeOperation = Literal[
+    "skill_selection",
+    "decision",
+    "strategy",
+    "plan",
+    "evaluate",
+    "replan",
+    "summarize",
+    "finalize",
+]
 OutputMode = Literal["text", "json", "tools"]
 RuntimeStatus = Literal["idle", "running"]
 
@@ -202,6 +211,7 @@ class RuntimeServices:
 
     planner: object
     tools: object
+    skill_catalog: object | None = None
     checkpoint_store: object | None = None
     runtime_store: RuntimeStore | None = None
     on_event: EventHandler | None = None

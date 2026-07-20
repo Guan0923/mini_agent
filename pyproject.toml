@@ -12,6 +12,7 @@ dependencies = [
     "ddgr>=2.2,<3",
     "huggingface-hub>=0.30,<2",
     "jsonschema>=4.23,<5",
+    "pyyaml>=6,<7",
     "regex>=2024.11.6,<2027",
     "requests>=2.31,<3",
     "textual>=8.2,<9",

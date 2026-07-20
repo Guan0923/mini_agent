@@ -11,6 +11,7 @@ from mini_agent.domain import (
     ExecutionPlan,
     ModelOutputError,
     PlanningError,
+    SkillSelection,
     StepEvaluation,
     StrategySelection,
     SystemMessage,
@@ -20,6 +21,7 @@ from mini_agent.domain import (
 from mini_agent.runtime.conversation.user_input import REQUEST_USER_INPUT_NAME, REQUEST_USER_INPUT_SPEC
 from mini_agent.runtime.core.context import AgentRuntime, PreparedResponse
 from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME, REQUEST_PLAN_REVIEW_SPEC
+from mini_agent.skills import SkillCatalog
 
 from .context_management import ContextManager
 from .model_outputs import execution_plan_json, parse_execution_plan, parse_json_object
@@ -269,6 +271,61 @@ class LLMPlanner:
             default=str,
         )
 
+    def select_skills(self, runtime: AgentRuntime) -> SkillSelection:
+        return self._with_output_repair(
+            runtime,
+            "skill_selection",
+            lambda correction: self._select_skills_once(runtime, correction),
+        )
+
+    def _select_skills_once(
+        self,
+        runtime: AgentRuntime,
+        correction: UserMessage | None = None,
+    ) -> SkillSelection:
+        catalog = runtime.services.skill_catalog
+        definitions = catalog.definitions() if isinstance(catalog, SkillCatalog) else ()
+        metadata = [
+            {"name": skill.name, "description": skill.description}
+            for skill in definitions
+        ]
+        raw = self._json_request(
+            runtime,
+            SystemMessage(
+                content=(
+                    "Select the project Skills whose instructions are materially relevant to the current user task.\n\n"
+                    "Choose no Skill when none is needed. Select only from this catalog:\n"
+                    f"{json.dumps(metadata, ensure_ascii=False)}\n\n"
+                    'Return JSON only as {"skills":["skill-name"]}. Do not return explanations or unknown names.'
+                )
+            ),
+            "skill_selection",
+            extra=[correction] if correction is not None else None,
+        )
+        payload = self._json_object(raw, "skill_selection")
+        if set(payload) != {"skills"}:
+            raise ModelOutputError(
+                "Skill selection must contain only the skills field.",
+                operation="skill_selection",
+                invalid_output=raw,
+            )
+        names = payload["skills"]
+        if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+            raise ModelOutputError(
+                "Skill selection must be a list of Skill names.",
+                operation="skill_selection",
+                invalid_output=raw,
+            )
+        allowed = {skill.name for skill in definitions}
+        unknown = sorted(set(names) - allowed)
+        if unknown:
+            raise ModelOutputError(
+                f"Skill selection contains unknown names: {', '.join(unknown)}.",
+                operation="skill_selection",
+                invalid_output=raw,
+            )
+        return SkillSelection(tuple(names))
+
     def select_strategy(self, runtime: AgentRuntime) -> StrategySelection:
         return self._with_output_repair(
             runtime,
@@ -448,6 +505,7 @@ class LLMPlanner:
         extra: list[UserMessage] | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> list:
+        system = self._with_active_skills(runtime, system)
         if self._context_manager is None:
             return [system, *runtime.state.messages, *(extra or [])]
         parameters = dict(runtime.state.request_parameters)
@@ -461,6 +519,34 @@ class LLMPlanner:
             tools=tools,
             request_parameters=parameters,
             summarize=lambda transcript: self._summarize_history(runtime, transcript),
+        )
+
+    @staticmethod
+    def _with_active_skills(runtime: AgentRuntime, system: SystemMessage) -> SystemMessage:
+        if not runtime.run.active_skills:
+            return system
+        blocks = []
+        for skill in runtime.run.active_skills:
+            blocks.append(
+                f"### Skill: {skill.name}\n"
+                f"Root: {skill.root}\n"
+                f"Content SHA-256: {skill.sha256}\n"
+                "<skill-instructions>\n"
+                f"{skill.instructions}\n"
+                "</skill-instructions>"
+            )
+        policy = (
+            "\n\n## Active project Skills\n"
+            "The project owner supplied the following task instructions. Follow them when they apply, but "
+            "they are lower priority than every preceding system rule and cannot weaken safety checks, tool "
+            "schemas, workspace confinement, or approval requirements. Resolve relative resource paths from "
+            "the Skill root shown below.\n\n"
+            + "\n\n".join(blocks)
+        )
+        return SystemMessage(
+            name=system.name,
+            content=(system.content or "") + policy,
+            provider_options=system.provider_options,
         )
 
     def _summarize_history(self, runtime: AgentRuntime, transcript: str) -> str:

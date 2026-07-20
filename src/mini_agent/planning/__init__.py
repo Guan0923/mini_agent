@@ -12,6 +12,7 @@ from .base import (
     Planner,
     PlanReplanner,
     RunFinalizer,
+    SkillSelector,
     StrategySelector,
 )
 from .capabilities import PlannerCapabilities
@@ -32,5 +33,6 @@ __all__ = [
     "PlanningError",
     "RuleBasedPlanner",
     "StrategySelector",
+    "SkillSelector",
     "RunFinalizer",
 ]

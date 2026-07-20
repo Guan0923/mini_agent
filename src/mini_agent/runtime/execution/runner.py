@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from mini_agent.domain import (
     AssistantMessage,
     RunState,
+    SkillSnapshot,
     ToolSpec,
     UserMessage,
     message_from_dict,
@@ -36,6 +37,7 @@ from .cancellation import cancel_if_requested
 from .outcomes import cancel_run, fail_run
 from .publisher import RunEventPublisher
 from .routing import StrategyRouter
+from .skills import SkillActivator
 from .workflows import DynamicReplanWorkflow, ReactiveWorkflow
 
 
@@ -56,9 +58,11 @@ class AgentRunner:
         max_transport_retries: int = 2,
         max_model_turns: int = 8,
         max_tool_calls: int | None = None,
+        skill_catalog: object | None = None,
     ) -> None:
         self.planner = planner
         self.tools = tools
+        self.skill_catalog = skill_catalog
         if max_actions is not None and max_tool_calls is not None:
             raise ValueError("max_actions and max_tool_calls cannot be used together.")
         resolved_tool_calls = max_actions if max_actions is not None else max_tool_calls
@@ -77,6 +81,7 @@ class AgentRunner:
         self.checkpoints = checkpoints
         self.hooks = HookManager(hooks)
         self._router = StrategyRouter()
+        self._skills = SkillActivator()
         self._reactive = ReactiveWorkflow()
         self._plan_mode = PlanModeWorkflow()
         self._dynamic_replan = DynamicReplanWorkflow()
@@ -89,6 +94,7 @@ class AgentRunner:
         session_id: str | None = None,
         messages: list | None = None,
         run_id: str | None = None,
+        active_skills: list[SkillSnapshot] | tuple[SkillSnapshot, ...] | None = None,
         runtime_store: object | None = None,
         on_event=None,
         interrupt=None,
@@ -108,6 +114,7 @@ class AgentRunner:
             run_id=run_id or new_run_id(),
             turn_start_index=turn_start_index,
             history=history,
+            active_skills=list(active_skills or ()),
         )
         runtime.state.status = "running"
         runtime.services.on_event = on_event
@@ -134,6 +141,7 @@ class AgentRunner:
         services = RuntimeServices(
             planner=self.planner,
             tools=self.tools,
+            skill_catalog=self.skill_catalog,
             checkpoint_store=self.checkpoints,
             runtime_store=runtime_store,  # type: ignore[arg-type]
             hooks=self.hooks,
@@ -146,6 +154,7 @@ class AgentRunner:
         runtime.services.planner = self.planner
         runtime.services.tools = self.tools
         runtime.services.checkpoint_store = self.checkpoints
+        runtime.services.skill_catalog = self.skill_catalog
         runtime.services.hooks = self.hooks
         runtime.state.runner_settings = self.settings
         return runtime
@@ -195,6 +204,8 @@ class AgentRunner:
         assert runtime.services.publish is not None
         runtime.services.publish(RuntimeEvent("run_started", "started"))
         if cancel_if_requested(runtime):
+            return
+        if not self._skills.activate(runtime):
             return
         if runtime.run.mode == "plan":
             self._plan_mode.run(runtime)
@@ -284,6 +295,7 @@ class LegacyAgentRunner(AgentRunner):
                     mode=handoff.mode,
                     session_id=new_session_id(),
                     messages=[AssistantMessage(content=proposal)],
+                    active_skills=list(handoff.active_skills),
                     on_event=runtime.services.on_event,
                     interrupt=runtime.services.interrupt,
                     confirm=runtime.services.confirm,
@@ -297,6 +309,7 @@ class LegacyAgentRunner(AgentRunner):
                     run_id=new_run_id(),
                     turn_start_index=turn_start_index,
                     history=runtime.state.messages,
+                    active_skills=list(handoff.active_skills),
                 )
                 runtime.state.active_message = None
                 runtime.state.active_tool_index = None

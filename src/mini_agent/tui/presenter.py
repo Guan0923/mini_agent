@@ -30,6 +30,8 @@ class TerminalPresenter:
     def on_event(self, event: RuntimeEvent) -> None:
         if event.kind == "run_started":
             self._write(f"RUN {event.data['run_id']} started")
+        elif event.kind == "skills_selected":
+            self._write(f"SKILLS {event.message}")
         elif event.kind == "thinking_start":
             self._write("THINKING")
             self._thinking_open = True

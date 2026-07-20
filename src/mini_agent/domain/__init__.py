@@ -16,6 +16,7 @@ from .messages import (
     message_to_dict,
 )
 from .session import DEFAULT_SESSION_TITLE, Session, SessionSummary, new_session_id
+from .skills import SkillSelection, SkillSnapshot
 from .state import (
     AgentAction,
     ExecutionPlan,
@@ -53,6 +54,8 @@ __all__ = [
     "RunStatus",
     "Session",
     "SessionSummary",
+    "SkillSnapshot",
+    "SkillSelection",
     "StepEvaluation",
     "StrategyPolicy",
     "StrategySelection",
