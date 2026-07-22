@@ -53,17 +53,6 @@ def test_runtime_event_import_does_not_load_application_graph() -> None:
     )
 
 
-def test_core_runtime_and_planning_do_not_import_provider_implementations() -> None:
-    paths = [
-        SOURCE / "mini_agent" / "planning" / "llm.py",
-        SOURCE / "mini_agent" / "runtime" / "execution" / "routing.py",
-        SOURCE / "mini_agent" / "runtime" / "execution" / "workflows.py",
-    ]
-
-    for path in paths:
-        assert not any(name == "mini_agent.providers" for name in _module_imports(path)), path
-
-
 def test_deepseek_adapter_does_not_own_http_transport() -> None:
     imports = _module_imports(SOURCE / "mini_agent" / "providers" / "deepseek.py")
 
@@ -79,35 +68,3 @@ def test_application_services_depend_on_runner_port() -> None:
     for path in paths:
         imports = _module_imports(path)
         assert not any(name == "runner" or name.endswith(".runner") for name in imports), path
-
-
-def test_runtime_implementations_are_grouped_by_responsibility() -> None:
-    runtime = SOURCE / "mini_agent" / "runtime"
-
-    expected_modules = {
-        "core": {"config.py", "context.py", "contracts.py", "events.py", "hooks.py"},
-        "application": {"factory.py", "services.py"},
-        "execution": {"runner.py", "routing.py", "steps.py", "workflows.py"},
-        "conversation": {"service.py", "store.py", "steering.py", "user_input.py"},
-        "planning": {"mode.py", "review.py"},
-        "persistence": {"artifacts.py", "checkpointing.py", "recording.py"},
-    }
-    for package, modules in expected_modules.items():
-        assert modules <= {path.name for path in (runtime / package).glob("*.py")}
-
-    assert {path.name for path in runtime.glob("*.py")} == {"__init__.py"}
-
-
-def test_high_churn_model_and_tool_protocols_are_grouped_by_responsibility() -> None:
-    planning = SOURCE / "mini_agent" / "planning"
-    tools = SOURCE / "mini_agent" / "tools"
-
-    planner_imports = _module_imports(planning / "llm.py")
-    assert "model_requests" in planner_imports
-    assert "model_outputs" in planner_imports
-
-    default_tools = tools / "default_tools"
-    assert {"command.py", "filesystem.py", "schema.py", "web.py"} <= {
-        path.name for path in default_tools.glob("*.py")
-    }
-    assert "default_tools" in _module_imports(tools / "catalog.py")

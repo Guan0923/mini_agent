@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from rich.markdown import Markdown
-from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
-from textual.widgets import RichLog, Static
+from textual.widget import Widget
+from textual.widgets import Static
+
+from .latex import LatexMarkdown
+from .selectable import CopyableScroll
 
 
 class HistoryScreen(Screen[None]):
@@ -26,6 +28,16 @@ class HistoryScreen(Screen[None]):
         padding: 0 1;
         background: #101418;
         scrollbar-color: #5f6b76;
+    }
+    .history-role {
+        height: auto;
+        color: #9fc3e8;
+        text-style: bold;
+    }
+    .history-message {
+        height: auto;
+        padding: 0 0 0 2;
+        margin-bottom: 1;
     }
     #history-footer {
         height: 1;
@@ -47,22 +59,24 @@ class HistoryScreen(Screen[None]):
         super().__init__()
         self.session_label = session_label
         self.messages = messages
-        self.history_log = RichLog(wrap=True, markup=False, auto_scroll=False, id="history-log")
+        self.history_log = CopyableScroll(*self._content_widgets(), id="history-log")
+
+    def _content_widgets(self) -> list[Widget]:
+        if not self.messages:
+            return [Static("No conversation history.", classes="history-message")]
+        widgets: list[Widget] = []
+        for message in self.messages:
+            role = message.get("role", "system").upper()
+            widgets.append(Static(role, classes="history-role"))
+            widgets.append(LatexMarkdown(message.get("content", ""), classes="history-message"))
+        return widgets
 
     def compose(self) -> ComposeResult:
         yield Static(f"HISTORY | {self.session_label}", id="history-header")
         yield self.history_log
-        yield Static("READ ONLY | Esc to return", id="history-footer")
+        yield Static("READ ONLY | Select text and right-click to copy | Esc to return", id="history-footer")
 
     def on_mount(self) -> None:
-        if not self.messages:
-            self.history_log.write(Text("No conversation history.", style="dim"))
-        else:
-            for message in self.messages:
-                role = message.get("role", "system").upper()
-                self.history_log.write(Text(role, style="bold #9fc3e8"))
-                self.history_log.write(Markdown(message.get("content", "")))
-                self.history_log.write("")
         self.call_after_refresh(self.history_log.scroll_end, animate=False)
 
     def action_close(self) -> None:

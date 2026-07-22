@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
-from textual.widgets import RichLog, Static
+from textual.widgets import Static
+
+from .selectable import CopyableScroll
 
 
 class _InspectionScreen(Screen[None]):
@@ -25,6 +26,9 @@ class _InspectionScreen(Screen[None]):
         padding: 0 1;
         background: #101418;
         scrollbar-color: #5f6b76;
+    }
+    .inspection-content {
+        height: auto;
     }
     #inspection-footer {
         height: 1;
@@ -46,16 +50,15 @@ class _InspectionScreen(Screen[None]):
         super().__init__()
         self.heading = heading
         self.content = content
-        self.content_log = RichLog(wrap=True, markup=False, auto_scroll=False, id="inspection-log")
+        items = [Static(item, markup=False, classes="inspection-content") for item in content]
+        self.content_log = CopyableScroll(*items, id="inspection-log")
 
     def compose(self) -> ComposeResult:
         yield Static(self.heading, id="inspection-header")
         yield self.content_log
-        yield Static("READ ONLY | Esc to return", id="inspection-footer")
+        yield Static("READ ONLY | Select text and right-click to copy | Esc to return", id="inspection-footer")
 
     def on_mount(self) -> None:
-        for item in self.content:
-            self.content_log.write(Text(item))
         self.call_after_refresh(self.content_log.scroll_end, animate=False)
 
     def action_close(self) -> None:

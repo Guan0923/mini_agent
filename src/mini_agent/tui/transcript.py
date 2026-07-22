@@ -10,6 +10,8 @@ from textual.timer import Timer
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.text_area import Selection
 
+from .latex import LatexMarkdown
+
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
@@ -69,7 +71,7 @@ class CompactProgress(Static):
             self._animation_timer = None
 
 
-class MarkdownBody(Markdown):
+class MarkdownBody(LatexMarkdown):
     """A Markdown widget with a synchronous source cache for streaming text."""
 
     def __init__(self, markdown: str = "", **kwargs: object) -> None:

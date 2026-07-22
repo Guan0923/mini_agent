@@ -16,7 +16,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.timer import Timer
-from textual.widgets import Input, ListView, Markdown, OptionList, Static, TextArea
+from textual.widgets import Input, ListView, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.widgets.text_area import Selection
 
@@ -28,6 +28,7 @@ from .diagnostic_mixin import TuiDiagnosticMixin
 from .diagnostics import DiagnosticSink
 from .history import HistoryScreen
 from .inspection import SessionsScreen, TraceScreen
+from .latex import LatexMarkdown
 from .transcript import CompactProgress, MarkdownBody, TranscriptNode
 from .transcript_rendering import TranscriptRenderingMixin
 from .widgets import (
@@ -268,7 +269,7 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
         self.status_line = Static(id="status")
         self.context_progress = ContextProgress()
         self.question_header = Static(id="choice-header")
-        self.review_details = Markdown(id="review-details")
+        self.review_details = LatexMarkdown(id="review-details")
         self.completion_menu = OptionList(id="completion-menu")
         self.input = TerminalInput(
             soft_wrap=True,

@@ -428,6 +428,8 @@ dependencies = [
     { name = "ddgr" },
     { name = "huggingface-hub" },
     { name = "jsonschema" },
+    { name = "mdit-py-plugins" },
+    { name = "pylatexenc" },
     { name = "pyyaml" },
     { name = "regex" },
     { name = "requests" },
@@ -447,6 +449,8 @@ requires-dist = [
     { name = "ddgr", specifier = ">=2.2,<3" },
     { name = "huggingface-hub", specifier = ">=0.30,<2" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
+    { name = "mdit-py-plugins", specifier = ">=0.6,<1" },
+    { name = "pylatexenc", specifier = ">=2.10,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "pyyaml", specifier = ">=6,<7" },
@@ -493,6 +497,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/c3/b2/bc9c9196916376152
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
 ]
+
+[[package]]
+name = "pylatexenc"
+version = "2.10"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5d/ab/34ec41718af73c00119d0351b7a2531d2ebddb51833a36448fc7b862be60/pylatexenc-2.10.tar.gz", hash = "sha256:3dd8fd84eb46dc30bee1e23eaab8d8fb5a7f507347b23e5f38ad9675c84f40d3", size = 162597, upload-time = "2021-04-06T07:56:07.854Z" }
 
 [[package]]
 name = "pytest"
