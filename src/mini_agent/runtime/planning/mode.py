@@ -7,8 +7,8 @@ from mini_agent.domain import AssistantMessage, RunHandoff
 from ..core.context import AgentRuntime
 from ..core.contracts import InterruptRequest
 from ..core.events import RuntimeEvent
-from ..execution.cancellation import cancel_if_requested
-from ..execution.outcomes import cancel_run, complete_run, fail_run
+from ..execution.lifecycle.cancellation import cancel_if_requested
+from ..execution.lifecycle.outcomes import cancel_run, complete_run, fail_run
 from ..execution.workflows import PlanProposalWorkflow
 from .review import REQUEST_PLAN_REVIEW_NAME
 

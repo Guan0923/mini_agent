@@ -20,7 +20,7 @@ _EXPORTS = {
     "HookExecutionError": ("core.hooks", "HookExecutionError"),
     "HookManager": ("core.hooks", "HookManager"),
     "HookOutcome": ("core.hooks", "HookOutcome"),
-    "LegacyAgentRunner": ("execution.runner", "LegacyAgentRunner"),
+    "LegacyAgentRunner": ("execution.legacy", "LegacyAgentRunner"),
     "PreparedResponse": ("core.context", "PreparedResponse"),
     "QuestionOption": ("core.contracts", "QuestionOption"),
     "ModelHookContext": ("core.hooks", "ModelHookContext"),
