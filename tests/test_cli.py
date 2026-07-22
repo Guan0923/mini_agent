@@ -167,6 +167,57 @@ def test_interactive_start_uses_full_screen_view_and_prints_resume_status(monkey
     assert capsys.readouterr().out == "No saved session.\n"
 
 
+def test_interactive_start_loads_restored_session_history_into_main_view(monkeypatch) -> None:
+    history = [
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": "earlier answer"},
+    ]
+
+    class HistoryView:
+        last = None
+
+        def __init__(self, loop, **kwargs) -> None:
+            del loop, kwargs
+            type(self).last = self
+            self.submissions = asyncio.Queue()
+            self.submissions.put_nowait(None)
+            self.interrupts = asyncio.Queue()
+            self.stopped = asyncio.Event()
+            self.loaded: list[list[dict[str, str]]] = []
+            self.writes: list[str] = []
+
+        async def run_async(self) -> None:
+            await self.stopped.wait()
+
+        def stop(self) -> None:
+            self.stopped.set()
+
+        def write(self, text: str, end: str = "\n") -> None:
+            self.writes.append(f"{text}{end}")
+
+        def set_ui(self, **kwargs) -> None:
+            del kwargs
+
+        def clear(self) -> None:
+            self.writes.clear()
+
+        def load_history(self, messages: list[dict[str, str]]) -> None:
+            self.loaded.append(messages)
+
+    monkeypatch.setattr(cli, "TerminalView", HistoryView)
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._conversation_service.active_session = SimpleNamespace(
+        session_id="session_restored",
+        title="Restored",
+    )
+    app._conversation_service.history = lambda: history
+
+    app.start()
+
+    assert HistoryView.last is not None
+    assert HistoryView.last.loaded == [history]
+
+
 def test_interactive_start_defers_active_run_messages_to_one_follow_up_run(monkeypatch, capsys) -> None:
     calls: list[str] = []
 
@@ -988,6 +1039,73 @@ def test_view_routes_conversations_system_output_and_history() -> None:
     assert view.conversations == ["hello"]
     assert view.system == [("SYSTEM EVENT", "")]
     assert view.histories == [("session_1 — Session 1", history)]
+
+
+def test_session_and_use_refresh_main_history_without_changing_failed_switch() -> None:
+    histories = {
+        "session_current": [
+            {"role": "user", "content": "current question"},
+            {"role": "assistant", "content": "current answer"},
+        ],
+        "session_empty": [],
+    }
+
+    class HistoryView:
+        def __init__(self) -> None:
+            self.loaded: list[list[dict[str, str]]] = []
+            self.context_resets = 0
+            self.system: list[str] = []
+
+        def load_history(self, messages: list[dict[str, str]]) -> None:
+            self.loaded.append(messages)
+
+        def set_context_usage(self) -> None:
+            self.context_resets += 1
+
+        def write_system(self, text: str, end: str = "\n") -> None:
+            self.system.append(f"{text}{end}")
+
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    view = HistoryView()
+    app._view = view
+    app._conversation_service.session_store = object()
+    app._conversation_service.active_session = SimpleNamespace(
+        session_id="session_current",
+        title="Current",
+    )
+    app._conversation_service.history = lambda: histories[
+        app._conversation_service.active_session.session_id
+    ]
+    app._conversation_service.current_summary = lambda: SimpleNamespace(
+        session_id="session_current",
+        title="Current",
+        message_count=2,
+        created_at="earlier",
+        updated_at="now",
+        last_run_id=None,
+    )
+
+    def use_session(session_id: str) -> None:
+        if session_id == "missing":
+            raise ValueError("missing")
+        app._conversation_service.active_session = SimpleNamespace(
+            session_id=session_id,
+            title="Empty",
+        )
+
+    app._conversation_service.use_session = use_session
+
+    assert app._handle("/session") is True
+    assert view.loaded == [histories["session_current"]]
+
+    assert app._handle("/use session_empty") is True
+    assert view.loaded[-1] == []
+    assert view.context_resets == 1
+    assert app.last_state is None
+
+    loaded_before_failure = list(view.loaded)
+    assert app._handle("/use missing") is True
+    assert view.loaded == loaded_before_failure
 
 
 def test_sessions_and_trace_commands_route_to_read_only_views() -> None:

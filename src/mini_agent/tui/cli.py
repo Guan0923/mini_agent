@@ -155,6 +155,7 @@ class TerminalApp:
         if diagnostics is not None:
             diagnostics.record("tui_started", {"mode": self.mode})
         self._view = view
+        self._load_active_history()
         self._write("Mini-Agent TUI — type /help for commands, /quit to exit.")
         self._print_active_session()
         pending_messages: Queue[str] = Queue()
@@ -792,6 +793,7 @@ class TerminalApp:
         except ValueError:
             self._write(f"Unknown session: {session_id}")
             return
+        self._load_active_history()
         self._reset_context_usage()
         self.last_state = None
         self._print_active_session()
@@ -854,6 +856,7 @@ class TerminalApp:
         if summary is None:
             self._write("No active session.")
             return
+        self._load_active_history()
         self._write(f"SESSION {summary.session_id}")
         self._write(f"TITLE {summary.title}")
         self._write(f"MESSAGES {summary.message_count}")
@@ -861,6 +864,15 @@ class TerminalApp:
         self._write(f"UPDATED {summary.updated_at}")
         if summary.last_run_id:
             self._write(f"LAST RUN {summary.last_run_id} {summary.last_run_status}")
+
+    def _load_active_history(self) -> None:
+        """Replace the main transcript with the active session's persisted history."""
+
+        view = getattr(self, "_view", None)
+        load_history = getattr(view, "load_history", None)
+        if self.active_session is None or not callable(load_history):
+            return
+        load_history(self._conversation_service.history())
 
     def _show_history(self) -> None:
         view = getattr(self, "_view", None)
