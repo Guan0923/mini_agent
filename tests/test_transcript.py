@@ -460,6 +460,8 @@ def test_history_load_skips_system_and_keeps_role_content_only() -> None:
     async def scenario() -> None:
         view = TerminalView()
         async with view.run_test(size=(80, 20)) as pilot:
+            view.begin_conversation("stale conversation")
+            view.input.value = "preserved draft"
             view.load_history(
                 [
                     {"role": "system", "content": "hidden notice"},
@@ -473,6 +475,8 @@ def test_history_load_skips_system_and_keeps_role_content_only() -> None:
             assert all(node.has_class("transcript-role") for node in view._top_level_nodes)
             assert view.transcript_text == "question\nanswer"
             assert "hidden notice" not in view.transcript_text
+            assert "stale conversation" not in view.transcript_text
+            assert view.input.value == "preserved draft"
 
     asyncio.run(scenario())
 
