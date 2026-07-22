@@ -1,44 +1,68 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## Working Principles
 
-Mini-Agent is a Python 3.11+ terminal-first agent lab. Source code lives in `src/mini_agent/`; tests live in `tests/`.
+- Before taking action, briefly state what you are about to do and why.
+- Follow Occam's razor: choose the simplest direct change that fully solves the problem.
+- Preserve unrelated user changes and untracked files. Inspect a dirty worktree before editing, and never use destructive Git commands without explicit authorization.
+- Prefer evidence from the current source, tests, and configuration over assumptions or stale documentation.
 
-- `domain/`: pure run-state types such as `AgentAction` and `RunState`.
-- `runtime/`: dependency assembly, execution loop, settings, and structured runtime events.
-- `planning/`: rule-based and LLM planning strategies.
-- `tools/`: tool contracts, registry, calculator, and workspace-confined file operations.
-- `providers/`: HTTP transport plus provider-specific adapters, currently DeepSeek.
-- `tui/`: terminal input, output, and confirmation prompts.
+## Project Structure & Dependency Direction
 
-Keep dependency flow inward: TUI composes the runtime; runtime invokes planners and tools; provider adapters must not depend on TUI code.
+Mini-Agent is a Python 3.11+ terminal-first agent lab. Production code lives in `src/mini_agent/`; focused tests live in `tests/`.
 
-## Build, Test, and Development Commands
+- `domain/`: provider-neutral messages, plans, sessions, skills, errors, and run state.
+- `planning/`: rule-based and LLM planners, context management, model request lifecycle, and structured-output parsing.
+- `runtime/`: application composition, conversation orchestration, execution workflows, Plan mode, persistence ports, hooks, and runtime events.
+- `providers/`: `client.py` orchestrates providers, `transport.py` owns generic JSON/SSE HTTP, and `deepseek/` owns DeepSeek wire conversion.
+- `tools/`: contracts and registry plus grouped `filesystem/`, `web/`, `default_tools/`, and command implementations.
+- `storage/`: SQLite checkpoint/session adapters split into operations, schema migration, and row mapping.
+- `tui/`: CLI/application loops, approval components, screens, rendering, view behavior, and reusable widgets.
+- `observability/`: JSONL logging, redaction, and event fan-out.
 
-Run these commands from the repository root:
+Keep dependencies inward: TUI composes runtime services; runtime invokes planner/tool ports; provider adapters never import TUI or storage; domain remains independent of outer layers.
+
+## Build, Run, and Validation Commands
+
+Run commands from the repository root:
 
 ```powershell
-python run.py --planner rule                 # Run offline interactive TUI
-python run.py "calculate (18 + 6) * 4"      # Run one task with configured provider
-python -m pytest -q                          # Run the complete test suite
+python -m pip install -e ".[dev]"
+python run.py --planner rule                 # Offline interactive TUI
+python run.py "calculate (18 + 6) * 4"      # One configured-provider task
+python -m pytest -q                          # Complete focused test suite
+python -m ruff check .
+python -m ruff format --check .
 ```
 
-`pyproject.toml` defines the `src` layout and the only runtime dependency, `requests`. Use a virtual environment when installing dependencies: `python -m pip install -e .`.
+`python run.py`, `python -m mini_agent`, and the installed `mini-agent` command share the same CLI entry point.
 
-## Coding Style & Naming Conventions
+## Design and Coding Guidelines
 
-Use four-space indentation, type hints for public APIs, and concise module docstrings. Prefer `snake_case` for modules, functions, and variables; use `PascalCase` for classes and dataclasses. Keep provider transport generic in `providers/client.py`; put provider-specific request construction and response parsing in files such as `providers/deepseek.py`.
-
-Do not add tool behavior directly to the TUI or runner. Register tools through `ToolRegistry`, and preserve workspace path checks and confirmation requirements for writes. The runner publishes `RuntimeEvent` objects; terminal formatting belongs in `tui/presenter.py`.
+- Use four-space indentation, type hints for public APIs, concise module docstrings, `snake_case` names, and `PascalCase` classes/dataclasses.
+- Treat roughly 300 lines per file and at most 8 direct Python files per package as reviewability guidance, not mechanical limits. Split by responsibility; do not create thin forwarding modules only to satisfy a number.
+- Keep HTTP/SSE mechanics in `providers/transport.py`; provider-specific request/response rules belong under the provider package.
+- Register tools through `ToolRegistry`. Preserve JSON Schema validation, workspace confinement, output bounds, and approval requirements.
+- Keep tool behavior out of the TUI and runner. Runtime publishes `RuntimeEvent`; terminal presentation belongs under `tui/rendering/`.
+- Reuse shared normalization, validation, path, and persistence helpers instead of duplicating private implementations.
+- Use `apply_patch` for intentional source edits when available; bulk formatting and mechanical moves may use dedicated tools.
 
 ## Testing Guidelines
 
-Use `pytest`; name files `test_*.py` and functions `test_<behavior>`. Mock HTTP sessions for provider tests—never call a paid API in automated tests. Add tests for success paths, invalid provider responses, and permission or path-boundary failures when changing tools.
+- Use `pytest`; name files `test_*.py` and functions `test_<behavior>`.
+- Keep a focused representative test for each contract or state transition. Avoid exhaustive key/mouse variants and duplicate end-to-end scenarios when lower-level coverage already proves the behavior.
+- Preserve high-risk coverage for provider parsing/transport errors, retries, redaction, persistence migrations, path confinement, approvals, and command execution.
+- Mock HTTP sessions and provider responses; automated tests must never call a paid model API.
+- When changing tools, cover success, invalid arguments, permission boundaries, and path/security failures.
+- Run the complete suite after structural changes. On Windows, use an external pytest `--basetemp` if the workspace temp directory has ACL issues.
 
-## Commit & Pull Request Guidelines
+## Commits and Pull Requests
 
-Follow the existing Conventional Commit-style pattern: `type: concise summary`, for example `feat: add anthropic adapter` or `fix: render agent replies`. Keep commits focused. Pull requests should describe behavior changes, list test commands run, link relevant issues, and include terminal output for user-visible TUI changes.
+Use focused Conventional Commit-style messages such as `feat: add anthropic adapter` or `fix: render agent replies`. Pull requests should summarize behavior changes, list validation commands, link relevant issues, and include terminal output for user-visible TUI changes.
 
-## Security & Configuration
+## Security and Configuration
 
-Copy `.env.example` to `.env`; never commit real API keys. Treat model-generated tool arguments as untrusted and validate them before execution.
+- Copy `.env.example` to `.env`; never commit real API keys or credentials. Process environment values override `.env` values.
+- Treat model-generated tool arguments and all web/tool output as untrusted.
+- Authentication headers, `.env` contents, and full process environments must never be persisted. Keep recursive redaction intact when changing logs.
+- `LOG_FULL_MESSAGES=true` records complete redacted bodies; `false` records summaries. Both modes must remain schema-compatible across JSONL, SQLite, runtime state, and history projections.

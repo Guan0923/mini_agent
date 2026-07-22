@@ -117,12 +117,11 @@ class SequencedStreamSession:
 
 
 def runtime_for_custom(*, max_transport_retries: int = 2):
-    runtime = AgentRunner(
-        RuleBasedPlanner(), ToolRegistry(), max_transport_retries=max_transport_retries
-    ).new_runtime(task="hello")
+    runtime = AgentRunner(RuleBasedPlanner(), ToolRegistry(), max_transport_retries=max_transport_retries).new_runtime(
+        task="hello"
+    )
     runtime.exchange.messages = [UserMessage(content="hello")]
     return runtime
-
 
 
 def runtime_for_stream():
@@ -221,6 +220,7 @@ def test_deepseek_json_wire_request_forces_thinking_disabled() -> None:
     assert request.data["wire_request"]["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in request.data["wire_request"]
 
+
 def test_stream_model_response_keeps_all_wire_events() -> None:
     session = FakeStreamSession(
         [
@@ -237,7 +237,10 @@ def test_stream_model_response_keeps_all_wire_events() -> None:
 
     response = next(event for event in events if event.kind == "model_response")
     assert response.data["wire_response"] == [
-        {"id": "stream-1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}
+        {
+            "id": "stream-1",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        }
     ]
     assert response.data["transport"]["stream_completed"] is True
 
@@ -356,7 +359,6 @@ def test_response_rejects_duplicate_tool_call_ids() -> None:
                     "tool_calls": [tool_call, tool_call],
                 },
                 "finish_reason": "tool_calls",
-
             }
         ]
     }

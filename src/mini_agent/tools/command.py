@@ -163,10 +163,7 @@ class WorkspaceCommand:
                 break
             marker = updated_marker
 
-        parts = [
-            f"{label}:\n{value[:allocation]}"
-            for (label, value), allocation in zip(streams, allocations)
-        ]
+        parts = [f"{label}:\n{value[:allocation]}" for (label, value), allocation in zip(streams, allocations)]
         return "\n".join(parts) + marker
 
     @staticmethod

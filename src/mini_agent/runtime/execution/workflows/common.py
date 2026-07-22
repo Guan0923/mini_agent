@@ -15,6 +15,7 @@ from ..steps import ToolStepExecutor, ToolStepResult
 
 _MAX_TOOL_CONTEXT_CHARS = 2_000
 
+
 @dataclass(frozen=True)
 class PlanProposalResult:
     """One completed Plan-mode response, optionally submitted for review."""
@@ -170,6 +171,8 @@ def _truncate(value: str) -> str:
         return value
     omitted = len(value) - _MAX_TOOL_CONTEXT_CHARS
     return f"{value[:_MAX_TOOL_CONTEXT_CHARS]}… ({omitted} characters omitted)"
+
+
 def _same_tool(first: ToolMessage, second: ToolMessage | None) -> bool:
     return second is not None and first.name == second.name and first.arguments == second.arguments
 

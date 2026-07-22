@@ -95,9 +95,7 @@ class PlanControlMixin:
                 "id": question.id,
                 "header": question.header,
                 "question": question.question,
-                "options": [
-                    {"label": option.label, "description": option.description} for option in question.options
-                ],
+                "options": [{"label": option.label, "description": option.description} for option in question.options],
             }
             for question in questions
         ]
@@ -147,10 +145,14 @@ class PlanControlMixin:
         tool.content = format_user_input_answers(answers)
         tool.retryable = False
         _publish_tool_result(runtime, tool)
-        runtime.run.add_event("user_input_received", "Plan question answers received", call_id=tool.call_id, answers=answers)
+        runtime.run.add_event(
+            "user_input_received", "Plan question answers received", call_id=tool.call_id, answers=answers
+        )
         _publish(
             runtime,
-            RuntimeEvent("user_input_received", "Plan question answers received", {"call_id": tool.call_id, "answers": answers}),
+            RuntimeEvent(
+                "user_input_received", "Plan question answers received", {"call_id": tool.call_id, "answers": answers}
+            ),
         )
         _finish_assistant(runtime)
         return True

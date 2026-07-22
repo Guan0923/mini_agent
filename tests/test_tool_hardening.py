@@ -56,18 +56,26 @@ def test_iterative_glob_supports_deep_valid_patterns_and_rejects_excessive_depth
 @pytest.mark.parametrize("tool", ["glob", "grep"])
 def test_registry_converts_excessive_glob_inputs_to_tool_errors(tmp_path: Path, tool: str) -> None:
     registry = ToolRegistry(tmp_path)
-    arguments = {"pattern": "/".join(["**"] * 257)} if tool == "glob" else {
-        "pattern": "needle",
-        "glob": "/".join(["**"] * 257),
-    }
+    arguments = (
+        {"pattern": "/".join(["**"] * 257)}
+        if tool == "glob"
+        else {
+            "pattern": "needle",
+            "glob": "/".join(["**"] * 257),
+        }
+    )
 
     with pytest.raises(ToolError, match="path segments"):
         registry.invoke(tool, arguments)
 
-    long_arguments = {"pattern": "x" * 4_097} if tool == "glob" else {
-        "pattern": "needle",
-        "glob": "x" * 4_097,
-    }
+    long_arguments = (
+        {"pattern": "x" * 4_097}
+        if tool == "glob"
+        else {
+            "pattern": "needle",
+            "glob": "x" * 4_097,
+        }
+    )
     with pytest.raises(ToolError, match="Invalid arguments"):
         registry.invoke(tool, long_arguments)
 

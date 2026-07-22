@@ -18,9 +18,7 @@ class StrategyRouter:
         capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
         fallback_data: dict[str, object] = {}
         if run.mode == "plan":
-            selection = StrategySelection(
-                "reactive", "Plan mode drafts a proposal for explicit implementation review."
-            )
+            selection = StrategySelection("reactive", "Plan mode drafts a proposal for explicit implementation review.")
             source = "mode"
         elif settings.strategy == "auto":
             if capabilities.strategy_selector is None:

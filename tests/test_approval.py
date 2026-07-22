@@ -1,5 +1,5 @@
 from mini_agent.runtime.core.contracts import InterruptRequest, QuestionOption, UserQuestion
-from mini_agent.tui.approval import TerminalApproval
+from mini_agent.tui.components.approval import TerminalApproval
 
 
 def test_tool_review_collects_english_supplement(monkeypatch, capsys) -> None:
@@ -97,7 +97,9 @@ def test_full_access_auto_approves_tools_but_not_plan_review(monkeypatch, capsys
     approval = TerminalApproval("full_access")
     monkeypatch.setattr("builtins.input", lambda _prompt: "3")
 
-    tool_decision = approval(InterruptRequest("tool", "Call tool run_command?", {"tool": "run_command", "arguments": {}}))
+    tool_decision = approval(
+        InterruptRequest("tool", "Call tool run_command?", {"tool": "run_command", "arguments": {}})
+    )
     plan_decision = approval(InterruptRequest("plan", "Implement this plan?", {"plan": "1. Write the file."}))
 
     assert tool_decision.choice == "continue"

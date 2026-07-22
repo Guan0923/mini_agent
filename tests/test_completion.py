@@ -1,4 +1,7 @@
-from mini_agent.tui.completion import SlashCommandCompleter
+import asyncio
+
+from mini_agent.tui.components.completion import SlashCommandCompleter
+from mini_agent.tui.view import TerminalView
 
 
 def _completions(text: str):
@@ -48,3 +51,18 @@ def test_completion_replaces_only_the_current_command_prefix() -> None:
 
     assert completion.value == "/plan"
     assert completion.start_position == 20
+
+
+def test_enter_submits_terminal_input() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test() as pilot:
+            view.input.value = "hello"
+            view.input.focus()
+
+            await pilot.press("enter")
+
+            assert await asyncio.wait_for(view.submissions.get(), 1) == "hello"
+            assert view.input.value == ""
+
+    asyncio.run(scenario())

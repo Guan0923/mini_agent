@@ -90,12 +90,13 @@ def test_session_runtime_messages_survive_restart_and_match_run_state(tmp_path: 
 
     assert messages == state.runtime_messages
     assert [message.sequence for message in messages] == list(range(1, len(messages) + 1))
-    assert {"run_started", "response", "response", "response", "run_finished"} <= {
-        message.kind for message in messages
-    }
+    assert {"run_started", "response", "response", "response", "run_finished"} <= {message.kind for message in messages}
     assert reopened.load_conversation(service.active_session.session_id) == [
         {"role": "user", "content": "calculate 2 + 2"},
-        {"role": "assistant", "content": "Hello! I can help with web search, file operations, and running commands in the workspace."},
+        {
+            "role": "assistant",
+            "content": "Hello! I can help with web search, file operations, and running commands in the workspace.",
+        },
     ]
 
 
@@ -278,9 +279,7 @@ def test_log_full_messages_rejects_invalid_env_value(tmp_path: Path) -> None:
 class StreamingCompletionClient:
     def run(self, runtime) -> PreparedResponse:
         if runtime.exchange.operation == "strategy":
-            return PreparedResponse(
-                AssistantMessage(content='{"strategy":"reactive","reason":"Direct response."}')
-            )
+            return PreparedResponse(AssistantMessage(content='{"strategy":"reactive","reason":"Direct response."}'))
         assert runtime.exchange.on_reasoning is not None
         assert runtime.exchange.on_content is not None
         runtime.exchange.on_reasoning("Think.")
@@ -305,9 +304,7 @@ def test_response_stream_is_renderable_but_not_persisted_chunk_by_chunk(tmp_path
     state = runner.run(runtime)
 
     stream_kinds = [
-        event.kind
-        for event in events
-        if event.kind.startswith("thinking_") or event.kind.startswith("response_")
+        event.kind for event in events if event.kind.startswith("thinking_") or event.kind.startswith("response_")
     ]
     assert stream_kinds == [
         "thinking_start",
@@ -324,10 +321,7 @@ def test_response_stream_is_renderable_but_not_persisted_chunk_by_chunk(tmp_path
     transient = {"response_start", "response_delta", "response_end"}
     assert transient.isdisjoint(message.kind for message in state.runtime_messages)
 
-    records = [
-        json.loads(line)
-        for line in logger.path_for(state.run_id).read_text(encoding="utf-8").splitlines()
-    ]
+    records = [json.loads(line) for line in logger.path_for(state.run_id).read_text(encoding="utf-8").splitlines()]
     assert transient.isdisjoint(record["kind"] for record in records)
     assert [record["kind"] for record in records].count("response") == 1
 
@@ -384,7 +378,6 @@ def test_tool_lifecycle_events_are_correlated_by_call_id() -> None:
 
     lifecycle = [event for event in events if event.kind in {"tool_call", "tool_result"}]
     assert [event.data["call_id"] for event in lifecycle] == ["call_echo", "call_echo"]
-
 
 
 class ExplodingStreamingPlanner:

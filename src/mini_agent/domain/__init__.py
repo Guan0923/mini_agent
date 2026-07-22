@@ -2,7 +2,6 @@
 
 from .errors import ModelOutputError, PlanningError
 from .messages import (
-    ArtifactMessage,
     AssistantMessage,
     ChatMessage,
     Message,
@@ -38,7 +37,6 @@ from .state import (
 
 __all__ = [
     "AgentAction",
-    "ArtifactMessage",
     "AssistantMessage",
     "ChatMessage",
     "DEFAULT_SESSION_TITLE",

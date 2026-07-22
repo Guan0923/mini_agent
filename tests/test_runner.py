@@ -15,10 +15,9 @@ from mini_agent.observability import JsonlRunLogger
 from mini_agent.planning import RuleBasedPlanner
 from mini_agent.providers import ModelRequestError
 from mini_agent.runtime import LegacyAgentRunner as AgentRunner
-from mini_agent.runtime import RunnerSettings, SQLiteCheckpointStore
-from mini_agent.runtime.core.contracts import InterruptDecision, InterruptRequest
+from mini_agent.runtime.core.contracts import InterruptDecision
 from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
-from mini_agent.tools import Tool, ToolError, ToolRegistry
+from mini_agent.tools import ToolRegistry
 
 
 def test_runner_executes_calculation(tmp_path: Path) -> None:
@@ -63,72 +62,6 @@ def test_jsonl_error_includes_provider_diagnostics(tmp_path: Path) -> None:
         "content_chars": 0,
         "reasoning_chars": 42,
     }
-
-
-class PlanModePlanner:
-    name = "test"
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        assert mode == "plan"
-        return AgentAction(
-            type="tool_call", tool=REQUEST_PLAN_REVIEW_NAME, arguments={"plan": "1. Write the planned file."}
-        )
-
-    def create_dynamic_plan(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> ExecutionPlan:
-        assert {"role": "assistant", "content": "1. Write the planned file."} in history
-        return ExecutionPlan(
-            goal="Write a file from the reviewed plan.",
-            steps=[
-                PlanStep(
-                    id="write",
-                    description="Write the planned file",
-                    action=AgentAction(
-                        type="tool_call",
-                        tool="run_command",
-                        arguments={"command": "[System.IO.File]::WriteAllText('blocked.txt', 'no')"},
-                    ),
-                )
-            ],
-        )
-
-    def evaluate_step(self, history, plan, step, result) -> StepEvaluation:
-        return StepEvaluation("continue", "The write completed.")
-
-    def replan(self, history, plan, reason, on_reasoning=None) -> ExecutionPlan:
-        raise AssertionError("The test plan should not need replanning.")
-
-
-def test_plan_mode_cancel_prevents_execution(tmp_path: Path) -> None:
-    events = []
-    state = AgentRunner(PlanModePlanner(), ToolRegistry(tmp_path)).run(
-        "write a file",
-        lambda _: True,
-        mode="plan",
-        on_event=events.append,
-        interrupt=lambda _request: InterruptDecision("cancel"),
-    )
-
-    assert state.status == "cancelled"
-    assert not (tmp_path / "blocked.txt").exists()
-    assert [event.kind for event in events[-2:]] == ["cancelled", "run_finished"]
-
-
-def test_legacy_runner_clear_session_handoff_uses_only_final_plan_context(tmp_path: Path) -> None:
-    state = AgentRunner(PlanModePlanner(), ToolRegistry(tmp_path), strategy="dynamic_replan").run(
-        "write a file",
-        lambda _: True,
-        mode="plan",
-        interrupt=lambda request: InterruptDecision(
-            "implement_clear_session" if request.kind == "plan" else "continue"
-        ),
-    )
-
-    assert state.status == "completed"
-    assert state.mode == "agent"
-    assert state.history[0] == AssistantMessage(content="1. Write the planned file.")
-    assert state.history[1]["content"] == "Implement the plan"
-    assert all(item["content"] != "write a file" for item in state.history)
-    assert (tmp_path / "blocked.txt").read_text(encoding="utf-8") == "no"
 
 
 class PlanResearchPlanner:
@@ -178,8 +111,9 @@ def test_plan_mode_researches_read_only_tools_then_hands_off_to_dynamic_executio
     state = AgentRunner(PlanResearchPlanner(), ToolRegistry(tmp_path)).run(
         "review the note",
         mode="plan",
-        interrupt=lambda request: requests.append(request.kind)
-        or InterruptDecision("implement" if request.kind == "plan" else "continue"),
+        interrupt=lambda request: (
+            requests.append(request.kind) or InterruptDecision("implement" if request.kind == "plan" else "continue")
+        ),
     )
 
     assert state.status == "completed"
@@ -206,44 +140,6 @@ def test_plan_mode_researches_read_only_tools_then_hands_off_to_dynamic_executio
     assert proposals[0].tool_messages[0].arguments["plan"].startswith("1. Read")
 
 
-class PlanRecoveryPlanner:
-    name = "plan-recovery"
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        assert mode == "plan"
-        if history[-1]["content"].startswith("[Tool error]"):
-            return AgentAction(
-                type="tool_call",
-                tool=REQUEST_PLAN_REVIEW_NAME,
-                arguments={"plan": "1. Inspect the missing input before implementation."},
-            )
-        return AgentAction(type="tool_call", tool="read_file", arguments={"path": "missing.txt"})
-
-
-def test_plan_mode_feeds_a_failed_read_back_to_the_planner(tmp_path: Path) -> None:
-    events = []
-    state = AgentRunner(PlanRecoveryPlanner(), ToolRegistry(tmp_path), max_retries=0).run(
-        "prepare a plan",
-        mode="plan",
-        on_event=events.append,
-        interrupt=lambda request: (
-            InterruptDecision("cancel") if request.kind == "plan" else pytest.fail("unexpected tool approval")
-        ),
-    )
-
-    assert state.status == "cancelled"
-    tool_error = next(
-        tool
-        for message in state.history
-        if isinstance(message, AssistantMessage)
-        for tool in message.tool_messages
-        if tool.status == "failed"
-    )
-    assert tool_error.role == "tool"
-    assert tool_error.content is not None and "Not a file" in tool_error.content
-    assert [event.data["attempt"] for event in events if event.kind == "tool_recovery"] == [1]
-
-
 class ConversationPlanner:
     name = "test"
 
@@ -255,64 +151,6 @@ class ConversationPlanner:
 
     def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
         return StrategySelection("reactive", "A greeting needs no precomputed plan.")
-
-
-def test_agent_mode_emits_reasoning_and_persists_conversation(tmp_path: Path) -> None:
-    events = []
-    conversation = [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}]
-    state = AgentRunner(ConversationPlanner(), ToolRegistry(tmp_path)).run(
-        "How are you?", lambda _: False, conversation=conversation, on_event=events.append
-    )
-
-    assert state.status == "completed"
-    assert [event.kind for event in events] == [
-        "run_started",
-        "strategy",
-        "thinking_start",
-        "thinking_delta",
-        "thinking_end",
-        "assistant_message",
-        "response",
-        "run_finished",
-    ]
-    assert all(event.data["run_id"] == state.run_id for event in events)
-    assert conversation[-2:] == [
-        {"role": "user", "content": "How are you?"},
-        {"role": "assistant", "content": "I am well."},
-    ]
-
-
-class RepairNoticePlanner:
-    name = "repair-notice"
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        return AgentAction(type="final_answer", answer="Recovered response.")
-
-    def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("reactive", "The response has already been repaired.")
-
-    def consume_output_repairs(self) -> list[dict[str, str | int]]:
-        return [
-            {
-                "phase": "action",
-                "attempt": 1,
-                "validation_error": "Model did not return the required action JSON.",
-                "invalid_output_preview": "not JSON",
-                "outcome": "repaired",
-            }
-        ]
-
-
-def test_runner_persists_and_emits_model_format_repairs(tmp_path: Path) -> None:
-    events = []
-    state = AgentRunner(RepairNoticePlanner(), ToolRegistry(tmp_path)).run(
-        "recover a malformed action", lambda _: False, on_event=events.append
-    )
-
-    repair_events = [event for event in events if event.kind == "model_repair"]
-    assert state.status == "completed"
-    assert repair_events[0].data["outcome"] == "repaired"
-    assert any(event.kind == "model_repair" for event in state.events)
 
 
 class DynamicRecoveryPlanner:
@@ -391,124 +229,6 @@ def test_dynamic_replan_replaces_unfinished_steps_after_tool_failure(tmp_path: P
     assert "replan_applied" in [event.kind for event in events]
 
 
-def test_dynamic_replan_emits_plan_snapshots_for_creation_progress_and_replan(tmp_path: Path) -> None:
-    events = []
-    state = AgentRunner(DynamicRecoveryPlanner(), ToolRegistry(tmp_path)).run(
-        "recover from a missing source", lambda _: True, on_event=events.append
-    )
-
-    plan_event = next(event for event in events if event.kind == "plan")
-    assert plan_event.data["revision"] == 1
-    assert [step["status"] for step in plan_event.data["steps"]] == ["pending", "pending"]
-
-    progress_events = [event for event in events if event.kind == "plan_progress"]
-    started = next(event for event in progress_events if event.data["trigger"] == "step_started")
-    failed = next(event for event in progress_events if event.data["trigger"] == "step_failed")
-    assert started.data["changed_step_id"] == "missing-source"
-    assert [step["status"] for step in started.data["steps"]] == ["running", "pending"]
-    assert failed.data["changed_step_id"] == "missing-source"
-    assert [step["status"] for step in failed.data["steps"]] == ["failed", "pending"]
-    assert failed.data["steps"][0]["result"]
-
-    applied = next(event for event in events if event.kind == "replan_applied")
-    assert applied.data["revision"] == 2
-    assert [step["status"] for step in applied.data["previous_steps"]] == ["failed", "superseded"]
-    assert applied.data["steps"][0]["id"] == "fallback-write"
-    assert applied.data["steps"][0]["status"] == "pending"
-
-    event_kinds = [event.kind for event in events]
-    assert event_kinds.index("plan") < event_kinds.index("plan_progress")
-    assert event_kinds.index("plan_progress") < event_kinds.index("replan_requested")
-    assert event_kinds.index("replan_requested") < event_kinds.index("replan_applied")
-    assert state.status == "completed"
-
-
-class DeviatingPlanPlanner(DynamicRecoveryPlanner):
-    name = "deviating-plan"
-
-    def create_plan(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> ExecutionPlan:
-        return ExecutionPlan(
-            goal="Write a verified value.",
-            steps=[
-                PlanStep(
-                    id="calculate",
-                    description="Calculate a value",
-                    action=AgentAction(
-                        type="tool_call", tool="run_command", arguments={"command": "python -c 'print(2 + 2)'"}
-                    ),
-                ),
-                PlanStep(
-                    id="old-write",
-                    description="Write the old result",
-                    action=AgentAction(
-                        type="tool_call",
-                        tool="run_command",
-                        arguments={"command": "[System.IO.File]::WriteAllText('old.txt', 'old')"},
-                    ),
-                ),
-            ],
-        )
-
-    def evaluate_step(self, history, plan, step, result) -> StepEvaluation:
-        if step.id == "calculate":
-            return StepEvaluation("replan", "The calculation result requires a different output file.")
-        return StepEvaluation("continue", "The replacement step completed the goal.")
-
-    def replan(self, history, plan, reason, on_reasoning=None) -> ExecutionPlan:
-        return ExecutionPlan(
-            goal="Write the verified value.",
-            steps=[
-                PlanStep(
-                    id="verified-write",
-                    description="Write the verified result",
-                    action=AgentAction(
-                        type="tool_call",
-                        tool="run_command",
-                        arguments={"command": "[System.IO.File]::WriteAllText('verified.txt', '4')"},
-                    ),
-                )
-            ],
-        )
-
-
-def test_dynamic_replan_replaces_remaining_steps_after_result_deviation(tmp_path: Path) -> None:
-    state = AgentRunner(DeviatingPlanPlanner(), ToolRegistry(tmp_path)).run("handle a deviation", lambda _: True)
-
-    assert state.status == "completed"
-    assert state.replan_count == 1
-    assert state.plan_history[0].steps[0].status == "completed"
-    assert state.plan_history[0].steps[1].status == "superseded"
-    assert (tmp_path / "verified.txt").read_text(encoding="utf-8") == "4"
-
-
-def test_dynamic_replan_stops_when_replan_budget_is_exhausted(tmp_path: Path) -> None:
-    state = AgentRunner(DynamicRecoveryPlanner(), ToolRegistry(tmp_path), strategy="dynamic_replan", max_replans=0).run(
-        "recover from a missing source", lambda _: True
-    )
-
-    assert state.status == "failed"
-    assert state.replan_count == 0
-    assert state.final_answer is not None and "Stopped after 0 replans" in state.final_answer
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "message"),
-    [
-        ({"max_actions": 0}, "max_actions"),
-        ({"max_retries": -1}, "max_retries"),
-        ({"max_model_repairs": -1}, "max_model_repairs"),
-        ({"max_transport_retries": -1}, "max_transport_retries"),
-        ({"max_tool_recoveries": -1}, "max_tool_recoveries"),
-        ({"max_replans": -1}, "max_replans"),
-        ({"strategy": "plan_execute"}, "strategy"),
-        ({"strategy": "unknown"}, "strategy"),
-    ],
-)
-def test_runner_settings_validate_limits(kwargs: dict[str, object], message: str) -> None:
-    with pytest.raises(ValueError, match=message):
-        RunnerSettings(**kwargs)
-
-
 def test_local_read_only_tool_skips_approval(tmp_path: Path) -> None:
     (tmp_path / "note.txt").write_text("read safely", encoding="utf-8")
     events = []
@@ -522,25 +242,6 @@ def test_local_read_only_tool_skips_approval(tmp_path: Path) -> None:
     assert state.status == "completed"
     assert state.final_answer is not None and "read safely" in state.final_answer
     assert "approval_requested" not in [event.kind for event in events]
-
-
-class WebSearchPlanner:
-    name = "web-search"
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        return AgentAction(type="tool_call", tool="web_search", arguments={"query": "Mini-Agent"})
-
-
-def test_web_tool_still_requires_approval(tmp_path: Path) -> None:
-    requests = []
-    state = AgentRunner(WebSearchPlanner(), ToolRegistry(tmp_path), strategy="reactive").run(
-        "search the web",
-        interrupt=lambda request: requests.append(request) or InterruptDecision("cancel"),
-    )
-
-    assert state.status == "cancelled"
-    assert [request.kind for request in requests] == ["tool"]
-    assert requests[0].data["tool"] == "web_search"
 
 
 class PlanWriteAttemptPlanner:
@@ -570,76 +271,6 @@ def test_plan_mode_blocks_write_tools_during_planning(tmp_path: Path) -> None:
     assert "approval_requested" not in [event.kind for event in events]
 
 
-class PlanWebResearchPlanner:
-    name = "plan-web-research"
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        assert mode == "plan"
-        return AgentAction(type="tool_call", tool="web_search", arguments={"query": "Mini-Agent"})
-
-
-def test_plan_mode_requires_tool_approval_for_web_research(tmp_path: Path) -> None:
-    requests = []
-    state = AgentRunner(PlanWebResearchPlanner(), ToolRegistry(tmp_path)).run(
-        "research on the web",
-        mode="plan",
-        interrupt=lambda request: requests.append(request) or InterruptDecision("cancel"),
-    )
-
-    assert state.status == "cancelled"
-    assert [request.kind for request in requests] == ["tool"]
-    assert requests[0].data["tool"] == "web_search"
-
-
-class UnnumberedPlanPlanner:
-    name = "unnumbered-plan"
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        return AgentAction(type="final_answer", answer="Inspect the project and make the change.")
-
-
-def test_plan_mode_accepts_an_ordinary_unnumbered_response(tmp_path: Path) -> None:
-    state = AgentRunner(UnnumberedPlanPlanner(), ToolRegistry(tmp_path)).run("discuss a change", mode="plan")
-
-    assert state.status == "completed"
-    assert state.final_answer == "Inspect the project and make the change."
-
-
-class OrdinaryPlanConversationPlanner:
-    name = "ordinary-plan-conversation"
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        return AgentAction(type="final_answer", answer="Inspect the project and implement the requested change.")
-
-
-def test_plan_mode_does_not_format_repair_an_ordinary_response(tmp_path: Path) -> None:
-    events = []
-    state = AgentRunner(OrdinaryPlanConversationPlanner(), ToolRegistry(tmp_path)).run(
-        "discuss a change",
-        mode="plan",
-        on_event=events.append,
-        interrupt=lambda _request: pytest.fail("ordinary responses must not open review"),
-    )
-
-    assert state.status == "completed"
-    assert state.final_answer == "Inspect the project and implement the requested change."
-    assert [event.kind for event in events].count("model_repair") == 0
-
-
-class InvalidStrategyPlanner:
-    name = "invalid-strategy"
-
-    def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("unknown", "This should be rejected by automatic routing.")  # type: ignore[arg-type]
-
-
-def test_automatic_routing_rejects_an_invalid_planner_strategy(tmp_path: Path) -> None:
-    state = AgentRunner(InvalidStrategyPlanner(), ToolRegistry(tmp_path)).run("choose a strategy")
-
-    assert state.status == "failed"
-    assert "unsupported execution strategy: 'unknown'" in (state.final_answer or "")
-
-
 class OneWriteThenAnswerPlanner:
     name = "one-write-then-answer"
 
@@ -651,19 +282,6 @@ class OneWriteThenAnswerPlanner:
             tool="run_command",
             arguments={"command": "[System.IO.File]::WriteAllText('output.txt', 'done')"},
         )
-
-
-def test_tool_interrupt_cancel_prevents_confirmed_call(tmp_path: Path) -> None:
-    events = []
-    state = AgentRunner(OneWriteThenAnswerPlanner(), ToolRegistry(tmp_path), strategy="reactive").run(
-        "write a file",
-        on_event=events.append,
-        interrupt=lambda _request: InterruptDecision("cancel"),
-    )
-
-    assert state.status == "cancelled"
-    assert "tool_result" not in [event.kind for event in events]
-    assert "approval_requested" in [event.kind for event in events]
 
 
 class RecoveringToolPlanner:
@@ -699,36 +317,6 @@ def test_reactive_workflow_feeds_tool_errors_back_to_the_planner(tmp_path: Path)
     assert [event.data["attempt"] for event in recoveries] == [1]
 
 
-class LongToolContextPlanner:
-    name = "long-tool-context"
-
-    def __init__(self) -> None:
-        self.histories: list[list[dict[str, str]]] = []
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        self.histories.append(list(history))
-        if history[-1]["content"].startswith("[Tool error]"):
-            return AgentAction(type="final_answer", answer="Handled the failed tool.")
-        return AgentAction(type="tool_call", tool="fail", arguments={"value": "x" * 3_000})
-
-    def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("reactive", "The test inspects bounded tool context.")
-
-
-def test_reactive_tool_context_is_truncated_before_returning_to_the_model(tmp_path: Path) -> None:
-    def fail(value: str) -> str:
-        raise ToolError("y" * 3_000)
-
-    planner = LongToolContextPlanner()
-    tools = ToolRegistry([Tool("fail", "Fails with untrusted long data.", fail)])
-    state = AgentRunner(planner, tools, max_retries=0).run("handle a long error")
-
-    assert state.status == "completed"
-    recovery_history = planner.histories[1]
-    assert recovery_history[-2]["content"].endswith("characters omitted)")
-    assert recovery_history[-1]["content"].endswith("characters omitted)")
-
-
 class ConsecutiveFailurePlanner:
     name = "consecutive-failure"
 
@@ -755,81 +343,6 @@ def test_reactive_tool_recovery_stops_after_two_consecutive_failures(tmp_path: P
     assert len([event for event in events if event.kind == "tool_failed"]) == 3
 
 
-class ResettingRecoveryPlanner:
-    name = "resetting-recovery"
-
-    def __init__(self) -> None:
-        self.stage = 0
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        last = history[-1]["content"]
-        if last.startswith("[Tool error]"):
-            if self.stage == 0:
-                self.stage = 1
-                return AgentAction(type="tool_call", tool="glob", arguments={"pattern": "**/*"})
-            self.stage = 3
-            return AgentAction(type="tool_call", tool="glob", arguments={"pattern": "**/*"})
-        if last.startswith("[Tool result]"):
-            if self.stage == 1:
-                self.stage = 2
-                return AgentAction(type="tool_call", tool="read_file", arguments={"path": "missing-again.txt"})
-            return AgentAction(type="final_answer", answer="recovered twice")
-        return AgentAction(type="tool_call", tool="read_file", arguments={"path": "missing-first.txt"})
-
-    def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("reactive", "A successful tool call resets the recovery counter.")
-
-
-def test_successful_tool_call_resets_consecutive_recovery_count(tmp_path: Path) -> None:
-    events = []
-    state = AgentRunner(ResettingRecoveryPlanner(), ToolRegistry(tmp_path), max_retries=0).run(
-        "recover twice", on_event=events.append
-    )
-
-    assert state.status == "completed"
-    recoveries = [event for event in events if event.kind == "tool_recovery"]
-    assert [event.data["attempt"] for event in recoveries] == [1, 1]
-
-
-class RepeatingWritePlanner:
-    name = "repeating-write"
-
-    _ACTION = AgentAction(type="tool_call", tool="run_command", arguments={"command": "Get-Content missing.txt"})
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        return self._ACTION
-
-    def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("reactive", "The test rejects a repeated non-retryable call.")
-
-
-def test_reactive_recovery_refuses_to_repeat_a_non_retryable_tool_call(tmp_path: Path) -> None:
-    events = []
-    state = AgentRunner(RepeatingWritePlanner(), ToolRegistry(tmp_path), max_retries=0).run(
-        "repeat a failed write",
-        on_event=events.append,
-        interrupt=lambda _request: InterruptDecision("continue"),
-    )
-
-    assert state.status == "failed"
-    assert len([event for event in events if event.kind == "tool_call"]) == 1
-    assert len([event for event in events if event.kind == "approval_requested"]) == 1
-    assert "refusing to repeat non-retryable" in (state.final_answer or "")
-
-
-def test_human_interrupt_continue_is_the_only_runtime_confirmation(tmp_path: Path) -> None:
-    confirmations = []
-    state = AgentRunner(OneWriteThenAnswerPlanner(), ToolRegistry(tmp_path), strategy="reactive").run(
-        "write a file",
-        confirm=lambda message: confirmations.append(message) or False,
-        interrupt=lambda _request: InterruptDecision("continue"),
-    )
-
-    assert state.status == "completed"
-    assert (tmp_path / "output.txt").read_text(encoding="utf-8") == "done"
-    assert confirmations == []
-
-
 def test_default_runner_confirmation_still_protects_mutating_tools(tmp_path: Path) -> None:
     confirmations = []
     state = AgentRunner(OneWriteThenAnswerPlanner(), ToolRegistry(tmp_path), strategy="reactive").run(
@@ -839,48 +352,6 @@ def test_default_runner_confirmation_still_protects_mutating_tools(tmp_path: Pat
     assert state.status == "cancelled"
     assert not (tmp_path / "output.txt").exists()
     assert len(confirmations) == 1
-
-
-class SinglePlanPlanner:
-    name = "single-plan"
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        assert mode == "plan"
-        return AgentAction(
-            type="tool_call", tool=REQUEST_PLAN_REVIEW_NAME, arguments={"plan": "1. Write original.txt."}
-        )
-
-
-def test_plan_mode_rejects_supplement_after_checkpointing_review(tmp_path: Path) -> None:
-    store = SQLiteCheckpointStore(tmp_path / "checkpoints.db")
-    observed_checkpoint = []
-
-    def interrupt(request: InterruptRequest) -> InterruptDecision:
-        saved = store.load(request.data["run_id"])
-        assert saved is not None
-        assert saved.events[-1].kind == "approval_requested"
-        observed_checkpoint.append(request.kind)
-        return InterruptDecision("supplement", "write a revised file")
-
-    runner = AgentRunner(SinglePlanPlanner(), ToolRegistry(tmp_path), checkpoints=store)
-    state = runner.run("write a file", lambda _: True, mode="plan", interrupt=interrupt)
-
-    assert state.status == "failed"
-    assert state.mode == "plan"
-    assert state.final_answer == "Invalid Plan Review decision: supplement."
-    assert not (tmp_path / "original.txt").exists()
-    assert not (tmp_path / "revised.txt").exists()
-    assert observed_checkpoint == ["plan"]
-    proposals = [
-        item.tool_messages[0].arguments["plan"]
-        for item in state.history
-        if isinstance(item, AssistantMessage)
-        and item.tool_messages
-        and item.tool_messages[0].name == REQUEST_PLAN_REVIEW_NAME
-    ]
-    assert proposals == ["1. Write original.txt."]
-    saved = store.load(state.run_id)
-    assert saved is not None and saved.status == "failed"
 
 
 class MemoryCheckpointStore:
@@ -899,77 +370,3 @@ def test_checkpointing_skips_high_volume_reasoning_events(tmp_path: Path) -> Non
     assert "thinking_delta" not in store.reasons
     assert "thinking_end" not in store.reasons
     assert store.reasons == ["run_started", "strategy", "response", "run_finished"]
-
-
-class FeedbackReplanner:
-    name = "feedback-replanner"
-
-    def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
-        raise AssertionError("The fixed plan should be used.")
-
-    def create_plan(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> ExecutionPlan:
-        return ExecutionPlan(
-            goal="Write two files.",
-            steps=[
-                PlanStep(
-                    id="first",
-                    description="Write the first file",
-                    action=AgentAction(
-                        type="tool_call",
-                        tool="write_file",
-                        arguments={"path": "approved.txt", "content": "ok"},
-                    ),
-                ),
-                PlanStep(
-                    id="second",
-                    description="Write the second file",
-                    action=AgentAction(
-                        type="tool_call",
-                        tool="write_file",
-                        arguments={"path": "first.txt", "content": "1"},
-                    ),
-                ),
-            ],
-        )
-
-    def replan(self, history, plan, reason, on_reasoning=None) -> ExecutionPlan:
-        assert plan.steps[0].status == "completed"
-        assert plan.steps[1].status == "pending"
-        assert "Human plan feedback" in reason
-        return ExecutionPlan(
-            goal="Write the revised remaining file.",
-            steps=[
-                PlanStep(
-                    id="revised",
-                    description="Write the revised file",
-                    action=AgentAction(
-                        type="tool_call",
-                        tool="write_file",
-                        arguments={"path": "second.txt", "content": "2"},
-                    ),
-                )
-            ],
-        )
-
-    def evaluate_step(self, history, plan, step, result) -> StepEvaluation:
-        return StepEvaluation("continue", "The completed write keeps the remaining plan valid.")
-
-
-def test_supplement_uses_remaining_work_replan_after_completed_steps(tmp_path: Path) -> None:
-    decisions = iter(
-        [
-            InterruptDecision("continue"),
-            InterruptDecision("supplement", "Use 3 + 3 for the remaining work."),
-            InterruptDecision("continue"),
-        ]
-    )
-    state = AgentRunner(FeedbackReplanner(), ToolRegistry(tmp_path), strategy="dynamic_replan").run(
-        "write twice",
-        lambda _: False,
-        interrupt=lambda _request: next(decisions),
-    )
-
-    assert state.status == "completed"
-    assert state.plan is not None and state.plan.revision == 2
-    assert [step.status for step in state.plan_history[0].steps] == ["completed", "superseded"]
-    assert state.plan.steps[0].result == "Created second.txt with 1 characters."

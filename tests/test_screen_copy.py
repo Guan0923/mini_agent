@@ -5,8 +5,8 @@ import asyncio
 from textual.app import App
 from textual.widgets import Markdown
 
-from mini_agent.tui.history import HistoryScreen
-from mini_agent.tui.inspection import SessionsScreen, TraceScreen
+from mini_agent.tui.screens.history import HistoryScreen
+from mini_agent.tui.screens.inspection import SessionsScreen, TraceScreen
 
 
 async def _copy_all(screen, selector: str) -> tuple[str, list[str]]:

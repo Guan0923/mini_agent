@@ -168,10 +168,7 @@ def test_plan_review_must_not_be_mixed_with_execution_tools(tmp_path: Path) -> N
 
 def test_repeated_invalid_plan_review_calls_stop_at_recovery_limit(tmp_path: Path) -> None:
     planner = ScriptedPlanPlanner(
-        [
-            AssistantMessage(tool_messages=[review_call(" ", f"review_{index}")])
-            for index in range(3)
-        ]
+        [AssistantMessage(tool_messages=[review_call(" ", f"review_{index}")]) for index in range(3)]
     )
     runner = AgentRunner(planner, ToolRegistry(tmp_path))
     runtime = runner.new_runtime(

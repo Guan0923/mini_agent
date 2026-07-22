@@ -94,5 +94,3 @@ class StrategySelection:
 
     strategy: ExecutionStrategy
     reason: str
-
-

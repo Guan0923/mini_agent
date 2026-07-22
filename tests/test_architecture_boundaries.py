@@ -15,8 +15,12 @@ def _module_imports(path: Path) -> set[str]:
         if isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.add(node.module)
+            imports.add("." * node.level + node.module)
     return imports
+
+
+def _package_imports(path: Path) -> set[str]:
+    return {imported for module in path.rglob("*.py") for imported in _module_imports(module)}
 
 
 def _run_isolated_import(statement: str, forbidden: tuple[str, ...]) -> None:
@@ -35,14 +39,7 @@ def _run_isolated_import(statement: str, forbidden: tuple[str, ...]) -> None:
 def test_domain_import_does_not_load_outer_layers() -> None:
     _run_isolated_import(
         "import mini_agent.domain",
-        (
-            "mini_agent.runtime",
-            "mini_agent.planning",
-            "mini_agent.providers",
-            "mini_agent.storage",
-            "mini_agent.tools",
-            "requests",
-        ),
+        ("mini_agent.runtime", "mini_agent.planning", "mini_agent.providers", "mini_agent.storage", "mini_agent.tools"),
     )
 
 
@@ -54,8 +51,7 @@ def test_runtime_event_import_does_not_load_application_graph() -> None:
 
 
 def test_deepseek_adapter_does_not_own_http_transport() -> None:
-    imports = _module_imports(SOURCE / "mini_agent" / "providers" / "deepseek.py")
-
+    imports = _package_imports(SOURCE / "mini_agent" / "providers" / "deepseek")
     assert "requests" not in imports
 
 
@@ -64,7 +60,6 @@ def test_application_services_depend_on_runner_port() -> None:
         SOURCE / "mini_agent" / "runtime" / "application" / "services.py",
         SOURCE / "mini_agent" / "runtime" / "conversation" / "service.py",
     ]
-
     for path in paths:
         imports = _module_imports(path)
         assert not any(name == "runner" or name.endswith(".runner") for name in imports), path

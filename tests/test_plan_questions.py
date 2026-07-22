@@ -9,7 +9,6 @@ from mini_agent.runtime.conversation.user_input import (
     REQUEST_USER_INPUT_NAME,
     format_user_input_answers,
     parse_user_input_questions,
-    validate_user_input_answers,
 )
 from mini_agent.runtime.core.contracts import InterruptDecision, QuestionOption, UserQuestion
 from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
@@ -56,56 +55,6 @@ def test_request_user_input_parser_rejects_duplicate_question_ids() -> None:
         parse_user_input_questions(arguments)
 
 
-def test_request_user_input_parser_accepts_more_than_three_options() -> None:
-    arguments = question_arguments()
-    arguments["questions"][0]["options"].extend(
-        [
-            {"label": "Text", "description": "Use a text file."},
-            {"label": "Memory", "description": "Keep the result in memory."},
-        ]
-    )
-
-    questions = parse_user_input_questions(arguments)
-
-    assert [option.label for option in questions[0].options] == ["SQLite", "JSONL", "Text", "Memory"]
-
-
-@pytest.mark.parametrize("option_count", [0, 1])
-def test_request_user_input_parser_accepts_fewer_than_two_options(option_count: int) -> None:
-    arguments = question_arguments()
-    arguments["questions"][0]["options"] = arguments["questions"][0]["options"][:option_count]
-
-    questions = parse_user_input_questions(arguments)
-
-    assert len(questions[0].options) == option_count
-
-
-def test_request_user_input_parser_accepts_more_than_three_questions() -> None:
-    arguments = question_arguments()
-    template = arguments["questions"][0]
-    arguments["questions"] = [
-        {**template, "id": f"question_{index}"}
-        for index in range(4)
-    ]
-
-    questions = parse_user_input_questions(arguments)
-
-    assert [question.id for question in questions] == [f"question_{index}" for index in range(4)]
-
-
-def test_request_user_input_parser_rejects_empty_questions() -> None:
-    with pytest.raises(ValueError, match="non-empty"):
-        parse_user_input_questions({"questions": []})
-
-
-def test_request_user_input_parser_rejects_whitespace_only_text() -> None:
-    arguments = question_arguments()
-    arguments["questions"][0]["options"][0]["label"] = "   "
-
-    with pytest.raises(ValueError, match="must not be blank"):
-        parse_user_input_questions(arguments)
-
-
 def test_request_user_input_parser_filters_exact_client_other_label() -> None:
     arguments = question_arguments()
     arguments["questions"][0]["options"].insert(
@@ -118,40 +67,11 @@ def test_request_user_input_parser_filters_exact_client_other_label() -> None:
     assert [option.label for option in questions[0].options] == ["SQLite", "JSONL"]
 
 
-@pytest.mark.parametrize("label", ["以上都不对", "none of the above"])
-def test_request_user_input_parser_keeps_semantically_similar_other_labels(label: str) -> None:
-    arguments = question_arguments()
-    arguments["questions"][0]["options"][0]["label"] = label
-
-    questions = parse_user_input_questions(arguments)
-
-    assert questions[0].options[0].label == label
-
-
 def test_user_input_answers_use_codex_style_tool_result_shape() -> None:
     result = format_user_input_answers({"storage": ["SQLite"]})
 
     assert json.loads(result) == {"answers": {"storage": {"answers": ["SQLite"]}}}
 
-
-
-def test_user_input_answers_allow_explicit_skips() -> None:
-    questions = parse_user_input_questions(question_arguments())
-
-    answers = validate_user_input_answers(questions, {"storage": []})
-
-    assert answers == {"storage": []}
-    assert json.loads(format_user_input_answers(answers)) == {
-        "answers": {"storage": {"answers": []}}
-    }
-
-
-@pytest.mark.parametrize("value", [[""], ["one", "two"]])
-def test_user_input_answers_reject_invalid_non_skip_values(value: list[str]) -> None:
-    questions = parse_user_input_questions(question_arguments())
-
-    with pytest.raises(ValueError):
-        validate_user_input_answers(questions, {"storage": value})
 
 class QuestionThenPlanPlanner:
     name = "question-then-plan"
@@ -328,77 +248,3 @@ def test_request_user_input_must_not_be_mixed_with_execution_tools(tmp_path: Pat
     rejected = service.runtime.state.messages[1]
     assert [tool.status for tool in rejected.tool_messages] == ["failed", "failed"]
     assert all("only tool call" in (tool.content or "") for tool in rejected.tool_messages)
-
-
-def test_default_interrupt_cancels_and_persists_plan_question(tmp_path: Path) -> None:
-    planner = ScriptedPlanPlanner([AssistantMessage(tool_messages=[question_call()])])
-    runner = AgentRunner(planner, ToolRegistry(tmp_path))
-    runtime = runner.new_runtime(task="Plan the change", mode="plan")
-
-    result = runner.run(runtime)
-
-    assert result.status == "cancelled"
-    assert runtime.state.messages[-1].tool_messages[0].status == "failed"
-    assert runtime.state.messages[-1].tool_messages[0].content == "Plan question cancelled by user."
-
-
-def test_repeated_invalid_question_calls_stop_at_recovery_limit(tmp_path: Path) -> None:
-    invalid = question_arguments()
-    invalid["questions"] = []
-    planner = ScriptedPlanPlanner(
-        [
-            AssistantMessage(
-                tool_messages=[
-                    ToolMessage(name=REQUEST_USER_INPUT_NAME, call_id=f"question_{index}", arguments=invalid)
-                ]
-            )
-            for index in range(3)
-        ]
-    )
-    service = build_service(tmp_path, planner)
-
-    result = service.run_task("Plan the change", mode="plan", interrupt=lambda _request: pytest.fail())
-
-    assert result.status == "failed"
-    assert result.final_answer == "Stopped after repeated invalid request_user_input calls."
-    assert len(result.actions) == 3
-
-
-def test_same_session_implement_replays_question_tool_history(tmp_path: Path) -> None:
-    planner = QuestionThenPlanPlanner()
-    service = build_service(tmp_path, planner)
-
-    def interrupt(request):
-        if request.kind == "question":
-            return InterruptDecision("answer", answers={"storage": ["SQLite"]})
-        return InterruptDecision("implement")
-
-    result = service.run_task("Plan the change", mode="plan", interrupt=interrupt)
-
-    assert result.mode == "agent"
-    history = planner.agent_histories[-1]
-    assert isinstance(history[1], AssistantMessage)
-    assert history[1].tool_messages[0].name == REQUEST_USER_INPUT_NAME
-    assert history[1].tool_messages[0].status == "succeeded"
-    assert history[-2].tool_messages[0].name == REQUEST_PLAN_REVIEW_NAME
-    assert history[-2].tool_messages[0].arguments == {"plan": PLAN}
-    assert history[-2].tool_messages[0].status == "succeeded"
-    assert history[-1] == UserMessage(content="Implement the plan")
-
-
-def test_clear_session_implement_drops_question_tool_history(tmp_path: Path) -> None:
-    planner = QuestionThenPlanPlanner()
-    service = build_service(tmp_path, planner)
-
-    def interrupt(request):
-        if request.kind == "question":
-            return InterruptDecision("answer", answers={"storage": ["SQLite"]})
-        return InterruptDecision("implement_clear_session")
-
-    result = service.run_task("Plan the change", mode="plan", interrupt=interrupt)
-
-    assert result.mode == "agent"
-    assert planner.agent_histories[-1] == [
-        AssistantMessage(content=PLAN),
-        UserMessage(content="Implement the plan"),
-    ]

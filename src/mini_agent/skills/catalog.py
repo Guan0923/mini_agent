@@ -76,9 +76,7 @@ class SkillCatalog:
             definition = cls._load_manifest(manifest, directory.name, workspace_root)
             previous = names.get(definition.name)
             if previous is not None:
-                raise SkillConfigurationError(
-                    f"Duplicate Skill name {definition.name!r}: {previous} and {manifest}"
-                )
+                raise SkillConfigurationError(f"Duplicate Skill name {definition.name!r}: {previous} and {manifest}")
             names[definition.name] = manifest
             definitions.append(definition)
         return cls(tuple(definitions))
@@ -120,30 +118,23 @@ class SkillCatalog:
         if not isinstance(frontmatter, dict):
             raise SkillConfigurationError(f"Skill frontmatter must be a mapping: {path}")
         if set(frontmatter) != {"name", "description"}:
-            raise SkillConfigurationError(
-                f"Skill frontmatter must contain only 'name' and 'description': {path}"
-            )
+            raise SkillConfigurationError(f"Skill frontmatter must contain only 'name' and 'description': {path}")
         name = frontmatter["name"]
         description = frontmatter["description"]
         if not isinstance(name, str) or not name.strip():
             raise SkillConfigurationError(f"Skill name must be a non-empty string: {path}")
         if len(name) > 64 or _NAME_PATTERN.fullmatch(name) is None:
             raise SkillConfigurationError(
-                "Skill name must use lowercase letters, digits, and hyphens "
-                f"and be at most 64 characters: {path}"
+                f"Skill name must use lowercase letters, digits, and hyphens and be at most 64 characters: {path}"
             )
         if name != directory_name:
-            raise SkillConfigurationError(
-                f"Skill name {name!r} must match directory name {directory_name!r}: {path}"
-            )
+            raise SkillConfigurationError(f"Skill name {name!r} must match directory name {directory_name!r}: {path}")
         if not isinstance(description, str) or not description.strip():
             raise SkillConfigurationError(f"Skill description must be a non-empty string: {path}")
 
         instruction_lines = lines[closing + 1 :]
         if len(instruction_lines) > MAX_INSTRUCTION_LINES:
-            raise SkillConfigurationError(
-                f"Skill instructions exceed {MAX_INSTRUCTION_LINES} lines: {path}"
-            )
+            raise SkillConfigurationError(f"Skill instructions exceed {MAX_INSTRUCTION_LINES} lines: {path}")
         instructions = "\n".join(instruction_lines).strip()
         if not instructions:
             raise SkillConfigurationError(f"Skill instructions must not be empty: {path}")

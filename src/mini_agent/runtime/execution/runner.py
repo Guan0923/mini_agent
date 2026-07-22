@@ -313,10 +313,7 @@ class AgentRunner:
                         "tool_calls": counts.get("tool_call", 0),
                         "retries": counts.get("retry", 0) + counts.get("model_retry", 0),
                         "replans": counts.get("replan_requested", 0),
-                        "active_skills": [
-                            {"name": skill.name, "sha256": skill.sha256}
-                            for skill in run.active_skills
-                        ],
+                        "active_skills": [{"name": skill.name, "sha256": skill.sha256} for skill in run.active_skills],
                     },
                 )
             )

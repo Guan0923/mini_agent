@@ -229,7 +229,6 @@ def test_settings_serialize_new_budgets_and_load_legacy_max_actions() -> None:
     assert restored.runner_settings.max_actions == 5
 
 
-
 def test_run_state_model_turns_round_trip_and_legacy_default() -> None:
     state = RunState(task="Inspect", mode="agent", model_turns=3)
     assert RunState.from_dict(state.to_dict()).model_turns == 3
@@ -237,6 +236,8 @@ def test_run_state_model_turns_round_trip_and_legacy_default() -> None:
     payload = state.to_dict()
     payload.pop("model_turns")
     assert RunState.from_dict(payload).model_turns == 0
+
+
 def test_old_and_new_tool_budget_arguments_conflict() -> None:
     with pytest.raises(ValueError, match="cannot be used together"):
         RunnerSettings(max_actions=4, max_tool_calls=4)

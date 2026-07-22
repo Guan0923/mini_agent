@@ -39,9 +39,7 @@ class ModelRequestExecutor:
         exchange.allowed_tools = list(allowed_tools or [])
         exchange.operation_tools = list(operation_tools if operation_tools is not None else allowed_tools or [])
         exchange.stream = (
-            exchange.on_reasoning is not None or exchange.on_content is not None
-            if stream is None
-            else stream
+            exchange.on_reasoning is not None or exchange.on_content is not None if stream is None else stream
         )
         exchange.exchange_id = runtime.next_exchange_id()
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
-MessageRole = Literal["system", "user", "assistant", "tool", "artifact"]
+MessageRole = Literal["system", "user", "assistant", "tool"]
 ToolStatus = Literal["pending", "succeeded", "failed"]
 
 
@@ -73,23 +73,6 @@ class AssistantMessage(Message):
     tool_messages: list[ToolMessage] = field(default_factory=list)
 
 
-@dataclass(kw_only=True)
-class ArtifactMessage(Message):
-    """Durable content snapshot produced by a run."""
-
-    artifact_id: str
-    content: str
-    sha256: str
-    revision: int
-    created_by_run_id: str
-    name: str = "artifact"
-    role: Literal["artifact"] = field(default="artifact", init=False)
-    kind: str = "plan"
-    source_role: Literal["assistant"] = "assistant"
-    relative_path: str | None = None
-    media_type: str = "text/markdown"
-
-
 ChatMessage: TypeAlias = SystemMessage | UserMessage | AssistantMessage
 
 
@@ -143,8 +126,6 @@ def tool_message_from_dict(data: dict[str, Any], *, fallback_call_id: str | None
 
 
 def message_to_dict(message: ChatMessage) -> dict[str, Any]:
-    if isinstance(message, ArtifactMessage):
-        raise TypeError("ArtifactMessage is not an active chat message")
     payload: dict[str, Any] = {
         "name": message.name,
         "role": message.role,

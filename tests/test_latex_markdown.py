@@ -4,9 +4,9 @@ import asyncio
 
 from textual.app import App, ComposeResult
 
-from mini_agent.tui.history import HistoryScreen
 from mini_agent.tui.latex import LatexMarkdown, latex_markdown_parser, latex_to_terminal_text
-from mini_agent.tui.transcript import MarkdownBody
+from mini_agent.tui.rendering.transcript import MarkdownBody
+from mini_agent.tui.screens.history import HistoryScreen
 from mini_agent.tui.view import TerminalView
 
 

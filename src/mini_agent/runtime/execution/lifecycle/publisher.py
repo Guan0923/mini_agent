@@ -71,11 +71,7 @@ class RunEventPublisher:
         reasoning = message.get("reasoning")
         if not isinstance(reasoning, str) or not reasoning:
             return
-        data = {
-            key: event.data[key]
-            for key in ("run_id", "task", "mode", "strategy", "status")
-            if key in event.data
-        }
+        data = {key: event.data[key] for key in ("run_id", "task", "mode", "strategy", "status") if key in event.data}
         data["streamed"] = False
         text, data = persistent_event(
             RuntimeEvent("thinking_delta", reasoning, data),

@@ -10,7 +10,9 @@ python -m venv .venv
 python -m pip install -e ".[dev]"
 ```
 
-The editable install exposes the `mini-agent` command and keeps the `src/` package layout identical to CI.
+The editable install exposes the `mini-agent` command and keeps the `src/` package layout used by tests.
+
+Provider configuration comes from `<workspace>/.env`, with process environment variables taking precedence. `BASE_URL` may be a service root, a URL ending in `/v1`, or the complete `/chat/completions` endpoint. Only keys documented in `.env.example` are supported; invalid numeric/boolean values fail during startup.
 
 Tasks can reference workspace files with `@relative/path`, for example `summarize @README.md`. References are expanded before planning, remain workspace-confined, and are bounded to avoid unintentional oversized prompts.
 
@@ -22,7 +24,7 @@ Transcript writes from worker threads are coalesced at about 30 FPS, so streamin
 
 ## Local validation
 
-Run the same checks used by CI from the repository root:
+Run the required local checks from the repository root:
 
 ```powershell
 ruff check .
@@ -35,6 +37,8 @@ For a fast test-only loop:
 ```powershell
 python -m pytest -q
 ```
+
+The suite keeps focused contract and high-risk integration coverage. Avoid adding exhaustive TUI key/mouse variants or duplicate end-to-end scenarios when a representative state-transition test already exists. The configured 70% coverage gate measures the non-visual core; TUI contract tests still run, but Textual rendering modules are excluded from the percentage because exhaustive event-loop variants are intentionally not maintained.
 
 ## Running the application
 
@@ -58,15 +62,15 @@ The application writes local runtime data below the selected workspace:
 - `logs/`: JSONL audit streams for individual runs, including normalized messages plus provider wire request/response bodies, stream events, transport status, retry attempts, durations, tool timing, and run summaries;
 - `.mini_agent/checkpoints.db`: run checkpoints, typed runtime snapshots, compact conversation projections, and ordered session runtime messages;
 
-These paths are ignored by Git. `LOG_FULL_MESSAGES=True` is the development default; set it to `False` in `.env` to write summaries instead of complete audit-message bodies. Sensitive key names and values are redacted in both modes. Wire payloads are retained without authentication headers; stream responses are stored as ordered JSON events. Existing artifact files are left untouched, but the active Agent runtime no longer creates or consumes them. Do not use production credentials or sensitive personal data in checked-in fixtures.
+These paths are ignored by Git. `LOG_FULL_MESSAGES=true` is the development default; set it to `false` in `.env` to write summaries instead of complete audit-message bodies. Sensitive key names and values are redacted in both modes. Wire payloads are retained without authentication headers; stream responses are stored as ordered JSON events. Existing workspace data is left untouched during upgrades. Do not use production credentials or sensitive personal data in checked-in fixtures.
 
 ## Change boundaries
 
 - Domain types remain independent of the TUI, providers, and concrete storage. Active chat history contains only system, user, and assistant messages.
 - Runtime keeps only lazy public exports at the package root and groups implementations into `core`, `application`, `execution`, `conversation`, `planning`, and `persistence`. `ConversationService` owns the active session, one durable turn at a time, same-session handoffs, and isolated-session handoffs requested by `RunHandoff.new_session`.
 - Tools validate untrusted model arguments and remain workspace-confined. Keep default workspace assembly in `tools/catalog.py`; keep `ToolRegistry` independent of concrete tool implementations.
-- Provider adapters own wire conversion only and accept active chat messages, never artifact snapshots. Keep reusable HTTP and SSE mechanics in `providers/client.py`.
-- Storage adapters implement runtime ports and are chosen only by `runtime.factory`. Dormant artifact adapters remain independently testable but are not composed into AgentRunner.
-- TUI renders runtime events and owns terminal commands/approval prompts; put reusable controls in `tui/widgets`, choice or transcript state transitions in their concern modules, and keep `TerminalView` focused on composition and lifecycle. Keep the Plan Review and Tool Review decision sets separate, and do not implement tool behavior or session persistence in the TUI.
+- Provider adapters own wire conversion only and accept active chat messages. Keep reusable HTTP and SSE mechanics in `providers/transport.py`.
+- Storage adapters implement runtime ports and are chosen only by `runtime.factory`; SQLite schema migration and row mapping remain separate from session operations.
+- TUI renders runtime events and owns terminal commands/approval prompts; keep application loops, components, screens, rendering state, and view behavior in their focused subpackages. Keep the Plan Review and Tool Review decision sets separate, and do not implement tool behavior or session persistence in the TUI.
 
 When adding behavior, add or update focused tests in `tests/`, then run the complete validation commands before opening a pull request.

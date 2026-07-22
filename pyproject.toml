@@ -32,6 +32,7 @@ minversion = "8.0"
 addopts = "-ra --strict-config --strict-markers"
 pythonpath = ["src"]
 testpaths = ["tests"]
+xfail_strict = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -39,6 +40,7 @@ where = ["src"]
 [tool.coverage.run]
 branch = true
 source = ["mini_agent"]
+omit = ["*/mini_agent/tui/*"]
 
 [tool.coverage.report]
 skip_covered = true

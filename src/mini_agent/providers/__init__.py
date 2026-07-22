@@ -1,6 +1,6 @@
 """Provider strategies and the high-level LLM client."""
 
-from .client import JsonHttpTransport, LLMClient, ProviderAdapter
+from .client import LLMClient, ProviderAdapter
 from .config import ModelConfig
 from .deepseek import (
     DeepSeek,
@@ -10,6 +10,7 @@ from .deepseek import (
     DeepSeekUsage,
 )
 from .errors import ModelConfigurationError, ModelRequestError, ModelTransportError
+from .transport import JsonHttpTransport
 
 __all__ = [
     "DeepSeek",

@@ -14,6 +14,7 @@ dist/
 *.egg-info/
 .venv/
 venv/
+.reasonix/
 
 # Local runtime logs
 logs/
@@ -21,3 +22,6 @@ logs/
 
 # Local editor settings
 .vscode/
+
+# Local desktop task metadata
+.reasonix/

@@ -166,4 +166,3 @@ class PlanProposalWorkflow(PlanControlMixin):
                 details = failed.content if failed is not None else "unknown error"
                 fail_run(runtime, f"Stopped: {details}")
                 return None
-

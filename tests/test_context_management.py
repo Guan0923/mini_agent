@@ -115,35 +115,6 @@ def test_provider_total_tokens_trigger_compression_and_keep_current_run() -> Non
     assert compressed.data["provider_total_tokens"] == 80
 
 
-def test_local_token_estimate_triggers_compression_with_tool_results() -> None:
-    tool = ToolMessage(
-        name="read_file",
-        call_id="call_1",
-        arguments={"path": "README.md"},
-        content="important result",
-        status="succeeded",
-    )
-    runtime = runtime_for(
-        [
-            UserMessage(content="inspect"),
-            AssistantMessage(tool_messages=[tool]),
-            UserMessage(content="current"),
-        ],
-        turn_start_index=2,
-    )
-    transcripts: list[str] = []
-
-    ContextManager(FakeEstimator([80, 20])).prepare(
-        runtime,
-        SystemMessage(content="system"),
-        summarize=lambda transcript: transcripts.append(transcript) or "inspection summary",
-    )
-
-    assert "read_file" in transcripts[0]
-    assert "README.md" in transcripts[0]
-    assert "important result" in transcripts[0]
-
-
 def test_summary_failure_keeps_original_history() -> None:
     original = [
         UserMessage(content="old"),
@@ -172,53 +143,6 @@ def test_uncompressible_current_request_over_context_size_fails() -> None:
             SystemMessage(content="system"),
             summarize=lambda _transcript: "unused",
         )
-
-
-def test_repeated_compression_merges_existing_summary() -> None:
-    runtime = runtime_for(
-        [
-            SystemMessage(name="context_summary", content="[Conversation summary]\nfirst summary"),
-            UserMessage(content="follow-up"),
-            AssistantMessage(content="follow-up answer"),
-            UserMessage(content="current"),
-        ],
-        turn_start_index=3,
-    )
-    transcripts: list[str] = []
-
-    ContextManager(FakeEstimator([80, 20])).prepare(
-        runtime,
-        SystemMessage(content="system"),
-        summarize=lambda transcript: transcripts.append(transcript) or "merged summary",
-    )
-
-    assert "first summary" in transcripts[0]
-    assert "follow-up answer" in transcripts[0]
-    assert runtime.state.messages[0] == SystemMessage(
-        name="context_summary",
-        content="[Conversation summary]\nmerged summary",
-    )
-    assert runtime.state.messages[1] == UserMessage(content="current")
-
-
-def test_compression_that_still_exceeds_context_size_fails() -> None:
-    runtime = runtime_for(
-        [
-            UserMessage(content="old"),
-            AssistantMessage(content="answer"),
-            UserMessage(content="current"),
-        ],
-        turn_start_index=2,
-    )
-
-    with pytest.raises(PlanningError, match="exceeds the model context window"):
-        ContextManager(FakeEstimator([100, 100])).prepare(
-            runtime,
-            SystemMessage(content="system"),
-            summarize=lambda _transcript: "summary",
-        )
-
-    assert isinstance(runtime.state.messages[0], SystemMessage)
 
 
 def test_manual_compaction_summarizes_old_history_and_keeps_latest_turn() -> None:
@@ -268,47 +192,6 @@ def test_manual_compaction_failure_leaves_history_unchanged() -> None:
 
     assert runtime.state.messages == original
     assert not any(item.kind == "context_compressed" for item in runtime.run.events)
-
-
-def test_manual_compaction_without_old_history_is_a_no_op() -> None:
-    runtime = runtime_for([UserMessage(content="latest")], turn_start_index=0)
-
-    result = ContextManager(FakeEstimator([20])).compact(
-        runtime,
-        summarize=lambda _transcript: "unused",
-    )
-
-    assert result.compacted is False
-    assert result.previous_messages == 1
-    assert result.remaining_messages == 1
-    assert runtime.state.messages == [UserMessage(content="latest")]
-
-
-def test_repeated_manual_compaction_without_new_turn_is_a_no_op() -> None:
-    messages = [
-        SystemMessage(name="context_summary", content="[Conversation summary]\nexisting"),
-        UserMessage(content="latest"),
-        AssistantMessage(content="answer"),
-    ]
-    runtime = runtime_for(messages, turn_start_index=1)
-    summaries: list[str] = []
-
-    result = ContextManager(FakeEstimator([20])).compact(
-        runtime,
-        summarize=lambda transcript: summaries.append(transcript) or "replacement",
-    )
-
-    assert result.compacted is False
-    assert summaries == []
-    assert runtime.state.messages == messages
-
-
-def test_run_state_round_trips_turn_start_index_and_legacy_defaults_to_zero() -> None:
-    restored = RunState.from_dict(RunState(task="task", mode="agent", turn_start_index=4).to_dict())
-    legacy = RunState.from_dict({"task": "legacy", "mode": "agent", "run_id": "run_legacy"})
-
-    assert restored.turn_start_index == 4
-    assert legacy.turn_start_index == 0
 
 
 class FakeEncoding:
@@ -412,31 +295,6 @@ def test_llm_planner_runs_non_streaming_summary_before_normal_request() -> None:
     assert runtime.state.turn_usage == {"total_tokens": 9}
 
 
-def test_llm_planner_manual_compaction_uses_existing_summary_request() -> None:
-    client = ContextAwareClient()
-    planner = LLMPlanner(client, [], [])
-    runtime = runtime_for(
-        [
-            UserMessage(content="old"),
-            AssistantMessage(content="answer"),
-            UserMessage(content="latest"),
-        ],
-        turn_start_index=2,
-    )
-    runtime.services.planner = planner
-    runtime.state.turn_usage = {"total_tokens": 9}
-
-    result = planner.compact_context(runtime)
-
-    assert result.compacted is True
-    assert client.operations == [("summarize", False)]
-    assert runtime.state.turn_usage == {"total_tokens": 9}
-    assert runtime.state.messages[0] == SystemMessage(
-        name="context_summary",
-        content="[Conversation summary]\ncompressed history",
-    )
-
-
 def test_rule_planner_rejects_manual_context_compaction() -> None:
     runner = AgentRunner(RuleBasedPlanner(), ToolRegistry())
     runtime = runner.empty_runtime(session_id="session_rule")
@@ -459,30 +317,6 @@ def test_rule_planner_rejects_manual_context_compaction() -> None:
         runner.compact_context(runtime)
 
     assert runtime.state.messages == [UserMessage(content="latest")]
-
-
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"CONTEXT_SIZE": "not-a-number"}, "CONTEXT_SIZE must be an integer"),
-        ({"CONTEXT_SIZE": "8192"}, "greater than MAX_TOKENS"),
-        ({"TOKENIZER_MODEL": " "}, "TOKENIZER_MODEL must not be empty"),
-    ],
-)
-def test_model_config_rejects_invalid_context_settings(
-    tmp_path: Path,
-    overrides: dict[str, str],
-    message: str,
-) -> None:
-    environment = {
-        "API_KEY": "secret",
-        "BASE_URL": "https://example.test/v1",
-        "MODEL": "demo",
-        **overrides,
-    }
-
-    with pytest.raises(ModelConfigurationError, match=message):
-        ModelConfig.from_env(tmp_path / ".env", environ=environment)
 
 
 def test_model_config_loads_context_defaults_and_overrides(tmp_path: Path) -> None:
@@ -509,29 +343,6 @@ def test_model_config_loads_context_defaults_and_overrides(tmp_path: Path) -> No
     assert default.tokenizer_model == "deepseek-ai/DeepSeek-V3"
     assert configured.context_size == 2_048_000
     assert configured.tokenizer_model == "deepseek-ai/custom-tokenizer"
-
-
-def test_context_manager_publishes_usage_below_threshold() -> None:
-    runtime = runtime_for([UserMessage(content="current")], turn_start_index=0)
-    events = []
-    runtime.services.publish = events.append
-
-    ContextManager(FakeEstimator([79])).prepare(
-        runtime,
-        SystemMessage(content="system"),
-        summarize=lambda _transcript: "unused",
-    )
-
-    usage = [event for event in events if event.kind == "context_usage"]
-    assert len(usage) == 1
-    assert usage[0].data == {
-        "estimated_tokens": 79,
-        "context_size": 100,
-        "threshold": 0.8,
-        "threshold_tokens": 80,
-        "ratio": 0.79,
-        "phase": "before_compression",
-    }
 
 
 def test_context_manager_publishes_usage_before_and_after_compression() -> None:

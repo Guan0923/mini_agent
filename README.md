@@ -1,4 +1,4 @@
-# MiniHermes Lab 项目计划书
+# Mini-Agent
 
 ## 一、项目背景
 
@@ -176,7 +176,7 @@ Plan 调研、控制工具调用和结构化结果都作为普通 typed messages
 
 `/new <title>` 与 `/clear <title>` 清空当前 transcript 并进入待创建 session，不会修改 alternate screen 之外的终端内容。其它 TUI 命令：`/permission` 在底部独立候选区切换当前程序的工具审批模式，`/help` 查看帮助，`/tools` 查看工具，`/trace` 查看上一次运行的结构化轨迹，`/sessions` 列出保存的对话，`/session` 查看当前对话信息，`/history` 打开当前 session 的只读全屏历史视图，按 Esc 返回对话，`/use <session_id>` 切换保存的对话，`/quit` 退出。待创建 session 只保存在内存中，终端显示 `SESSION PENDING — <title> (not saved yet)`；用户发送第一条消息时才生成 session ID 并写入 SQLite，未发送消息便退出不会留下空 session。`/clear` 不删除旧 session，可通过 `/sessions` 和 `/use <session_id>` 恢复；待创建状态会清除当前模型上下文、当前会话记录和上一次运行状态，但不改变进程内的 mode、permission 或工具配置。标题和 session ID 只接受空格参数，不支持 `/new/<title>` 或 `/use/<session_id>`。
 
-交互模式支持带注释的命令实时补全：输入 `/p` 会显示 `/plan — Create a plan and open Plan Review.` 和 `/permission — Choose the in-memory tool approval mode.`，按 Tab 接受候选，方向键选择候选，Enter 提交；接受候选时只插入命令本身。已识别命令会按文本顺序先执行，剩余普通文字按原顺序合并为一次 task；例如 `你好 /plan` 和 `/plan 你好` 都会先启用 Plan mode，再运行一次“你好”。`/new`、`/clear` 和 `/use` 会消费其后的文字直到下一个命令作为参数，其他命令后的文字仍属于 task；`/quit` 会停止处理当前行且不会提交 task；`/history` 必须独立提交，不能与普通任务混合。命令可以出现在任务句子中，但前面必须有空格；文件路径和 URL 中的 `/` 不会被识别为命令。任务中可以使用 `@相对路径` 引用工作区文件，例如 `请总结 @README.md`；文件内容会在本次任务中以内嵌引用形式提供给 Agent，引用路径必须位于 workspace 内。每次运行会在 `<workspace>/logs/<run_id>.jsonl` 记录有序 runtime messages，包括模型请求/规范化响应、计划、审批、工具调用和结果；SQLite 同时保存按 session/run 查询的同一审计轨迹、`session_runtime` 快照、checkpoint 和供 `/history` 使用的 user/assistant 文本投影。`LOG_FULL_MESSAGES=True`（默认）记录完整消息正文；设为 `False` 时记录长度、哈希和最多 200 字符预览。两种模式都会脱敏 API key、Authorization、Cookie、token、password 与 secret 字段；runtime 审计日志还会记录 provider 实际发送的 wire request、完整 wire response（流式响应按事件数组保存）、安全的响应 headers 白名单、HTTP 状态、重试次数和耗时，不记录认证 headers、.env 或完整环境变量。每个 turn 结束时，Runtime 的 usage 会被该 turn 最后一次模型响应 usage 覆盖。使用 `--session-id <session_id>` 可在新的 CLI 进程中继续已有对话。
+交互模式支持带注释的命令实时补全：输入 `/p` 会显示 `/plan — Create a plan and open Plan Review.` 和 `/permission — Choose the in-memory tool approval mode.`，按 Tab 接受候选，方向键选择候选，Enter 提交；接受候选时只插入命令本身。已识别命令会按文本顺序先执行，剩余普通文字按原顺序合并为一次 task；例如 `你好 /plan` 和 `/plan 你好` 都会先启用 Plan mode，再运行一次“你好”。`/new`、`/clear` 和 `/use` 会消费其后的文字直到下一个命令作为参数，其他命令后的文字仍属于 task；`/quit` 会停止处理当前行且不会提交 task；`/history` 必须独立提交，不能与普通任务混合。命令可以出现在任务句子中，但前面必须有空格；文件路径和 URL 中的 `/` 不会被识别为命令。任务中可以使用 `@相对路径` 引用工作区文件，例如 `请总结 @README.md`；文件内容会在本次任务中以内嵌引用形式提供给 Agent，引用路径必须位于 workspace 内。每次运行会在 `<workspace>/logs/<run_id>.jsonl` 记录有序 runtime messages，包括模型请求/规范化响应、计划、审批、工具调用和结果；SQLite 同时保存按 session/run 查询的同一审计轨迹、`session_runtime` 快照、checkpoint 和供 `/history` 使用的 user/assistant 文本投影。`LOG_FULL_MESSAGES=true`（默认）记录完整消息正文；设为 `false` 时记录长度、哈希和最多 200 字符预览。两种模式都会脱敏 API key、Authorization、Cookie、token、password 与 secret 字段；runtime 审计日志还会记录 provider 实际发送的 wire request、完整 wire response（流式响应按事件数组保存）、安全的响应 headers 白名单、HTTP 状态、重试次数和耗时，不记录认证 headers、.env 或完整环境变量。每个 turn 结束时，Runtime 的 usage 会被该 turn 最后一次模型响应 usage 覆盖。使用 `--session-id <session_id>` 可在新的 CLI 进程中继续已有对话。
 
 ### 项目级 Skills
 
@@ -206,7 +206,7 @@ Agent 运行时输入框保持可用。期间提交的多条普通消息会按�
 - 可观察的「直接决策 → 工具调用 → 工具结果 → 再决策/最终回复」执行闭环；
 - workspace-confined 的范围读取、glob、grep、精确编辑和原子写入，以及需要用户确认的网页搜索/抓取和跨平台命令执行工具；
 - 安全同参数重试、LLM 工具失败恢复与结构化运行轨迹；
-- 可替换的规划器接口，为下一步接入 LLM 规划策略保留边界。
+- Rule/LLM 两类规划器、自动策略选择、结构化输出修复，以及 reactive/dynamic-replan 执行路径；
 - 项目级 Skill 发现、语义选择、显式激活、运行快照和 Plan→Agent 交接；
 
 ### 当前需要完成：Harness 能力补全
@@ -215,14 +215,14 @@ Agent 运行时输入框保持可用。期间提交的多条普通消息会按�
 
 #### P0：可靠性底座
 
-- [ ] **上下文管理**：增加模型 token 预算、工具结果裁剪、滑动窗口、摘要压缩和关键事实保留，避免长 session 与大工具输出拖垮后续请求。
+- [x] **上下文管理**：按 provider 上下文窗口估算 token，在请求前发布 usage，并支持自动/手动摘要压缩且保留当前 turn。
 - [x] **Hooks**：为 run、模型请求和工具调用提供可注入、可取消、可审计的 before/after 生命周期接口。
-- [ ] **工具输出治理**：统一限制字符数、行数、文件数和估算 token；超限结果应截断或转存 artifact，而不是直接进入模型上下文。
+- [ ] **统一工具输出治理**：文件、命令、网页和模型消息已有各自边界；仍需统一跨工具的字符、行数、文件数和 token 总预算。
 - [ ] **工具选择策略**：按任务、模式和风险动态缩小可用工具集合，并要求工具与用户目标直接相关，避免无关的 workspace 扫描或网络请求。
 - [ ] **暂停与恢复**：基于现有 checkpoint 实现 durable `/resume`、`/cancel` 和 `/terminate`，恢复时不得重复执行已经产生副作用的操作。
 - [ ] **执行隔离**：为命令和高风险工具增加 sandbox、文件系统/网络策略、资源限制及子进程树清理。
 - [ ] **全局预算与取消**：限制 run 总时长、token、费用和工具输出预算，并能取消正在进行的模型请求、命令或后台进程。
-- [ ] **模型协议恢复**：为空 JSON、纯空格响应和结构错误增加有限格式纠正重试、非流式降级及可选 model/provider fallback，同时保持副作用幂等。
+- [x] **模型协议恢复**：结构化输出失败后最多修复两次（共三次请求）；strategy 契约耗尽时降级 reactive，transport/认证/配置错误继续快速失败。
 
 #### P1：完整 Harness 工作流
 
@@ -238,19 +238,19 @@ P0 完成后再系统推进 P1，避免先扩展功能数量而缺少可靠性�
 ### 模块结构
 
 ```text
-tui/          终端适配层；View 负责编排，choice/transcript concerns 管状态机，widgets 放可复用控件
+tui/          终端适配层；application、components、screens、rendering、view_parts 和 widgets 按职责分组
 runtime/      公共 lazy exports；根目录不放具体实现
   core/         AgentRuntime、事件、契约、配置与生命周期 hooks
   application/  应用服务与依赖装配
   execution/    runner、策略路由、工作流、步骤执行与运行结果
   conversation/ session 编排、steering、文件引用与用户问答
   planning/      Plan mode 与 Plan Review 协议
-  persistence/   checkpoint/artifact 端口与运行事件持久化转换
+  persistence/   checkpoint 端口与运行事件持久化转换
 observability/事件扇出与 JSONL 持久化日志 Sink
 planning/     规则/LLM 规划策略与显式能力协议
-tools/        工具契约、通用注册表、默认 workspace 工具 catalog、受限文件操作与跨平台命令执行
-providers/    LLM 门面、.env 配置和各厂商完整 API 适配器
-storage/      SQLite checkpoint/session 与未装配的 artifact 持久化适配器
+tools/        工具契约、注册表、默认 catalog，以及分组的 filesystem/web/command 实现
+providers/    LLM 门面、通用 transport、.env 配置和厂商协议子包
+storage/      按 checkpoint、session、schema 和映射职责拆分的 SQLite 适配器
 domain/       Message、ToolMessage、ToolSpec、RunState 与运行轨迹等纯数据模型
 ```
 
@@ -258,9 +258,22 @@ domain/       Message、ToolMessage、ToolSpec、RunState 与运行轨迹等纯�
 
 ### 大模型配置（无 SDK）
 
-将 `.env.example` 复制为 `.env`，填写 `PROVIDER`、`API_KEY`、`BASE_URL` 和 `MODEL`。`PROVIDER` 目前支持 `deepseek` 并默认取该值。可选的 `MAX_TOKENS` 控制每次模型输出上限，默认 `8192`，允许范围为 `1` 到 `384000`；复杂 JSON 计划应提高该值以避免输出被中途截断。`.env` 已被 Git 忽略，密钥不会被提交。
+将 `.env.example` 复制为 `.env`。进程环境变量优先于 `.env`；当前 provider 实现只支持 `deepseek`。
 
-默认启动方式会通过 Python 的 `requests` 直接向 DeepSeek 的 `BASE_URL/v1/chat/completions` 发送 HTTP 请求；项目没有使用模型 SDK。`providers/client.py` 中的 `LLMClient` 负责 Provider 选择、通用 JSON/SSE 传输和请求诊断，`providers/deepseek.py` 中的 `DeepSeek` 只负责请求与响应协议转换。接入其他 API 时增加独立 provider adapter，不改变 Agent 内部 Message、Runtime 或通用传输实现。
+| 变量 | 必填/默认值 | 说明 |
+| --- | --- | --- |
+| `PROVIDER` | 默认 `deepseek` | Provider 适配器名称。未知值会在启动时失败。 |
+| `API_KEY` | 必填 | Provider 密钥；不会写入日志。 |
+| `BASE_URL` | 必填 | 可填写服务根地址、以 `/v1` 结尾的地址，或完整 `/chat/completions` endpoint。 |
+| `MODEL` | 必填 | Provider 侧模型名称。 |
+| `MAX_TOKENS` | 默认 `8192` | 单次输出上限，范围 `1-384000`。 |
+| `CONTEXT_SIZE` | 默认 `1024000` | 上下文窗口，必须大于 `MAX_TOKENS`。 |
+| `TOKENIZER_MODEL` | 默认 `deepseek-ai/DeepSeek-V3` | 本地 token 估算使用的 Hugging Face tokenizer。 |
+| `LOG_FULL_MESSAGES` | 默认 `true` | `true` 保存完整且递归脱敏的 body；`false` 保存摘要。 |
+
+`.env` 已被 Git 忽略。不要在仓库、测试 fixture、日志或命令输出中放入真实凭据。
+
+默认启动方式会通过 Python 的 `requests` 向由 `BASE_URL` 规范化得到的 chat-completions endpoint 发送请求；项目没有使用模型 SDK。`providers/client.py` 中的 `LLMClient` 负责 Provider 选择、重试和请求诊断，`providers/transport.py` 负责通用 JSON/SSE 传输，`providers/deepseek/` 只负责请求与响应协议转换。接入其他 API 时增加独立 provider adapter，不改变 Agent 内部 Message、Runtime 或通用传输实现。
 
 模型工具调用由 provider adapter 转成 AssistantMessage 内的 ToolMessage；Runtime 校验工具名和参数后按顺序执行，并在全部结果就绪后再次请求模型。策略选择、计划生成和重规划仍使用 JSON Output。`write_file`、`edit_file` 和 `run_command` 都需经过终端的 Human-in-the-Loop 明确批准；直接调用 `ToolRegistry` 时仍需显式传入 `confirmed=True`。
 
@@ -298,4 +311,4 @@ python run.py --planner rule --session-id session_xxx "继续刚才的任务"
 python run.py --log-dir .agent-logs "计算 2 + 2"
 ```
 
-开发环境、质量检查和 CI 约定见 [`docs/development.md`](docs/development.md)。本地提交前至少运行 `ruff check .`、`ruff format --check .` 和 `python -m pytest -q`。
+开发环境与质量检查约定见 [`docs/development.md`](docs/development.md)。本地提交前至少运行 `ruff check .`、`ruff format --check .` 和 `python -m pytest -q`；非可视核心的覆盖率门槛为 70%。

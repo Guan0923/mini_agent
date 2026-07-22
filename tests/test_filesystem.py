@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from mini_agent.tools import ToolError, WorkspaceFiles
-from mini_agent.tools import filesystem as filesystem_module
+from mini_agent.tools.filesystem import io as filesystem_io
 
 
 def test_read_file_returns_bounded_lf_line_range(tmp_path: Path) -> None:
@@ -129,7 +129,7 @@ def test_atomic_replace_failure_preserves_original_and_cleans_temporary_file(tmp
     def fail_replace(_source, _destination) -> None:
         raise OSError("replace failed")
 
-    monkeypatch.setattr(filesystem_module.os, "replace", fail_replace)
+    monkeypatch.setattr(filesystem_io.os, "replace", fail_replace)
     with pytest.raises(ToolError, match="replace failed"):
         WorkspaceFiles(tmp_path).write_file("note.txt", "updated", overwrite=True)
 

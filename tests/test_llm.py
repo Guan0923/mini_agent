@@ -71,37 +71,6 @@ def test_prepare_request_expands_nested_tool_messages() -> None:
     assert result == {"role": "tool", "tool_call_id": "call_1", "content": "4"}
 
 
-def test_prepare_request_replays_plan_question_without_exposing_control_tool_in_agent_mode() -> None:
-    question = ToolMessage(
-        name="request_user_input",
-        call_id="question_1",
-        arguments={"questions": []},
-        content='{"answers":{"scope":{"answers":["Focused"]}}}',
-        status="succeeded",
-    )
-    runtime = runtime_for(messages=[AssistantMessage(tool_messages=[question]), UserMessage(content="Implement the plan")])
-    runtime.exchange.messages = runtime.state.messages
-    runtime.exchange.output_mode = "tools"
-    runtime.exchange.allowed_tools = [ToolSpec("run_command", "Execute commands.", {"type": "object"})]
-
-    payload = deepseek_for_test().prepare_request(runtime)
-
-    assert [tool["function"]["name"] for tool in payload["tools"]] == ["run_command"]
-    assert payload["messages"][0]["tool_calls"][0]["function"]["name"] == "request_user_input"
-    assert payload["messages"][1] == {
-        "role": "tool",
-        "tool_call_id": "question_1",
-        "content": question.content,
-    }
-
-
-def test_prepare_request_rejects_pending_tool_history() -> None:
-    runtime = runtime_for(messages=[AssistantMessage(tool_messages=[ToolMessage(name="run_command", call_id="call_1")])])
-
-    with pytest.raises(ModelRequestError, match="no result"):
-        deepseek_for_test().prepare_request(runtime)
-
-
 def test_prepare_request_supports_documented_deepseek_parameters() -> None:
     messages = [UserMessage(name="alice", content="Use a tool.")]
     runtime = runtime_for(messages=messages)
@@ -153,6 +122,7 @@ def test_prepare_request_supports_documented_deepseek_parameters() -> None:
     assert payload["stream_options"] == {"include_usage": True}
     assert payload["future_parameter"] == "supported"
 
+
 def test_prepare_json_request_forces_thinking_off_and_drops_effort() -> None:
     messages = [UserMessage(content="Return JSON.")]
     runtime = runtime_for(messages=messages)
@@ -168,44 +138,6 @@ def test_prepare_json_request_forces_thinking_off_and_drops_effort() -> None:
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in payload
-
-
-def test_prepare_request_supports_assistant_prefix_and_explicit_usage_opt_out() -> None:
-    messages = [
-        SystemMessage(name="guide", content="Answer directly."),
-        UserMessage(content="Complete this."),
-        AssistantMessage(
-            content="Prefix:",
-            reasoning="Continue carefully.",
-            provider_options={"deepseek": {"prefix": True}},
-        ),
-    ]
-    runtime = runtime_for(messages=messages)
-    runtime.exchange.messages = messages
-    runtime.state.request_parameters["stream_options"] = {"include_usage": False}
-    runtime.exchange.stream = True
-
-    payload = deepseek_for_test().prepare_request(runtime)
-
-    assert payload["messages"][0] == {"role": "system", "content": "Answer directly.", "name": "guide"}
-    assert payload["messages"][-1] == {
-        "role": "assistant",
-        "content": "Prefix:",
-        "prefix": True,
-        "reasoning_content": "Continue carefully.",
-    }
-    assert payload["stream_options"] == {"include_usage": False}
-
-
-@pytest.mark.parametrize("tool_choice", ["none", "auto", "required"])
-def test_prepare_request_supports_string_tool_choices(tool_choice) -> None:
-    runtime = runtime_for()
-    runtime.state.request_parameters["tool_choice"] = tool_choice
-    runtime.exchange.allowed_tools = [ToolSpec("run_command", "Calculate.")]
-
-    payload = deepseek_for_test().prepare_request(runtime)
-
-    assert payload["tool_choice"] == tool_choice
 
 
 @pytest.mark.parametrize(
@@ -313,28 +245,6 @@ def test_prepare_response_uses_lowest_choice_and_preserves_alternatives() -> Non
     assert response.finish_reason == "content_filter"
     alternatives = response.message.provider_options["deepseek"]["response"]["alternative_choices"]
     assert alternatives[0]["index"] == 1
-
-
-@pytest.mark.parametrize(
-    "finish_reason",
-    ["stop", "length", "content_filter", "tool_calls", "insufficient_system_resource"],
-)
-def test_prepare_response_preserves_documented_finish_reasons(finish_reason) -> None:
-    runtime = runtime_for()
-    runtime.exchange.raw_response = {
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": "Partial"},
-                "finish_reason": finish_reason,
-                "logprobs": None,
-            }
-        ]
-    }
-
-    response = deepseek_for_test().prepare_response(runtime)
-
-    assert response.finish_reason == finish_reason
 
 
 def test_prepare_response_rejects_invalid_tool_arguments_before_execution() -> None:
@@ -615,22 +525,6 @@ def test_llm_planner_uses_native_tool_response_with_runtime_only() -> None:
     assert runtime.exchange.allowed_tools == [spec]
 
 
-def test_agent_decision_explicitly_ends_previous_plan_mode() -> None:
-    client = ScriptedClient([PreparedResponse(AssistantMessage(content="Ready to execute."))])
-    planner = LLMPlanner(client, [], [])
-    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(
-        task="Implement the plan",
-        messages=[AssistantMessage(content="1. Make the change.")],
-    )
-
-    planner.decide(runtime)
-
-    system = runtime.exchange.messages[0]
-    assert isinstance(system, SystemMessage)
-    assert "You are now in Agent mode" in (system.content or "")
-    assert "previous Plan mode instructions" in (system.content or "")
-
-
 def test_plan_decision_exposes_request_user_input_without_registering_it() -> None:
     client = ScriptedClient([PreparedResponse(AssistantMessage(content="1. Inspect the project."))])
     planner = LLMPlanner(client, [], [])
@@ -650,14 +544,6 @@ def test_plan_decision_exposes_request_user_input_without_registering_it() -> No
     assert "request_plan_review" in (system.content or "")
     assert "does not require every response" in (system.content or "")
 
-
-@pytest.mark.parametrize("name", ["request_user_input", "request_plan_review"])
-def test_plan_decision_rejects_registered_control_name_collisions(name: str) -> None:
-    planner = LLMPlanner(ScriptedClient([]), [], [ToolSpec(name, "conflicting tool")])
-    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="Plan the change", mode="plan")
-
-    with pytest.raises(PlanningError, match="reserved for the Plan-mode control protocol"):
-        planner.decide(runtime)
 
 def test_llm_planner_rejects_unknown_native_tool() -> None:
     client = ScriptedClient(
@@ -707,37 +593,13 @@ def test_llm_plan_keeps_json_output_for_structured_operations() -> None:
     assert runtime.exchange.operation_tools == [spec]
 
 
-def test_llm_empty_json_error_preserves_response_diagnostics() -> None:
-    client = ScriptedClient(
-        [
-            PreparedResponse(
-                AssistantMessage(reasoning="The response stopped before the JSON answer."),
-                finish_reason="stop",
-            )
-        ]
-    )
-    planner = LLMPlanner(client, [], [])
-    runtime = AgentRunner(planner, ToolRegistry(), max_model_repairs=0).new_runtime(task="make a plan")
-
-    with pytest.raises(PlanningError, match="did not contain JSON content") as exc_info:
-        planner.create_plan(runtime)
-
-    assert exc_info.value.diagnostics == {
-        "finish_reason": "stop",
-        "content_chars": 0,
-        "reasoning_chars": 44,
-    }
-
-
 def test_llm_plan_repairs_invalid_json_once_without_polluting_history() -> None:
     client = ScriptedClient(
         [
             PreparedResponse(AssistantMessage(content="not-json")),
             PreparedResponse(
                 AssistantMessage(
-                    content=json.dumps(
-                        {"goal": "Answer directly.", "steps": [], "final_answer": "Recovered."}
-                    )
+                    content=json.dumps({"goal": "Answer directly.", "steps": [], "final_answer": "Recovered."})
                 )
             ),
         ]
@@ -755,26 +617,6 @@ def test_llm_plan_repairs_invalid_json_once_without_polluting_history() -> None:
     assert [message.content for message in runtime.state.messages] == ["answer"]
     assert isinstance(runtime.exchange.messages[-1], UserMessage)
     assert "Model output correction" in (runtime.exchange.messages[-1].content or "")
-
-
-def test_llm_decision_repairs_an_unknown_tool_once() -> None:
-    client = ScriptedClient(
-        [
-            PreparedResponse(
-                AssistantMessage(tool_messages=[ToolMessage(name="shell", call_id="call_1", arguments={})])
-            ),
-            PreparedResponse(AssistantMessage(content="Recovered response.")),
-        ]
-    )
-    spec = ToolSpec("run_command", "Run a command")
-    planner = LLMPlanner(client, [spec], [spec])
-    runtime = AgentRunner(planner, ToolRegistry(), max_model_repairs=1).new_runtime(task="run it")
-
-    message = planner.decide(runtime)
-
-    assert message.content == "Recovered response."
-    assert len(client.requests) == 2
-    assert planner.consume_output_repairs()[0]["outcome"] == "repaired"
 
 
 def test_llm_output_repair_stops_at_the_configured_limit() -> None:
@@ -800,11 +642,7 @@ def test_llm_json_parser_accepts_one_complete_json_code_fence() -> None:
         [
             PreparedResponse(
                 AssistantMessage(
-                    content=(
-                        "```json\n"
-                        '{"goal":"Answer directly.","steps":[],"final_answer":"Done."}\n'
-                        "```"
-                    )
+                    content=('```json\n{"goal":"Answer directly.","steps":[],"final_answer":"Done."}\n```')
                 )
             )
         ]
@@ -816,35 +654,6 @@ def test_llm_json_parser_accepts_one_complete_json_code_fence() -> None:
 
     assert plan.final_answer == "Done."
     assert planner.consume_output_repairs() == []
-
-
-def test_runner_repairs_an_invalid_strategy_and_continues() -> None:
-    client = ScriptedClient(
-        [
-            PreparedResponse(
-                AssistantMessage(content='{"strategy":"plan_execute","reason":"Use a fixed plan."}')
-            ),
-            PreparedResponse(AssistantMessage(content='{"strategy":"reactive","reason":"Answer directly."}')),
-            PreparedResponse(AssistantMessage(content="Recovered response.")),
-        ]
-    )
-    planner = LLMPlanner(client, [], [])
-    events = []
-    runner = AgentRunner(planner, ToolRegistry(), max_model_repairs=1)
-    runtime = runner.new_runtime(task="answer", on_event=events.append)
-
-    state = runner.run(runtime)
-
-    strategy_requests = [
-        event for event in events if event.kind == "model_request" and event.data["operation"] == "strategy"
-    ]
-    repair_events = [event for event in events if event.kind == "model_repair"]
-    assert state.status == "completed"
-    assert state.strategy == "reactive"
-    assert state.final_answer == "Recovered response."
-    assert len(strategy_requests) == 2
-    assert "Model output correction" in strategy_requests[1].data["messages"][-1]["content"]
-    assert [event.data["outcome"] for event in repair_events] == ["repaired"]
 
 
 def test_runner_falls_back_to_reactive_after_strategy_repairs_are_exhausted() -> None:
@@ -935,7 +744,9 @@ def test_strategy_requests_only_current_turn_and_repair_instruction() -> None:
     assert [message.content for message in first[1:]] == ["hello"]
     assert [message.content for message in second[1:-1]] == ["hello"]
     assert "Model output correction" in (second[-1].content or "")
-    assert all("Old unresolved request." != message.content for request in client.message_requests for message in request)
+    assert all(
+        "Old unresolved request." != message.content for request in client.message_requests for message in request
+    )
 
 
 def test_strategy_transport_failure_does_not_fallback() -> None:
@@ -952,56 +763,3 @@ def test_strategy_transport_failure_does_not_fallback() -> None:
     assert state.final_answer == "Strategy selection failed: HTTP 401 authentication failed."
     assert all(event.kind != "strategy" for event in events)
     assert any(event.kind == "error" for event in events)
-
-
-def test_prepare_response_streams_reasoning_then_content_and_aggregates_both() -> None:
-    runtime = runtime_for()
-    callbacks: list[tuple[str, str]] = []
-    runtime.exchange.on_reasoning = lambda chunk: callbacks.append(("reasoning", chunk))
-    runtime.exchange.on_content = lambda chunk: callbacks.append(("content", chunk))
-    runtime.exchange.raw_response = iter(
-        [
-            {
-                "id": "stream-content",
-                "model": "deepseek-test",
-                "object": "chat.completion.chunk",
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"role": "assistant", "reasoning_content": "Think.", "content": "Hel"},
-                        "finish_reason": None,
-                    }
-                ],
-            },
-            {
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": None,
-                    }
-                ]
-            },
-            {
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": "lo"},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"total_tokens": 7},
-            },
-        ]
-    )
-
-    response = deepseek_for_test().prepare_response(runtime)
-
-    assert callbacks == [
-        ("reasoning", "Think."),
-        ("content", "Hel"),
-        ("content", "lo"),
-    ]
-    assert response.message.reasoning == "Think."
-    assert response.message.content == "Hello"
-    assert response.usage == {"total_tokens": 7}

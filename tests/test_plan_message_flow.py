@@ -3,13 +3,11 @@ from pathlib import Path
 import pytest
 
 from mini_agent.domain import (
-    ArtifactMessage,
     AssistantMessage,
     StrategySelection,
     ToolMessage,
     UserMessage,
     message_from_dict,
-    message_to_dict,
 )
 from mini_agent.runtime import AgentRunner, ConversationService, SQLiteSessionStore
 from mini_agent.runtime.core.contracts import InterruptDecision
@@ -100,9 +98,7 @@ def test_plan_implement_clear_session_seeds_only_final_plan(tmp_path: Path) -> N
     service = build_service(tmp_path, planner)
     source = service.new_session("Source conversation")
     assert service.runtime is not None
-    service.runtime.state.messages.extend(
-        [UserMessage(content="Old request"), AssistantMessage(content="Old answer")]
-    )
+    service.runtime.state.messages.extend([UserMessage(content="Old request"), AssistantMessage(content="Old answer")])
     service.runtime.save()
 
     result = service.run_task(
@@ -132,19 +128,6 @@ def test_legacy_artifact_message_is_not_loadable() -> None:
                 "created_by_run_id": "run_old",
             }
         )
-
-
-def test_artifact_message_is_not_serializable_as_chat_history() -> None:
-    artifact = ArtifactMessage(
-        artifact_id="artifact_dormant",
-        content="Dormant snapshot",
-        sha256="hash",
-        revision=1,
-        created_by_run_id="run_old",
-    )
-
-    with pytest.raises(TypeError, match="ArtifactMessage is not an active chat message"):
-        message_to_dict(artifact)
 
 
 def test_plan_conversation_completes_without_review_or_format_repair(tmp_path: Path) -> None:

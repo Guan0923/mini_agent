@@ -119,7 +119,9 @@ class ToolStepExecutor:
             run.add_event("approval_requested", "Tool approval requested", interrupt_kind="tool", **request.data)
             publish(RuntimeEvent("approval_requested", request.message, request.data))
             if runtime.services.interrupt is None:
-                failure = self._failure(runtime, tool, "Tool approval cancelled because no interrupt handler is available.")
+                failure = self._failure(
+                    runtime, tool, "Tool approval cancelled because no interrupt handler is available."
+                )
                 return ToolStepResult(
                     success=False,
                     error=failure.error,
@@ -139,7 +141,9 @@ class ToolStepExecutor:
             publish(RuntimeEvent("approval_granted", request.message, request.data))
 
         started_at = perf_counter()
-        run.add_event("tool_call", f"Calling {tool}", call_id=tool_message.call_id, arguments=dict(tool_message.arguments))
+        run.add_event(
+            "tool_call", f"Calling {tool}", call_id=tool_message.call_id, arguments=dict(tool_message.arguments)
+        )
         publish(
             RuntimeEvent(
                 "tool_call",

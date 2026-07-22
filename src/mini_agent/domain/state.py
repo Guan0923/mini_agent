@@ -244,9 +244,7 @@ class RunState:
             model_turns=int(data.get("model_turns", 0)),
             status=data.get("status", "running"),
             active_skills=[
-                SkillSnapshot.from_dict(dict(item))
-                for item in data.get("active_skills", [])
-                if isinstance(item, dict)
+                SkillSnapshot.from_dict(dict(item)) for item in data.get("active_skills", []) if isinstance(item, dict)
             ],
             handoff=handoff,
         )

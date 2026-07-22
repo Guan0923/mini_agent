@@ -36,7 +36,9 @@ def parse_execution_plan(
     goal = payload.get("goal")
     steps = payload.get("steps")
     if not isinstance(goal, str) or not goal.strip() or not isinstance(steps, list):
-        raise ModelOutputError("Execution plan requires a goal and a steps array.", operation="plan", invalid_output=raw)
+        raise ModelOutputError(
+            "Execution plan requires a goal and a steps array.", operation="plan", invalid_output=raw
+        )
 
     allowed = {spec.name for spec in allowed_specs}
     parsed_steps: list[PlanStep] = []
@@ -50,9 +52,13 @@ def parse_execution_plan(
         name = item.get("tool")
         arguments = item.get("arguments")
         if not isinstance(step_id, str) or not step_id or step_id in seen_ids:
-            raise ModelOutputError("Plan step ids must be unique non-empty strings.", operation="plan", invalid_output=raw)
+            raise ModelOutputError(
+                "Plan step ids must be unique non-empty strings.", operation="plan", invalid_output=raw
+            )
         if not isinstance(description, str) or not description.strip():
-            raise ModelOutputError("Plan step description must be non-empty text.", operation="plan", invalid_output=raw)
+            raise ModelOutputError(
+                "Plan step description must be non-empty text.", operation="plan", invalid_output=raw
+            )
         if name not in allowed:
             raise ModelOutputError(f"Model requested unavailable tool: {name!r}.", operation="plan", invalid_output=raw)
         if not isinstance(arguments, dict):
