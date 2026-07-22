@@ -44,6 +44,16 @@ class _CleanResult:
     removed_tool_calls: int
 
 
+@dataclass(frozen=True)
+class ContextCompactionResult:
+    """Describe one explicit context compaction attempt."""
+
+    compacted: bool
+    previous_messages: int
+    remaining_messages: int
+    summary: str | None = None
+
+
 class ContextManager:
     """Clean durable history and summarize old turns before model requests."""
 
@@ -54,6 +64,83 @@ class ContextManager:
             raise ValueError("context compression threshold must be between zero and one.")
         self.estimator = estimator
         self.threshold = threshold
+
+    def compact(
+        self,
+        runtime: AgentRuntime,
+        *,
+        summarize: Callable[[str], str],
+    ) -> ContextCompactionResult:
+        """Immediately summarize old turns while preserving the latest turn."""
+
+        previous_messages = len(runtime.state.messages)
+        clean = self._clean_history(runtime)
+        boundary = min(max(clean.turn_start_index, 0), len(clean.messages))
+        old_history = clean.messages[:boundary]
+
+        summary_only = (
+            len(old_history) == 1
+            and isinstance(old_history[0], SystemMessage)
+            and old_history[0].name == _CONTEXT_SUMMARY_NAME
+        )
+        if not old_history or summary_only:
+            if clean.removed_messages or clean.removed_tool_calls:
+                self._record(
+                    runtime,
+                    "context_cleaned",
+                    "Incomplete context removed",
+                    {
+                        "removed_messages": clean.removed_messages,
+                        "removed_tool_calls": clean.removed_tool_calls,
+                        "remaining_messages": len(clean.messages),
+                    },
+                )
+                self._replace_history(runtime, clean.messages, clean.turn_start_index)
+            return ContextCompactionResult(
+                compacted=False,
+                previous_messages=previous_messages,
+                remaining_messages=len(clean.messages),
+            )
+
+        summary = summarize(self._transcript(old_history)).strip()
+        if not summary:
+            raise PlanningError("Context summarization returned no content.")
+
+        compressed = [
+            SystemMessage(
+                name=_CONTEXT_SUMMARY_NAME,
+                content=f"{_CONTEXT_SUMMARY_PREFIX}\n{summary}",
+            ),
+            *clean.messages[boundary:],
+        ]
+        if clean.removed_messages or clean.removed_tool_calls:
+            self._record(
+                runtime,
+                "context_cleaned",
+                "Incomplete context removed",
+                {
+                    "removed_messages": clean.removed_messages,
+                    "removed_tool_calls": clean.removed_tool_calls,
+                    "remaining_messages": len(clean.messages),
+                },
+            )
+        self._record(
+            runtime,
+            "context_compressed",
+            "Conversation context compacted manually",
+            {
+                "previous_messages": len(old_history),
+                "remaining_messages": len(compressed),
+                "manual": True,
+            },
+        )
+        self._replace_history(runtime, compressed, 1)
+        return ContextCompactionResult(
+            compacted=True,
+            previous_messages=previous_messages,
+            remaining_messages=len(compressed),
+            summary=summary,
+        )
 
     def prepare(
         self,

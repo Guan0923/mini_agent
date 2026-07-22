@@ -17,8 +17,11 @@ from mini_agent.domain import (
 )
 from mini_agent.planning.context_management import ContextManager
 from mini_agent.planning.llm import LLMPlanner
+from mini_agent.planning.rule_based import RuleBasedPlanner
 from mini_agent.providers import DeepSeek, ModelConfig, ModelConfigurationError
+from mini_agent.runtime import AgentRunner
 from mini_agent.runtime.core.context import AgentRuntime, PreparedResponse
+from mini_agent.tools import ToolRegistry
 
 
 @dataclass
@@ -218,6 +221,88 @@ def test_compression_that_still_exceeds_context_size_fails() -> None:
     assert isinstance(runtime.state.messages[0], SystemMessage)
 
 
+def test_manual_compaction_summarizes_old_history_and_keeps_latest_turn() -> None:
+    runtime = runtime_for(
+        [
+            UserMessage(content="old question"),
+            AssistantMessage(content="old answer"),
+            UserMessage(content="latest question"),
+            AssistantMessage(content="latest answer"),
+        ],
+        turn_start_index=2,
+    )
+    transcripts: list[str] = []
+
+    result = ContextManager(FakeEstimator([20])).compact(
+        runtime,
+        summarize=lambda transcript: transcripts.append(transcript) or "durable summary",
+    )
+
+    assert result.compacted is True
+    assert result.previous_messages == 4
+    assert result.remaining_messages == 3
+    assert transcripts and "old question" in transcripts[0]
+    assert runtime.state.messages == [
+        SystemMessage(name="context_summary", content="[Conversation summary]\ndurable summary"),
+        UserMessage(content="latest question"),
+        AssistantMessage(content="latest answer"),
+    ]
+    assert runtime.run.turn_start_index == 1
+    event = next(item for item in runtime.run.events if item.kind == "context_compressed")
+    assert event.data["manual"] is True
+
+
+def test_manual_compaction_failure_leaves_history_unchanged() -> None:
+    original = [
+        UserMessage(content="old question"),
+        AssistantMessage(content="old answer"),
+        UserMessage(content="latest question"),
+    ]
+    runtime = runtime_for(original, turn_start_index=2)
+
+    with pytest.raises(PlanningError, match="summary failed"):
+        ContextManager(FakeEstimator([20])).compact(
+            runtime,
+            summarize=lambda _transcript: (_ for _ in ()).throw(PlanningError("summary failed")),
+        )
+
+    assert runtime.state.messages == original
+    assert not any(item.kind == "context_compressed" for item in runtime.run.events)
+
+
+def test_manual_compaction_without_old_history_is_a_no_op() -> None:
+    runtime = runtime_for([UserMessage(content="latest")], turn_start_index=0)
+
+    result = ContextManager(FakeEstimator([20])).compact(
+        runtime,
+        summarize=lambda _transcript: "unused",
+    )
+
+    assert result.compacted is False
+    assert result.previous_messages == 1
+    assert result.remaining_messages == 1
+    assert runtime.state.messages == [UserMessage(content="latest")]
+
+
+def test_repeated_manual_compaction_without_new_turn_is_a_no_op() -> None:
+    messages = [
+        SystemMessage(name="context_summary", content="[Conversation summary]\nexisting"),
+        UserMessage(content="latest"),
+        AssistantMessage(content="answer"),
+    ]
+    runtime = runtime_for(messages, turn_start_index=1)
+    summaries: list[str] = []
+
+    result = ContextManager(FakeEstimator([20])).compact(
+        runtime,
+        summarize=lambda transcript: summaries.append(transcript) or "replacement",
+    )
+
+    assert result.compacted is False
+    assert summaries == []
+    assert runtime.state.messages == messages
+
+
 def test_run_state_round_trips_turn_start_index_and_legacy_defaults_to_zero() -> None:
     restored = RunState.from_dict(RunState(task="task", mode="agent", turn_start_index=4).to_dict())
     legacy = RunState.from_dict({"task": "legacy", "mode": "agent", "run_id": "run_legacy"})
@@ -325,6 +410,55 @@ def test_llm_planner_runs_non_streaming_summary_before_normal_request() -> None:
     assert response.content == "final"
     assert client.operations == [("summarize", False), ("decision", True)]
     assert runtime.state.turn_usage == {"total_tokens": 9}
+
+
+def test_llm_planner_manual_compaction_uses_existing_summary_request() -> None:
+    client = ContextAwareClient()
+    planner = LLMPlanner(client, [], [])
+    runtime = runtime_for(
+        [
+            UserMessage(content="old"),
+            AssistantMessage(content="answer"),
+            UserMessage(content="latest"),
+        ],
+        turn_start_index=2,
+    )
+    runtime.services.planner = planner
+    runtime.state.turn_usage = {"total_tokens": 9}
+
+    result = planner.compact_context(runtime)
+
+    assert result.compacted is True
+    assert client.operations == [("summarize", False)]
+    assert runtime.state.turn_usage == {"total_tokens": 9}
+    assert runtime.state.messages[0] == SystemMessage(
+        name="context_summary",
+        content="[Conversation summary]\ncompressed history",
+    )
+
+
+def test_rule_planner_rejects_manual_context_compaction() -> None:
+    runner = AgentRunner(RuleBasedPlanner(), ToolRegistry())
+    runtime = runner.empty_runtime(session_id="session_rule")
+    runtime.state.messages = [UserMessage(content="latest")]
+    runtime.state.current_run = RunState(
+        task="latest",
+        mode="agent",
+        history=runtime.state.messages,
+        turn_start_index=0,
+        status="completed",
+    )
+
+    with pytest.raises(PlanningError, match="requires the LLM planner"):
+        runner.compact_context(runtime)
+
+    assert runtime.state.messages == [UserMessage(content="latest")]
+
+    runtime.state.current_run = None
+    with pytest.raises(PlanningError, match="requires the LLM planner"):
+        runner.compact_context(runtime)
+
+    assert runtime.state.messages == [UserMessage(content="latest")]
 
 
 @pytest.mark.parametrize(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from threading import Timer
+from threading import Event, Timer, get_ident
 from types import SimpleNamespace
 
 import pytest
@@ -990,6 +990,59 @@ def test_view_routes_conversations_system_output_and_history() -> None:
     assert view.histories == [("session_1 — Session 1", history)]
 
 
+def test_sessions_and_trace_commands_route_to_read_only_views() -> None:
+    class InspectionView:
+        def __init__(self) -> None:
+            self.sessions: list[list[str]] = []
+            self.traces: list[tuple[str, str]] = []
+
+        def show_sessions(self, sessions: list[str]) -> None:
+            self.sessions.append(sessions)
+
+        def show_trace(self, run_label: str, trace: str) -> None:
+            self.traces.append((run_label, trace))
+
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    view = InspectionView()
+    app._view = view
+    app._conversation_service.session_store = object()
+    app._conversation_service.active_session = SimpleNamespace(session_id="session_1", title="Session 1")
+    app._conversation_service.list_sessions = lambda: [
+        SimpleNamespace(
+            session_id="session_1",
+            title="Session 1",
+            message_count=2,
+            updated_at="now",
+        )
+    ]
+    app.last_state = RunState(task="hello", mode="agent", status="completed")
+
+    assert app._handle("/sessions") is True
+    assert app._handle("/trace") is True
+
+    assert view.sessions == [["* session_1 — Session 1 (2 messages, updated now)"]]
+    assert view.traces[0][0] == app.last_state.run_id
+    assert '"task": "hello"' in view.traces[0][1]
+
+
+def test_compact_command_is_standalone_and_reports_console_result(capsys) -> None:
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    calls = []
+    app._conversation_service.compact_context = lambda: calls.append(True) or SimpleNamespace(
+        compacted=True,
+        previous_messages=6,
+        remaining_messages=3,
+    )
+
+    assert app._handle("/compact") is True
+    assert calls == [True]
+    assert capsys.readouterr().out == "COMPACTED 6 → 3 messages\n"
+
+    assert app._handle("before /compact after") is True
+    assert calls == [True]
+    assert capsys.readouterr().out == "Usage: /compact\n"
+
+
 def test_console_output_remains_the_fallback_without_an_active_view(capsys) -> None:
     app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
 
@@ -997,3 +1050,101 @@ def test_console_output_remains_the_fallback_without_an_active_view(capsys) -> N
     app._write("SYSTEM EVENT")
 
     assert capsys.readouterr().out == "USER\nhello\nSYSTEM EVENT\n"
+
+def test_interactive_compaction_runs_in_background_and_rejects_duplicate(monkeypatch) -> None:
+    main_thread = get_ident()
+    release = Event()
+    compact_threads: list[int] = []
+    conversation = [{"role": "user", "content": "kept out of progress UI"}]
+
+    class CompactConversation(StubConversation):
+        def __init__(self) -> None:
+            super().__init__(RunState(task="unused", mode="agent", status="completed"))
+            self.conversation = conversation
+
+        def compact_context(self):
+            compact_threads.append(get_ident())
+            assert release.wait(1)
+            return SimpleNamespace(
+                compacted=True,
+                previous_messages=6,
+                remaining_messages=3,
+            )
+
+    class CompactView:
+        last = None
+
+        def __init__(self, loop, **kwargs) -> None:
+            del loop, kwargs
+            type(self).last = self
+            self.submissions = asyncio.Queue()
+            self.interrupts = asyncio.Queue()
+            self.stopped = asyncio.Event()
+            self.started = False
+            self.compact_statuses = 0
+            self.finished = False
+            self.quit_sent = False
+            self.progress_events: list[tuple[object, ...]] = []
+            self.writes: list[str] = []
+
+        async def run_async(self) -> None:
+            await self.stopped.wait()
+
+        def stop(self) -> None:
+            self.stopped.set()
+
+        def write(self, text: str, end: str = "\n") -> None:
+            self.writes.append(f"{text}{end}")
+
+        def clear(self) -> None:
+            self.writes.clear()
+
+        def begin_compaction(self) -> None:
+            self.progress_events.append(("begin",))
+
+        def finish_compaction(self, **result) -> None:
+            self.progress_events.append(("finish", result))
+            self.finished = True
+
+        def fail_compaction(self, message: str) -> None:
+            self.progress_events.append(("fail", message))
+
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            del interrupt_enabled
+            if "| IDLE" in status and not self.started:
+                self.started = True
+                self.submissions.put_nowait("/compact")
+                return
+            if "COMPACT | RUNNING" in status:
+                self.compact_statuses += 1
+                if self.compact_statuses == 1:
+                    self.submissions.put_nowait("/compact")
+                else:
+                    release.set()
+                return
+            if "| IDLE" in status and self.finished and not self.quit_sent:
+                self.quit_sent = True
+                self.submissions.put_nowait("/quit")
+
+    monkeypatch.setattr(cli, "TerminalView", CompactView)
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    app._conversation_service = CompactConversation()
+
+    app.start()
+
+    assert CompactView.last is not None
+    assert compact_threads and compact_threads[0] != main_thread
+    assert CompactView.last.compact_statuses >= 2
+    assert CompactView.last.progress_events == [
+        ("begin",),
+        (
+            "finish",
+            {
+                "compacted": True,
+                "previous_messages": 6,
+                "remaining_messages": 3,
+            },
+        ),
+    ]
+    assert "Commands are unavailable while the agent is running.\n" in CompactView.last.writes
+    assert conversation == [{"role": "user", "content": "kept out of progress UI"}]

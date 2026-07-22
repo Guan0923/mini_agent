@@ -24,7 +24,7 @@ def test_completes_multiple_commands_from_a_prefix() -> None:
 
 
 def test_completes_clear_from_a_prefix() -> None:
-    assert [item.value for item in _completions("/c")] == ["/clear"]
+    assert [item.value for item in _completions("/c")] == ["/clear", "/compact"]
 
 
 def test_completes_a_command_after_task_text() -> None:

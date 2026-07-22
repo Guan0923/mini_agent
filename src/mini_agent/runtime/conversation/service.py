@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mini_agent.domain import (
     DEFAULT_SESSION_TITLE,
@@ -19,6 +19,9 @@ from mini_agent.domain import (
     new_session_id,
 )
 from mini_agent.tools import ToolError
+
+if TYPE_CHECKING:
+    from mini_agent.planning.context_management import ContextCompactionResult
 
 from ..core.context import AgentRuntime, text_messages
 from ..core.contracts import CancellationHandler, EventHandler, InterruptHandler, SteeringHandler
@@ -241,6 +244,17 @@ class ConversationService:
         if self.session_store is None or self.active_session is None:
             return None
         return self.session_store.get_session_summary(self.active_session.session_id)
+
+    def compact_context(self) -> ContextCompactionResult:
+        """Compact the idle runtime and refresh its conversation projection."""
+
+        if self.runtime is None:
+            from mini_agent.planning.context_management import ContextCompactionResult
+
+            return ContextCompactionResult(False, 0, 0)
+        result = self.runner.compact_context(self.runtime)
+        self.conversation = text_messages(self.runtime.state.messages)
+        return result
 
     def history(self) -> list[dict[str, str]]:
         if self.runtime is None:
