@@ -27,7 +27,8 @@ from .completion import CommandSuggestion, SlashCommandCompleter
 from .diagnostic_mixin import TuiDiagnosticMixin
 from .diagnostics import DiagnosticSink
 from .history import HistoryScreen
-from .transcript import MarkdownBody
+from .inspection import SessionsScreen, TraceScreen
+from .transcript import CompactProgress, MarkdownBody, TranscriptNode
 from .transcript_rendering import TranscriptRenderingMixin
 from .widgets import (
     ChoiceItem,
@@ -151,6 +152,10 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
         padding-left: 2;
         color: #9fc3e8;
     }
+    .compact-progress {
+        padding: 0 1 1 2;
+        color: #9fc3e8;
+    }
     #separator { color: #5f6b76; height: 1; }
     #status-bar {
         height: 1;
@@ -246,6 +251,8 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
         self._completer = completer or SlashCommandCompleter()
         self._suggestions: list[CommandSuggestion] = []
         self._init_transcript_state(transcript_limit, transcript_node_limit)
+        self._compact_node: TranscriptNode | None = None
+        self._compact_progress: CompactProgress | None = None
         self._writes_closed = False
         self._follow_tail = True
         self._paused_scroll_y = 0.0
@@ -340,6 +347,63 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
 
         self._run_on_owner(begin)
 
+    def begin_compaction(self) -> None:
+        """Show an animated compaction row in the main transcript."""
+
+        def begin() -> None:
+            self._stop_compaction_progress()
+            node = self._new_top_level("COMPACT")
+            progress = CompactProgress()
+            node.add_node(progress)
+            self._compact_node = node
+            self._compact_progress = progress
+            self._scroll_after_transcript_change()
+
+        self._run_on_owner(begin)
+
+    def finish_compaction(
+        self,
+        *,
+        compacted: bool,
+        previous_messages: int,
+        remaining_messages: int,
+    ) -> None:
+        """Replace the active animation with its final result."""
+
+        def finish() -> None:
+            progress = self._compact_progress
+            if progress is None:
+                return
+            if compacted:
+                progress.complete(previous_messages, remaining_messages)
+            else:
+                progress.no_op()
+            if self._compact_node is not None:
+                self._completed_top_levels.add(self._compact_node)
+            self._compact_progress = None
+            self._compact_node = None
+            self._scroll_after_transcript_change()
+
+        self._run_on_owner(finish)
+
+    def fail_compaction(self, message: str) -> None:
+        """Replace the active animation with a failure result."""
+
+        def fail() -> None:
+            if self._compact_progress is not None:
+                self._compact_progress.fail(message)
+            if self._compact_node is not None:
+                self._completed_top_levels.add(self._compact_node)
+            self._compact_progress = None
+            self._compact_node = None
+            self._scroll_after_transcript_change()
+
+        self._run_on_owner(fail)
+
+    def _stop_compaction_progress(self) -> None:
+        if self._compact_progress is not None:
+            self._compact_progress.stop()
+
     def write_system(self, text: str, end: str = "\n") -> None:
         """Keep non-conversation output in diagnostics without rendering it."""
         value = f"{text}{end}"
@@ -358,6 +422,16 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
         """Push a read-only history screen without replacing the live transcript."""
 
         self._run_on_owner(lambda: self.push_screen(HistoryScreen(session_label, messages)))
+
+    def show_sessions(self, sessions: list[str]) -> None:
+        """Push a read-only saved-sessions screen."""
+
+        self._run_on_owner(lambda: self.push_screen(SessionsScreen(sessions)))
+
+    def show_trace(self, run_label: str, trace: str) -> None:
+        """Push a read-only trace screen without replacing the live transcript."""
+
+        self._run_on_owner(lambda: self.push_screen(TraceScreen(run_label, trace)))
 
     def load_history(self, messages: list[dict[str, str]]) -> None:
         """Replace the rendered transcript with persisted user and assistant messages."""
@@ -450,6 +524,7 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
         if self._writes_closed:
             return
         self._writes_closed = True
+        self._stop_compaction_progress()
         self._diagnose("view_stop_requested", self.diagnostic_snapshot())
 
         def close() -> None:
@@ -466,7 +541,7 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
             self._append_transcript("".join(chunks))
 
     def scroll_page_up(self) -> None:
-        if isinstance(self.screen, HistoryScreen):
+        if isinstance(self.screen, (HistoryScreen, SessionsScreen, TraceScreen)):
             self.screen.action_page_up()
             return
         if self.review_details.display:
@@ -478,7 +553,7 @@ class TerminalView(ChoicePromptMixin, TranscriptRenderingMixin, TuiDiagnosticMix
         self._refresh_status()
 
     def scroll_page_down(self) -> None:
-        if isinstance(self.screen, HistoryScreen):
+        if isinstance(self.screen, (HistoryScreen, SessionsScreen, TraceScreen)):
             self.screen.action_page_down()
             return
         if self.review_details.display:

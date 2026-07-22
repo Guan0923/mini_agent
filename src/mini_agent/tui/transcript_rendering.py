@@ -330,6 +330,9 @@ class TranscriptRenderingMixin:
                 tool.node.set_activity(False)
 
     def _reset_transcript_state(self) -> None:
+        progress = getattr(self, "_compact_progress", None)
+        if progress is not None:
+            progress.stop()
         self.transcript.clear_nodes(self._top_level_nodes)
         self.transcript_nodes = []
         self.markdown_bodies = []
@@ -349,6 +352,8 @@ class TranscriptRenderingMixin:
         self._streaming_system = None
         self._pending_system_chunks = []
         self._system_flush_scheduled = False
+        self._compact_node = None
+        self._compact_progress = None
 
     def _scroll_after_transcript_change(self) -> None:
         if self._reconcile_scheduled:

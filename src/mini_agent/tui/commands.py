@@ -28,7 +28,8 @@ COMMAND_DEFINITIONS = (
     CommandDefinition("help", "/help", "Show this help."),
     CommandDefinition("tools", "/tools", "List available tools."),
     CommandDefinition("skills", "/skills", "List discovered project Skills."),
-    CommandDefinition("trace", "/trace", "Print the last run trace as JSON."),
+    CommandDefinition("compact", "/compact", "Compact old conversation context now."),
+    CommandDefinition("trace", "/trace", "Open the read-only last-run trace view."),
     CommandDefinition("quit", "/quit", "Exit."),
 )
 

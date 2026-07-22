@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from mini_agent.domain import ToolSpec
+from mini_agent.domain import PlanningError, ToolSpec
 
-from ..context_management import ContextManager
+from ..context_management import ContextCompactionResult, ContextManager
 from ..model_requests import ModelRequestExecutor, RuntimeCompletionClient
 from .decisions import DecisionMixin
 from .formats import FormatMixin
@@ -37,6 +37,16 @@ class LLMPlanner(DecisionMixin, SelectionMixin, PlanMixin, RepairMixin, RequestM
         estimate_tokens = getattr(client, "estimate_tokens", None)
         self._context_manager = (
             ContextManager(client) if isinstance(context_size, int) and callable(estimate_tokens) else None
+        )
+
+    def compact_context(self, runtime) -> ContextCompactionResult:
+        """Force context compaction using the planner's existing summarizer."""
+
+        if self._context_manager is None:
+            raise PlanningError("Context compaction requires an LLM client with token estimation support.")
+        return self._context_manager.compact(
+            runtime,
+            summarize=lambda transcript: self._summarize_history(runtime, transcript),
         )
 
     @staticmethod

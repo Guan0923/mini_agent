@@ -8,6 +8,8 @@ from mini_agent.domain import AssistantMessage, ExecutionPlan, StepEvaluation, S
 from mini_agent.domain.skills import SkillSelection
 from mini_agent.runtime.core.context import AgentRuntime
 
+from .context_management import ContextCompactionResult
+
 
 @runtime_checkable
 class NamedPlanner(Protocol):
@@ -57,6 +59,11 @@ class DynamicReplanner(PlanReplanner, Protocol):
 @runtime_checkable
 class OutputRepairReporter(Protocol):
     def consume_output_repairs(self) -> list[dict[str, str | int]]: ...
+
+
+@runtime_checkable
+class ContextCompactor(Protocol):
+    def compact_context(self, runtime: AgentRuntime) -> ContextCompactionResult: ...
 
 
 class ExecutionPlanner(Planner, PlanCreator, Protocol):

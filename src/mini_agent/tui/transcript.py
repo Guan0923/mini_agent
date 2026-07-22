@@ -13,6 +13,62 @@ from textual.widgets.text_area import Selection
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
+class CompactProgress(Static):
+    """Indeterminate progress shown while context compaction is running."""
+
+    BAR_WIDTH = 18
+    BLOCK_WIDTH = 5
+
+    def __init__(self) -> None:
+        self._offset = 0
+        self._animation_timer: Timer | None = None
+        self.running = True
+        super().__init__(self._running_text(), markup=False, classes="compact-progress")
+
+    def on_mount(self) -> None:
+        if self.running and self._animation_timer is None:
+            self._animation_timer = self.set_interval(0.12, self._tick)
+
+    def on_unmount(self) -> None:
+        self.stop()
+
+    def _tick(self) -> None:
+        if not self.running:
+            return
+        self._offset = (self._offset + 1) % (self.BAR_WIDTH + self.BLOCK_WIDTH)
+        self.update(self._running_text())
+
+    def _running_text(self) -> str:
+        start = self._offset - self.BLOCK_WIDTH + 1
+        cells = [
+            "█" if start <= index <= self._offset else " "
+            for index in range(self.BAR_WIDTH)
+        ]
+        return f"正在 compact 中  [{''.join(cells)}]"
+
+    def complete(self, previous_messages: int, remaining_messages: int) -> None:
+        self.stop()
+        self.update(
+            f"compact 完成  [{'█' * self.BAR_WIDTH}]  "
+            f"{previous_messages} → {remaining_messages} 条消息"
+        )
+
+    def no_op(self) -> None:
+        self.stop()
+        self.update(f"无需 compact  [{'─' * self.BAR_WIDTH}]  没有可压缩的旧对话")
+
+    def fail(self, message: str) -> None:
+        self.stop()
+        detail = " ".join(message.split())[:200]
+        self.update(f"compact 失败  [{'!' * self.BAR_WIDTH}]  {detail}")
+
+    def stop(self) -> None:
+        self.running = False
+        if self._animation_timer is not None:
+            self._animation_timer.stop()
+            self._animation_timer = None
+
+
 class MarkdownBody(Markdown):
     """A Markdown widget with a synchronous source cache for streaming text."""
 

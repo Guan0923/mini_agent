@@ -10,6 +10,8 @@ from mini_agent.runtime import RuntimeEvent
 from mini_agent.runtime.conversation.user_input import OTHER_OPTION_LABEL, parse_user_input_questions
 from mini_agent.runtime.core.contracts import QuestionOption, UserQuestion
 from mini_agent.tui.history import HistoryScreen
+from mini_agent.tui.inspection import SessionsScreen, TraceScreen
+from mini_agent.tui.transcript import CompactProgress
 from mini_agent.tui.view import RUNNING_STATUS_WORDS, TerminalView
 from mini_agent.tui.widgets import TerminalInput
 
@@ -134,6 +136,97 @@ def test_history_screen_is_read_only_scrollable_and_restores_main_view() -> None
             await pilot.pause()
             assert not isinstance(view.screen, HistoryScreen)
             assert view.input.value == "preserved draft"
+
+    asyncio.run(scenario())
+
+def test_sessions_and_trace_screens_are_read_only_scrollable_and_restore_main_view() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        lines = [f"session-{index}" for index in range(60)]
+        trace = "{\n" + ",\n".join(f'  "event-{index}": {index}' for index in range(60)) + "\n}"
+        async with view.run_test(size=(60, 12)) as pilot:
+            view.input.value = "preserved draft"
+            view.show_sessions(lines)
+            await pilot.pause()
+            await pilot.pause()
+
+            screen = view.screen
+            assert isinstance(screen, SessionsScreen)
+            assert screen.content == lines
+            assert list(screen.query(TerminalInput)) == []
+            assert screen.content_log.scroll_y == screen.content_log.max_scroll_y
+
+            await pilot.press("pageup")
+            await pilot.pause()
+            assert screen.content_log.scroll_y < screen.content_log.max_scroll_y
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(view.screen, SessionsScreen)
+            assert view.input.value == "preserved draft"
+
+            view.show_trace("run-1", trace)
+            await pilot.pause()
+            await pilot.pause()
+
+            trace_screen = view.screen
+            assert isinstance(trace_screen, TraceScreen)
+            assert trace_screen.heading == "TRACE | run-1"
+            assert trace_screen.content == [trace]
+            assert list(trace_screen.query(TerminalInput)) == []
+            assert trace_screen.content_log.scroll_y == trace_screen.content_log.max_scroll_y
+
+            await pilot.press("pageup")
+            await pilot.pause()
+            assert trace_screen.content_log.scroll_y < trace_screen.content_log.max_scroll_y
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(view.screen, TraceScreen)
+            assert view.input.value == "preserved draft"
+
+    asyncio.run(scenario())
+
+
+def test_compact_progress_animates_finishes_fails_and_stops_on_clear() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(70, 14)) as pilot:
+            view.begin_compaction()
+            await pilot.pause()
+            progress = view.query_one(CompactProgress)
+            initial = str(progress.content)
+            assert "正在 compact 中" in initial
+            assert progress.running is True
+
+            progress._tick()
+            assert str(progress.content) != initial
+
+            view.finish_compaction(
+                compacted=True,
+                previous_messages=8,
+                remaining_messages=3,
+            )
+            await pilot.pause()
+            assert progress.running is False
+            assert "compact 完成" in str(progress.content)
+            assert "8 → 3" in str(progress.content)
+
+            view.begin_compaction()
+            await pilot.pause()
+            failed = list(view.query(CompactProgress))[-1]
+            view.fail_compaction("summary failed")
+            await pilot.pause()
+            assert failed.running is False
+            assert "compact 失败" in str(failed.content)
+
+            view.begin_compaction()
+            await pilot.pause()
+            cleared = list(view.query(CompactProgress))[-1]
+            view.clear()
+            await pilot.pause()
+            assert cleared.running is False
+            assert list(view.query(CompactProgress)) == []
 
     asyncio.run(scenario())
 

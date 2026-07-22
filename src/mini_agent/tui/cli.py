@@ -10,7 +10,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Event
 
-from mini_agent.domain import RunState
+from mini_agent.domain import PlanningError, RunState
 from mini_agent.observability import EventFanout, JsonlRunLogger
 from mini_agent.providers import ModelConfigurationError
 from mini_agent.runtime import (
@@ -161,6 +161,7 @@ class TerminalApp:
         permission_decisions: asyncio.Queue[str] = asyncio.Queue()
         approval = _InteractiveApproval(self._approval, loop, view)
         active_run: asyncio.Task[RunState | None] | None = None
+        active_compaction: asyncio.Task[object] | None = None
         permission_pending = False
         deferred_task: str | None = None
         cancel_requested = Event()
@@ -180,6 +181,9 @@ class TerminalApp:
                 )
             )
 
+        def launch_compaction() -> asyncio.Task[object]:
+            return asyncio.create_task(asyncio.to_thread(self._conversation_service.compact_context))
+
         view_task = asyncio.create_task(view.run_async())
         try:
             while True:
@@ -188,6 +192,7 @@ class TerminalApp:
                     active_run is not None,
                     approval,
                     permission_pending,
+                    compacting=active_compaction is not None,
                     cancelling=cancellation_pending or exit_after_run,
                 )
                 submission = asyncio.create_task(view.submissions.get())
@@ -204,6 +209,8 @@ class TerminalApp:
                 }
                 if active_run is not None:
                     waiters.add(active_run)  # type: ignore[arg-type]
+                if active_compaction is not None:
+                    waiters.add(active_compaction)  # type: ignore[arg-type]
                 if permission_change is not None:
                     waiters.add(permission_change)  # type: ignore[arg-type]
                 done, _pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
@@ -240,6 +247,7 @@ class TerminalApp:
 
                 exit_requested = False
                 run_finished = active_run is not None and active_run in done
+                compaction_finished = active_compaction is not None and active_compaction in done
 
                 approval_changed = approval_change in done
                 if approval_changed:
@@ -263,7 +271,7 @@ class TerminalApp:
                 if submission in done:
                     submitted = submission.result()
                     if submitted is None:
-                        if active_run is not None or approval.pending:
+                        if active_run is not None or approval.pending or active_compaction is not None:
                             self._write("Agent is still running; finish the active review before exiting.")
                         elif permission_pending:
                             permission_pending = False
@@ -274,7 +282,7 @@ class TerminalApp:
                     else:
                         task = submitted.strip()
                         if task == "/quit":
-                            if active_run is not None or approval.pending:
+                            if active_run is not None or approval.pending or active_compaction is not None:
                                 if not exit_after_run:
                                     exit_after_run = True
                                     cancel_requested.set()
@@ -291,7 +299,7 @@ class TerminalApp:
                             pass
                         elif permission_pending:
                             pass
-                        elif active_run is not None:
+                        elif active_run is not None or active_compaction is not None:
                             if task:
                                 if any(kind == "command" for kind, _value, _argument in self._split_input(task)):
                                     self._write("Commands are unavailable while the agent is running.")
@@ -300,35 +308,47 @@ class TerminalApp:
                                     pending_messages.put(task)
                                     self._write("MESSAGE QUEUED")
                         else:
-                            keep_running, next_task, request_permission = self._handle_view_input(task)
-                            if not keep_running:
-                                exit_requested = True
-                            if request_permission:
-                                permission_pending = True
-                                deferred_task = next_task
-                                current = self._approval.permission_mode.replace("_", " ").title()
-                                view.begin_review(
-                                    "PERMISSION",
-                                    f"Current: {current}",
-                                    "Choose how tools that require confirmation are handled.",
-                                    (
-                                        ChoiceItem(
-                                            "approval_for_me",
-                                            "Approval for me",
-                                            "Ask before tools that require confirmation.",
+                            parts = self._split_input(task)
+                            has_compact = any(
+                                kind == "command" and value == "compact"
+                                for kind, value, _argument in parts
+                            )
+                            if has_compact:
+                                if task != "/compact":
+                                    self._write("Usage: /compact")
+                                else:
+                                    view.begin_compaction()
+                                    active_compaction = launch_compaction()
+                            else:
+                                keep_running, next_task, request_permission = self._handle_view_input(task)
+                                if not keep_running:
+                                    exit_requested = True
+                                if request_permission:
+                                    permission_pending = True
+                                    deferred_task = next_task
+                                    current = self._approval.permission_mode.replace("_", " ").title()
+                                    view.begin_review(
+                                        "PERMISSION",
+                                        f"Current: {current}",
+                                        "Choose how tools that require confirmation are handled.",
+                                        (
+                                            ChoiceItem(
+                                                "approval_for_me",
+                                                "Approval for me",
+                                                "Ask before tools that require confirmation.",
+                                            ),
+                                            ChoiceItem(
+                                                "full_access",
+                                                "Full access",
+                                                "Automatically approve tool calls.",
+                                            ),
+                                            ChoiceItem("cancel", "Cancel"),
                                         ),
-                                        ChoiceItem(
-                                            "full_access",
-                                            "Full access",
-                                            "Automatically approve tool calls.",
-                                        ),
-                                        ChoiceItem("cancel", "Cancel"),
-                                    ),
-                                    lambda choice, _supplement: permission_decisions.put_nowait(choice),
-                                )
-                            elif next_task is not None:
-                                self._write_user_message(next_task)
-                                active_run = launch(next_task)
+                                        lambda choice, _supplement: permission_decisions.put_nowait(choice),
+                                    )
+                                elif next_task is not None:
+                                    self._write_user_message(next_task)
+                                    active_run = launch(next_task)
 
                 if interrupt_request in done:
                     if (active_run is not None or approval.pending) and not cancellation_pending and not exit_after_run:
@@ -336,6 +356,27 @@ class TerminalApp:
                         cancel_requested.set()
                         approval.cancel_pending()
                         self._write("CANCELLING — waiting for current operation")
+
+                if compaction_finished:
+                    assert active_compaction is not None
+                    try:
+                        result = active_compaction.result()
+                    except Exception as exc:
+                        view.fail_compaction(str(exc))
+                    else:
+                        view.finish_compaction(
+                            compacted=result.compacted,
+                            previous_messages=result.previous_messages,
+                            remaining_messages=result.remaining_messages,
+                        )
+                    active_compaction = None
+                    if exit_after_run:
+                        exit_requested = True
+                    else:
+                        queued = self._drain_steering(pending_messages)
+                        if queued:
+                            self._write(f"QUEUE STARTED — {len(queued)} queued message(s)")
+                            active_run = launch("\n\n".join(queued))
 
                 if run_finished:
                     assert active_run is not None
@@ -493,6 +534,7 @@ class TerminalApp:
         approval: _InteractiveApproval,
         permission_pending: bool,
         *,
+        compacting: bool = False,
         cancelling: bool = False,
     ) -> None:
         mode = self.mode.upper()
@@ -504,6 +546,9 @@ class TerminalApp:
             interrupt_enabled = True
         elif permission_pending:
             status = "PERMISSION | Select mode"
+            interrupt_enabled = False
+        elif compacting:
+            status = "COMPACT | RUNNING"
             interrupt_enabled = False
         elif running:
             status = f"{mode} | RUNNING"
@@ -575,9 +620,12 @@ class TerminalApp:
         if not task:
             return True
         parts = self._split_input(task)
-        if any(kind == "command" and value == "history" for kind, value, _argument in parts):
-            if task.strip() != "/history":
-                self._write("Usage: /history")
+        for standalone in ("history", "compact"):
+            has_command = any(
+                kind == "command" and value == standalone for kind, value, _argument in parts
+            )
+            if has_command and task.strip() != f"/{standalone}":
+                self._write(f"Usage: /{standalone}")
                 return True
         for kind, value, argument in parts:
             if kind == "task":
@@ -689,15 +737,27 @@ class TerminalApp:
                 return True
             self._write("\n".join(f"{skill.name} — {skill.description}" for skill in definitions))
             return True
+        if command == "compact":
+            if argument:
+                self._write("Usage: /compact")
+                return True
+            try:
+                result = self._conversation_service.compact_context()
+            except (PlanningError, RuntimeError) as exc:
+                self._write(f"COMPACT ERROR {exc}")
+                return True
+            if result.compacted:
+                self._write(
+                    f"COMPACTED {result.previous_messages} → {result.remaining_messages} messages"
+                )
+            else:
+                self._write("No old conversation context to compact.")
+            return True
         if command == "trace":
             if argument:
                 self._write("Usage: /trace")
                 return True
-            self._write(
-                json.dumps(self.last_state.to_dict(), ensure_ascii=False, indent=2)
-                if self.last_state
-                else "No run yet."
-            )
+            self._show_trace()
             return True
         return True
 
@@ -737,19 +797,44 @@ class TerminalApp:
         self._print_active_session()
 
     def _show_sessions(self) -> None:
+        view = getattr(self, "_view", None)
+        show_sessions = getattr(view, "show_sessions", None)
         if self.session_store is None:
-            self._write("Session storage is not configured.")
+            if callable(show_sessions):
+                show_sessions(["Session storage is not configured."])
+            else:
+                self._write("Session storage is not configured.")
             return
         sessions = self._conversation_service.list_sessions()
+        lines = [
+            (
+                f"{'*' if self.active_session and session.session_id == self.active_session.session_id else ' '} "
+                f"{session.session_id} — {session.title} "
+                f"({session.message_count} messages, updated {session.updated_at})"
+            )
+            for session in sessions
+        ]
+        if callable(show_sessions):
+            show_sessions(lines)
+            return
         if not sessions:
             self._write("No saved sessions.")
             return
-        for session in sessions:
-            marker = "*" if self.active_session and session.session_id == self.active_session.session_id else " "
-            self._write(
-                f"{marker} {session.session_id} — {session.title} "
-                f"({session.message_count} messages, updated {session.updated_at})"
-            )
+        for line in lines:
+            self._write(line)
+
+    def _show_trace(self) -> None:
+        view = getattr(self, "_view", None)
+        show_trace = getattr(view, "show_trace", None)
+        trace = (
+            json.dumps(self.last_state.to_dict(), ensure_ascii=False, indent=2)
+            if self.last_state
+            else "No run yet."
+        )
+        if callable(show_trace):
+            show_trace(self.last_state.run_id if self.last_state else "No run yet", trace)
+            return
+        self._write(trace)
 
     def _show_session(self) -> None:
         if self.session_store is None:

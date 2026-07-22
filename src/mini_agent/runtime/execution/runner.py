@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from mini_agent.domain import (
+    PlanningError,
     RunState,
     SkillSnapshot,
     ToolSpec,
@@ -12,6 +13,8 @@ from mini_agent.domain import (
     new_run_id,
     new_session_id,
 )
+from mini_agent.planning.base import ContextCompactor
+from mini_agent.planning.context_management import ContextCompactionResult
 from mini_agent.tools import ToolError
 
 from ..conversation.steering import consume_steering
@@ -156,6 +159,19 @@ class AgentRunner:
         runtime.services.hooks = self.hooks
         runtime.state.runner_settings = self.settings
         return runtime
+
+    def compact_context(self, runtime: AgentRuntime) -> ContextCompactionResult:
+        """Compact an idle runtime through the configured planner capability."""
+
+        self.bind(runtime)
+        if runtime.state.status == "running":
+            raise RuntimeError("Context cannot be compacted while a run is active.")
+        if not isinstance(self.planner, ContextCompactor):
+            raise PlanningError("Context compaction requires the LLM planner.")
+        if runtime.state.current_run is None:
+            message_count = len(runtime.state.messages)
+            return ContextCompactionResult(False, message_count, message_count)
+        return self.planner.compact_context(runtime)
 
     def run(self, runtime: AgentRuntime) -> RunState:
         """Execute one turn using the single runtime parameter."""

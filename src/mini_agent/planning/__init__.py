@@ -3,6 +3,7 @@
 from mini_agent.domain import PlanningError
 
 from .base import (
+    ContextCompactor,
     DynamicPlanCreator,
     DynamicReplanner,
     ExecutionPlanner,
@@ -20,6 +21,7 @@ from .llm import LLMPlanner
 from .rule_based import RuleBasedPlanner
 
 __all__ = [
+    "ContextCompactor",
     "DynamicPlanCreator",
     "DynamicReplanner",
     "ExecutionPlanner",

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mini_agent.domain import ChatMessage, RunState
 
 from ..core.context import AgentRuntime, RuntimeStore
+
+if TYPE_CHECKING:
+    from mini_agent.planning.context_management import ContextCompactionResult
 
 
 class RuntimeRunner(Protocol):
@@ -21,5 +24,7 @@ class RuntimeRunner(Protocol):
     ) -> AgentRuntime: ...
 
     def bind(self, runtime: AgentRuntime) -> AgentRuntime: ...
+
+    def compact_context(self, runtime: AgentRuntime) -> ContextCompactionResult: ...
 
     def run(self, runtime: AgentRuntime) -> RunState: ...
