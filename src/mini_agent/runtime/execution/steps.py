@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 
 from mini_agent.tools import ToolError
 
@@ -137,8 +138,20 @@ class ToolStepExecutor:
             run.add_event("approval_granted", "Tool approval granted", interrupt_kind="tool", **request.data)
             publish(RuntimeEvent("approval_granted", request.message, request.data))
 
+        started_at = perf_counter()
         run.add_event("tool_call", f"Calling {tool}", call_id=tool_message.call_id, arguments=dict(tool_message.arguments))
-        publish(RuntimeEvent("tool_call", tool, {"call_id": tool_message.call_id, "arguments": tool_message.arguments}))
+        publish(
+            RuntimeEvent(
+                "tool_call",
+                tool,
+                {
+                    "call_id": tool_message.call_id,
+                    "arguments": tool_message.arguments,
+                    "attempt": 1,
+                    "started_at": run.events[-1].timestamp,
+                },
+            )
+        )
         for attempt in range(runtime.state.runner_settings.max_retries + 1):
             try:
                 result = tools.invoke(tool, tool_message.arguments, confirmed=True)
@@ -146,8 +159,27 @@ class ToolStepExecutor:
                 tool_message.content = result
                 tool_message.retryable = retryable
                 run.completed_steps.append(len(run.actions))
-                run.add_event("tool_result", f"{tool} succeeded", call_id=tool_message.call_id, result=result)
-                publish(RuntimeEvent("tool_result", result, {"tool": tool, "call_id": tool_message.call_id}))
+                duration_ms = round((perf_counter() - started_at) * 1000, 3)
+                run.add_event(
+                    "tool_result",
+                    f"{tool} succeeded",
+                    call_id=tool_message.call_id,
+                    result=result,
+                    duration_ms=duration_ms,
+                    attempts=attempt + 1,
+                )
+                publish(
+                    RuntimeEvent(
+                        "tool_result",
+                        result,
+                        {
+                            "tool": tool,
+                            "call_id": tool_message.call_id,
+                            "duration_ms": duration_ms,
+                            "attempts": attempt + 1,
+                        },
+                    )
+                )
                 runtime.save()
                 return ToolStepResult(success=True, output=result, retryable=retryable)
             except ToolError as exc:
@@ -157,12 +189,31 @@ class ToolStepExecutor:
                     )
                     publish(
                         RuntimeEvent(
-                            "retry", str(exc), {"tool": tool, "call_id": tool_message.call_id, "attempt": attempt + 1}
+                            "retry",
+                            str(exc),
+                            {
+                                "tool": tool,
+                                "call_id": tool_message.call_id,
+                                "attempt": attempt + 1,
+                                "elapsed_ms": round((perf_counter() - started_at) * 1000, 3),
+                            },
                         )
                     )
                     continue
-                return self._failure(runtime, tool, str(exc), retryable=retryable)
-        return self._failure(runtime, tool, "Tool execution ended without an outcome.", retryable=retryable)
+                return self._failure(
+                    runtime,
+                    tool,
+                    str(exc),
+                    retryable=retryable,
+                    duration_ms=round((perf_counter() - started_at) * 1000, 3),
+                )
+        return self._failure(
+            runtime,
+            tool,
+            "Tool execution ended without an outcome.",
+            retryable=retryable,
+            duration_ms=round((perf_counter() - started_at) * 1000, 3),
+        )
 
     @staticmethod
     def _hook_outcome(result: ToolStepResult) -> HookOutcome[ToolHookResult]:
@@ -187,6 +238,7 @@ class ToolStepExecutor:
         error: str,
         *,
         retryable: bool | None = None,
+        duration_ms: float | None = None,
     ) -> ToolStepResult:
         run = runtime.run
         message = runtime.state.active_message
@@ -198,8 +250,11 @@ class ToolStepExecutor:
             current.status = "failed"
             current.content = error
             current.retryable = retryable
-        run.add_event("tool_failed", f"{tool} failed", call_id=call_id, error=error)
+        data: dict[str, object] = {"call_id": call_id, "error": error}
+        if duration_ms is not None:
+            data["duration_ms"] = duration_ms
+        run.add_event("tool_failed", f"{tool} failed", **data)
         publish = runtime.services.publish or (lambda _event: None)
-        publish(RuntimeEvent("tool_failed", error, {"tool": tool, "call_id": call_id}))
+        publish(RuntimeEvent("tool_failed", error, {"tool": tool, **data}))
         runtime.save()
         return ToolStepResult(success=False, error=error, retryable=retryable)

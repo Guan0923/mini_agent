@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from collections.abc import Iterator
+from time import perf_counter
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
@@ -55,6 +57,7 @@ class JsonHttpTransport:
 
     def __init__(self, session: requests.Session | None = None) -> None:
         self.session = session or requests.Session()
+        self.last_metadata: dict[str, Any] = {}
 
     def post_json(
         self,
@@ -63,6 +66,8 @@ class JsonHttpTransport:
         payload: dict[str, Any],
         timeout_seconds: int,
     ) -> dict[str, Any]:
+        started = perf_counter()
+        response: requests.Response | None = None
         try:
             response = self.session.post(
                 endpoint,
@@ -77,6 +82,12 @@ class JsonHttpTransport:
             raise _transport_error(exc, "Model request failed") from exc
         except ValueError as exc:
             raise ModelTransportError("Model response is not valid JSON.", retryable=True) from exc
+        finally:
+            self.last_metadata = {
+                "http_status": getattr(response, "status_code", None),
+                "response_headers": _safe_response_headers(getattr(response, "headers", None)),
+                "transport_duration_ms": round((perf_counter() - started) * 1000, 3),
+            }
         if not isinstance(data, dict):
             raise ModelTransportError("Model response must be a JSON object.", retryable=True)
         return data
@@ -88,6 +99,7 @@ class JsonHttpTransport:
         payload: dict[str, Any],
         timeout_seconds: int,
     ) -> Iterator[dict[str, Any]]:
+        started = perf_counter()
         response: requests.Response | None = None
         saw_done = False
         saw_event = False
@@ -138,6 +150,23 @@ class JsonHttpTransport:
         finally:
             if response is not None:
                 response.close()
+            self.last_metadata = {
+                "http_status": getattr(response, "status_code", None),
+                "response_headers": _safe_response_headers(getattr(response, "headers", None)),
+                "transport_duration_ms": round((perf_counter() - started) * 1000, 3),
+                "stream_completed": saw_done,
+            }
+
+
+def _safe_response_headers(headers: Any) -> dict[str, str]:
+    if not hasattr(headers, "items"):
+        return {}
+    allowed = {"content-type", "request-id", "x-request-id", "retry-after"}
+    return {
+        str(key).lower(): str(value)
+        for key, value in headers.items()
+        if str(key).lower() in allowed
+    }
 
 
 _RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
@@ -167,6 +196,32 @@ def _transport_error(
         retry_after=retry_after,
         stream_started=stream_started,
     )
+
+
+class _RecordedStream:
+    """Capture every parsed stream event while preserving incremental iteration."""
+
+    def __init__(self, source: Iterator[dict[str, Any]]) -> None:
+        self._source = source
+        self.events: list[dict[str, Any]] = []
+        self.completed = False
+
+    def __iter__(self) -> _RecordedStream:
+        return self
+
+    def __next__(self) -> dict[str, Any]:
+        try:
+            event = next(self._source)
+        except StopIteration:
+            self.completed = True
+            raise
+        self.events.append(copy.deepcopy(event))
+        return event
+
+    def close(self) -> None:
+        close = getattr(self._source, "close", None)
+        if callable(close):
+            close()
 
 
 class LLMClient:
@@ -212,19 +267,15 @@ class LLMClient:
         if runtime.exchange.exchange_id is None:
             runtime.exchange.exchange_id = runtime.next_exchange_id()
         publish = runtime.services.publish or (lambda _event: None)
-        publish(
-            RuntimeEvent(
-                "model_request",
-                f"Model {runtime.exchange.operation or 'completion'} request",
-                model_request_data(runtime.state, runtime.exchange),
-            )
-        )
         max_retries = runtime.state.runner_settings.max_transport_retries
         for attempt in range(max_retries + 1):
             try:
-                prepared = self._run_once(runtime)
+                prepared = self._run_once(runtime, attempt=attempt + 1)
                 self._last_request_diagnostics["transport_attempts"] = attempt + 1
                 return prepared
+            except ModelOutputError as exc:
+                self._publish_request_failure(runtime, exc, publish)
+                raise
             except ModelTransportError as exc:
                 if exc.retryable and attempt < max_retries:
                     delay = exc.retry_after if exc.retry_after is not None else 0.5 * (2**attempt)
@@ -244,8 +295,6 @@ class LLMClient:
                     continue
                 self._publish_request_failure(runtime, exc, publish)
                 raise
-            except ModelOutputError:
-                raise
             except ModelRequestError as exc:
                 self._publish_request_failure(runtime, exc, publish)
                 raise
@@ -261,7 +310,7 @@ class LLMClient:
             )
         )
 
-    def _run_once(self, runtime: AgentRuntime) -> PreparedResponse:
+    def _run_once(self, runtime: AgentRuntime, *, attempt: int) -> PreparedResponse:
         self._last_request_diagnostics = {}
         runtime.state.provider = self.config.provider
         runtime.state.model = self.config.model
@@ -270,17 +319,35 @@ class LLMClient:
             runtime.exchange.exchange_id = runtime.next_exchange_id()
         publish = runtime.services.publish or (lambda _event: None)
         diagnostics = self._request_diagnostics(runtime.exchange.stream)
+        started = perf_counter()
         raw: dict[str, Any] | Iterator[dict[str, Any]] | None = None
+        recorded_stream: _RecordedStream | None = None
         completed = False
         try:
             payload = self.llm.prepare_request(runtime)
+            runtime.exchange.wire_request = copy.deepcopy(payload)
+            runtime.exchange.transport_metadata = {
+                **diagnostics,
+                "http_method": "POST",
+                "attempt": attempt,
+                "request_body_bytes": len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")),
+            }
+            publish(
+                RuntimeEvent(
+                    "model_request",
+                    f"Model {runtime.exchange.operation or 'completion'} request",
+                    model_request_data(runtime.state, runtime.exchange),
+                )
+            )
             if runtime.exchange.stream:
-                raw = self.transport.stream_json(
+                source = self.transport.stream_json(
                     self.llm.endpoint,
                     self.llm.headers,
                     payload,
                     self.llm.timeout_seconds,
                 )
+                recorded_stream = _RecordedStream(source)
+                raw = recorded_stream
             else:
                 raw = self.transport.post_json(
                     self.llm.endpoint,
@@ -292,33 +359,14 @@ class LLMClient:
             prepared = self.llm.prepare_response(runtime)
             completed = True
         except ModelRequestError as exc:
-            if isinstance(exc, ModelOutputError):
-                diagnostics.update(request_outcome="failed", request_error_message=str(exc))
-                exc.diagnostics = {**diagnostics, **exc.diagnostics}
-                self._last_request_diagnostics = exc.diagnostics
-                publish(
-                    RuntimeEvent(
-                        "model_error",
-                        f"Model {runtime.exchange.operation or 'completion'} failed",
-                        model_error_data(runtime.state, runtime.exchange, exc),
-                    )
-                )
-                raise
             diagnostics.update(request_outcome="failed", request_error_message=str(exc))
             exc.diagnostics = {**diagnostics, **exc.diagnostics}
             self._last_request_diagnostics = exc.diagnostics
             raise
         except ModelOutputError as exc:
             diagnostics.update(request_outcome="failed", request_error_message=str(exc))
-            exc.diagnostics = {**diagnostics, **exc.diagnostics}
+            exc.diagnostics = {**diagnostics, **getattr(exc, "diagnostics", {})}
             self._last_request_diagnostics = exc.diagnostics
-            publish(
-                RuntimeEvent(
-                    "model_error",
-                    f"Model {runtime.exchange.operation or 'completion'} failed",
-                    model_error_data(runtime.state, runtime.exchange, exc),
-                )
-            )
             raise
         except Exception as exc:
             publish(
@@ -336,6 +384,16 @@ class LLMClient:
                     close()
                 if runtime.exchange.raw_response is raw:
                     runtime.exchange.raw_response = None
+            runtime.exchange.transport_metadata.update(getattr(self.transport, "last_metadata", {}) or {})
+            runtime.exchange.transport_metadata["duration_ms"] = round((perf_counter() - started) * 1000, 3)
+            if recorded_stream is not None:
+                runtime.exchange.wire_response = list(recorded_stream.events)
+                runtime.exchange.transport_metadata["stream_completed"] = recorded_stream.completed
+            elif isinstance(raw, dict):
+                runtime.exchange.wire_response = copy.deepcopy(raw)
+            runtime.exchange.transport_metadata["response_body_bytes"] = len(
+                json.dumps(runtime.exchange.wire_response, ensure_ascii=False, default=str).encode("utf-8")
+            ) if runtime.exchange.wire_response is not None else 0
         diagnostics.update(
             request_outcome="completed",
             response_id=prepared.response_id,

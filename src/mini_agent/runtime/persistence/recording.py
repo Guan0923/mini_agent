@@ -48,6 +48,7 @@ _IDENTIFIER_KEYS = frozenset(
     }
 )
 _PREVIEW_CHARS = 200
+LOG_SCHEMA_VERSION = 2
 
 
 def model_request_data(state: RuntimeState, exchange: RuntimeExchange) -> dict[str, Any]:
@@ -57,7 +58,8 @@ def model_request_data(state: RuntimeState, exchange: RuntimeExchange) -> dict[s
     overrides = exchange.context.get("request_parameters")
     if isinstance(overrides, Mapping):
         parameters.update(overrides)
-    return {
+    data: dict[str, Any] = {
+        "schema_version": LOG_SCHEMA_VERSION,
         "exchange_id": exchange.exchange_id,
         "operation": exchange.operation,
         "provider": state.provider,
@@ -68,12 +70,18 @@ def model_request_data(state: RuntimeState, exchange: RuntimeExchange) -> dict[s
         "messages": [_message_to_record(message) for message in exchange.messages],
         "tools": [_tool_spec_to_dict(tool) for tool in exchange.allowed_tools],
     }
+    if exchange.wire_request is not None:
+        data["wire_request"] = exchange.wire_request
+    if exchange.transport_metadata:
+        data["transport"] = dict(exchange.transport_metadata)
+    return data
 
 
 def model_response_data(state: RuntimeState, exchange: RuntimeExchange, response: PreparedResponse) -> dict[str, Any]:
-    """Return the normalized response instead of provider-specific wire data."""
+    """Return both normalized response data and the complete provider wire body."""
 
-    return {
+    data: dict[str, Any] = {
+        "schema_version": LOG_SCHEMA_VERSION,
         "exchange_id": exchange.exchange_id,
         "provider": state.provider,
         "model": state.model,
@@ -83,13 +91,19 @@ def model_response_data(state: RuntimeState, exchange: RuntimeExchange, response
         "usage": response.usage,
         "message": _message_to_record(response.message),
     }
+    if exchange.wire_response is not None:
+        data["wire_response"] = exchange.wire_response
+    if exchange.transport_metadata:
+        data["transport"] = dict(exchange.transport_metadata)
+    return data
 
 
 def model_error_data(state: RuntimeState, exchange: RuntimeExchange, error: Exception) -> dict[str, Any]:
-    """Capture safe request diagnostics without retaining provider wire payloads."""
+    """Capture safe diagnostics and any wire data available before the failure."""
 
     diagnostics = getattr(error, "diagnostics", None)
-    return {
+    data: dict[str, Any] = {
+        "schema_version": LOG_SCHEMA_VERSION,
         "exchange_id": exchange.exchange_id,
         "provider": state.provider,
         "model": state.model,
@@ -98,6 +112,13 @@ def model_error_data(state: RuntimeState, exchange: RuntimeExchange, error: Exce
         "error": str(error),
         "diagnostics": dict(diagnostics) if isinstance(diagnostics, dict) else {},
     }
+    if exchange.wire_request is not None:
+        data["wire_request"] = exchange.wire_request
+    if exchange.wire_response is not None:
+        data["wire_response"] = exchange.wire_response
+    if exchange.transport_metadata:
+        data["transport"] = dict(exchange.transport_metadata)
+    return data
 
 
 def persistent_event(event: RuntimeEvent, include_full_messages: bool) -> tuple[str, dict[str, Any]]:

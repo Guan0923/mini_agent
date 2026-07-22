@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from time import perf_counter
 
 from mini_agent.domain import (
     RunState,
@@ -161,6 +162,7 @@ class AgentRunner:
         """Execute one turn using the single runtime parameter."""
 
         self.bind(runtime)
+        started_at = perf_counter()
         runtime.state.status = "running"
         runtime.services.publish = RunEventPublisher(runtime)
         runtime.services.interrupt = runtime.services.interrupt or self._default_interrupt(runtime)
@@ -195,12 +197,35 @@ class AgentRunner:
                 phase=exc.phase,
                 error_type=exc.error_type,
             )
-        return self._finish(runtime)
+        return self._finish(runtime, started_at=started_at)
 
     def _dispatch(self, runtime: AgentRuntime) -> None:
         runtime.run.add_event("run_started", "Run started")
         assert runtime.services.publish is not None
-        runtime.services.publish(RuntimeEvent("run_started", "started"))
+        settings = runtime.state.runner_settings
+        runtime.services.publish(
+            RuntimeEvent(
+                "run_started",
+                "started",
+                {
+                    "schema_version": 2,
+                    "session_id": runtime.state.session_id,
+                    "provider": runtime.state.provider,
+                    "model": runtime.state.model,
+                    "runner_settings": {
+                        "max_retries": settings.max_retries,
+                        "max_model_repairs": settings.max_model_repairs,
+                        "max_transport_retries": settings.max_transport_retries,
+                        "max_tool_recoveries": settings.max_tool_recoveries,
+                        "max_model_turns": settings.max_model_turns,
+                        "max_tool_calls": settings.max_tool_calls,
+                        "max_replans": settings.max_replans,
+                        "strategy": settings.strategy,
+                        "log_full_messages": settings.log_full_messages,
+                    },
+                },
+            )
+        )
         if cancel_if_requested(runtime):
             return
         if not self._skills.activate(runtime):
@@ -246,7 +271,7 @@ class AgentRunner:
 
         return decide
 
-    def _finish(self, runtime: AgentRuntime) -> RunState:
+    def _finish(self, runtime: AgentRuntime, *, started_at: float) -> RunState:
         run = runtime.run
         runtime.state.usage = runtime.state.turn_usage
         runtime.state.turn_usage = None
@@ -255,6 +280,29 @@ class AgentRunner:
             runtime.state.run_history.append(RunSummary(run.run_id, run.task, run.status, run.mode, run.final_answer))
         run.add_event("run_finished", "Run finished", status=run.status)
         if runtime.services.publish is not None:
-            runtime.services.publish(RuntimeEvent("run_finished", run.status, {"final_answer": run.final_answer or ""}))
+            counts: dict[str, int] = {}
+            for message in run.runtime_messages:
+                counts[message.kind] = counts.get(message.kind, 0) + 1
+            runtime.services.publish(
+                RuntimeEvent(
+                    "run_finished",
+                    run.status,
+                    {
+                        "schema_version": 2,
+                        "final_answer": run.final_answer or "",
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+                        "usage": runtime.state.usage,
+                        "event_counts": counts,
+                        "model_calls": counts.get("model_request", 0),
+                        "tool_calls": counts.get("tool_call", 0),
+                        "retries": counts.get("retry", 0) + counts.get("model_retry", 0),
+                        "replans": counts.get("replan_requested", 0),
+                        "active_skills": [
+                            {"name": skill.name, "sha256": skill.sha256}
+                            for skill in run.active_skills
+                        ],
+                    },
+                )
+            )
         runtime.save()
         return run

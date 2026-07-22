@@ -55,10 +55,10 @@ Plan mode supports ordinary read-only conversation plus two built-in control Too
 
 The application writes local runtime data below the selected workspace:
 
-- `logs/`: JSONL audit streams for individual runs, including normalized model request/response messages;
+- `logs/`: JSONL audit streams for individual runs, including normalized messages plus provider wire request/response bodies, stream events, transport status, retry attempts, durations, tool timing, and run summaries;
 - `.mini_agent/checkpoints.db`: run checkpoints, typed runtime snapshots, compact conversation projections, and ordered session runtime messages;
 
-These paths are ignored by Git. `LOG_FULL_MESSAGES=True` is the development default; set it to `False` in `.env` to write summaries instead of complete audit-message bodies. Sensitive key names and values are redacted in both modes. Existing artifact files are left untouched, but the active Agent runtime no longer creates or consumes them. Do not use production credentials or sensitive personal data in checked-in fixtures.
+These paths are ignored by Git. `LOG_FULL_MESSAGES=True` is the development default; set it to `False` in `.env` to write summaries instead of complete audit-message bodies. Sensitive key names and values are redacted in both modes. Wire payloads are retained without authentication headers; stream responses are stored as ordered JSON events. Existing artifact files are left untouched, but the active Agent runtime no longer creates or consumes them. Do not use production credentials or sensitive personal data in checked-in fixtures.
 
 ## Change boundaries
 

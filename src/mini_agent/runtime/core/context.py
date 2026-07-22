@@ -170,6 +170,9 @@ class RuntimeExchange:
     stream: bool = False
     request: dict[str, Any] | None = None
     raw_response: dict[str, Any] | Iterable[dict[str, Any]] | None = None
+    wire_request: dict[str, Any] | None = None
+    wire_response: Any = None
+    transport_metadata: dict[str, Any] = field(default_factory=dict)
     prepared_response: PreparedResponse | None = None
     context: dict[str, Any] = field(default_factory=dict)
     on_reasoning: Callable[[str], None] | None = None
@@ -185,6 +188,9 @@ class RuntimeExchange:
         self.stream = False
         self.request = None
         self.raw_response = None
+        self.wire_request = None
+        self.wire_response = None
+        self.transport_metadata = {}
         self.prepared_response = None
         self.context = {}
         self.on_reasoning = None

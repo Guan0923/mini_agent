@@ -158,6 +158,53 @@ def test_llm_client_accepts_an_injected_provider_adapter() -> None:
     assert client.consume_request_diagnostics()["operation"] == "custom_messages"
 
 
+def test_model_events_include_wire_bodies_and_transport_metadata() -> None:
+    session = SequencedSession([FakeJsonResponse(200, {"answer": "custom response"}, {"request-id": "req-1"})])
+    client = LLMClient(
+        ModelConfig("secret", "https://unused.test", "custom-model", provider="custom"),
+        session=session,
+        adapter=CustomAdapter(),
+    )
+    runtime = runtime_for_custom()
+    events = []
+    runtime.services.publish = events.append
+
+    client.run(runtime)
+
+    request = next(event for event in events if event.kind == "model_request")
+    response = next(event for event in events if event.kind == "model_response")
+    assert request.data["schema_version"] == 2
+    assert request.data["wire_request"] == {"input": "hello"}
+    assert request.data["transport"]["endpoint"] == "https://provider.test/messages"
+    assert request.data["transport"]["attempt"] == 1
+    assert request.data["transport"]["request_body_bytes"] > 0
+    assert response.data["wire_response"] == {"answer": "custom response"}
+    assert response.data["transport"]["http_status"] == 200
+    assert response.data["transport"]["response_headers"] == {"request-id": "req-1"}
+    assert response.data["transport"]["duration_ms"] >= 0
+
+
+def test_stream_model_response_keeps_all_wire_events() -> None:
+    session = FakeStreamSession(
+        [
+            'data: {"id":"stream-1","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+    )
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
+    runtime = runtime_for_stream()
+    events = []
+    runtime.services.publish = events.append
+
+    client.run(runtime)
+
+    response = next(event for event in events if event.kind == "model_response")
+    assert response.data["wire_response"] == [
+        {"id": "stream-1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}
+    ]
+    assert response.data["transport"]["stream_completed"] is True
+
+
 def test_request_preparation_failure_replaces_stale_diagnostics() -> None:
     client = LLMClient(
         ModelConfig("secret", "https://example.test/v1", "demo"),
@@ -305,7 +352,14 @@ def test_transient_http_status_retries_with_retry_after(monkeypatch, status_code
     assert response.message.content == "recovered"
     assert session.calls == 2
     assert delays == [0.0]
-    assert [event.kind for event in events] == ["model_request", "model_retry", "model_response"]
+    assert [event.kind for event in events] == [
+        "model_request",
+        "model_retry",
+        "model_request",
+        "model_response",
+    ]
+    assert events[0].data["transport"]["attempt"] == 1
+    assert events[2].data["transport"]["attempt"] == 2
     assert events[1].data["status_code"] == status_code
 
 

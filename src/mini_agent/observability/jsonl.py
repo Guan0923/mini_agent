@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from mini_agent.runtime.core.events import RuntimeEvent
-from mini_agent.runtime.persistence.recording import persistent_event
+from mini_agent.runtime.persistence.recording import LOG_SCHEMA_VERSION, persistent_event
 
 
 class JsonlRunLogger:
@@ -79,6 +79,7 @@ class JsonlRunLogger:
         message, data = persistent_event(event, self._include_full_messages)
         self._log_dir.mkdir(parents=True, exist_ok=True)
         record: dict[str, Any] = {
+            "schema_version": LOG_SCHEMA_VERSION,
             "timestamp": event.timestamp,
             "run_id": run_id,
             "sequence": sequence,

@@ -4,6 +4,7 @@ from pathlib import Path
 from mini_agent.observability import EventFanout, JsonlRunLogger
 from mini_agent.planning import RuleBasedPlanner
 from mini_agent.runtime import LegacyAgentRunner as AgentRunner
+from mini_agent.runtime import RuntimeEvent
 from mini_agent.tools import ToolRegistry
 
 
@@ -28,3 +29,27 @@ def test_jsonl_logger_persists_the_complete_event_stream(tmp_path: Path) -> None
     assert all(record["run_id"] == state.run_id for record in records)
     assert all(record["data"]["run_id"] == state.run_id for record in records)
     assert all(record["timestamp"] for record in records)
+
+
+
+def test_jsonl_logger_redacts_and_summarizes_wire_payloads(tmp_path: Path) -> None:
+    logger = JsonlRunLogger(tmp_path / "logs", include_full_messages=False)
+    logger(
+        RuntimeEvent(
+            "model_response",
+            "response",
+            {
+                "run_id": "run_wire",
+                "wire_response": {
+                    "content": "complete response",
+                    "token": "visible-secret",
+                },
+            },
+        )
+    )
+
+    record = json.loads(logger.path_for("run_wire").read_text(encoding="utf-8"))
+    assert record["schema_version"] == 2
+    assert record["data"]["wire_response"]["content"]["preview"] == "complete response"
+    assert record["data"]["wire_response"]["token"] == "[REDACTED]"
+    assert "visible-secret" not in json.dumps(record, ensure_ascii=False)
