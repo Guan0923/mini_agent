@@ -37,6 +37,19 @@ class RequestMixin:
             summarize=lambda transcript: self._summarize_history(runtime, transcript),
         )
 
+    def _messages_for_current_turn(
+        self,
+        runtime: AgentRuntime,
+        system: SystemMessage,
+        *,
+        extra: list[UserMessage] | None = None,
+    ) -> list:
+        """Build a selector request without exposing previous conversation turns."""
+
+        system = self._with_active_skills(runtime, system)
+        boundary = min(max(runtime.run.turn_start_index, 0), len(runtime.state.messages))
+        return [system, *runtime.state.messages[boundary:], *(extra or [])]
+
     @staticmethod
     def _with_active_skills(runtime: AgentRuntime, system: SystemMessage) -> SystemMessage:
         if not runtime.run.active_skills:
@@ -121,10 +134,16 @@ class RequestMixin:
         *,
         extra: list[UserMessage] | None = None,
         operation_tools: list[ToolSpec] | None = None,
+        current_turn_only: bool = False,
     ) -> str:
+        messages = (
+            self._messages_for_current_turn(runtime, system, extra=extra)
+            if current_turn_only
+            else self._messages_for_request(runtime, system, extra=extra)
+        )
         prepared = self._request(
             runtime,
-            self._messages_for_request(runtime, system, extra=extra),
+            messages,
             operation=operation,
             output_mode="json",
             operation_tools=operation_tools,

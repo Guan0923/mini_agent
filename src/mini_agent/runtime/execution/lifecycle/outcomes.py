@@ -40,6 +40,16 @@ def complete_run(
 
 def fail_run(runtime: AgentRuntime, message: str, **data: object) -> None:
     run = runtime.run
+    boundary = min(max(run.turn_start_index, 0), len(runtime.state.messages))
+    already_recorded = any(
+        isinstance(existing, AssistantMessage)
+        and not existing.tool_messages
+        and existing.content == message
+        for existing in runtime.state.messages[boundary:]
+    )
+    if not already_recorded:
+        runtime.state.messages.append(AssistantMessage(content=message))
+    run.history = runtime.state.messages
     run.status = "failed"
     run.final_answer = message
     run.add_event("error", message, **data)

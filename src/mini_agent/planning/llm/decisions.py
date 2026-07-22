@@ -71,6 +71,8 @@ class DecisionMixin:
                     "agent. Your job is to analyze requests "
                     "thoroughly, decide on the best approach, and carry it out step by "
                     "step using the tools available to you.\n\n"
+                    "Prioritize the current user task and any in-run steering. Treat older unfinished requests as "
+                    "conversation history unless the current user explicitly asks to resume them.\n\n"
                     "## Reasoning Process\n"
                     "Before taking any action, work through these steps in your thinking:\n\n"
                     "1. **Understand the Goal**: What is the user actually trying to achieve? "

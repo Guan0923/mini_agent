@@ -390,6 +390,8 @@ def _prepare_request(runtime: AgentRuntime) -> dict[str, Any]:
         if validated.get("response_format", {}).get("type") == "text":
             raise ModelRequestError("DeepSeek JSON output mode conflicts with response_format.type='text'.")
         payload["response_format"] = {"type": "json_object"}
+        payload["thinking"] = {"type": "disabled"}
+        payload.pop("reasoning_effort", None)
     tools = runtime.exchange.allowed_tools
     if runtime.exchange.output_mode == "tools" and not tools:
         raise ModelRequestError("DeepSeek tools output mode requires at least one allowed tool.")

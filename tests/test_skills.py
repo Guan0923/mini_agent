@@ -6,7 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from mini_agent.domain import AssistantMessage, RunHandoff, RunState, SkillSelection, SkillSnapshot
+from mini_agent.domain import (
+    AssistantMessage,
+    RunHandoff,
+    RunState,
+    SkillSelection,
+    SkillSnapshot,
+    ToolMessage,
+    UserMessage,
+)
 from mini_agent.planning import LLMPlanner
 from mini_agent.runtime import AgentRunner, PreparedResponse
 from mini_agent.skills import (
@@ -269,6 +277,37 @@ class RecordingClient:
     def run(self, runtime) -> PreparedResponse:
         self.requests.append(list(runtime.exchange.messages))
         return self.responses.pop(0)
+
+
+def test_llm_skill_selection_uses_only_current_turn() -> None:
+    client = RecordingClient([PreparedResponse(AssistantMessage(content='{"skills":["demo"]}'))])
+    catalog = SkillCatalog((definition("demo"),))
+    planner = LLMPlanner(client, [], [])
+    history = [
+        UserMessage(content="Old task."),
+        AssistantMessage(
+            content="Old work.",
+            tool_messages=[
+                ToolMessage(
+                    name="old_tool",
+                    call_id="call_old",
+                    content="old result",
+                    status="succeeded",
+                )
+            ],
+        ),
+    ]
+    runtime = AgentRunner(
+        planner,
+        ToolRegistry(),
+        strategy="reactive",
+        skill_catalog=catalog,
+    ).new_runtime(task="Use demo now.", messages=history)
+
+    selection = planner.select_skills(runtime)
+
+    assert selection.names == ("demo",)
+    assert [message.content for message in client.requests[0][1:]] == ["Use demo now."]
 
 
 @pytest.mark.parametrize("mode", ["agent", "plan"])

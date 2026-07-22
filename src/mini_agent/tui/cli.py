@@ -957,8 +957,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-model-repairs",
         type=int,
-        default=1,
-        help="Retries for malformed model output (default: 1).",
+        default=2,
+        help="Retries for malformed model output (default: 2).",
     )
     parser.add_argument(
         "--max-transport-retries",

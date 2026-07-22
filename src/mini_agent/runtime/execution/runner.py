@@ -56,7 +56,7 @@ class AgentRunner:
         log_full_messages: bool = True,
         checkpoints: CheckpointStore | None = None,
         hooks: Iterable[AgentHook] = (),
-        max_model_repairs: int = 1,
+        max_model_repairs: int = 2,
         max_transport_retries: int = 2,
         max_model_turns: int = 8,
         max_tool_calls: int | None = None,

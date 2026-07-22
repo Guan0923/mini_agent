@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mini_agent.domain import PlanningError, StrategySelection
+from mini_agent.domain import ModelOutputError, PlanningError, StrategySelection
 from mini_agent.planning import PlannerCapabilities
 
 from ..core.context import AgentRuntime
@@ -16,6 +16,7 @@ class StrategyRouter:
         run = runtime.run
         settings = runtime.state.runner_settings
         capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
+        fallback_data: dict[str, object] = {}
         if run.mode == "plan":
             selection = StrategySelection(
                 "reactive", "Plan mode drafts a proposal for explicit implementation review."
@@ -29,15 +30,29 @@ class StrategyRouter:
                 return None
             try:
                 selection = capabilities.strategy_selector.select_strategy(runtime)
+            except ModelOutputError as exc:
+                _publish_repairs(runtime, capabilities)
+                attempts = settings.max_model_repairs + 1
+                selection = StrategySelection(
+                    "reactive",
+                    f"Strategy output remained invalid after {attempts} attempts; "
+                    f"defaulting to reactive: {exc.validation_error}",
+                )
+                source = "fallback"
+                fallback_data = {
+                    "validation_error": exc.validation_error,
+                    "attempts": attempts,
+                }
             except PlanningError as exc:
                 _publish_repairs(runtime, capabilities)
                 fail_run(runtime, f"Strategy selection failed: {exc}", **planning_failure_data(exc, capabilities.name))
                 return None
-            _publish_repairs(runtime, capabilities)
-            if selection.strategy not in {"reactive", "dynamic_replan"}:
-                fail_run(runtime, f"Planner selected unsupported execution strategy: {selection.strategy!r}.")
-                return None
-            source = "llm" if capabilities.name == "llm" else "planner"
+            else:
+                _publish_repairs(runtime, capabilities)
+                if selection.strategy not in {"reactive", "dynamic_replan"}:
+                    fail_run(runtime, f"Planner selected unsupported execution strategy: {selection.strategy!r}.")
+                    return None
+                source = "llm" if capabilities.name == "llm" else "planner"
         else:
             selection = StrategySelection(settings.strategy, "Execution strategy forced by configuration.")
             source = "override"
@@ -49,7 +64,14 @@ class StrategyRouter:
             strategy=selection.strategy,
             reason=selection.reason,
             source=source,
+            **fallback_data,
         )
         publish = runtime.services.publish or (lambda _event: None)
-        publish(RuntimeEvent("strategy", selection.strategy, {"reason": selection.reason, "source": source}))
+        publish(
+            RuntimeEvent(
+                "strategy",
+                selection.strategy,
+                {"reason": selection.reason, "source": source, **fallback_data},
+            )
+        )
         return selection

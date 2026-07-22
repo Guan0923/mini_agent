@@ -14,6 +14,7 @@ from mini_agent.runtime import (
     SQLiteSessionStore,
 )
 from mini_agent.runtime.core.config import log_full_messages_from_env
+from mini_agent.runtime.execution.lifecycle.outcomes import fail_run
 from mini_agent.tools import Tool, ToolRegistry
 
 
@@ -197,6 +198,45 @@ def test_model_request_failure_is_recorded_without_secret_content() -> None:
     assert state.status == "failed"
     assert error.data["error_type"] == "PlanningError"
     assert "visible-secret" not in json.dumps(error.__dict__, ensure_ascii=False)
+
+
+def test_failed_run_closes_canonical_history_and_survives_restart(tmp_path: Path) -> None:
+    database = tmp_path / "checkpoints.db"
+    store = SQLiteSessionStore(database)
+    planner = LLMPlanner(FailingCompletionClient(), [], [])
+    service = ConversationService(AgentRunner(planner, ToolRegistry(), strategy="reactive"), store)
+
+    state = service.run_task("fail", mode="agent")
+
+    assert state.status == "failed"
+    assert service.runtime is not None
+    expected = [
+        ("user", "fail"),
+        ("assistant", state.final_answer),
+    ]
+    assert [(message.role, message.content) for message in service.runtime.state.messages] == expected
+
+    reopened = SQLiteSessionStore(database)
+    restored = reopened.load_runtime(service.runtime.state.session_id)
+    assert restored is not None
+    assert [(message.role, message.content) for message in restored.messages] == expected
+    assert reopened.load_conversation(service.runtime.state.session_id) == [
+        {"role": role, "content": content} for role, content in expected
+    ]
+
+
+def test_fail_run_records_the_same_assistant_error_only_once() -> None:
+    runtime = AgentRunner(RuleBasedPlanner(), ToolRegistry(), strategy="reactive").new_runtime(task="fail")
+
+    fail_run(runtime, "Decision failed.")
+    fail_run(runtime, "Decision failed.")
+
+    assistant_errors = [
+        message
+        for message in runtime.state.messages
+        if isinstance(message, AssistantMessage) and message.content == "Decision failed."
+    ]
+    assert len(assistant_errors) == 1
 
 
 def test_summary_mode_redacts_secret_message_content_everywhere_in_the_audit_trace(tmp_path: Path) -> None:

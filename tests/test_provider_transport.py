@@ -184,6 +184,43 @@ def test_model_events_include_wire_bodies_and_transport_metadata() -> None:
     assert response.data["transport"]["duration_ms"] >= 0
 
 
+def test_deepseek_json_wire_request_forces_thinking_disabled() -> None:
+    session = SequencedSession(
+        [
+            FakeJsonResponse(
+                200,
+                {
+                    "id": "response-json",
+                    "model": "demo",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "{}"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+        ]
+    )
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
+    runtime = AgentRunner(RuleBasedPlanner(), ToolRegistry()).new_runtime(task="return json")
+    runtime.exchange.messages = [UserMessage(content="return json")]
+    runtime.exchange.output_mode = "json"
+    runtime.state.request_parameters = {
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "max",
+    }
+    events = []
+    runtime.services.publish = events.append
+
+    client.run(runtime)
+
+    request = next(event for event in events if event.kind == "model_request")
+    assert request.data["wire_request"]["response_format"] == {"type": "json_object"}
+    assert request.data["wire_request"]["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in request.data["wire_request"]
+
 def test_stream_model_response_keeps_all_wire_events() -> None:
     session = FakeStreamSession(
         [

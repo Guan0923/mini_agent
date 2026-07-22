@@ -15,7 +15,7 @@ _UNSET = object()
 @dataclass(frozen=True, init=False)
 class RunnerSettings:
     max_retries: int = 1
-    max_model_repairs: int = 1
+    max_model_repairs: int = 2
     max_transport_retries: int = 2
     max_tool_recoveries: int = 2
     max_model_turns: int = 8
@@ -28,7 +28,7 @@ class RunnerSettings:
     def __init__(
         self,
         max_retries: int = 1,
-        max_model_repairs: int = 1,
+        max_model_repairs: int = 2,
         max_transport_retries: int = 2,
         max_tool_recoveries: int = 2,
         max_actions: int | object = _UNSET,

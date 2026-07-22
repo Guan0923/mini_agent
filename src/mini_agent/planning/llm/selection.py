@@ -47,6 +47,7 @@ class SelectionMixin:
             ),
             "skill_selection",
             extra=[correction] if correction is not None else None,
+            current_turn_only=True,
         )
         payload = self._json_object(raw, "skill_selection")
         if set(payload) != {"skills"}:
@@ -87,11 +88,15 @@ class SelectionMixin:
             SystemMessage(
                 content=(
                     "Analyze the user's task and choose an execution strategy.\n\n"
+                    "Use only the current turn supplied in this request. Do not resume or act on an older, "
+                    "unfinished request.\n\n"
                     "Consider:\n"
                     "- Task complexity: single straightforward action vs. multiple dependent steps.\n"
                     "- Ambiguity: is the path clear or does it require exploration first?\n"
                     "- Risk: are there destructive operations that warrant a step-by-step approach?\n\n"
-                    "Return JSON only as "
+                    "Return one JSON object only. Example JSON:\n"
+                    '{"strategy":"reactive","reason":"A simple greeting needs no tools."}\n\n'
+                    "The required JSON schema is "
                     '{"strategy":"reactive|dynamic_replan","reason":"short explanation"}. '
                     "Choose reactive for simple, single-step, or exploratory tasks. "
                     "Choose dynamic_replan for multi-step work that benefits from a plan "
@@ -100,6 +105,7 @@ class SelectionMixin:
             ),
             "strategy",
             extra=[correction] if correction is not None else None,
+            current_turn_only=True,
         )
         try:
             payload = self._json_object(raw)

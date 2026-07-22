@@ -153,6 +153,22 @@ def test_prepare_request_supports_documented_deepseek_parameters() -> None:
     assert payload["stream_options"] == {"include_usage": True}
     assert payload["future_parameter"] == "supported"
 
+def test_prepare_json_request_forces_thinking_off_and_drops_effort() -> None:
+    messages = [UserMessage(content="Return JSON.")]
+    runtime = runtime_for(messages=messages)
+    runtime.exchange.messages = messages
+    runtime.state.request_parameters = {
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "max",
+    }
+    runtime.exchange.output_mode = "json"
+
+    payload = deepseek_for_test().prepare_request(runtime)
+
+    assert payload["response_format"] == {"type": "json_object"}
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in payload
+
 
 def test_prepare_request_supports_assistant_prefix_and_explicit_usage_opt_out() -> None:
     messages = [
@@ -557,9 +573,13 @@ class ScriptedClient:
     def __init__(self, responses):
         self.responses = list(responses)
         self.requests = []
+        self.message_requests = []
+        self.exchange_ids = []
 
     def run(self, runtime):
         self.requests.append(runtime.exchange)
+        self.message_requests.append(list(runtime.exchange.messages))
+        self.exchange_ids.append(runtime.exchange.exchange_id)
         response = self.responses.pop(0)
         runtime.state.turn_usage = response.usage
         return response
@@ -827,28 +847,111 @@ def test_runner_repairs_an_invalid_strategy_and_continues() -> None:
     assert [event.data["outcome"] for event in repair_events] == ["repaired"]
 
 
-def test_runner_fails_after_invalid_strategy_repairs_are_exhausted() -> None:
+def test_runner_falls_back_to_reactive_after_strategy_repairs_are_exhausted() -> None:
     client = ScriptedClient(
         [
-            PreparedResponse(
-                AssistantMessage(content='{"strategy":"plan_execute","reason":"Use a fixed plan."}')
-            ),
-            PreparedResponse(AssistantMessage(content='{"strategy":"unknown","reason":"Try another mode."}')),
+            PreparedResponse(AssistantMessage(content="   ", reasoning="Answer an old MCP question.")),
+            PreparedResponse(AssistantMessage(content=" ", reasoning="Still answering the old question.")),
+            PreparedResponse(AssistantMessage(content="", reasoning="No JSON was produced.")),
+            PreparedResponse(AssistantMessage(content="Recovered response.")),
         ]
     )
     planner = LLMPlanner(client, [], [])
     events = []
-    runner = AgentRunner(planner, ToolRegistry(), max_model_repairs=1)
-    runtime = runner.new_runtime(task="answer", on_event=events.append)
+    runner = AgentRunner(planner, ToolRegistry())
+    runtime = runner.new_runtime(task="hello", on_event=events.append)
 
     state = runner.run(runtime)
 
+    strategy = next(event for event in events if event.kind == "strategy")
+    strategy_requests = [
+        event for event in events if event.kind == "model_request" and event.data["operation"] == "strategy"
+    ]
+    repair_events = [event for event in events if event.kind == "model_repair"]
+    assert state.status == "completed"
+    assert state.strategy == "reactive"
+    assert state.final_answer == "Recovered response."
+    assert strategy.data["source"] == "fallback"
+    assert strategy.data["attempts"] == 3
+    assert strategy.data["validation_error"] == "Model response did not contain JSON content."
+    assert len(strategy_requests) == 3
+    assert len({event.data["exchange_id"] for event in strategy_requests}) == 3
+    assert len(repair_events) == 3
+    assert all(event.data["outcome"] == "failed" for event in repair_events)
+    assert all(event.kind != "error" for event in events)
+
+
+def test_runner_repairs_two_empty_strategy_responses_before_success() -> None:
+    client = ScriptedClient(
+        [
+            PreparedResponse(AssistantMessage(content=" ", reasoning="First reasoning.")),
+            PreparedResponse(AssistantMessage(content="\n", reasoning="Second reasoning.")),
+            PreparedResponse(AssistantMessage(content='{"strategy":"reactive","reason":"Current task is simple."}')),
+            PreparedResponse(AssistantMessage(content="Done.")),
+        ]
+    )
+    planner = LLMPlanner(client, [], [])
+    events = []
+    runner = AgentRunner(planner, ToolRegistry())
+    state = runner.run(runner.new_runtime(task="hello", on_event=events.append))
+
+    strategy = next(event for event in events if event.kind == "strategy")
+    repairs = [event for event in events if event.kind == "model_repair"]
+    assert state.status == "completed"
+    assert state.final_answer == "Done."
+    assert strategy.data["source"] == "llm"
+    assert len(repairs) == 2
+    assert all(event.data["outcome"] == "repaired" for event in repairs)
+
+
+def test_strategy_requests_only_current_turn_and_repair_instruction() -> None:
+    old_tool = ToolMessage(
+        name="old_tool",
+        call_id="call_old",
+        content="old result",
+        status="succeeded",
+    )
+    history = [
+        UserMessage(content="Old unresolved request."),
+        AssistantMessage(content="Old work.", tool_messages=[old_tool]),
+    ]
+    client = ScriptedClient(
+        [
+            PreparedResponse(AssistantMessage(content="not json")),
+            PreparedResponse(AssistantMessage(content='{"strategy":"reactive","reason":"Greeting."}')),
+        ]
+    )
+    planner = LLMPlanner(client, [], [])
+    runtime = AgentRunner(planner, ToolRegistry(), max_model_repairs=1).new_runtime(
+        task="hello",
+        messages=history,
+    )
+
+    selection = planner.select_strategy(runtime)
+
+    first = client.message_requests[0]
+    second = client.message_requests[1]
+    assert selection.strategy == "reactive"
+    assert [message.content for message in first[1:]] == ["hello"]
+    assert [message.content for message in second[1:-1]] == ["hello"]
+    assert "Model output correction" in (second[-1].content or "")
+    assert all("Old unresolved request." != message.content for request in client.message_requests for message in request)
+
+
+def test_strategy_transport_failure_does_not_fallback() -> None:
+    class FailingClient:
+        def run(self, runtime):
+            raise ModelRequestError("HTTP 401 authentication failed.")
+
+    planner = LLMPlanner(FailingClient(), [], [])
+    events = []
+    runner = AgentRunner(planner, ToolRegistry())
+    state = runner.run(runner.new_runtime(task="hello", on_event=events.append))
+
     assert state.status == "failed"
-    assert state.final_answer == "Strategy selection failed: Unsupported execution strategy: 'unknown'."
-    assert [event.kind for event in events].count("model_repair") == 2
-    assert all(event.data["outcome"] == "failed" for event in events if event.kind == "model_repair")
-    assert events[-2].kind == "error"
-    assert events[-1].kind == "run_finished"
+    assert state.final_answer == "Strategy selection failed: HTTP 401 authentication failed."
+    assert all(event.kind != "strategy" for event in events)
+    assert any(event.kind == "error" for event in events)
 
 
 def test_prepare_response_streams_reasoning_then_content_and_aggregates_both() -> None:
