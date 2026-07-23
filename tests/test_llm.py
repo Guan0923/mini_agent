@@ -381,8 +381,8 @@ class FakeStreamResponse:
     def raise_for_status(self) -> None:
         return None
 
-    def iter_lines(self, decode_unicode=True):
-        assert decode_unicode is True
+    def iter_lines(self, decode_unicode=False):
+        assert decode_unicode is False
         return [
             'data: {"id":"stream","model":"demo","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null,"logprobs":null}],"usage":null}',
             'data: {"choices":[{"index":0,"delta":{"content":"!"},"finish_reason":"stop","logprobs":null}],"usage":null}',

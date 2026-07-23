@@ -74,7 +74,10 @@ class JsonHttpTransport:
                 allow_redirects=False,
             )
             response.raise_for_status()
-            for line in response.iter_lines(decode_unicode=True):
+            # SSE payloads are JSON, whose wire encoding is UTF-8.  Do not let
+            # requests use a missing or incorrect response charset here: that
+            # can turn UTF-8 Chinese text into mojibake before JSON parsing.
+            for line in response.iter_lines(decode_unicode=False):
                 if not line:
                     continue
                 if isinstance(line, bytes):

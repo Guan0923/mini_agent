@@ -13,7 +13,7 @@ from mini_agent.domain.skills import SkillSnapshot
 
 SKILLS_RELATIVE_ROOT = Path(".mini_agent") / "skills"
 MAX_SKILL_BYTES = 64 * 1024
-MAX_INSTRUCTION_LINES = 500
+MAX_INSTRUCTION_LINES = 1_000
 _NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _EXPLICIT_PATTERN = re.compile(r"(?<![\w$])\$([a-z0-9]+(?:-[a-z0-9]+)*)\b")
 

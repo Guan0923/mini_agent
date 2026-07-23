@@ -9,15 +9,15 @@ from mini_agent.tools import ToolRegistry
 
 
 class FakeStreamResponse:
-    def __init__(self, lines: list[str]) -> None:
+    def __init__(self, lines: list[str | bytes]) -> None:
         self.lines = lines
         self.closed = False
 
     def raise_for_status(self) -> None:
         return None
 
-    def iter_lines(self, decode_unicode: bool = True) -> list[str]:
-        assert decode_unicode is True
+    def iter_lines(self, decode_unicode: bool = False) -> list[str | bytes]:
+        assert decode_unicode is False
         return self.lines
 
     def close(self) -> None:
@@ -25,7 +25,7 @@ class FakeStreamResponse:
 
 
 class FakeStreamSession:
-    def __init__(self, lines: list[str]) -> None:
+    def __init__(self, lines: list[str | bytes]) -> None:
         self.response = FakeStreamResponse(lines)
         self.calls = 0
 
@@ -243,6 +243,23 @@ def test_stream_model_response_keeps_all_wire_events() -> None:
         }
     ]
     assert response.data["transport"]["stream_completed"] is True
+
+
+def test_stream_model_response_decodes_utf8_bytes_independent_of_response_charset() -> None:
+    session = FakeStreamSession(
+        [
+            (
+                'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"你好"},"finish_reason":"stop"}]}'
+            ).encode(),
+            b"data: [DONE]",
+        ]
+    )
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
+    runtime = runtime_for_stream()
+
+    response = client.run(runtime)
+
+    assert response.message.content == "你好"
 
 
 def test_request_preparation_failure_replaces_stale_diagnostics() -> None:

@@ -18,7 +18,9 @@ venv/
 
 # Local runtime logs
 logs/
-.mini_agent/
+.mini_agent/*
+!.mini_agent/skills/
+!.mini_agent/skills/**
 
 # Local editor settings
 .vscode/
