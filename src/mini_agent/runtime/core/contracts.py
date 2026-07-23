@@ -12,9 +12,19 @@ Confirm = Callable[[str], bool]
 EventHandler = Callable[[RuntimeEvent], None]
 SteeringHandler = Callable[[], list[str]]
 CancellationHandler = Callable[[], bool]
+SuspensionHandler = Callable[[], bool]
 PlanReviewChoice = Literal["implement", "implement_clear_session", "cancel"]
 ToolReviewChoice = Literal["continue", "cancel", "supplement"]
-HumanChoice = Literal["implement", "implement_clear_session", "continue", "cancel", "supplement", "answer"]
+HumanChoice = Literal[
+    "implement",
+    "implement_clear_session",
+    "continue",
+    "cancel",
+    "supplement",
+    "answer",
+    "terminate",
+    "back",
+]
 
 
 @dataclass(frozen=True)
@@ -35,7 +45,7 @@ class UserQuestion:
 class InterruptRequest:
     """A human decision point for a plan review or confirmed tool action."""
 
-    kind: Literal["plan", "tool", "question"]
+    kind: Literal["plan", "tool", "question", "resume"]
     message: str
     data: dict[str, Any]
     questions: tuple[UserQuestion, ...] = ()

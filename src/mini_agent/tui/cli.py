@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-replans", type=int, default=2, help="Maximum dynamic replans per task (default: 2).")
     parser.add_argument("--log-dir", default="logs", help="Directory for persistent JSONL run logs (default: logs).")
-    parser.add_argument("--session-id", help="Resume an existing workspace session by ID.")
+    parser.add_argument("--resume", metavar="SESSION_ID", help="Resume an existing workspace session by ID.")
     args = parser.parse_args(argv)
     if args.max_actions is not None and args.max_tool_calls is not None:
         parser.error("--max-actions and --max-tool-calls cannot be used together.")
@@ -200,13 +200,18 @@ def main(argv: list[str] | None = None) -> int:
             log_full_messages=log_full_messages_from_env(workspace / ".env"),
         )
         application = build_application(workspace, args.planner, settings)
-        conversation = application.open_conversation(args.session_id)
+        conversation = application.open_conversation(args.resume)
     except ModelConfigurationError as exc:
         parser.error(f"{exc} Use --planner rule for offline mode.")
     except ValueError as exc:
         parser.error(str(exc))
     app = TerminalApp(conversation, workspace / args.log_dir)
+    app._run_trigger = "cli" if args.task else "tui"
     if args.task:
+        if args.resume and conversation.prepare_resume(args.resume).requires_action:
+            parser.error("The resumed session has suspended work; run without a task and choose Continue or Terminate.")
         state = app.run_task(" ".join(args.task))
         return 0 if state is not None and state.status == "completed" else 1
+    if args.resume:
+        app._startup_resume_id = args.resume
     return app.start()

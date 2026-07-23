@@ -47,6 +47,7 @@ class InteractiveAppMixin:
         permission_pending = False
         deferred_task: str | None = None
         cancel_requested = Event()
+        suspend_requested = Event()
         cancellation_pending = False
         exit_after_run = False
         normal_exit_requested = False
@@ -60,11 +61,28 @@ class InteractiveAppMixin:
                     task,
                     interrupt=approval,
                     cancel_requested=cancel_requested.is_set,
+                    suspend_requested=suspend_requested.is_set,
+                )
+            )
+
+        def launch_resume(session_id: str | None) -> asyncio.Task[RunState | None]:
+            return asyncio.create_task(
+                asyncio.to_thread(
+                    self.resume_session,
+                    session_id,
+                    interrupt=approval,
+                    cancel_requested=cancel_requested.is_set,
+                    suspend_requested=suspend_requested.is_set,
                 )
             )
 
         def launch_compaction() -> asyncio.Task[object]:
             return asyncio.create_task(asyncio.to_thread(self._conversation_service.compact_context))
+
+        startup_resume_id = getattr(self, "_startup_resume_id", None)
+        if startup_resume_id is not None:
+            active_run = launch_resume(startup_resume_id)
+            self._startup_resume_id = None
 
         view_task = asyncio.create_task(view.run_async())
         try:
@@ -75,7 +93,8 @@ class InteractiveAppMixin:
                     approval,
                     permission_pending,
                     compacting=active_compaction is not None,
-                    cancelling=cancellation_pending or exit_after_run,
+                    cancelling=cancellation_pending,
+                    suspending=exit_after_run,
                 )
                 submission = asyncio.create_task(view.submissions.get())
                 interrupt_request = asyncio.create_task(view.interrupts.get())
@@ -115,6 +134,9 @@ class InteractiveAppMixin:
                         normal_exit_requested = True
                     except BaseException as error:
                         view_task_error = error
+                    if active_run is not None:
+                        suspend_requested.set()
+                        approval.cancel_pending()
                     if submission not in done:
                         await self._cancel_task(submission)
                     if interrupt_request not in done:
@@ -123,6 +145,13 @@ class InteractiveAppMixin:
                         await self._cancel_task(approval_change)
                     if permission_change is not None and permission_change not in done:
                         await self._cancel_task(permission_change)
+                    if active_run is not None:
+                        try:
+                            await active_run
+                        except BaseException as error:
+                            if view_task_error is None:
+                                view_task_error = error
+                        active_run = None
                     break
 
                 exit_requested = False
@@ -165,10 +194,10 @@ class InteractiveAppMixin:
                             if active_run is not None or approval.pending or active_compaction is not None:
                                 if not exit_after_run:
                                     exit_after_run = True
-                                    cancel_requested.set()
+                                    suspend_requested.set()
                                     self._drain_steering(pending_messages)
                                     approval.cancel_pending()
-                                    self._write("CANCELLING — waiting for current operation")
+                                    self._write("SUSPENDING — waiting for a safe checkpoint")
                             else:
                                 if permission_pending:
                                     permission_pending = False
@@ -228,6 +257,10 @@ class InteractiveAppMixin:
                                 elif next_task is not None:
                                     self._write_user_message(next_task)
                                     active_run = launch(next_task)
+                                pending_resume_id = getattr(self, "_pending_resume_id", ...)
+                                if pending_resume_id is not ...:
+                                    self._pending_resume_id = ...
+                                    active_run = launch_resume(pending_resume_id)
 
                 if interrupt_request in done:
                     if (active_run is not None or approval.pending) and not cancellation_pending and not exit_after_run:
@@ -265,6 +298,7 @@ class InteractiveAppMixin:
                         self._write(f"ERROR {exc}")
                     active_run = None
                     cancel_requested.clear()
+                    suspend_requested.clear()
                     cancellation_pending = False
                     if exit_after_run:
                         exit_requested = True

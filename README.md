@@ -172,11 +172,11 @@ Plan 调研、控制工具调用和结构化结果都作为普通 typed messages
 
 工具仅在其声明需要确认时才请求 Human-in-the-Loop：网页搜索/抓取、`write_file`、`edit_file` 和 `run_command` 均会逐次确认；`read_file`、`glob` 和 `grep` 自动执行。TUI 默认使用 `Approval for me`；输入 `/permission` 可在当前程序内切换为 `Full access`，使所有工具审批自动 Continue。工具审批仍使用 `Continue / Cancel / Supplement`，Supplement 只属于 Tool Review，与 Plan Review 相互独立；`Full access` 不会跳过 `/plan` 生成提案后的 `PLAN REVIEW`，最终计划仍需人工选择 `Implement / Implement and Clear Session / Cancel and Stay in plan mode`。若 reactive 或 `/plan` 调研中的工具失败，运行时会将截断后的调用和错误作为不可信上下文交给 LLM，请其最多连续纠错 `--max-tool-recoveries` 次（默认 2）；任一工具成功会重置该计数。文件修改和命令工具不可自动重试，也不会因相同参数被重复执行。
 
-交互式 TUI 使用 alternate screen：可滚动消息区占满终端，状态栏和输入框固定在最底部；状态栏始终包含当前 permission 模式。输入框按显式换行和软换行从 1 行自动增高到最多 4 行，超过后保持 4 行并在内部滚动；Enter 提交完整消息，Ctrl+J 在光标处插入换行。退出后会恢复进入前的终端画面，并输出当前 session ID、`/use <session_id>` 与 `mini-agent --session-id <session_id>` 恢复方式。Agent 运行中提交的普通消息进入进程内的下一轮队列；当前 run 结束后，这些消息按提交顺序合并并自动启动一个 follow-up run。Esc 会协作式取消当前 active run（包括 Tool/Plan Review 和 Plan 问题），取消完成后发送队列；`/quit` 或 Ctrl+C 则取消、丢弃队列并退出。Plan 问题逐题显示在独立候选列表中，期间主输入框隐藏：方向键循环选择，普通候选按 Enter 确认；“其他”直接按 Enter 或鼠标左键表示跳过该问题并返回空答案数组，按 Tab 则进入自由输入，Enter 提交非空答案。非 Textual 运行使用数字选择并在最后一项后读取自由文本。
+交互式 TUI 使用 alternate screen：可滚动消息区占满终端，状态栏和输入框固定在最底部；状态栏始终包含当前 permission 模式。输入框按显式换行和软换行从 1 行自动增高到最多 4 行，超过后保持 4 行并在内部滚动；Enter 提交完整消息，Ctrl+J 在光标处插入换行。退出后会恢复进入前的终端画面，并输出当前 session ID、`/resume <session_id>` 与 `mini-agent --resume <session_id>` 恢复方式。Agent 运行中提交的普通消息进入进程内的下一轮队列；当前 run 结束后，这些消息按提交顺序合并并自动启动一个 follow-up run。Esc 会协作式取消当前 active run（包括 Tool/Plan Review 和 Plan 问题）；`/quit`、Ctrl+C 或关闭 TUI 会在安全边界暂停当前 run、丢弃尚未进入 runtime 的队列并退出。Plan 问题逐题显示在独立候选列表中，期间主输入框隐藏：方向键循环选择，普通候选按 Enter 确认；“其他”直接按 Enter 或鼠标左键表示跳过该问题并返回空答案数组，按 Tab 则进入自由输入，Enter 提交非空答案。非 Textual 运行使用数字选择并在最后一项后读取自由文本。
 
-`/new <title>` 与 `/clear <title>` 清空当前 transcript 并进入待创建 session，不会修改 alternate screen 之外的终端内容。其它 TUI 命令：`/permission` 在底部独立候选区切换当前程序的工具审批模式，`/help` 查看帮助，`/tools` 查看工具，`/trace` 查看上一次运行的结构化轨迹，`/sessions` 列出保存的对话，`/session` 查看当前对话信息，`/history` 打开当前 session 的只读全屏历史视图，按 Esc 返回对话，`/use <session_id>` 切换保存的对话，`/quit` 退出。待创建 session 只保存在内存中，终端显示 `SESSION PENDING — <title> (not saved yet)`；用户发送第一条消息时才生成 session ID 并写入 SQLite，未发送消息便退出不会留下空 session。`/clear` 不删除旧 session，可通过 `/sessions` 和 `/use <session_id>` 恢复；待创建状态会清除当前模型上下文、当前会话记录和上一次运行状态，但不改变进程内的 mode、permission 或工具配置。标题和 session ID 只接受空格参数，不支持 `/new/<title>` 或 `/use/<session_id>`。
+`/new <title>` 与 `/clear <title>` 清空当前 transcript 并进入待创建 session，不会修改 alternate screen 之外的终端内容。其它 TUI 命令：`/permission` 在底部独立候选区切换当前程序的工具审批模式，`/help` 查看帮助，`/tools` 查看工具，`/trace` 查看上一次运行的结构化轨迹，`/sessions` 列出保存的对话，`/resume [session_id]` 恢复当前、最近或指定 session 并显示来源，`/history` 打开当前 session 的只读全屏历史视图，按 Esc 返回对话，`/quit` 退出。待创建 session 只保存在内存中，终端显示 `SESSION PENDING — <title> (not saved yet)`；用户发送第一条消息时才生成 session ID 并写入 SQLite，未发送消息便退出不会留下空 session。`/clear` 不删除旧 session，可通过 `/sessions` 和 `/resume <session_id>` 恢复；待创建状态会清除当前模型上下文、当前会话记录和上一次运行状态，但不改变进程内的 mode、permission 或工具配置。标题和 session ID 只接受空格参数，不支持 `/new/<title>` 或 `/resume/<session_id>`。
 
-交互模式支持带注释的命令实时补全：输入 `/p` 会显示 `/plan — Create a plan and open Plan Review.` 和 `/permission — Choose the in-memory tool approval mode.`，按 Tab 接受候选，方向键选择候选，Enter 提交；接受候选时只插入命令本身。已识别命令会按文本顺序先执行，剩余普通文字按原顺序合并为一次 task；例如 `你好 /plan` 和 `/plan 你好` 都会先启用 Plan mode，再运行一次“你好”。`/new`、`/clear` 和 `/use` 会消费其后的文字直到下一个命令作为参数，其他命令后的文字仍属于 task；`/quit` 会停止处理当前行且不会提交 task；`/history` 必须独立提交，不能与普通任务混合。命令可以出现在任务句子中，但前面必须有空格；文件路径和 URL 中的 `/` 不会被识别为命令。任务中可以使用 `@相对路径` 引用工作区文件，例如 `请总结 @README.md`；文件内容会在本次任务中以内嵌引用形式提供给 Agent，引用路径必须位于 workspace 内。每次运行会在 `<workspace>/logs/<run_id>.jsonl` 记录有序 runtime messages，包括模型请求/规范化响应、计划、审批、工具调用和结果；SQLite 同时保存按 session/run 查询的同一审计轨迹、`session_runtime` 快照、checkpoint 和供 `/history` 使用的 user/assistant 文本投影。`LOG_FULL_MESSAGES=true`（默认）记录完整消息正文；设为 `false` 时记录长度、哈希和最多 200 字符预览。两种模式都会脱敏 API key、Authorization、Cookie、token、password 与 secret 字段；runtime 审计日志还会记录 provider 实际发送的 wire request、完整 wire response（流式响应按事件数组保存）、安全的响应 headers 白名单、HTTP 状态、重试次数和耗时，不记录认证 headers、.env 或完整环境变量。每个 turn 结束时，Runtime 的 usage 会被该 turn 最后一次模型响应 usage 覆盖。使用 `--session-id <session_id>` 可在新的 CLI 进程中继续已有对话。
+交互模式支持带注释的命令实时补全：输入 `/p` 会显示 `/plan — Create a plan and open Plan Review.` 和 `/permission — Choose the in-memory tool approval mode.`，按 Tab 接受候选，方向键选择候选，Enter 提交；接受候选时只插入命令本身。已识别命令会按文本顺序先执行，剩余普通文字按原顺序合并为一次 task；例如 `你好 /plan` 和 `/plan 你好` 都会先启用 Plan mode，再运行一次“你好”。`/new`、`/clear` 和 `/resume` 会消费其后的文字直到下一个命令作为参数，其他命令后的文字仍属于 task；`/quit` 会停止处理当前行且不会提交 task；`/history` 必须独立提交，不能与普通任务混合。命令可以出现在任务句子中，但前面必须有空格；文件路径和 URL 中的 `/` 不会被识别为命令。任务中可以使用 `@相对路径` 引用工作区文件，例如 `请总结 @README.md`；文件内容会在本次任务中以内嵌引用形式提供给 Agent，引用路径必须位于 workspace 内。每次运行会在 `<workspace>/logs/<run_id>.jsonl` 记录有序 runtime messages，包括模型请求/规范化响应、计划、审批、工具调用和结果；SQLite 同时保存按 session/run 查询的同一审计轨迹、`session_runtime` 快照、checkpoint 和供 `/history` 使用的 user/assistant 文本投影。`LOG_FULL_MESSAGES=true`（默认）记录完整消息正文；设为 `false` 时记录长度、哈希和最多 200 字符预览。两种模式都会脱敏 API key、Authorization、Cookie、token、password 与 secret 字段；runtime 审计日志还会记录 provider 实际发送的 wire request、完整 wire response（流式响应按事件数组保存）、安全的响应 headers 白名单、HTTP 状态、重试次数和耗时，不记录认证 headers、.env 或完整环境变量。每个 turn 结束时，Runtime 的 usage 会被该 turn 最后一次模型响应 usage 覆盖。使用 `--resume <session_id>` 可在新的 CLI 进程中恢复已有对话或暂停的 workflow。
 
 ### 项目级 Skills
 
@@ -219,7 +219,7 @@ Agent 运行时输入框保持可用。期间提交的多条普通消息会按�
 - [x] **Hooks**：为 run、模型请求和工具调用提供可注入、可取消、可审计的 before/after 生命周期接口。
 - [ ] **统一工具输出治理**：文件、命令、网页和模型消息已有各自边界；仍需统一跨工具的字符、行数、文件数和 token 总预算。
 - [ ] **工具选择策略**：按任务、模式和风险动态缩小可用工具集合，并要求工具与用户目标直接相关，避免无关的 workspace 扫描或网络请求。
-- [ ] **暂停与恢复**：基于现有 checkpoint 实现 durable `/resume`、`/cancel` 和 `/terminate`，恢复时不得重复执行已经产生副作用的操作。
+- [x] **暂停与恢复**：基于 checkpoint、workflow/attempt 来源链和 `indeterminate` 工具结果实现 durable `/resume`；Esc 取消，退出暂停，恢复不自动重放结果不明的副作用。
 - [ ] **执行隔离**：为命令和高风险工具增加 sandbox、文件系统/网络策略、资源限制及子进程树清理。
 - [ ] **全局预算与取消**：限制 run 总时长、token、费用和工具输出预算，并能取消正在进行的模型请求、命令或后台进程。
 - [x] **模型协议恢复**：结构化输出失败后最多修复两次（共三次请求）；strategy 契约耗尽时降级 reactive，transport/认证/配置错误继续快速失败。
@@ -305,7 +305,7 @@ python run.py --max-model-turns 8 --max-tool-calls 32 --max-retries 2 "计算 (1
 python run.py --strategy dynamic_replan --max-replans 2 "整理并更新项目说明"
 
 # 在已有 session 中继续多轮对话
-python run.py --planner rule --session-id session_xxx "继续刚才的任务"
+python run.py --planner rule --resume session_xxx "继续刚才的任务"
 
 # 将运行日志写入自定义目录
 python run.py --log-dir .agent-logs "计算 2 + 2"

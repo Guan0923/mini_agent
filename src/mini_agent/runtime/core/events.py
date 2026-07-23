@@ -9,6 +9,10 @@ from mini_agent.domain.state import utc_now
 
 RuntimeEventKind = Literal[
     "run_started",
+    "run_suspended",
+    "run_resumed",
+    "run_interrupted",
+    "run_terminated",
     "skills_selected",
     "thinking_start",
     "thinking_delta",
@@ -32,6 +36,7 @@ RuntimeEventKind = Literal[
     "tool_call",
     "tool_result",
     "tool_failed",
+    "tool_indeterminate",
     "retry",
     "tool_recovery",
     "replan_requested",
@@ -58,6 +63,10 @@ RuntimeEventKind = Literal[
 CHECKPOINT_EVENT_KINDS: frozenset[RuntimeEventKind] = frozenset(
     {
         "run_started",
+        "run_suspended",
+        "run_resumed",
+        "run_interrupted",
+        "run_terminated",
         "skills_selected",
         "model_request",
         "model_response",
@@ -79,6 +88,7 @@ CHECKPOINT_EVENT_KINDS: frozenset[RuntimeEventKind] = frozenset(
         "tool_call",
         "tool_result",
         "tool_failed",
+        "tool_indeterminate",
         "tool_recovery",
         "replan_requested",
         "replan_applied",

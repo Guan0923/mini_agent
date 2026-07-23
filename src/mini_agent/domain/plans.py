@@ -9,7 +9,7 @@ from uuid import uuid4
 from .messages import ToolMessage
 
 ExecutionStrategy = Literal["reactive", "dynamic_replan"]
-PlanStepStatus = Literal["pending", "running", "completed", "failed", "superseded"]
+PlanStepStatus = Literal["pending", "running", "completed", "failed", "indeterminate", "superseded"]
 ReplanDecision = Literal["continue", "replan"]
 ActionType = Literal["tool_call", "final_answer"]
 

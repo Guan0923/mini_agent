@@ -7,6 +7,7 @@ from time import perf_counter
 
 from mini_agent.domain import (
     PlanningError,
+    RunProvenance,
     RunState,
     SkillSnapshot,
     ToolSpec,
@@ -61,10 +62,12 @@ class AgentRunner:
         max_model_turns: int = 8,
         max_tool_calls: int | None = None,
         skill_catalog: object | None = None,
+        workspace_root: str | None = None,
     ) -> None:
         self.planner = planner
         self.tools = tools
         self.skill_catalog = skill_catalog
+        self.workspace_root = workspace_root
         if max_actions is not None and max_tool_calls is not None:
             raise ValueError("max_actions and max_tool_calls cannot be used together.")
         resolved_tool_calls = max_actions if max_actions is not None else max_tool_calls
@@ -117,6 +120,7 @@ class AgentRunner:
             turn_start_index=turn_start_index,
             history=history,
             active_skills=list(active_skills or ()),
+            provenance=RunProvenance(trigger="embedding", workspace_root=self.workspace_root),
         )
         runtime.state.status = "running"
         runtime.services.on_event = on_event
@@ -134,6 +138,7 @@ class AgentRunner:
         specs: list[ToolSpec] = self.tools.specs() if hasattr(self.tools, "specs") else []
         state = RuntimeState(
             session_id=session_id,
+            workspace_root=self.workspace_root,
             messages=list(messages or []),
             runner_settings=self.settings,
             tool_specs=specs,
@@ -177,6 +182,15 @@ class AgentRunner:
     def run(self, runtime: AgentRuntime) -> RunState:
         """Execute one turn using the single runtime parameter."""
 
+        return self._run_attempt(runtime, resumed=False)
+
+    def resume(self, runtime: AgentRuntime) -> RunState:
+        """Continue a reconstructed durable attempt without replaying run setup."""
+
+        return self._run_attempt(runtime, resumed=True)
+
+    def _run_attempt(self, runtime: AgentRuntime, *, resumed: bool) -> RunState:
+
         self.bind(runtime)
         started_at = perf_counter()
         runtime.state.status = "running"
@@ -189,7 +203,7 @@ class AgentRunner:
         try:
             self.hooks.run_run(
                 context,
-                lambda _context: self._dispatch(runtime),
+                lambda _context: self._resume_dispatch(runtime) if resumed else self._dispatch(runtime),
                 lambda _result: HookOutcome(
                     status=(
                         "succeeded"
@@ -214,6 +228,31 @@ class AgentRunner:
                 error_type=exc.error_type,
             )
         return self._finish(runtime, started_at=started_at)
+
+    def _resume_dispatch(self, runtime: AgentRuntime) -> None:
+        run = runtime.run
+        run.add_event("run_resumed", "Run resumed", source_run_id=run.provenance.source_run_id)
+        assert runtime.services.publish is not None
+        runtime.services.publish(
+            RuntimeEvent(
+                "run_resumed",
+                "resumed",
+                {
+                    "session_id": runtime.state.session_id,
+                    "workflow_id": run.provenance.workflow_id,
+                    "attempt": run.provenance.attempt,
+                    "source_run_id": run.provenance.source_run_id,
+                },
+            )
+        )
+        if cancel_if_requested(runtime):
+            return
+        if run.mode == "plan":
+            self._plan_mode.run(runtime)
+        elif run.strategy == "dynamic_replan":
+            self._dynamic_replan.resume(runtime)
+        else:
+            self._reactive.run(runtime)
 
     def _dispatch(self, runtime: AgentRuntime) -> None:
         runtime.run.add_event("run_started", "Run started")
@@ -291,9 +330,19 @@ class AgentRunner:
         run = runtime.run
         runtime.state.usage = runtime.state.turn_usage
         runtime.state.turn_usage = None
-        runtime.state.status = "idle"
+        runtime.state.status = "suspended" if run.status == "suspended" else "idle"
         if not any(summary.run_id == run.run_id for summary in runtime.state.run_history):
-            runtime.state.run_history.append(RunSummary(run.run_id, run.task, run.status, run.mode, run.final_answer))
+            runtime.state.run_history.append(
+                RunSummary(
+                    run.run_id,
+                    run.task,
+                    run.status,
+                    run.mode,
+                    run.final_answer,
+                    run.provenance.workflow_id,
+                    run.provenance.attempt,
+                )
+            )
         run.add_event("run_finished", "Run finished", status=run.status)
         if runtime.services.publish is not None:
             counts: dict[str, int] = {}

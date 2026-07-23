@@ -22,17 +22,21 @@ from .plans import (
     StepEvaluation,
     StrategySelection,
 )
-from .session import DEFAULT_SESSION_TITLE, Session, SessionSummary, new_session_id
+from .session import DEFAULT_SESSION_TITLE, ResumePreview, Session, SessionSummary, new_session_id
 from .skills import SkillSelection, SkillSnapshot
 from .state import (
+    RecoveryCheckpoint,
     RunHandoff,
     RunMode,
+    RunProvenance,
     RunState,
     RunStatus,
     RuntimeMessage,
+    RunTrigger,
     StrategyPolicy,
     TraceEvent,
     new_run_id,
+    new_workflow_id,
 )
 
 __all__ = [
@@ -47,11 +51,15 @@ __all__ = [
     "ModelOutputError",
     "PlanStep",
     "PlanningError",
+    "RecoveryCheckpoint",
+    "ResumePreview",
     "RunMode",
+    "RunProvenance",
     "RuntimeMessage",
     "RunHandoff",
     "RunState",
     "RunStatus",
+    "RunTrigger",
     "Session",
     "SessionSummary",
     "SkillSnapshot",
@@ -68,5 +76,6 @@ __all__ = [
     "message_from_dict",
     "message_to_dict",
     "new_run_id",
+    "new_workflow_id",
     "new_session_id",
 ]

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 MessageRole = Literal["system", "user", "assistant", "tool"]
-ToolStatus = Literal["pending", "succeeded", "failed"]
+ToolStatus = Literal["pending", "succeeded", "failed", "indeterminate"]
 
 
 @dataclass(kw_only=True)
@@ -112,7 +112,7 @@ def tool_message_from_dict(data: dict[str, Any], *, fallback_call_id: str | None
         raise ValueError("Serialized ToolMessage is missing call_id.")
     content = data.get("content")
     status = data.get("status")
-    if status not in {"pending", "succeeded", "failed"}:
+    if status not in {"pending", "succeeded", "failed", "indeterminate"}:
         status = "pending" if content is None else "succeeded"
     return ToolMessage(
         name=str(data.get("name") or data.get("tool") or "unknown"),

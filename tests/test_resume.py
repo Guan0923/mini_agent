@@ -1,0 +1,442 @@
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from mini_agent.domain import (
+    AgentAction,
+    AssistantMessage,
+    ExecutionPlan,
+    PlanStep,
+    RecoveryCheckpoint,
+    RunProvenance,
+    RunState,
+    StepEvaluation,
+    ToolMessage,
+)
+from mini_agent.runtime import AgentRunner, ConversationService, RuntimeEvent, SQLiteSessionStore
+from mini_agent.runtime.conversation.recovery import reconstruct_attempt
+from mini_agent.runtime.core.context import RuntimeState
+from mini_agent.runtime.core.contracts import InterruptDecision
+from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
+from mini_agent.tools import Tool, ToolRegistry
+
+
+class InterruptingToolPlanner:
+    name = "interrupting-tool"
+
+    def decide(self, runtime):
+        if any(
+            tool.status == "indeterminate"
+            for message in runtime.state.messages
+            if isinstance(message, AssistantMessage)
+            for tool in message.tool_messages
+        ):
+            return AssistantMessage(content="Recovered without replaying the tool.")
+        return AssistantMessage(
+            tool_messages=[ToolMessage(name="side_effect", call_id="call_side_effect", arguments={})]
+        )
+
+
+class FinalPlanner:
+    name = "final"
+
+    def decide(self, runtime):
+        return AssistantMessage(content="Resumed.")
+
+
+class ResumeDynamicPlanner:
+    name = "resume-dynamic"
+
+    def __init__(self) -> None:
+        self.replan_reasons: list[str] = []
+        self.replan_statuses: list[str] = []
+
+    def create_plan(self, runtime) -> ExecutionPlan:
+        return ExecutionPlan(
+            goal="Perform one side effect safely.",
+            steps=[
+                PlanStep(
+                    id="effect",
+                    description="Create the effect once",
+                    action=AgentAction(type="tool_call", tool="side_effect", arguments={}),
+                )
+            ],
+        )
+
+    def evaluate_step(self, runtime) -> StepEvaluation:
+        return StepEvaluation("continue", "The step completed.")
+
+    def replan(self, runtime) -> ExecutionPlan:
+        plan = runtime.exchange.context["plan"]
+        reason = runtime.exchange.context["reason"]
+        assert plan.steps[0].status in {"failed", "indeterminate"}
+        self.replan_reasons.append(reason)
+        self.replan_statuses.append(plan.steps[0].status)
+        return ExecutionPlan(goal="Inspect instead of replaying.", steps=[], final_answer="Recovered safely.")
+
+
+class PlanHandoffPlanner:
+    name = "plan-handoff"
+
+    def decide(self, runtime):
+        if runtime.run.mode == "plan":
+            return AssistantMessage(
+                tool_messages=[
+                    ToolMessage(
+                        name=REQUEST_PLAN_REVIEW_NAME,
+                        call_id="review_1",
+                        arguments={"plan": "Implement the reviewed change."},
+                    )
+                ]
+            )
+        return AssistantMessage(content="Implemented from the reviewed plan.")
+
+
+def shared_service(tmp_path: Path, planner, tools: ToolRegistry) -> tuple[ConversationService, SQLiteSessionStore]:
+    store = SQLiteSessionStore(tmp_path / ".mini_agent" / "checkpoints.db")
+    runner = AgentRunner(
+        planner,
+        tools,
+        strategy="reactive",
+        checkpoints=store,
+        workspace_root=str(tmp_path.resolve()),
+    )
+    return ConversationService(runner, store), store
+
+
+def test_resume_creates_linked_attempt_without_replaying_indeterminate_tool(tmp_path: Path) -> None:
+    effect = tmp_path / "effect.txt"
+
+    def interrupt_after_effect() -> str:
+        effect.write_text(effect.read_text() + "x" if effect.exists() else "x")
+        raise KeyboardInterrupt
+
+    tools = ToolRegistry([Tool("side_effect", "Create one side effect.", interrupt_after_effect)])
+    service, store = shared_service(tmp_path, InterruptingToolPlanner(), tools)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.run_task("perform once", mode="agent")
+
+    assert service.active_session is not None
+    session_id = service.active_session.session_id
+    preview = service.prepare_resume(session_id)
+    source_run_id = preview.run_id
+    assert preview.status == "interrupted"
+    assert preview.interruption_reason == "process_interrupted"
+    assert preview.indeterminate_call_ids == ("call_side_effect",)
+
+    reopened = ConversationService(service.runner, store)
+    result = reopened.resume_session(
+        session_id,
+        interrupt=lambda _request: InterruptDecision("continue"),
+    )
+
+    assert result is not None and result.status == "completed"
+    assert result.run_id != source_run_id
+    assert result.provenance.source_run_id == source_run_id
+    assert result.provenance.attempt == 2
+    assert effect.read_text() == "x"
+    indeterminate = [
+        tool for message in result.history if isinstance(message, AssistantMessage) for tool in message.tool_messages
+    ]
+    assert [(tool.call_id, tool.status) for tool in indeterminate] == [("call_side_effect", "indeterminate")]
+    source_messages = store.load_runtime_messages(session_id, source_run_id)
+    assert {message.kind for message in source_messages} >= {"run_interrupted", "tool_indeterminate"}
+    indeterminate_event = next(message for message in source_messages if message.kind == "tool_indeterminate")
+    assert indeterminate_event.data["session_id"] == session_id
+    assert indeterminate_event.data["workspace_root"] == str(tmp_path.resolve())
+    assert indeterminate_event.data["workflow_id"] == result.provenance.workflow_id
+    archived = store.load_runtime(session_id)
+    assert archived is not None
+    assert any(summary.run_id == source_run_id for summary in archived.run_history)
+
+
+def test_cooperative_suspend_is_resumable_and_preserves_workflow_identity(tmp_path: Path) -> None:
+    service, store = shared_service(tmp_path, FinalPlanner(), ToolRegistry())
+
+    suspended = service.run_task("pause me", mode="agent", suspend_requested=lambda: True)
+
+    assert suspended.status == "suspended"
+    assert service.active_session is not None
+    workflow_id = suspended.provenance.workflow_id
+    preview = service.prepare_resume(service.active_session.session_id)
+    assert preview.status == "suspended"
+    assert preview.interruption_reason == "user_suspended"
+
+    reopened = ConversationService(service.runner, store)
+    resumed = reopened.resume_session(
+        preview.session_id,
+        interrupt=lambda _request: InterruptDecision("continue"),
+    )
+
+    assert resumed is not None and resumed.status == "completed"
+    assert resumed.provenance.workflow_id == workflow_id
+    assert resumed.provenance.attempt == 2
+    with sqlite3.connect(tmp_path / ".mini_agent" / "checkpoints.db") as connection:
+        transition_reason = connection.execute(
+            "SELECT reason FROM checkpoints WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+            (suspended.run_id,),
+        ).fetchone()[0]
+        attempt_starts = connection.execute(
+            "SELECT started_at FROM session_runs WHERE workflow_id = ? ORDER BY attempt",
+            (workflow_id,),
+        ).fetchall()
+    assert transition_reason == "run_suspended"
+    assert len(attempt_starts) == 2
+    assert attempt_starts[0][0] != attempt_starts[1][0]
+
+
+def test_dynamic_resume_replans_indeterminate_step_without_replaying_tool(tmp_path: Path) -> None:
+    effect = tmp_path / "dynamic-effect.txt"
+
+    def interrupt_after_effect() -> str:
+        effect.write_text(effect.read_text() + "x" if effect.exists() else "x")
+        raise KeyboardInterrupt
+
+    planner = ResumeDynamicPlanner()
+    tools = ToolRegistry([Tool("side_effect", "Create one side effect.", interrupt_after_effect)])
+    store = SQLiteSessionStore(tmp_path / ".mini_agent" / "checkpoints.db")
+    runner = AgentRunner(
+        planner,
+        tools,
+        strategy="dynamic_replan",
+        checkpoints=store,
+        workspace_root=str(tmp_path.resolve()),
+    )
+    service = ConversationService(runner, store)
+
+    with pytest.raises(KeyboardInterrupt):
+        service.run_task("perform dynamic work", mode="agent")
+    assert service.active_session is not None
+
+    resumed = ConversationService(runner, store).resume_session(
+        service.active_session.session_id,
+        interrupt=lambda _request: InterruptDecision("continue"),
+    )
+
+    assert resumed is not None and resumed.status == "completed"
+    assert effect.read_text() == "x"
+    assert planner.replan_reasons and "indeterminate" in planner.replan_reasons[0]
+    assert planner.replan_statuses == ["indeterminate"]
+    assert resumed.plan_history[-1].steps[0].status == "indeterminate"
+
+
+def test_dynamic_resume_replans_step_that_never_reached_tool_call(tmp_path: Path) -> None:
+    effect = tmp_path / "not-called.txt"
+
+    def side_effect() -> str:
+        effect.write_text("called")
+        return "called"
+
+    planner = ResumeDynamicPlanner()
+    tools = ToolRegistry([Tool("side_effect", "Create one side effect.", side_effect)])
+    store = SQLiteSessionStore(tmp_path / ".mini_agent" / "checkpoints.db")
+    runner = AgentRunner(
+        planner,
+        tools,
+        strategy="dynamic_replan",
+        checkpoints=store,
+        workspace_root=str(tmp_path.resolve()),
+    )
+    service = ConversationService(runner, store)
+
+    def interrupt_after_step_started(event: RuntimeEvent) -> None:
+        if event.kind == "plan_progress" and event.data.get("trigger") == "step_started":
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        service.run_task("stop before the tool call", mode="agent", on_event=interrupt_after_step_started)
+    assert service.active_session is not None
+    preview = service.prepare_resume(service.active_session.session_id)
+    assert preview.indeterminate_call_ids == ()
+    assert not effect.exists()
+
+    resumed = ConversationService(runner, store).resume_session(
+        service.active_session.session_id,
+        interrupt=lambda _request: InterruptDecision("continue"),
+    )
+
+    assert resumed is not None and resumed.status == "completed"
+    assert not effect.exists()
+    assert planner.replan_statuses == ["failed"]
+    assert "fresh decision" in planner.replan_reasons[0]
+
+
+def test_plan_review_handoff_creates_new_workflow_with_parent_source(tmp_path: Path) -> None:
+    service, _store = shared_service(tmp_path, PlanHandoffPlanner(), ToolRegistry())
+
+    result = service.run_task(
+        "plan the change",
+        mode="plan",
+        interrupt=lambda _request: InterruptDecision("implement"),
+    )
+
+    assert result.status == "completed"
+    assert result.provenance.trigger == "handoff"
+    assert service.active_session is not None
+    assert result.provenance.source_session_id == service.active_session.session_id
+    assert result.provenance.source_run_id is not None
+    assert result.provenance.source_run_id != result.run_id
+    assert service.runtime is not None
+    source = next(
+        summary for summary in service.runtime.state.run_history if summary.run_id == result.provenance.source_run_id
+    )
+    assert source.workflow_id != result.provenance.workflow_id
+
+
+def test_legacy_run_state_defaults_provenance_to_original_run_id() -> None:
+    state = RunState(task="legacy", mode="agent")
+    payload = state.to_dict()
+    payload.pop("provenance")
+    payload.pop("checkpoint")
+
+    restored = RunState.from_dict(payload)
+
+    assert restored.provenance.workflow_id == state.run_id
+    assert restored.provenance.trigger == "legacy"
+
+
+def test_existing_interrupted_state_keeps_process_interruption_reason() -> None:
+    state = RuntimeState(
+        session_id="session_1",
+        status="interrupted",
+        current_run=RunState(task="resume me", mode="agent", status="interrupted"),
+    )
+
+    source, resumed = reconstruct_attempt(state)
+
+    assert source.current_run is not None and source.current_run.checkpoint is not None
+    assert source.current_run.checkpoint.interruption == "process_interrupted"
+    assert resumed.current_run is not None
+    assert resumed.current_run.run_id != source.current_run.run_id
+    assert resumed.current_run.provenance.attempt == source.current_run.provenance.attempt + 1
+    assert resumed.current_run.checkpoint is not None
+    assert resumed.current_run.checkpoint.reason == "run_resumed"
+
+
+def test_provenance_and_recovery_checkpoint_round_trip() -> None:
+    state = RunState(
+        task="trace me",
+        mode="agent",
+        provenance=RunProvenance(
+            workflow_id="workflow_1",
+            attempt=3,
+            trigger="resume",
+            workspace_root="C:/workspace",
+            source_session_id="session_parent",
+            source_run_id="run_parent",
+        ),
+        checkpoint=RecoveryCheckpoint(
+            reason="tool_call",
+            timestamp="2026-07-23T00:00:00+00:00",
+            call_id="call_1",
+            exchange_id="exchange_1",
+            interruption="process_interrupted",
+            indeterminate_call_ids=("call_1",),
+        ),
+    )
+
+    restored = RunState.from_dict(state.to_dict())
+
+    assert restored.provenance == state.provenance
+    assert restored.checkpoint == state.checkpoint
+
+
+def test_resume_back_leaves_active_session_unchanged_and_terminate_unlocks_target(tmp_path: Path) -> None:
+    service, store = shared_service(tmp_path, FinalPlanner(), ToolRegistry())
+    suspended = service.run_task("pause me", mode="agent", suspend_requested=lambda: True)
+    assert service.active_session is not None
+    session_id = service.active_session.session_id
+
+    reopened = ConversationService(service.runner, store)
+    result = reopened.resume_session(
+        session_id,
+        interrupt=lambda _request: InterruptDecision("back"),
+    )
+
+    assert result is None
+    assert reopened.active_session is None
+
+    terminated = reopened.resume_session(
+        session_id,
+        interrupt=lambda _request: InterruptDecision("terminate"),
+    )
+    assert terminated is not None and terminated.run_id == suspended.run_id
+    assert terminated.status == "terminated"
+    restored = store.load_runtime(session_id)
+    assert restored is not None and restored.status == "idle"
+    assert any(
+        message.kind == "run_terminated" for message in store.load_runtime_messages(session_id, suspended.run_id)
+    )
+
+
+def test_resume_without_id_uses_latest_session_and_rejects_workspace_change(tmp_path: Path) -> None:
+    service, store = shared_service(tmp_path, FinalPlanner(), ToolRegistry())
+    service.run_task("pause me", mode="agent", suspend_requested=lambda: True)
+    assert service.active_session is not None
+    latest_id = service.active_session.session_id
+
+    other_runner = AgentRunner(
+        FinalPlanner(),
+        ToolRegistry(),
+        strategy="reactive",
+        checkpoints=store,
+        workspace_root=str((tmp_path / "moved").resolve()),
+    )
+    reopened = ConversationService(other_runner, store)
+
+    assert reopened.prepare_resume().session_id == latest_id
+    with pytest.raises(RuntimeError, match="belongs to workspace"):
+        reopened.resume_session(interrupt=lambda _request: InterruptDecision("continue"))
+
+
+def test_checkpoint_event_rolls_back_message_snapshot_and_run_status_together(tmp_path: Path) -> None:
+    service, _store = shared_service(tmp_path, FinalPlanner(), ToolRegistry())
+    completed = service.run_task("finish first", mode="agent")
+    assert service.runtime is not None
+    database = tmp_path / ".mini_agent" / "checkpoints.db"
+
+    with sqlite3.connect(database) as connection:
+        before_messages = connection.execute(
+            "SELECT COUNT(*) FROM session_runtime_messages WHERE run_id = ?",
+            (completed.run_id,),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            CREATE TRIGGER reject_checkpoint BEFORE INSERT ON checkpoints
+            BEGIN
+                SELECT RAISE(ABORT, 'checkpoint rejected');
+            END
+            """
+        )
+
+    service.runtime.run.status = "suspended"
+    service.runtime.state.status = "suspended"
+    assert service.runtime.services.publish is not None
+    with pytest.raises(sqlite3.IntegrityError, match="checkpoint rejected"):
+        service.runtime.services.publish(RuntimeEvent("run_suspended", "suspended"))
+
+    with sqlite3.connect(database) as connection:
+        after_messages = connection.execute(
+            "SELECT COUNT(*) FROM session_runtime_messages WHERE run_id = ?",
+            (completed.run_id,),
+        ).fetchone()[0]
+        run_status, run_payload = connection.execute(
+            "SELECT status, state_json FROM runs WHERE run_id = ?",
+            (completed.run_id,),
+        ).fetchone()
+        session_status = connection.execute(
+            "SELECT status FROM session_runs WHERE run_id = ?",
+            (completed.run_id,),
+        ).fetchone()[0]
+        runtime_payload = connection.execute(
+            "SELECT state_json FROM session_runtime WHERE session_id = ?",
+            (service.runtime.state.session_id,),
+        ).fetchone()[0]
+
+    assert after_messages == before_messages
+    assert run_status == session_status == "completed"
+    assert json.loads(run_payload)["current_run"]["status"] == "completed"
+    assert json.loads(runtime_payload)["status"] == "idle"

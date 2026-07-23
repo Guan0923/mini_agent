@@ -21,6 +21,8 @@ class TaskAppMixin:
         steering: SteeringHandler | None = None,
         interrupt: InterruptHandler | None = None,
         cancel_requested: CancellationHandler | None = None,
+        suspend_requested: CancellationHandler | None = None,
+        trigger: str | None = None,
     ) -> RunState | None:
         previous_session_id = self.active_session.session_id if self.active_session is not None else None
         try:
@@ -31,6 +33,8 @@ class TaskAppMixin:
                 interrupt=interrupt or self._approval,
                 steering=steering,
                 cancel_requested=cancel_requested,
+                suspend_requested=suspend_requested,
+                trigger=trigger or getattr(self, "_run_trigger", "tui"),
             )
         except TaskPreparationError as exc:
             self._write(f"REFERENCE ERROR {exc}")
@@ -41,6 +45,41 @@ class TaskAppMixin:
             self.mode = "agent"
             self._write("Agent mode enabled after Plan Review implementation handoff.")
         return self.last_state
+
+    def resume_session(
+        self,
+        session_id: str | None = None,
+        *,
+        interrupt: InterruptHandler | None = None,
+        cancel_requested: CancellationHandler | None = None,
+        suspend_requested: CancellationHandler | None = None,
+    ) -> RunState | None:
+        preview = self._conversation_service.prepare_resume(session_id)
+        result = self._conversation_service.resume_session(
+            session_id,
+            on_event=self._event_sink,
+            interrupt=interrupt or self._approval,
+            cancel_requested=cancel_requested,
+            suspend_requested=suspend_requested,
+        )
+        if result is not None:
+            self.last_state = result
+        self._load_active_history()
+        self._reset_context_usage()
+        self._print_active_session()
+        self._show_session()
+        self._write(f"WORKSPACE {preview.workspace_root or 'unknown'}")
+        if preview.workflow_id:
+            self._write(f"WORKFLOW {preview.workflow_id}")
+        if preview.run_id:
+            self._write(f"SOURCE RUN {preview.run_id} ATTEMPT {preview.attempt or 1} {preview.status}")
+        if preview.source_run_id:
+            self._write(f"PARENT RUN {preview.source_run_id}")
+        if preview.checkpoint_reason:
+            self._write(f"CHECKPOINT {preview.checkpoint_reason} {preview.checkpoint_at or ''}".rstrip())
+        if preview.interruption_reason:
+            self._write(f"INTERRUPTION {preview.interruption_reason}")
+        return result
 
     def _handle_idle_input(self, task: str) -> tuple[bool, str | None]:
         if not task:
@@ -92,9 +131,13 @@ class TaskAppMixin:
         *,
         compacting: bool = False,
         cancelling: bool = False,
+        suspending: bool = False,
     ) -> None:
         mode = self.mode.upper()
-        if cancelling:
+        if suspending:
+            status = f"{mode} | SUSPENDING"
+            interrupt_enabled = False
+        elif cancelling:
             status = f"{mode} | CANCELLING"
             interrupt_enabled = False
         elif approval.pending:
@@ -152,8 +195,8 @@ class TaskAppMixin:
             return
         session_id = self.active_session.session_id
         self._write(f"SESSION {session_id}")
-        self._write(f"RESUME IN TUI /use {session_id}")
-        self._write(f"RESUME FROM SHELL mini-agent --session-id {session_id}")
+        self._write(f"RESUME IN TUI /resume {session_id}")
+        self._write(f"RESUME FROM SHELL mini-agent --resume {session_id}")
 
     @staticmethod
     def _drain_steering(messages: Queue[str]) -> list[str]:

@@ -7,9 +7,12 @@ from typing import TYPE_CHECKING, Protocol
 from mini_agent.domain import (
     DEFAULT_SESSION_TITLE,
     AssistantMessage,
+    ResumePreview,
     RunHandoff,
     RunMode,
+    RunProvenance,
     RunState,
+    RunTrigger,
     Session,
     SessionSummary,
     SkillSnapshot,
@@ -24,9 +27,10 @@ if TYPE_CHECKING:
     from mini_agent.planning.context_management import ContextCompactionResult
 
 from ..core.context import AgentRuntime, text_messages
-from ..core.contracts import CancellationHandler, EventHandler, InterruptHandler, SteeringHandler
+from ..core.contracts import CancellationHandler, EventHandler, InterruptHandler, InterruptRequest, SteeringHandler
 from ..core.events import RuntimeEvent
 from ..execution import RuntimeRunner
+from .recovery import build_preview, reconstruct_attempt
 from .store import SessionStore
 
 
@@ -66,6 +70,8 @@ class ConversationService:
         interrupt: InterruptHandler | None = None,
         steering: SteeringHandler | None = None,
         cancel_requested: CancellationHandler | None = None,
+        suspend_requested: CancellationHandler | None = None,
+        trigger: RunTrigger = "embedding",
     ) -> RunState:
         prepared = self._prepare(task)
         state = self._run_single_turn(
@@ -75,10 +81,15 @@ class ConversationService:
             interrupt=interrupt,
             steering=steering,
             cancel_requested=cancel_requested,
+            suspend_requested=suspend_requested,
+            trigger=trigger,
         )
         handoff = state.handoff
         if handoff is None:
             return state
+        source_session_id = (
+            self.active_session.session_id if self.active_session is not None else self.runtime.state.session_id
+        )
         if handoff.new_session:
             self._start_isolated_handoff_session(handoff)
         follow_up = self._run_single_turn(
@@ -88,7 +99,11 @@ class ConversationService:
             interrupt=interrupt,
             steering=steering,
             cancel_requested=cancel_requested,
+            suspend_requested=suspend_requested,
             active_skills=handoff.active_skills,
+            trigger="handoff",
+            source_session_id=source_session_id,
+            source_run_id=state.run_id,
         )
         if follow_up.handoff is not None:
             raise RuntimeError("Nested run handoffs are not supported.")
@@ -136,20 +151,30 @@ class ConversationService:
         interrupt: InterruptHandler | None,
         steering: SteeringHandler | None,
         cancel_requested: CancellationHandler | None,
+        suspend_requested: CancellationHandler | None,
         active_skills: tuple[SkillSnapshot, ...] = (),
+        trigger: RunTrigger = "embedding",
+        source_session_id: str | None = None,
+        source_run_id: str | None = None,
     ) -> RunState:
+        provenance = RunProvenance(
+            trigger=trigger,
+            workspace_root=getattr(self.runner, "workspace_root", None),
+            source_session_id=source_session_id,
+            source_run_id=source_run_id,
+        )
         if self.session_store is not None:
             session = self.ensure_session(prepared)
             self._ensure_runtime(session.session_id)
             assert self.runtime is not None
-            if self.runtime.state.status == "running":
+            if self.runtime.state.status in {"running", "suspended"}:
                 raise RuntimeError("The active session already has a running turn; resume or terminate it first.")
             run_id = new_run_id()
-            self.session_store.start_turn(session.session_id, run_id, prepared)
+            self.session_store.start_turn(session.session_id, run_id, prepared, provenance)
         else:
             if self.runtime is None:
                 self.runtime = self.runner.empty_runtime(session_id=new_session_id())
-            if self.runtime.state.status == "running":
+            if self.runtime.state.status in {"running", "suspended"}:
                 raise RuntimeError("The active session already has a running turn; resume or terminate it first.")
             run_id = new_run_id()
         assert self.runtime is not None
@@ -162,6 +187,7 @@ class ConversationService:
             turn_start_index=turn_start_index,
             history=self.runtime.state.messages,
             active_skills=list(active_skills),
+            provenance=provenance,
         )
         self.runtime.state.active_message = None
         self.runtime.state.active_tool_index = None
@@ -172,13 +198,14 @@ class ConversationService:
         self.runtime.services.interrupt = interrupt
         self.runtime.services.steering = steering
         self.runtime.services.cancel_requested = cancel_requested
+        self.runtime.services.suspend_requested = suspend_requested
         runtime = self.runner.bind(self.runtime)
         try:
             state = self.runner.run(runtime)
         except Exception as exc:
             self._record_unexpected_failure(exc)
             raise
-        if self.session_store is not None and self.active_session is not None:
+        if self.session_store is not None and self.active_session is not None and state.status != "suspended":
             self.session_store.finish_turn(
                 self.active_session.session_id,
                 state.run_id,
@@ -188,6 +215,148 @@ class ConversationService:
             self._reload_active_session()
         self.conversation = text_messages(runtime.state.messages)
         return state
+
+    def prepare_resume(self, session_id: str | None = None) -> ResumePreview:
+        """Inspect a resume target without changing the active conversation."""
+
+        if self.session_store is None:
+            raise RuntimeError("Session storage is not configured.")
+        session = self.session_store.get_session(session_id) if session_id else self.active_session
+        if session is None and session_id is None:
+            session = self.session_store.latest_session()
+        if session is None:
+            if session_id:
+                raise ValueError(f"Unknown session: {session_id}")
+            raise ValueError("No saved session is available to resume.")
+        return build_preview(session, self.session_store.load_runtime(session.session_id))
+
+    def resume_session(
+        self,
+        session_id: str | None = None,
+        *,
+        on_event: EventHandler | None = None,
+        interrupt: InterruptHandler | None = None,
+        steering: SteeringHandler | None = None,
+        cancel_requested: CancellationHandler | None = None,
+        suspend_requested: CancellationHandler | None = None,
+    ) -> RunState | None:
+        """Select an idle session or continue its interrupted workflow as a new attempt."""
+
+        preview = self.prepare_resume(session_id)
+        if not preview.requires_action:
+            self.use_session(preview.session_id)
+            return None
+        details = "\n".join(
+            value
+            for value in (
+                f"SESSION {preview.session_id}",
+                f"WORKSPACE {preview.workspace_root or 'unknown'}",
+                f"WORKFLOW {preview.workflow_id or 'unknown'}",
+                f"RUN {preview.run_id or 'unknown'} ATTEMPT {preview.attempt or 1}",
+                f"TASK {preview.task or ''}",
+                f"MODE {preview.mode or 'unknown'} STRATEGY {preview.strategy or 'unknown'}",
+                f"STATUS {preview.status}",
+                f"INTERRUPTION {preview.interruption_reason}" if preview.interruption_reason else "",
+                f"CHECKPOINT {preview.checkpoint_reason or 'unknown'} {preview.checkpoint_at or ''}".rstrip(),
+                (
+                    "INDETERMINATE " + ", ".join(preview.indeterminate_call_ids)
+                    if preview.indeterminate_call_ids
+                    else ""
+                ),
+            )
+            if value
+        )
+        request = InterruptRequest(
+            "resume",
+            "Continue this durable workflow, terminate it, or go back?",
+            {"details": details, "session_id": preview.session_id, "run_id": preview.run_id},
+        )
+        decision = interrupt(request) if interrupt is not None else None
+        if decision is None or decision.choice == "back":
+            return None
+        if decision.choice == "terminate":
+            return self.terminate_resume(preview.session_id)
+        if decision.choice != "continue":
+            raise RuntimeError(f"Invalid resume decision: {decision.choice}")
+        assert self.session_store is not None
+        state = self.session_store.load_runtime(preview.session_id)
+        if state is None:
+            raise RuntimeError("The selected session has no durable runtime state.")
+        current_workspace = getattr(self.runner, "workspace_root", None)
+        if state.workspace_root and current_workspace and state.workspace_root != current_workspace:
+            raise RuntimeError(
+                f"Workflow belongs to workspace {state.workspace_root}; current workspace is {current_workspace}."
+            )
+        source, resumed = reconstruct_attempt(state)
+        self.session_store.resume_runtime(source, resumed)
+        session = self.session_store.get_session(preview.session_id)
+        assert session is not None
+        runtime = self.runner.empty_runtime(session_id=preview.session_id, runtime_store=self.session_store)
+        runtime.state = resumed
+        self.runtime = self.runner.bind(runtime)
+        self.active_session = session
+        self._clear_pending_session()
+        self.runtime.services.on_event = on_event
+        self.runtime.services.interrupt = interrupt
+        self.runtime.services.steering = steering
+        self.runtime.services.cancel_requested = cancel_requested
+        self.runtime.services.suspend_requested = suspend_requested
+        try:
+            result = self.runner.resume(self.runtime)
+        except Exception as exc:
+            self._record_unexpected_failure(exc)
+            raise
+        if result.status != "suspended":
+            self.session_store.finish_turn(
+                preview.session_id,
+                result.run_id,
+                result.status,
+                result.final_answer,
+            )
+        self.conversation = text_messages(self.runtime.state.messages)
+        self._reload_active_session()
+        return result
+
+    def terminate_resume(self, session_id: str | None = None) -> RunState:
+        """Close a suspended or interrupted workflow without executing more work."""
+
+        preview = self.prepare_resume(session_id)
+        if not preview.requires_action:
+            raise RuntimeError("The selected session has no resumable workflow to terminate.")
+        self.use_session(preview.session_id)
+        assert self.runtime is not None
+        run = self.runtime.run
+        message = "Workflow terminated by user after suspension or interruption."
+        run.status = "terminated"
+        run.final_answer = message
+        self.runtime.state.messages.append(AssistantMessage(content=message))
+        run.history = self.runtime.state.messages
+        self.runtime.state.status = "idle"
+        run.add_event("run_terminated", message)
+        run.add_runtime_message(
+            "run_terminated",
+            message,
+            data={
+                "session_id": self.runtime.state.session_id,
+                "run_id": run.run_id,
+                "workflow_id": run.provenance.workflow_id,
+                "workflow_attempt": run.provenance.attempt,
+                "workflow_trigger": run.provenance.trigger,
+                "workspace_root": run.provenance.workspace_root or self.runtime.state.workspace_root,
+                "source_session_id": run.provenance.source_session_id,
+                "source_run_id": run.provenance.source_run_id,
+                "status": run.status,
+            },
+        )
+        checkpoint = self.runtime.services.checkpoint_store
+        if checkpoint is not None:
+            checkpoint.save(self.runtime, "run_terminated")
+        self.runtime.save()
+        assert self.session_store is not None
+        self.session_store.finish_turn(preview.session_id, run.run_id, run.status, message)
+        self.conversation = text_messages(self.runtime.state.messages)
+        self._reload_active_session()
+        return run
 
     def ensure_session(self, title: str | None = None) -> Session:
         if self.session_store is None:

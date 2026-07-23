@@ -7,6 +7,7 @@ from pathlib import Path
 
 from mini_agent.domain import (
     DEFAULT_SESSION_TITLE,
+    RunProvenance,
     RunStatus,
     RuntimeMessage,
     Session,
@@ -62,6 +63,61 @@ class SQLiteSessionStore(SessionSchemaMixin, SessionMappingMixin):
             rows = connection.execute(self._summary_query("") + " ORDER BY s.updated_at DESC").fetchall()
         return [self._summary_from_row(row) for row in rows]
 
+    def latest_session(self) -> Session | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT session_id, title, created_at, updated_at
+                FROM sessions
+                ORDER BY updated_at DESC, session_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return self._session_from_row(row) if row else None
+
+    def save(self, runtime, reason: str) -> None:
+        """Atomically persist the session snapshot and its checkpoint."""
+
+        state = runtime.state
+        run = runtime.run
+        payload = json.dumps(state.to_dict(), ensure_ascii=False)
+        timestamp = utc_now()
+        with self._connect() as connection:
+            exists = connection.execute("SELECT 1 FROM sessions WHERE session_id = ?", (state.session_id,)).fetchone()
+            if exists is None:
+                raise ValueError(f"Unknown session: {state.session_id}")
+            connection.execute(
+                """
+                INSERT INTO runs (run_id, status, state_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    status = excluded.status,
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (run.run_id, run.status, payload, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO checkpoints (run_id, reason, state_json, created_at) VALUES (?, ?, ?, ?)",
+                (run.run_id, reason, payload, timestamp),
+            )
+            connection.execute(
+                """
+                INSERT INTO session_runtime (session_id, state_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (state.session_id, payload, timestamp),
+            )
+            connection.execute(
+                "UPDATE session_runs SET status = ?, updated_at = ? WHERE run_id = ? AND session_id = ?",
+                (run.status, timestamp, run.run_id, state.session_id),
+            )
+            self._save_runtime_messages(connection, state.session_id, run.run_id, run.runtime_messages)
+            connection.execute("UPDATE sessions SET updated_at = ? WHERE session_id = ?", (timestamp, state.session_id))
+
     def load_conversation(self, session_id: str) -> list[dict[str, str]]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -101,6 +157,101 @@ class SQLiteSessionStore(SessionSchemaMixin, SessionMappingMixin):
             ).fetchone()
         return RuntimeState.from_dict(json.loads(row[0])) if row else None
 
+    def resume_runtime(self, source: RuntimeState, resumed: RuntimeState) -> None:
+        """Atomically archive one attempt and install its resumed successor."""
+
+        if source.session_id != resumed.session_id or source.current_run is None or resumed.current_run is None:
+            raise ValueError("Resume transition must contain two attempts from the same session.")
+        source_run = source.current_run
+        resumed_run = resumed.current_run
+        timestamp = utc_now()
+        source_payload = json.dumps(source.to_dict(), ensure_ascii=False)
+        resumed_payload = json.dumps(resumed.to_dict(), ensure_ascii=False)
+        origin = resumed_run.provenance
+        source_checkpoint_reason = "run_interrupted" if source_run.status == "interrupted" else "run_suspended"
+        with self._connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE session_runs SET status = ?, updated_at = ?
+                WHERE run_id = ? AND session_id = ?
+                """,
+                (source_run.status, timestamp, source_run.run_id, source.session_id),
+            )
+            if updated.rowcount == 0:
+                raise ValueError(f"Unknown session run: {source_run.run_id}")
+            connection.execute(
+                """
+                INSERT INTO runs (run_id, status, state_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    status = excluded.status,
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (source_run.run_id, source_run.status, source_payload, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO checkpoints (run_id, reason, state_json, created_at) VALUES (?, ?, ?, ?)",
+                (source_run.run_id, source_checkpoint_reason, source_payload, timestamp),
+            )
+            self._save_runtime_messages(
+                connection,
+                source.session_id,
+                source_run.run_id,
+                source_run.runtime_messages,
+            )
+            connection.execute(
+                """
+                INSERT INTO session_runs (
+                    run_id, session_id, task, status, workflow_id, attempt, origin_kind,
+                    source_session_id, source_run_id, started_at, updated_at
+                ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    resumed_run.run_id,
+                    resumed.session_id,
+                    resumed_run.task,
+                    origin.workflow_id,
+                    origin.attempt,
+                    origin.trigger,
+                    origin.source_session_id,
+                    origin.source_run_id,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO runs (run_id, status, state_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (resumed_run.run_id, resumed_run.status, resumed_payload, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO checkpoints (run_id, reason, state_json, created_at) VALUES (?, ?, ?, ?)",
+                (resumed_run.run_id, "run_resumed", resumed_payload, timestamp),
+            )
+            self._save_runtime_messages(
+                connection,
+                resumed.session_id,
+                resumed_run.run_id,
+                resumed_run.runtime_messages,
+            )
+            connection.execute(
+                """
+                INSERT INTO session_runtime (session_id, state_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (resumed.session_id, resumed_payload, timestamp),
+            )
+            connection.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (timestamp, resumed.session_id),
+            )
+
     def append_runtime_message(self, session_id: str, run_id: str, message: RuntimeMessage) -> None:
         """Persist one canonical runtime message as soon as it is emitted."""
 
@@ -138,6 +289,31 @@ class SQLiteSessionStore(SessionSchemaMixin, SessionMappingMixin):
                 (message.timestamp, session_id),
             )
 
+    @staticmethod
+    def _save_runtime_messages(connection, session_id: str, run_id: str, messages: list[RuntimeMessage]) -> None:
+        for message in messages:
+            connection.execute(
+                """
+                INSERT INTO session_runtime_messages
+                    (session_id, run_id, sequence, kind, message, data_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, sequence) DO UPDATE SET
+                    kind = excluded.kind,
+                    message = excluded.message,
+                    data_json = excluded.data_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    session_id,
+                    run_id,
+                    message.sequence,
+                    message.kind,
+                    message.message,
+                    json.dumps(message.data, ensure_ascii=False, default=str),
+                    message.timestamp,
+                ),
+            )
+
     def load_runtime_messages(self, session_id: str, run_id: str | None = None) -> list[RuntimeMessage]:
         """Load the ordered audit trail without changing the LLM conversation projection."""
 
@@ -169,8 +345,17 @@ class SQLiteSessionStore(SessionSchemaMixin, SessionMappingMixin):
             )
         return messages
 
-    def start_turn(self, session_id: str, run_id: str, task: str) -> None:
+    def start_turn(
+        self,
+        session_id: str,
+        run_id: str,
+        task: str,
+        provenance: RunProvenance | None = None,
+        *,
+        append_user_message: bool = True,
+    ) -> None:
         timestamp = utc_now()
+        origin = provenance or RunProvenance(workflow_id=run_id, trigger="legacy")
         with self._connect() as connection:
             session = connection.execute(
                 "SELECT title FROM sessions WHERE session_id = ?",
@@ -190,26 +375,46 @@ class SQLiteSessionStore(SessionSchemaMixin, SessionMappingMixin):
 
             connection.execute(
                 """
-                INSERT INTO session_runs (run_id, session_id, task, status, started_at, updated_at)
-                VALUES (?, ?, ?, 'running', ?, ?)
+                INSERT INTO session_runs (
+                    run_id, session_id, task, status, workflow_id, attempt, origin_kind,
+                    source_session_id, source_run_id, started_at, updated_at
+                )
+                VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     session_id = excluded.session_id,
                     task = excluded.task,
                     status = 'running',
+                    workflow_id = excluded.workflow_id,
+                    attempt = excluded.attempt,
+                    origin_kind = excluded.origin_kind,
+                    source_session_id = excluded.source_session_id,
+                    source_run_id = excluded.source_run_id,
                     updated_at = excluded.updated_at
                 """,
-                (run_id, session_id, task, timestamp, timestamp),
+                (
+                    run_id,
+                    session_id,
+                    task,
+                    origin.workflow_id,
+                    origin.attempt,
+                    origin.trigger,
+                    origin.source_session_id,
+                    origin.source_run_id,
+                    timestamp,
+                    timestamp,
+                ),
             )
-            connection.execute(
-                """
-                INSERT INTO session_messages (session_id, run_id, role, content, created_at)
-                SELECT ?, ?, 'user', ?, ?
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM session_messages WHERE run_id = ? AND role = 'user'
+            if append_user_message:
+                connection.execute(
+                    """
+                    INSERT INTO session_messages (session_id, run_id, role, content, created_at)
+                    SELECT ?, ?, 'user', ?, ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM session_messages WHERE run_id = ? AND role = 'user'
+                    )
+                    """,
+                    (session_id, run_id, task, timestamp, run_id),
                 )
-                """,
-                (session_id, run_id, task, timestamp, run_id),
-            )
             connection.execute(
                 "UPDATE sessions SET title = ?, updated_at = ? WHERE session_id = ?",
                 (title, timestamp, session_id),

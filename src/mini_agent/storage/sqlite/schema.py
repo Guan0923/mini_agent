@@ -16,6 +16,29 @@ class SessionSchemaMixin:
         with self._connect() as connection:
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS runs (
+                    run_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+                )
+                """
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS checkpoints_run_id_idx ON checkpoints (run_id, id)")
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS sessions (
                     session_id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -31,12 +54,18 @@ class SessionSchemaMixin:
                     session_id TEXT NOT NULL,
                     task TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    workflow_id TEXT,
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    origin_kind TEXT NOT NULL DEFAULT 'legacy',
+                    source_session_id TEXT,
+                    source_run_id TEXT,
                     started_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                 )
                 """
             )
+            self._ensure_session_runs_schema(connection)
             self._ensure_session_messages_schema(connection)
             connection.execute(
                 """
@@ -78,10 +107,31 @@ class SessionSchemaMixin:
             )
             connection.execute(
                 """
+                CREATE UNIQUE INDEX IF NOT EXISTS session_runs_workflow_attempt_idx
+                ON session_runs (workflow_id, attempt) WHERE workflow_id IS NOT NULL
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS session_runtime_messages_session_run_idx
                 ON session_runtime_messages (session_id, run_id, sequence)
                 """
             )
+
+    @staticmethod
+    def _ensure_session_runs_schema(connection: sqlite3.Connection) -> None:
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(session_runs)").fetchall()}
+        additions = {
+            "workflow_id": "TEXT",
+            "attempt": "INTEGER NOT NULL DEFAULT 1",
+            "origin_kind": "TEXT NOT NULL DEFAULT 'legacy'",
+            "source_session_id": "TEXT",
+            "source_run_id": "TEXT",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE session_runs ADD COLUMN {name} {definition}")
+        connection.execute("UPDATE session_runs SET workflow_id = run_id WHERE workflow_id IS NULL")
 
     @staticmethod
     def _ensure_session_messages_schema(connection: sqlite3.Connection) -> None:

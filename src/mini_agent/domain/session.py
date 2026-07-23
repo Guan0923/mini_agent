@@ -35,3 +35,29 @@ class SessionSummary:
     message_count: int
     last_run_id: str | None = None
     last_run_status: str | None = None
+
+
+@dataclass(frozen=True)
+class ResumePreview:
+    """User-facing provenance for selecting a durable session or interrupted run."""
+
+    session_id: str
+    title: str
+    workspace_root: str | None
+    workflow_id: str | None
+    run_id: str | None
+    attempt: int | None
+    task: str | None
+    mode: str | None
+    strategy: str | None
+    status: str
+    source_session_id: str | None = None
+    source_run_id: str | None = None
+    checkpoint_reason: str | None = None
+    checkpoint_at: str | None = None
+    interruption_reason: str | None = None
+    indeterminate_call_ids: tuple[str, ...] = ()
+
+    @property
+    def requires_action(self) -> bool:
+        return self.status in {"running", "suspended", "interrupted"}
