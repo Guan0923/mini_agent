@@ -103,6 +103,7 @@ def test_session_store_migrates_legacy_message_uniqueness(tmp_path: Path) -> Non
             """
         )
 
+    SQLiteSessionStore(database)
     store = SQLiteSessionStore(database)
     store.append_turn_input("session_legacy", "run_legacy", "steer")
     store.finish_turn("session_legacy", "run_legacy", "completed", "done")
@@ -112,6 +113,13 @@ def test_session_store_migrates_legacy_message_uniqueness(tmp_path: Path) -> Non
         {"role": "user", "content": "steer"},
         {"role": "assistant", "content": "done"},
     ]
+    with sqlite3.connect(database) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(session_runs)")}
+        lineage = connection.execute(
+            "SELECT workflow_id, attempt, origin_kind FROM session_runs WHERE run_id = 'run_legacy'"
+        ).fetchone()
+    assert {"workflow_id", "attempt", "origin_kind", "source_session_id", "source_run_id"} <= columns
+    assert lineage == ("run_legacy", 1, "legacy")
 
 
 class HistoryPlanner:
@@ -134,15 +142,14 @@ def test_tui_consumes_only_spaced_session_arguments_and_rejects_legacy_slash_for
         ("command", "plan", ""),
         ("task", "before after", ""),
     ]
-    assert TerminalApp._split_input("/clear Reset /use session_123") == [
-        ("command", "clear", "Reset"),
-        ("command", "use", "session_123"),
+    assert TerminalApp._split_input("/resume session_123") == [
+        ("command", "resume", "session_123"),
     ]
-    assert TerminalApp._split_input("/use session_123 trailing text") == [
-        ("command", "use", "session_123 trailing text"),
-    ]
+    assert TerminalApp._split_input("/resume") == [("command", "resume", "")]
+    assert TerminalApp._split_input("/use session_123") == [("command", "legacy_session", "")]
+    assert TerminalApp._split_input("/session") == [("command", "legacy_session", "")]
     assert TerminalApp._split_input("/new/legacy title") == [("task", "/new/legacy title", "")]
-    assert TerminalApp._split_input("/use/session_123") == [("task", "/use/session_123", "")]
+    assert TerminalApp._split_input("/resume/session_123") == [("task", "/resume/session_123", "")]
 
 
 def test_tui_quit_stops_line_before_submitting_a_task(tmp_path: Path, monkeypatch) -> None:

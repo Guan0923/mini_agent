@@ -43,8 +43,16 @@ def build_application(
 
     files = WorkspaceFiles(workspace)
     tools = build_tool_registry(workspace, workspace_files=files)
-    runner = _build_runner(workspace, planner_name, _settings_for(workspace, settings), tools, hooks)
-    return AgentApplication(runner, build_session_store(workspace), FileReferenceExpander(files))
+    session_store = build_session_store(workspace)
+    runner = _build_runner(
+        workspace,
+        planner_name,
+        _settings_for(workspace, settings),
+        tools,
+        hooks,
+        checkpoints=session_store,
+    )
+    return AgentApplication(runner, session_store, FileReferenceExpander(files))
 
 
 def build_runner(
@@ -68,6 +76,7 @@ def _build_runner(
     settings: RunnerSettings,
     tools: ToolExecutor,
     hooks: Iterable[AgentHook],
+    checkpoints: object | None = None,
 ) -> AgentRunner:
     skills = SkillCatalog.discover(workspace)
     if planner_name == "rule":
@@ -87,9 +96,10 @@ def _build_runner(
         max_replans=settings.max_replans,
         strategy=settings.strategy,
         log_full_messages=settings.log_full_messages,
-        checkpoints=SQLiteCheckpointStore(session_database_path(workspace)),
+        checkpoints=checkpoints or SQLiteCheckpointStore(session_database_path(workspace)),
         hooks=hooks,
         skill_catalog=skills,
+        workspace_root=str(workspace.resolve()),
     )
 
 

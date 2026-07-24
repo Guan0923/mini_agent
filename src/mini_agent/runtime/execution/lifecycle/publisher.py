@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from mini_agent.domain import RecoveryCheckpoint
+
 from ...core.context import AgentRuntime
 from ...core.events import CHECKPOINT_EVENT_KINDS, RuntimeEvent
 from ...persistence.recording import persistent_event
@@ -18,7 +20,14 @@ class RunEventPublisher:
         runtime = self._runtime
         run = runtime.run
         context = {
+            "session_id": runtime.state.session_id,
             "run_id": run.run_id,
+            "workflow_id": run.provenance.workflow_id,
+            "workflow_attempt": run.provenance.attempt,
+            "workflow_trigger": run.provenance.trigger,
+            "workspace_root": run.provenance.workspace_root or runtime.state.workspace_root,
+            "source_session_id": run.provenance.source_session_id,
+            "source_run_id": run.provenance.source_run_id,
             "task": run.task,
             "mode": run.mode,
             "strategy": run.strategy,
@@ -33,7 +42,16 @@ class RunEventPublisher:
         self._record(enriched)
         checkpoint = runtime.services.checkpoint_store
         if checkpoint is not None and event.kind in CHECKPOINT_EVENT_KINDS:
+            run.checkpoint = RecoveryCheckpoint(
+                reason=event.kind,
+                timestamp=event.timestamp,
+                call_id=str(event.data["call_id"]) if event.data.get("call_id") else None,
+                exchange_id=str(event.data["exchange_id"]) if event.data.get("exchange_id") else None,
+                interruption=("user_suspended" if event.kind == "run_suspended" else None),
+            )
             checkpoint.save(runtime, event.kind)
+            if checkpoint is not runtime.services.runtime_store:
+                runtime.save()
         if runtime.services.on_event is not None:
             runtime.services.on_event(enriched)
 
@@ -99,6 +117,10 @@ class RunEventPublisher:
         runtime = self._runtime
         durable = runtime.run.add_runtime_message(kind, message, timestamp=timestamp, data=data)
         store = runtime.services.runtime_store
+        if store is runtime.services.checkpoint_store and kind in CHECKPOINT_EVENT_KINDS:
+            # The shared SQLite store writes this message with the checkpoint,
+            # session runtime, and run status in one transaction.
+            return
         append = getattr(store, "append_runtime_message", None)
         if callable(append):
             append(runtime.state.session_id, runtime.run.run_id, durable)

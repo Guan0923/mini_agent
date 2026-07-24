@@ -63,6 +63,17 @@ def cancel_run(runtime: AgentRuntime) -> None:
     publish(RuntimeEvent("cancelled", "cancelled"))
 
 
+def suspend_run(runtime: AgentRuntime) -> None:
+    """Stop at a cooperative boundary while preserving resumable state."""
+
+    run = runtime.run
+    run.status = "suspended"
+    runtime.state.status = "suspended"
+    run.add_event("run_suspended", "Run suspended by user")
+    publish = runtime.services.publish or (lambda _event: None)
+    publish(RuntimeEvent("run_suspended", "suspended"))
+
+
 def record_plan_feedback(runtime: AgentRuntime, supplement: str | None) -> str | None:
     feedback = (supplement or "").strip()
     if not feedback:

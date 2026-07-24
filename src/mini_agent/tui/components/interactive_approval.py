@@ -50,6 +50,8 @@ class InteractiveApproval:
             return "PLAN QUESTIONS | Select answers"
         if request.kind == "plan":
             return "PLAN REVIEW | Select action"
+        if request.kind == "resume":
+            return "RESUME | Select action"
         return "TOOL REVIEW | Select action"
 
     def __call__(self, request: InterruptRequest) -> InterruptDecision:
@@ -91,7 +93,7 @@ class InteractiveApproval:
             self._view is None
             or request.kind == "question"
             and not callable(getattr(self._view, "begin_questionnaire", None))
-            or request.kind in {"plan", "tool"}
+            or request.kind in {"plan", "tool", "resume"}
             and not callable(getattr(self._view, "begin_review", None))
         ):
             self._approval.render_request(request)
@@ -110,6 +112,18 @@ class InteractiveApproval:
                         "Start implementation in a new session.",
                     ),
                     ChoiceItem("cancel", "Cancel and Stay in plan mode", "Do not implement this plan."),
+                ),
+                self._complete_review,
+            )
+        elif request.kind == "resume":
+            self._view.begin_review(
+                "RESUME WORKFLOW",
+                request.message,
+                str(request.data.get("details") or ""),
+                (
+                    ChoiceItem("continue", "Continue", "Create a new attempt from the durable checkpoint."),
+                    ChoiceItem("terminate", "Terminate", "Close this workflow without executing more work."),
+                    ChoiceItem("back", "Back", "Leave the current session unchanged."),
                 ),
                 self._complete_review,
             )
@@ -146,21 +160,22 @@ class InteractiveApproval:
     def _complete_questionnaire(self, answers: dict[str, list[str]]) -> None:
         if self._pending is None or self._pending[0].kind != "question":
             return
-        _request, future = self._pending
+        request, future = self._pending
         self._pending = None
         self._supplement = False
         future.set_result(InterruptDecision("answer", answers=answers))
         self.changed.set()
 
     def _complete_review(self, choice: str, supplement: str | None) -> None:
-        if self._pending is None or self._pending[0].kind not in {"plan", "tool"}:
+        if self._pending is None or self._pending[0].kind not in {"plan", "tool", "resume"}:
             return
         request, future = self._pending
-        allowed = (
-            {"implement", "implement_clear_session", "cancel"}
-            if request.kind == "plan"
-            else {"continue", "cancel", "supplement"}
-        )
+        if request.kind == "plan":
+            allowed = {"implement", "implement_clear_session", "cancel"}
+        elif request.kind == "resume":
+            allowed = {"continue", "terminate", "back"}
+        else:
+            allowed = {"continue", "cancel", "supplement"}
         self._pending = None
         self._supplement = False
         if choice not in allowed:
@@ -174,11 +189,11 @@ class InteractiveApproval:
 
         if self._pending is None:
             return
-        _request, future = self._pending
+        request, future = self._pending
         self._pending = None
         self._supplement = False
         cancel_prompt = getattr(self._view, "cancel_choice_prompt", None)
         if callable(cancel_prompt):
             cancel_prompt()
-        future.set_result(InterruptDecision("cancel"))
+        future.set_result(InterruptDecision("back" if request.kind == "resume" else "cancel"))
         self.changed.set()

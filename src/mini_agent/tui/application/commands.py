@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from mini_agent.domain import PlanningError
 
@@ -33,6 +34,9 @@ class CommandAppMixin:
     @staticmethod
     def _split_input(value: str) -> list[tuple[str, str, str]]:
         """Run recognized commands first, then return at most one merged task."""
+
+        if re.search(r"(?<!\S)/(?:use|session)(?=\s|$)", value):
+            return [("command", "legacy_session", "")]
 
         matches = list(COMMAND_PATTERN.finditer(value))
         if not matches:
@@ -87,11 +91,8 @@ class CommandAppMixin:
                 return True
             self._show_sessions()
             return True
-        if command == "session":
-            if argument:
-                self._write("Usage: /session")
-                return True
-            self._show_session()
+        if command == "resume":
+            self._resume_session(argument or None)
             return True
         if command == "history":
             if argument:
@@ -102,8 +103,8 @@ class CommandAppMixin:
         if command in {"new", "clear"}:
             self._new_session(argument or None)
             return True
-        if command == "use":
-            self._use_session(argument)
+        if command == "legacy_session":
+            self._write("/use and /session were removed; use /resume [session_id].")
             return True
         if command == "quit":
             if argument:
@@ -175,22 +176,18 @@ class CommandAppMixin:
         self.last_state = None
         self._print_active_session()
 
-    def _use_session(self, session_id: str) -> None:
+    def _resume_session(self, session_id: str | None) -> None:
         if self.session_store is None:
             self._write("Session storage is not configured.")
             return
-        if not session_id:
-            self._write("Usage: /use <session_id>")
+        if getattr(self, "_view", None) is not None:
+            self._pending_resume_id = session_id
             return
         try:
-            self._conversation_service.use_session(session_id)
-        except ValueError:
-            self._write(f"Unknown session: {session_id}")
+            self.resume_session(session_id)
+        except (RuntimeError, ValueError) as exc:
+            self._write(f"RESUME ERROR {exc}")
             return
-        self._load_active_history()
-        self._reset_context_usage()
-        self.last_state = None
-        self._print_active_session()
 
     def _show_sessions(self) -> None:
         view = getattr(self, "_view", None)

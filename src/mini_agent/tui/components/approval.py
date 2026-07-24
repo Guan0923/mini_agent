@@ -102,6 +102,13 @@ class TerminalApproval:
                     self._write(f"{index}. {step}")
             return
 
+        if request.kind == "resume":
+            self._write(f"\nRESUME WORKFLOW\n{request.message}")
+            details = request.data.get("details")
+            if isinstance(details, str):
+                self._write(details)
+            return
+
         self._write(f"\nTOOL REVIEW\n{format_tool_review(request).plain()}")
 
     @staticmethod
@@ -110,6 +117,8 @@ class TerminalApproval:
             return "Supplement: "
         if request.kind == "plan":
             return "[1] Implement  [2] Implement and Clear Session  [3] Cancel and Stay in plan mode: "
+        if request.kind == "resume":
+            return "[1] Continue  [2] Terminate  [3] Back: "
         return "[1] Continue  [2] Cancel  [3] Supplement: "
 
     @staticmethod
@@ -134,6 +143,14 @@ class TerminalApproval:
                 return InterruptDecision("implement_clear_session"), False
             if choice in {"3", "cancel", "cancel and stay", "cancel and stay in plan mode"}:
                 return InterruptDecision("cancel"), False
+            return None, False
+        if request.kind == "resume":
+            if choice in {"1", "continue"}:
+                return InterruptDecision("continue"), False
+            if choice in {"2", "terminate"}:
+                return InterruptDecision("terminate"), False
+            if choice in {"3", "back"}:
+                return InterruptDecision("back"), False
             return None, False
         if choice in {"1", "continue"}:
             return InterruptDecision("continue"), False

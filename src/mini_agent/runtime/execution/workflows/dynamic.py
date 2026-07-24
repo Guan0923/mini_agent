@@ -16,6 +16,21 @@ from .plan import PlanWorkflow
 
 
 class DynamicReplanWorkflow(PlanWorkflow):
+    def resume(self, runtime: AgentRuntime):
+        """Replan around indeterminate steps before normal dynamic execution."""
+
+        plan = runtime.run.plan
+        if plan is not None:
+            recovery_steps = [step for step in plan.steps if step.status in {"failed", "indeterminate"}]
+            if recovery_steps:
+                capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
+                reason = "Interrupted plan steps require a fresh decision: " + ", ".join(
+                    f"{step.id} ({step.status})" for step in recovery_steps
+                )
+                if not self._replace(runtime, reason, capabilities):
+                    return runtime.run
+        return self.run(runtime)
+
     def run(self, runtime: AgentRuntime):
         capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
         if capabilities.dynamic_replanner is None:

@@ -79,6 +79,43 @@ def test_main_maps_one_shot_status_to_exit_code(tmp_path, stub_cli, status: str,
     assert cli.main(["--workspace", str(tmp_path), "--planner", "rule", "task"]) == expected
 
 
+def test_main_resumes_idle_session_before_running_positional_task(tmp_path, monkeypatch) -> None:
+    opened: list[str | None] = []
+    conversation = SimpleNamespace(
+        prepare_resume=lambda _session_id: SimpleNamespace(requires_action=False),
+    )
+    application = SimpleNamespace(open_conversation=lambda session_id: opened.append(session_id) or conversation)
+    monkeypatch.setattr(cli, "build_application", lambda *args: application)
+    monkeypatch.setattr(cli, "TerminalApp", StubTerminalApp)
+    StubTerminalApp.result = RunState(task="next", mode="agent", status="completed")
+
+    result = cli.main(["--workspace", str(tmp_path), "--planner", "rule", "--resume", "session_1", "next"])
+
+    assert result == 0
+    assert opened == ["session_1"]
+
+
+def test_main_refuses_positional_task_until_resumable_workflow_is_handled(tmp_path, monkeypatch) -> None:
+    conversation = SimpleNamespace(
+        prepare_resume=lambda _session_id: SimpleNamespace(requires_action=True),
+    )
+    application = SimpleNamespace(open_conversation=lambda _session_id: conversation)
+    monkeypatch.setattr(cli, "build_application", lambda *args: application)
+    monkeypatch.setattr(cli, "TerminalApp", StubTerminalApp)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--workspace", str(tmp_path), "--planner", "rule", "--resume", "session_1", "next"])
+
+    assert exc_info.value.code == 2
+
+
+def test_main_rejects_removed_session_id_option() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--session-id", "session_1"])
+
+    assert exc_info.value.code == 2
+
+
 def test_view_routes_conversations_system_output_and_history() -> None:
     class TranscriptView:
         def __init__(self) -> None:

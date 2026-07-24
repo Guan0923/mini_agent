@@ -20,7 +20,7 @@ from mini_agent.domain.messages import messages_from_dicts
 from mini_agent.domain.state import utc_now
 
 from .config import RunnerSettings
-from .contracts import CancellationHandler, Confirm, EventHandler, InterruptHandler, SteeringHandler
+from .contracts import CancellationHandler, Confirm, EventHandler, InterruptHandler, SteeringHandler, SuspensionHandler
 from .hooks import HookManager
 
 RuntimeOperation = Literal[
@@ -44,6 +44,8 @@ class RunSummary:
     status: str
     mode: str
     final_answer: str | None = None
+    workflow_id: str | None = None
+    attempt: int = 1
 
 
 @dataclass
@@ -51,6 +53,7 @@ class RuntimeState:
     """Serializable state required to resume one complete conversation session."""
 
     session_id: str
+    workspace_root: str | None = None
     messages: list[ChatMessage] = field(default_factory=list)
     provider: str = "unknown"
     model: str = "unknown"
@@ -70,6 +73,7 @@ class RuntimeState:
     def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
+            "workspace_root": self.workspace_root,
             "messages": [message_to_dict(message) for message in self.messages],
             "provider": self.provider,
             "model": self.model,
@@ -117,6 +121,7 @@ class RuntimeState:
             active_message = parsed
         return cls(
             session_id=str(data["session_id"]),
+            workspace_root=(str(data["workspace_root"]) if data.get("workspace_root") is not None else None),
             messages=messages_from_dicts([dict(item) for item in data.get("messages", [])]),
             provider=str(data.get("provider") or "unknown"),
             model=str(data.get("model") or "unknown"),
@@ -224,6 +229,7 @@ class RuntimeServices:
     interrupt: InterruptHandler | None = None
     steering: SteeringHandler | None = None
     cancel_requested: CancellationHandler | None = None
+    suspend_requested: SuspensionHandler | None = None
     confirm: Confirm | None = None
     id_factory: Callable[[], str] = new_tool_call_id
     clock: Callable[[], str] = utc_now

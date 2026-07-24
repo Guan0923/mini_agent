@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from ...core.context import AgentRuntime
 from ...core.events import RuntimeEvent
-from .outcomes import cancel_run
+from .outcomes import cancel_run, suspend_run
 
 
 def cancel_if_requested(runtime: AgentRuntime) -> bool:
     """Cancel the active run once when its process-local signal is set."""
+
+    suspend = runtime.services.suspend_requested
+    if suspend is not None and suspend():
+        if runtime.run.status == "suspended":
+            return True
+        if runtime.run.status == "running":
+            suspend_run(runtime)
+            return True
 
     handler = runtime.services.cancel_requested
     if handler is None or not handler():

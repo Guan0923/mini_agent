@@ -39,6 +39,10 @@ EventKind = Literal[
     "error",
     "final",
     "run_finished",
+    "run_suspended",
+    "run_resumed",
+    "run_interrupted",
+    "run_terminated",
     "approval_requested",
     "approval_granted",
     "user_input_requested",
@@ -47,11 +51,21 @@ EventKind = Literal[
     "steering_applied",
     "handoff_created",
     "cancelled",
+    "tool_indeterminate",
     "plan_progress",
 ]
 RunMode = Literal["agent", "plan"]
-RunStatus = Literal["running", "completed", "failed", "cancelled"]
+RunStatus = Literal[
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+    "suspended",
+    "interrupted",
+    "terminated",
+]
 StrategyPolicy = Literal["auto", "reactive", "dynamic_replan"]
+RunTrigger = Literal["tui", "cli", "embedding", "handoff", "resume", "legacy"]
 
 
 def utc_now() -> str:
@@ -60,6 +74,34 @@ def utc_now() -> str:
 
 def new_run_id() -> str:
     return f"run_{uuid4().hex}"
+
+
+def new_workflow_id() -> str:
+    return f"workflow_{uuid4().hex}"
+
+
+@dataclass(frozen=True)
+class RunProvenance:
+    """Immutable identity and ancestry for one workflow attempt."""
+
+    workflow_id: str = field(default_factory=new_workflow_id)
+    attempt: int = 1
+    trigger: RunTrigger = "embedding"
+    workspace_root: str | None = None
+    source_session_id: str | None = None
+    source_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryCheckpoint:
+    """The last durable boundary from which an interrupted run is inspected."""
+
+    reason: str
+    timestamp: str
+    call_id: str | None = None
+    exchange_id: str | None = None
+    interruption: str | None = None
+    indeterminate_call_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,6 +154,8 @@ class RunState:
     status: RunStatus = "running"
     handoff: RunHandoff | None = None
     active_skills: list[SkillSnapshot] = field(default_factory=list)
+    provenance: RunProvenance = field(default_factory=RunProvenance)
+    checkpoint: RecoveryCheckpoint | None = None
 
     def add_event(self, kind: EventKind, message: str, **data: Any) -> None:
         self.events.append(TraceEvent(kind=kind, message=message, data=data))
@@ -157,6 +201,8 @@ class RunState:
             "status": self.status,
             "handoff": asdict(self.handoff) if self.handoff else None,
             "active_skills": [skill.to_dict() for skill in self.active_skills],
+            "provenance": asdict(self.provenance),
+            "checkpoint": asdict(self.checkpoint) if self.checkpoint else None,
         }
 
     @classmethod
@@ -212,6 +258,41 @@ class RunState:
                 ),
             )
 
+        provenance_data = data.get("provenance")
+        if isinstance(provenance_data, dict):
+            provenance = RunProvenance(
+                workflow_id=str(provenance_data.get("workflow_id") or data["run_id"]),
+                attempt=max(1, int(provenance_data.get("attempt", 1))),
+                trigger=provenance_data.get("trigger", "legacy"),
+                workspace_root=(
+                    str(provenance_data["workspace_root"])
+                    if provenance_data.get("workspace_root") is not None
+                    else None
+                ),
+                source_session_id=(
+                    str(provenance_data["source_session_id"])
+                    if provenance_data.get("source_session_id") is not None
+                    else None
+                ),
+                source_run_id=(
+                    str(provenance_data["source_run_id"]) if provenance_data.get("source_run_id") is not None else None
+                ),
+            )
+        else:
+            provenance = RunProvenance(workflow_id=str(data["run_id"]), trigger="legacy")
+
+        checkpoint_data = data.get("checkpoint")
+        checkpoint = None
+        if isinstance(checkpoint_data, dict) and checkpoint_data.get("reason"):
+            checkpoint = RecoveryCheckpoint(
+                reason=str(checkpoint_data["reason"]),
+                timestamp=str(checkpoint_data.get("timestamp") or utc_now()),
+                call_id=(str(checkpoint_data["call_id"]) if checkpoint_data.get("call_id") else None),
+                exchange_id=(str(checkpoint_data["exchange_id"]) if checkpoint_data.get("exchange_id") else None),
+                interruption=(str(checkpoint_data["interruption"]) if checkpoint_data.get("interruption") else None),
+                indeterminate_call_ids=tuple(str(item) for item in checkpoint_data.get("indeterminate_call_ids", [])),
+            )
+
         return cls(
             task=data["task"],
             mode=data["mode"],
@@ -247,6 +328,8 @@ class RunState:
                 SkillSnapshot.from_dict(dict(item)) for item in data.get("active_skills", []) if isinstance(item, dict)
             ],
             handoff=handoff,
+            provenance=provenance,
+            checkpoint=checkpoint,
         )
 
     @staticmethod

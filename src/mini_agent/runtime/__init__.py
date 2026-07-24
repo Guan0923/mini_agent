@@ -36,6 +36,7 @@ _EXPORTS = {
     "RuntimeState": ("core.context", "RuntimeState"),
     "SessionStore": ("conversation.store", "SessionStore"),
     "SteeringHandler": ("core.contracts", "SteeringHandler"),
+    "SuspensionHandler": ("core.contracts", "SuspensionHandler"),
     "SQLiteCheckpointStore": ("persistence.checkpoints", "SQLiteCheckpointStore"),
     "SQLiteSessionStore": ("conversation.sessions", "SQLiteSessionStore"),
     "TaskPreparationError": ("conversation.service", "TaskPreparationError"),

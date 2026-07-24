@@ -23,7 +23,11 @@ def test_completes_permission_from_a_prefix() -> None:
 
 
 def test_completes_multiple_commands_from_a_prefix() -> None:
-    assert [item.value for item in _completions("/s")] == ["/sessions", "/session", "/skills"]
+    assert [item.value for item in _completions("/s")] == ["/sessions", "/skills"]
+
+
+def test_resume_completion_replaces_use_and_session() -> None:
+    assert [item.value for item in _completions("/r")] == ["/resume"]
 
 
 def test_completes_clear_from_a_prefix() -> None:
