@@ -166,6 +166,8 @@ TUI 有两种模式，默认是 Agent 模式：模型每次选择工具调用或
 
 Agent 模式只支持 `reactive` 和 `dynamic_replan`：前者适合简单、逐步确定的任务，后者会按实时工具结果生成并替换后续可执行阶段。默认的 `auto` 会让模型在这两种策略中选择；模型返回其他值时，运行时会按 `--max-model-repairs` 发送纠正请求。
 
+主决策循环的 system prompt 使用四层包内资源组合：`instruction.md` 说明 Mini-Agent 的项目意义和真实能力，`default.md` 保存两种模式的共同规则并通过唯一插槽嵌入 `plan.md` 或 `agent.md`，Active Skills 最后追加且不能削弱基础规则。策略选择、上下文摘要、JSON 执行计划和步骤评估仍使用各自的窄职责提示词，避免交互式 Agent 规则干扰结构化输出。维护提示词时应先确认运行时已有对应工具、权限和 UI 协议；尚未实现的能力不能只靠提示词声明。
+
 输入 `/plan` 会进入只读规划与讨论模式：普通问候、解释和需求讨论直接作为对话返回；`read_file`、`glob` 和 `grep` 可用于本地调研，网页搜索/抓取仍会要求确认，`write_file`、`edit_file` 和 `run_command` 不会暴露。若项目本身无法回答会实质影响方案的问题，模型可单独调用 Plan 专用控制工具 `request_user_input`。只有当完整实施计划确实需要用户审核时，模型才单独调用 `request_plan_review` 并进入 `PLAN REVIEW`。两个控制工具都不注册到 `ToolRegistry`，也不计入 `/tools` 展示的执行工具。
 
 Plan 调研、控制工具调用和结构化结果都作为普通 typed messages 保存在 session runtime history。`request_plan_review` 的计划正文保存在该调用的参数中，同一历史不会再插入重复计划消息；隔离 handoff 仍通过 run 的 `final_answer` 为新 session 提供一条计划 AssistantMessage。`PLAN REVIEW` 保留三个选择：`Implement`、`Implement and Clear Session` 和 `Cancel and Stay in plan mode`。handoff 后仍由正常策略路由器选择执行方式，不强制 `dynamic_replan`。

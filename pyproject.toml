@@ -37,6 +37,9 @@ xfail_strict = true
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"mini_agent.planning.prompts" = ["*.md"]
+
 [tool.coverage.run]
 branch = true
 source = ["mini_agent"]
