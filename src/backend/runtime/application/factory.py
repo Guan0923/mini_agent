@@ -9,7 +9,7 @@ from typing import Literal
 from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.providers import LLMClient, ModelConfig
 from backend.skills import SkillCatalog
-from backend.storage import PostgresCheckpointStore, PostgresSessionStore
+from backend.storage import PostgresCheckpointStore, PostgresDatabase, PostgresSessionStore
 from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry
 
 from ..conversation.references import FileReferenceExpander
@@ -43,7 +43,8 @@ def build_application(
 
     files = WorkspaceFiles(workspace)
     tools = build_tool_registry(workspace, workspace_files=files)
-    session_store = build_session_store(workspace)
+    database = PostgresDatabase(database_url(workspace))
+    session_store = PostgresSessionStore(database=database)
     runner = _build_runner(
         workspace,
         planner_name,
@@ -52,7 +53,7 @@ def build_application(
         hooks,
         checkpoints=session_store,
     )
-    return AgentApplication(runner, session_store, FileReferenceExpander(files))
+    return AgentApplication(runner, session_store, FileReferenceExpander(files), database)
 
 
 def build_runner(

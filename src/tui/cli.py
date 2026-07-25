@@ -85,11 +85,11 @@ class TerminalApp(InteractiveAppMixin, TaskAppMixin, CommandAppMixin):
             handle_event(event)
         if event.kind != "context_usage":
             return
-        estimated = event.data.get("estimated_tokens")
+        estimated = event.data.get("input_tokens", event.data.get("estimated_tokens"))
         context_size = event.data.get("context_size")
-        threshold = event.data.get("threshold", 0.8)
-        if isinstance(estimated, int) and isinstance(context_size, int) and isinstance(threshold, int | float):
-            view.set_context_usage(estimated, context_size, float(threshold))
+        target_ratio = event.data.get("target_ratio", 0.8)
+        if isinstance(estimated, int) and isinstance(context_size, int) and isinstance(target_ratio, int | float):
+            view.set_context_usage(estimated, context_size, float(target_ratio))
 
     def _present_runtime_event(self, event: RuntimeEvent) -> None:
         """Keep the console presenter as the non-interactive fallback."""
@@ -207,12 +207,19 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     app = TerminalApp(conversation, workspace / args.log_dir)
-    app._run_trigger = "cli" if args.task else "tui"
-    if args.task:
-        if args.resume and conversation.prepare_resume(args.resume).requires_action:
-            parser.error("The resumed session has suspended work; run without a task and choose Continue or Terminate.")
-        state = app.run_task(" ".join(args.task))
-        return 0 if state is not None and state.status == "completed" else 1
-    if args.resume:
-        app._startup_resume_id = args.resume
-    return app.start()
+    try:
+        app._run_trigger = "cli" if args.task else "tui"
+        if args.task:
+            if args.resume and conversation.prepare_resume(args.resume).requires_action:
+                parser.error(
+                    "The resumed session has recoverable work; run without a task and choose Continue or Back."
+                )
+            state = app.run_task(" ".join(args.task))
+            return 0 if state is not None and state.status == "completed" else 1
+        if args.resume:
+            app._startup_resume_id = args.resume
+        return app.start()
+    finally:
+        close = getattr(application, "close", None)
+        if callable(close):
+            close()

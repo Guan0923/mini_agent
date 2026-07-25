@@ -90,6 +90,13 @@ class ModelRequestExecutor:
         if output_mode == "tools":
             exchange.allowed_tools = list(hook_context.allowed_tools)
         exchange.context["request_parameters"] = dict(hook_context.request_parameters)
+        estimate_input = getattr(self._client, "estimate_input_tokens", None)
+        if callable(estimate_input):
+            exchange.context["estimated_input_tokens"] = estimate_input(
+                exchange.messages,
+                exchange.allowed_tools,
+                dict(hook_context.request_parameters),
+            )
 
         if getattr(self._client, "records_runtime_events", False):
             return self._client.run(runtime)

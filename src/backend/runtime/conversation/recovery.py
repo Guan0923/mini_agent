@@ -41,12 +41,9 @@ def build_preview(session: Session, state: RuntimeState | None) -> ResumePreview
         if message.kind in {"tool_result", "tool_failed"} and message.data.get("call_id")
     }
     uncertain = tuple(sorted(called - finished))
-    status = "interrupted" if state.status == "running" and run.status == "running" else run.status
-    interruption_reason = checkpoint.interruption if checkpoint else None
-    if status == "interrupted" and interruption_reason is None:
-        interruption_reason = "process_interrupted"
-    elif status == "suspended" and interruption_reason is None:
-        interruption_reason = "user_suspended"
+    process_interrupted = state.status == "running" and run.status == "running"
+    status = "failed" if process_interrupted else run.status
+    stop_reason = "process_interrupted" if process_interrupted else run.stop_reason
     return ResumePreview(
         session_id=session.session_id,
         title=session.title,
@@ -58,11 +55,12 @@ def build_preview(session: Session, state: RuntimeState | None) -> ResumePreview
         mode=run.mode,
         strategy=run.strategy,
         status=status,
+        stop_reason=stop_reason,
         source_session_id=run.provenance.source_session_id,
         source_run_id=run.provenance.source_run_id,
         checkpoint_reason=checkpoint.reason if checkpoint else None,
         checkpoint_at=checkpoint.timestamp if checkpoint else None,
-        interruption_reason=interruption_reason,
+        interruption_reason=stop_reason,
         indeterminate_call_ids=uncertain or (checkpoint.indeterminate_call_ids if checkpoint else ()),
     )
 
@@ -70,7 +68,7 @@ def build_preview(session: Session, state: RuntimeState | None) -> ResumePreview
 def reconstruct_attempt(state: RuntimeState) -> tuple[RuntimeState, RuntimeState]:
     """Return archived source and a safe new attempt without replaying pending tools."""
 
-    if state.current_run is None or state.current_run.status not in {"running", "suspended", "interrupted"}:
+    if state.current_run is None or state.current_run.status not in {"running", "failed", "cancelled"}:
         raise RuntimeError("The selected session has no resumable workflow.")
 
     source = RuntimeState.from_dict(state.to_dict())
@@ -80,11 +78,12 @@ def reconstruct_attempt(state: RuntimeState) -> tuple[RuntimeState, RuntimeState
     old_run = resumed.current_run
 
     interrupted_at = utc_now()
-    was_interrupted = source_run.status in {"running", "interrupted"}
-    interruption = "process_interrupted" if was_interrupted else "user_suspended"
+    process_interrupted = source_run.status == "running"
+    interruption = "process_interrupted" if process_interrupted else source_run.stop_reason
     if source_run.status == "running":
-        source_run.status = "interrupted"
-        source.status = "interrupted"
+        source_run.status = "failed"
+        source_run.stop_reason = "process_interrupted"
+        source.status = "idle"
 
     called = {
         str(message.data.get("call_id"))
@@ -157,8 +156,9 @@ def reconstruct_attempt(state: RuntimeState) -> tuple[RuntimeState, RuntimeState
                 step.status = replacement.status
                 step.result = replacement.result
 
-    if source_run.status == "interrupted":
+    if process_interrupted:
         message = "Previous process stopped before the workflow reached a terminal state."
+        source_run.final_answer = source_run.final_answer or message
         source_run.add_event("run_interrupted", message)
         source_run.add_runtime_message(
             "run_interrupted",
@@ -213,6 +213,7 @@ def reconstruct_attempt(state: RuntimeState) -> tuple[RuntimeState, RuntimeState
     payload.update(
         run_id=new_id,
         status="running",
+        stop_reason=None,
         final_answer=None,
         handoff=None,
         events=[],

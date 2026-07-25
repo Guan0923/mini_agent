@@ -170,6 +170,8 @@ def test_display_command_updates_view_and_status() -> None:
         def __init__(self) -> None:
             self.levels: list[str] = []
             self.system: list[tuple[str, str]] = []
+            self.reviews: list[dict[str, object]] = []
+            self.ui_states: list[tuple[str, bool]] = []
 
         def set_detail_level(self, detail_level: str) -> None:
             self.levels.append(detail_level)
@@ -177,15 +179,38 @@ def test_display_command_updates_view_and_status() -> None:
         def write_system(self, text: str, end: str = "\n") -> None:
             self.system.append((text, end))
 
+        def begin_review(self, *args, **kwargs) -> None:
+            self.reviews.append({"args": args, "kwargs": kwargs})
+
+        def set_ui(self, *, status: str, interrupt_enabled: bool = False) -> None:
+            self.ui_states.append((status, interrupt_enabled))
+
     app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
     view = DisplayView()
     app._view = view
 
+    assert cli.TerminalApp._split_input("/display") == [("command", "display", "")]
+    assert app._handle_command("display", "") is True
+    assert len(view.reviews) == 1
+    review = view.reviews[0]
+    assert review["args"][:3] == (
+        "DISPLAY MODE",
+        "Current: Medium",
+        "Choose how much detail future agent runs show.",
+    )
+    assert review["kwargs"] == {"initial_choice_id": "medium"}
+    callback = review["args"][4]
+    callback("minimal", None)
+    assert app._display_mode == "minimal"
+    assert view.levels == ["minimal"]
+    assert view.ui_states[-1] == ("AGENT | IDLE | DISPLAY: MINIMAL | PERMISSION: APPROVAL FOR ME", False)
+
     assert cli.TerminalApp._split_input("/display verbose") == [("command", "display", "verbose")]
     assert app._handle_command("display", "verbose") is True
     assert app._display_mode == "verbose"
-    assert view.levels == ["verbose"]
-    assert view.system == [("Display mode set to verbose.", "\n")]
+    assert view.levels == ["minimal", "verbose"]
+    assert view.ui_states[-1] == ("AGENT | IDLE | DISPLAY: VERBOSE | PERMISSION: APPROVAL FOR ME", False)
+    assert view.system[-1] == ("Display mode set to verbose.", "\n")
     assert "DISPLAY: VERBOSE" in app._status_with_permission("AGENT | IDLE")
 
     assert app._handle_command("display", "unknown") is True

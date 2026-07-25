@@ -66,11 +66,12 @@ class RuntimeState:
     active_tool_index: int | None = None
     usage: dict[str, Any] | None = None
     turn_usage: dict[str, Any] | None = None
+    token_usage: dict[str, Any] = field(default_factory=dict)
     status: RuntimeStatus = "idle"
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, include_runtime_messages: bool = True) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "workspace_root": self.workspace_root,
@@ -98,12 +99,17 @@ class RuntimeState:
                 }
                 for spec in self.tool_specs
             ],
-            "current_run": self.current_run.to_dict() if self.current_run else None,
+            "current_run": (
+                self.current_run.to_dict(include_runtime_messages=include_runtime_messages)
+                if self.current_run
+                else None
+            ),
             "run_history": [summary.__dict__ for summary in self.run_history],
             "active_message": message_to_dict(self.active_message) if self.active_message else None,
             "active_tool_index": self.active_tool_index,
             "usage": self.usage,
             "turn_usage": self.turn_usage,
+            "token_usage": self.token_usage,
             "status": self.status,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -146,7 +152,8 @@ class RuntimeState:
             active_tool_index=data.get("active_tool_index"),
             usage=data.get("usage") if isinstance(data.get("usage"), dict) else None,
             turn_usage=data.get("turn_usage") if isinstance(data.get("turn_usage"), dict) else None,
-            status=data.get("status", "idle"),
+            token_usage=dict(data.get("token_usage") or {}),
+            status="running" if data.get("status") == "running" else "idle",
             created_at=str(data.get("created_at") or utc_now()),
             updated_at=str(data.get("updated_at") or utc_now()),
         )

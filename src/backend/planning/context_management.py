@@ -1,26 +1,19 @@
-"""Provider-neutral conversation cleanup and automatic history compression."""
+"""Provider-neutral conversation history compression."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Protocol
 
-from backend.domain import (
-    AssistantMessage,
-    ChatMessage,
-    PlanningError,
-    SystemMessage,
-    ToolSpec,
-    UserMessage,
-)
+from backend.domain import AssistantMessage, ChatMessage, PlanningError, SystemMessage, ToolSpec, UserMessage
 from backend.runtime.core.context import AgentRuntime
 from backend.runtime.core.events import RuntimeEvent
 
 _CONTEXT_SUMMARY_NAME = "context_summary"
 _CONTEXT_SUMMARY_PREFIX = "[Conversation summary]"
-_DEFAULT_THRESHOLD = 0.8
+_DEFAULT_TARGET_RATIO = 0.8
 
 
 class TokenEstimator(Protocol):
@@ -35,13 +28,12 @@ class TokenEstimator(Protocol):
         request_parameters: dict[str, Any],
     ) -> int: ...
 
-
-@dataclass(frozen=True)
-class _CleanResult:
-    messages: list[ChatMessage]
-    turn_start_index: int
-    removed_messages: int
-    removed_tool_calls: int
+    def estimate_input_tokens(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolSpec],
+        request_parameters: dict[str, Any],
+    ) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -55,15 +47,19 @@ class ContextCompactionResult:
 
 
 class ContextManager:
-    """Clean durable history and summarize old turns before model requests."""
+    """Summarize completed conversation history without altering active work."""
 
-    def __init__(self, estimator: TokenEstimator, threshold: float = _DEFAULT_THRESHOLD) -> None:
+    def __init__(self, estimator: TokenEstimator, target_ratio: float = _DEFAULT_TARGET_RATIO) -> None:
         if estimator.context_size < 1:
             raise ValueError("context_size must be positive.")
-        if not 0 < threshold < 1:
-            raise ValueError("context compression threshold must be between zero and one.")
+        if not 0 < target_ratio < 1:
+            raise ValueError("context compression target ratio must be between zero and one.")
         self.estimator = estimator
-        self.threshold = threshold
+        self.target_ratio = target_ratio
+
+    @property
+    def target_tokens(self) -> int:
+        return int(self.estimator.context_size * self.target_ratio)
 
     def compact(
         self,
@@ -71,76 +67,38 @@ class ContextManager:
         *,
         summarize: Callable[[str], str],
     ) -> ContextCompactionResult:
-        """Immediately summarize old turns while preserving the latest turn."""
+        """Manually summarize all persisted, already-finished conversation history."""
 
-        previous_messages = len(runtime.state.messages)
-        clean = self._clean_history(runtime)
-        boundary = min(max(clean.turn_start_index, 0), len(clean.messages))
-        old_history = clean.messages[:boundary]
-
-        summary_only = (
-            len(old_history) == 1
-            and isinstance(old_history[0], SystemMessage)
-            and old_history[0].name == _CONTEXT_SUMMARY_NAME
-        )
-        if not old_history or summary_only:
-            if clean.removed_messages or clean.removed_tool_calls:
-                self._record(
-                    runtime,
-                    "context_cleaned",
-                    "Incomplete context removed",
-                    {
-                        "removed_messages": clean.removed_messages,
-                        "removed_tool_calls": clean.removed_tool_calls,
-                        "remaining_messages": len(clean.messages),
-                    },
-                )
-                self._replace_history(runtime, clean.messages, clean.turn_start_index)
-            return ContextCompactionResult(
-                compacted=False,
-                previous_messages=previous_messages,
-                remaining_messages=len(clean.messages),
-            )
-
-        summary = summarize(self._transcript(old_history)).strip()
-        if not summary:
-            raise PlanningError("Context summarization returned no content.")
-
-        compressed = [
-            SystemMessage(
-                name=_CONTEXT_SUMMARY_NAME,
-                content=f"{_CONTEXT_SUMMARY_PREFIX}\n{summary}",
-            ),
-            *clean.messages[boundary:],
-        ]
-        if clean.removed_messages or clean.removed_tool_calls:
-            self._record(
-                runtime,
-                "context_cleaned",
-                "Incomplete context removed",
-                {
-                    "removed_messages": clean.removed_messages,
-                    "removed_tool_calls": clean.removed_tool_calls,
-                    "remaining_messages": len(clean.messages),
-                },
-            )
-        self._record(
+        original = list(runtime.state.messages)
+        if not original:
+            return ContextCompactionResult(False, 0, 0)
+        estimated_before = self._estimate_input_tokens(original, [], {})
+        summary, compressed, estimated_after = self._summarize_candidate(
             runtime,
-            "context_compressed",
-            "Conversation context compacted manually",
-            {
-                "previous_messages": len(old_history),
-                "remaining_messages": len(compressed),
-                "manual": True,
-            },
+            source=original,
+            retained=[],
+            summarize=summarize,
+            trigger="manual",
+            estimated_before=estimated_before,
+            estimate_candidate=lambda candidate: self._estimate_input_tokens(candidate, [], {}),
         )
         self._replace_history(runtime, compressed, 1)
-        return ContextCompactionResult(
-            compacted=True,
-            previous_messages=previous_messages,
-            remaining_messages=len(compressed),
-            summary=summary,
+        self._record(
+            runtime,
+            "context_compaction_completed",
+            "Conversation context compacted manually",
+            {
+                "trigger": "manual",
+                "source_messages": len(original),
+                "previous_messages": len(original),
+                "remaining_messages": len(compressed),
+                "estimated_tokens_before": estimated_before,
+                "estimated_tokens_after": estimated_after,
+                "target_tokens": self.target_tokens,
+            },
         )
+        runtime.save()
+        return ContextCompactionResult(True, len(original), len(compressed), summary)
 
     def prepare(
         self,
@@ -152,78 +110,115 @@ class ContextManager:
         request_parameters: dict[str, Any] | None = None,
         summarize: Callable[[str], str],
     ) -> list[ChatMessage]:
-        """Return cleaned request messages, compressing old history when needed."""
-
-        clean = self._clean_history(runtime)
-        if clean.removed_messages or clean.removed_tool_calls:
-            self._replace_history(runtime, clean.messages, clean.turn_start_index)
-            self._record(
-                runtime,
-                "context_cleaned",
-                "Incomplete context removed",
-                {
-                    "removed_messages": clean.removed_messages,
-                    "removed_tool_calls": clean.removed_tool_calls,
-                    "remaining_messages": len(clean.messages),
-                },
-            )
+        """Build a request, compacting only completed history when it would exceed the window."""
 
         suffix = list(extra or [])
         exposed_tools = list(tools or [])
         parameters = dict(request_parameters or {})
         messages = [system, *runtime.state.messages, *suffix]
-        estimated = self.estimator.estimate_tokens(messages, exposed_tools, parameters)
-        provider_total = self._provider_total(runtime)
-        threshold_tokens = int(self.estimator.context_size * self.threshold)
-        self._publish_usage(runtime, estimated, phase="before_compression")
-        if max(estimated, provider_total or 0) < threshold_tokens:
+        estimated_before = self._estimate_input_tokens(messages, exposed_tools, parameters)
+        self._publish_usage(runtime, estimated_before, phase="before_compaction")
+        if estimated_before < self.target_tokens:
+            runtime.exchange.context["estimated_input_tokens"] = estimated_before
             return messages
 
         boundary = min(max(runtime.run.turn_start_index, 0), len(runtime.state.messages))
-        old_history = runtime.state.messages[:boundary]
-        if old_history:
-            transcript = self._transcript(old_history)
-            try:
-                summary = summarize(transcript).strip()
-            except PlanningError:
-                summary = ""
-            if summary:
-                retained = runtime.state.messages[boundary:]
-                compressed = [
-                    SystemMessage(
-                        name=_CONTEXT_SUMMARY_NAME,
-                        content=f"{_CONTEXT_SUMMARY_PREFIX}\n{summary}",
-                    ),
-                    *retained,
-                ]
-                self._replace_history(runtime, compressed, 1)
-                messages = [system, *runtime.state.messages, *suffix]
-                estimated_after = self.estimator.estimate_tokens(messages, exposed_tools, parameters)
-                self._record(
-                    runtime,
-                    "context_compressed",
-                    "Conversation context compressed",
-                    {
-                        "previous_messages": len(old_history),
-                        "remaining_messages": len(compressed),
-                        "provider_total_tokens": provider_total,
-                        "estimated_tokens_before": estimated,
-                        "estimated_tokens_after": estimated_after,
-                        "threshold_tokens": threshold_tokens,
-                    },
+        completed_history = runtime.state.messages[:boundary]
+        if not completed_history:
+            if estimated_before >= self.estimator.context_size:
+                raise PlanningError(
+                    "The current turn exceeds the model context window and cannot be compacted before it finishes."
                 )
-                estimated = estimated_after
-                self._publish_usage(runtime, estimated, phase="after_compression")
+            runtime.exchange.context["estimated_input_tokens"] = estimated_before
+            return messages
 
-        if estimated >= self.estimator.context_size:
-            raise PlanningError(
-                "The current request still exceeds the model context window after context cleanup and compression."
+        summary, compressed, estimated_after = self._summarize_candidate(
+            runtime,
+            source=completed_history,
+            retained=runtime.state.messages[boundary:],
+            summarize=summarize,
+            trigger="automatic",
+            estimated_before=estimated_before,
+            estimate_candidate=lambda candidate: self._estimate_input_tokens(
+                [system, *candidate, *suffix], exposed_tools, parameters
+            ),
+        )
+        previous_messages = len(runtime.state.messages)
+        self._replace_history(runtime, compressed, 1)
+        self._record(
+            runtime,
+            "context_compaction_completed",
+            "Conversation context compacted automatically",
+            {
+                "trigger": "automatic",
+                "source_messages": len(completed_history),
+                "previous_messages": previous_messages,
+                "remaining_messages": len(compressed),
+                "estimated_tokens_before": estimated_before,
+                "estimated_tokens_after": estimated_after,
+                "target_tokens": self.target_tokens,
+            },
+        )
+        runtime.save()
+        self._publish_usage(runtime, estimated_after, phase="after_compaction")
+        runtime.exchange.context["estimated_input_tokens"] = estimated_after
+        return [system, *runtime.state.messages, *suffix]
+
+    def _summarize_candidate(
+        self,
+        runtime: AgentRuntime,
+        *,
+        source: list[ChatMessage],
+        retained: list[ChatMessage],
+        summarize: Callable[[str], str],
+        trigger: str,
+        estimated_before: int,
+        estimate_candidate: Callable[[list[ChatMessage]], int],
+    ) -> tuple[str, list[ChatMessage], int]:
+        self._record(
+            runtime,
+            "context_compaction_started",
+            "Conversation context compaction started",
+            {
+                "trigger": trigger,
+                "source_messages": len(source),
+                "retained_messages": len(retained),
+                "estimated_tokens_before": estimated_before,
+                "target_tokens": self.target_tokens,
+            },
+        )
+        runtime.save()
+        try:
+            summary = summarize(self._transcript(source)).strip()
+            if not summary:
+                raise PlanningError("Context summarization returned no content.")
+            compressed = [
+                SystemMessage(name=_CONTEXT_SUMMARY_NAME, content=f"{_CONTEXT_SUMMARY_PREFIX}\n{summary}"),
+                *retained,
+            ]
+            estimated_after = estimate_candidate(compressed)
+            if estimated_after > self.target_tokens:
+                raise PlanningError(
+                    "Context compaction could not reduce the candidate request to the configured context target."
+                )
+        except Exception as exc:
+            self._record(
+                runtime,
+                "context_compaction_failed",
+                "Conversation context compaction failed",
+                {
+                    "trigger": trigger,
+                    "source_messages": len(source),
+                    "estimated_tokens_before": estimated_before,
+                    "target_tokens": self.target_tokens,
+                    "error": str(exc),
+                },
             )
-        return messages
+            runtime.save()
+            raise
+        return summary, compressed, estimated_after
 
     def _publish_usage(self, runtime: AgentRuntime, estimated: int, *, phase: str) -> None:
-        context_size = self.estimator.context_size
-        threshold_tokens = int(context_size * self.threshold)
         publish = runtime.services.publish or (lambda _event: None)
         publish(
             RuntimeEvent(
@@ -231,63 +226,33 @@ class ContextManager:
                 "Context usage estimated",
                 {
                     "estimated_tokens": estimated,
-                    "context_size": context_size,
-                    "threshold": self.threshold,
-                    "threshold_tokens": threshold_tokens,
-                    "ratio": estimated / context_size,
+                    "input_tokens": estimated,
+                    "input_source": "estimated",
+                    "context_size": self.estimator.context_size,
+                    "target_ratio": self.target_ratio,
+                    "target_tokens": self.target_tokens,
+                    "ratio": estimated / self.estimator.context_size,
                     "phase": phase,
                 },
             )
         )
 
-    @staticmethod
-    def _provider_total(runtime: AgentRuntime) -> int | None:
-        usage = runtime.state.turn_usage or runtime.state.usage
-        if not isinstance(usage, dict):
-            return None
-        total = usage.get("total_tokens")
-        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
-            return None
-        return total
-
-    @staticmethod
-    def _clean_history(runtime: AgentRuntime) -> _CleanResult:
-        boundary = min(max(runtime.run.turn_start_index, 0), len(runtime.state.messages))
-        messages: list[ChatMessage] = []
-        new_boundary = 0
-        removed_messages = 0
-        removed_tool_calls = 0
-
-        for index, message in enumerate(runtime.state.messages):
-            cleaned: ChatMessage | None = message
-            if isinstance(message, SystemMessage | UserMessage):
-                if not message.content or not message.content.strip():
-                    cleaned = None
-            elif isinstance(message, AssistantMessage):
-                complete_tools = [
-                    tool for tool in message.tool_messages if tool.status != "pending" and tool.content is not None
-                ]
-                removed_tool_calls += len(message.tool_messages) - len(complete_tools)
-                if not (message.content and message.content.strip()) and not complete_tools:
-                    cleaned = None
-                elif len(complete_tools) != len(message.tool_messages):
-                    cleaned = replace(message, tool_messages=complete_tools)
-
-            if cleaned is None:
-                removed_messages += 1
-                continue
-            messages.append(cleaned)
-            if index < boundary:
-                new_boundary += 1
-
-        return _CleanResult(messages, new_boundary, removed_messages, removed_tool_calls)
+    def _estimate_input_tokens(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolSpec],
+        request_parameters: dict[str, Any],
+    ) -> int:
+        estimate = getattr(self.estimator, "estimate_input_tokens", None)
+        if callable(estimate):
+            return estimate(messages, tools, request_parameters)
+        return self.estimator.estimate_tokens(messages, tools, request_parameters)
 
     @staticmethod
     def _replace_history(runtime: AgentRuntime, messages: list[ChatMessage], turn_start_index: int) -> None:
         runtime.state.messages = messages
         runtime.run.history = runtime.state.messages
         runtime.run.turn_start_index = turn_start_index
-        runtime.save()
 
     @staticmethod
     def _record(runtime: AgentRuntime, kind: str, message: str, data: dict[str, Any]) -> None:

@@ -2,42 +2,30 @@
 
 from __future__ import annotations
 
-import os
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 import psycopg
 
+from .database import PostgresDatabase
+
 
 class PostgresSchemaMixin:
-    def __init__(self, database_url: str | None = None) -> None:
-        configured_url = database_url or os.environ.get("TEST_DATABASE_URL")
-        configured_url = configured_url or os.environ.get("DATABASE_URL", "")
-        if not configured_url.strip():
-            raise ValueError("DATABASE_URL must be configured for PostgreSQL storage.")
-        self._database_url = configured_url
+    def __init__(self, database_url: str | None = None, *, database: PostgresDatabase | None = None) -> None:
+        self._database = database or PostgresDatabase.shared(database_url)
+        self._owns_database = False
         self._initialize()
 
     @contextmanager
     def _connect(self) -> Iterator[psycopg.Connection]:
-        connection: psycopg.Connection | None = None
-        last_error: psycopg.OperationalError | None = None
-        for attempt in range(3):
-            try:
-                connection = psycopg.connect(self._database_url)
-                break
-            except psycopg.OperationalError as exc:
-                last_error = exc
-                if attempt < 2:
-                    time.sleep(0.05 * (attempt + 1))
-        if connection is None:
-            raise RuntimeError("Unable to connect to PostgreSQL using DATABASE_URL.") from last_error
-        try:
-            with connection:
-                yield connection
-        except psycopg.OperationalError as exc:
-            raise RuntimeError("PostgreSQL operation failed.") from exc
+        with self._database.connection() as connection:
+            yield connection
+
+    def close(self) -> None:
+        """Close a privately-owned pool; injected pools remain application-owned."""
+
+        if self._owns_database:
+            self._database.close()
 
     def _initialize(self) -> None:
         statements = (
@@ -133,5 +121,27 @@ class PostgresSchemaMixin:
             """,
         )
         with self._connect() as connection:
-            for statement in statements:
-                connection.execute(statement)
+            migration_table = connection.execute("SELECT to_regclass('public.schema_migrations')").fetchone()
+            if migration_table is None or migration_table[0] is None:
+                connection.execute(
+                    """CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"""
+                )
+            applied = {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations").fetchall()}
+            if 1 not in applied:
+                for statement in statements:
+                    connection.execute(statement)
+                connection.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (1, CURRENT_TIMESTAMP)")
+            if 2 not in applied:
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS session_messages_page_idx ON session_messages (session_id, id DESC)"
+                )
+                connection.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (2, CURRENT_TIMESTAMP)")
+            if 3 not in applied:
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS run_runtime_messages (
+                    run_id TEXT NOT NULL REFERENCES runs(run_id), sequence INTEGER NOT NULL,
+                    kind TEXT NOT NULL, message TEXT NOT NULL, data_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL, PRIMARY KEY (run_id, sequence))"""
+                )
+                connection.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (3, CURRENT_TIMESTAMP)")

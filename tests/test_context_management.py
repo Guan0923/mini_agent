@@ -21,6 +21,7 @@ from backend.planning.rule_based import RuleBasedPlanner
 from backend.providers import DeepSeek, ModelConfig, ModelConfigurationError
 from backend.runtime import AgentRunner
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
+from backend.runtime.core.events import CHECKPOINT_EVENT_KINDS
 from backend.tools import ToolRegistry
 
 
@@ -51,7 +52,7 @@ def runtime_for(messages, *, turn_start_index: int) -> AgentRuntime:
     return runtime
 
 
-def test_context_manager_removes_incomplete_messages_and_pending_tools() -> None:
+def test_context_manager_preserves_incomplete_messages_and_pending_tools() -> None:
     pending = ToolMessage(name="pending", call_id="call_pending")
     complete = ToolMessage(
         name="complete",
@@ -59,16 +60,12 @@ def test_context_manager_removes_incomplete_messages_and_pending_tools() -> None
         content="result",
         status="succeeded",
     )
-    runtime = runtime_for(
-        [
-            UserMessage(content="  "),
-            AssistantMessage(tool_messages=[pending, complete]),
-            UserMessage(content="current"),
-        ],
-        turn_start_index=2,
-    )
-    events = []
-    runtime.services.publish = events.append
+    original = [
+        UserMessage(content="  "),
+        AssistantMessage(tool_messages=[pending, complete]),
+        UserMessage(content="current"),
+    ]
+    runtime = runtime_for(original, turn_start_index=2)
 
     messages = ContextManager(FakeEstimator([20])).prepare(
         runtime,
@@ -76,18 +73,13 @@ def test_context_manager_removes_incomplete_messages_and_pending_tools() -> None
         summarize=lambda _transcript: "unused",
     )
 
-    assert [message.role for message in runtime.state.messages] == ["assistant", "user"]
-    assistant = runtime.state.messages[0]
-    assert isinstance(assistant, AssistantMessage)
-    assert assistant.tool_messages == [complete]
-    assert runtime.run.turn_start_index == 1
-    assert messages[1:] == runtime.state.messages
-    cleaned = next(event for event in events if event.kind == "context_cleaned")
-    assert cleaned.data["removed_messages"] == 1
-    assert cleaned.data["removed_tool_calls"] == 1
+    assert runtime.state.messages == original
+    assert messages[1:] == original
+    assert runtime.run.turn_start_index == 2
+    assert not any(event.kind.startswith("context_compaction") for event in runtime.run.events)
 
 
-def test_provider_total_tokens_trigger_compression_and_keep_current_run() -> None:
+def test_automatic_compaction_compresses_only_completed_history() -> None:
     runtime = runtime_for(
         [
             UserMessage(content="old question"),
@@ -96,26 +88,55 @@ def test_provider_total_tokens_trigger_compression_and_keep_current_run() -> Non
         ],
         turn_start_index=2,
     )
-    runtime.state.usage = {"total_tokens": 80}
     transcripts: list[str] = []
 
-    messages = ContextManager(FakeEstimator([20, 15])).prepare(
+    messages = ContextManager(FakeEstimator([100, 20])).prepare(
         runtime,
         SystemMessage(content="system"),
         summarize=lambda transcript: transcripts.append(transcript) or "old exchange summary",
     )
 
     assert transcripts and "old question" in transcripts[0] and "old answer" in transcripts[0]
-    assert isinstance(runtime.state.messages[0], SystemMessage)
-    assert runtime.state.messages[0].name == "context_summary"
-    assert runtime.state.messages[1] == UserMessage(content="current")
+    assert runtime.state.messages == [
+        SystemMessage(name="context_summary", content="[Conversation summary]\nold exchange summary"),
+        UserMessage(content="current"),
+    ]
     assert runtime.run.turn_start_index == 1
     assert messages[1:] == runtime.state.messages
-    compressed = next(event for event in runtime.run.events if event.kind == "context_compressed")
-    assert compressed.data["provider_total_tokens"] == 80
+    assert [event.kind for event in runtime.run.events] == [
+        "context_compaction_started",
+        "context_compaction_completed",
+    ]
+    completed = runtime.run.events[-1]
+    assert completed.data["trigger"] == "automatic"
+    assert completed.data["estimated_tokens_after"] == 20
+    assert completed.data["target_tokens"] == 80
 
 
-def test_summary_failure_keeps_original_history() -> None:
+def test_automatic_compaction_keeps_active_message_unchanged() -> None:
+    runtime = runtime_for(
+        [
+            UserMessage(content="old"),
+            AssistantMessage(content="answer"),
+            UserMessage(content="current"),
+        ],
+        turn_start_index=2,
+    )
+    active = AssistantMessage(tool_messages=[ToolMessage(name="pending", call_id="call_pending")])
+    runtime.state.active_message = active
+
+    ContextManager(FakeEstimator([100, 20])).prepare(
+        runtime,
+        SystemMessage(content="system"),
+        summarize=lambda _transcript: "summary",
+    )
+
+    assert runtime.state.active_message is active
+    assert active.tool_messages[0].status == "pending"
+    assert runtime.state.messages[-1] == UserMessage(content="current")
+
+
+def test_summary_failure_keeps_original_history_and_records_failure() -> None:
     original = [
         UserMessage(content="old"),
         AssistantMessage(content="answer"),
@@ -123,33 +144,48 @@ def test_summary_failure_keeps_original_history() -> None:
     ]
     runtime = runtime_for(original, turn_start_index=2)
 
-    messages = ContextManager(FakeEstimator([80])).prepare(
-        runtime,
-        SystemMessage(content="system"),
-        summarize=lambda _transcript: (_ for _ in ()).throw(PlanningError("failed")),
-    )
+    with pytest.raises(PlanningError, match="failed"):
+        ContextManager(FakeEstimator([100])).prepare(
+            runtime,
+            SystemMessage(content="system"),
+            summarize=lambda _transcript: (_ for _ in ()).throw(PlanningError("failed")),
+        )
 
     assert runtime.state.messages == original
-    assert messages[1:] == original
-    assert not any(event.kind == "context_compressed" for event in runtime.run.events)
+    assert [event.kind for event in runtime.run.events] == [
+        "context_compaction_started",
+        "context_compaction_failed",
+    ]
 
 
-def test_uncompressible_current_request_over_context_size_fails() -> None:
-    runtime = runtime_for([UserMessage(content="current")], turn_start_index=0)
+def test_uncompressible_current_request_over_context_size_fails_without_deleting_context() -> None:
+    original = [UserMessage(content="current")]
+    runtime = runtime_for(original, turn_start_index=0)
 
-    with pytest.raises(PlanningError, match="exceeds the model context window"):
+    with pytest.raises(PlanningError, match="cannot be compacted before it finishes"):
         ContextManager(FakeEstimator([100])).prepare(
             runtime,
             SystemMessage(content="system"),
             summarize=lambda _transcript: "unused",
         )
 
+    assert runtime.state.messages == original
+    assert not runtime.run.events
 
-def test_manual_compaction_summarizes_old_history_and_keeps_latest_turn() -> None:
+
+def test_manual_compaction_summarizes_all_finished_history_and_tool_results() -> None:
+    succeeded = ToolMessage(name="search", call_id="call_success", content="found", status="succeeded")
+    failed = ToolMessage(name="write", call_id="call_failed", content="denied", status="failed")
+    indeterminate = ToolMessage(
+        name="deploy",
+        call_id="call_unknown",
+        content="outcome unknown",
+        status="indeterminate",
+    )
     runtime = runtime_for(
         [
             UserMessage(content="old question"),
-            AssistantMessage(content="old answer"),
+            AssistantMessage(tool_messages=[succeeded, failed, indeterminate]),
             UserMessage(content="latest question"),
             AssistantMessage(content="latest answer"),
         ],
@@ -164,16 +200,17 @@ def test_manual_compaction_summarizes_old_history_and_keeps_latest_turn() -> Non
 
     assert result.compacted is True
     assert result.previous_messages == 4
-    assert result.remaining_messages == 3
-    assert transcripts and "old question" in transcripts[0]
+    assert result.remaining_messages == 1
+    assert transcripts and all(value in transcripts[0] for value in ("search", "found", "denied", "outcome unknown"))
     assert runtime.state.messages == [
         SystemMessage(name="context_summary", content="[Conversation summary]\ndurable summary"),
-        UserMessage(content="latest question"),
-        AssistantMessage(content="latest answer"),
     ]
     assert runtime.run.turn_start_index == 1
-    event = next(item for item in runtime.run.events if item.kind == "context_compressed")
-    assert event.data["manual"] is True
+    assert [event.kind for event in runtime.run.events] == [
+        "context_compaction_started",
+        "context_compaction_completed",
+    ]
+    assert runtime.run.events[-1].data["trigger"] == "manual"
 
 
 def test_manual_compaction_failure_leaves_history_unchanged() -> None:
@@ -191,7 +228,23 @@ def test_manual_compaction_failure_leaves_history_unchanged() -> None:
         )
 
     assert runtime.state.messages == original
-    assert not any(item.kind == "context_compressed" for item in runtime.run.events)
+    assert [event.kind for event in runtime.run.events] == [
+        "context_compaction_started",
+        "context_compaction_failed",
+    ]
+
+
+def test_candidate_over_context_target_keeps_history_unchanged() -> None:
+    original = [UserMessage(content="old"), AssistantMessage(content="answer")]
+    runtime = runtime_for(original, turn_start_index=2)
+
+    with pytest.raises(PlanningError, match="configured context target"):
+        ContextManager(FakeEstimator([100, 81])).compact(runtime, summarize=lambda _transcript: "too large")
+
+    assert runtime.state.messages == original
+    failed = runtime.run.events[-1]
+    assert failed.kind == "context_compaction_failed"
+    assert failed.data["target_tokens"] == 80
 
 
 class FakeEncoding:
@@ -260,13 +313,18 @@ class ContextAwareClient:
 
     def __init__(self) -> None:
         self.operations: list[tuple[str | None, bool]] = []
+        self.estimates = [100, 20]
+        self.summary_prompt: str | None = None
 
     def estimate_tokens(self, messages, tools, request_parameters) -> int:
-        return 20
+        if len(self.estimates) > 1:
+            return self.estimates.pop(0)
+        return self.estimates[0]
 
     def run(self, runtime: AgentRuntime) -> PreparedResponse:
         self.operations.append((runtime.exchange.operation, runtime.exchange.stream))
         if runtime.exchange.operation == "summarize":
+            self.summary_prompt = runtime.exchange.messages[0].content
             runtime.state.turn_usage = {"total_tokens": 5}
             return PreparedResponse(AssistantMessage(content="compressed history"), {"total_tokens": 5})
         runtime.state.turn_usage = {"total_tokens": 9}
@@ -292,6 +350,7 @@ def test_llm_planner_runs_non_streaming_summary_before_normal_request() -> None:
 
     assert response.content == "final"
     assert client.operations == [("summarize", False), ("decision", True)]
+    assert client.summary_prompt is not None and "CONTEXT CHECKPOINT COMPACTION" in client.summary_prompt
     assert runtime.state.turn_usage == {"total_tokens": 9}
 
 
@@ -317,6 +376,19 @@ def test_rule_planner_rejects_manual_context_compaction() -> None:
         runner.compact_context(runtime)
 
     assert runtime.state.messages == [UserMessage(content="latest")]
+
+    runtime.state.current_run = RunState(task="active", mode="agent", history=runtime.state.messages)
+    runtime.state.status = "running"
+    with pytest.raises(RuntimeError, match="Current turn is still running"):
+        runner.compact_context(runtime)
+
+
+def test_compaction_events_are_checkpointed() -> None:
+    assert {
+        "context_compaction_started",
+        "context_compaction_completed",
+        "context_compaction_failed",
+    } <= CHECKPOINT_EVENT_KINDS
 
 
 def test_model_config_loads_context_defaults_and_overrides(tmp_path: Path) -> None:
@@ -357,7 +429,7 @@ def test_context_manager_publishes_usage_before_and_after_compression() -> None:
     events = []
     runtime.services.publish = events.append
 
-    ContextManager(FakeEstimator([80, 20])).prepare(
+    ContextManager(FakeEstimator([100, 20])).prepare(
         runtime,
         SystemMessage(content="system"),
         summarize=lambda _transcript: "summary",
@@ -365,7 +437,34 @@ def test_context_manager_publishes_usage_before_and_after_compression() -> None:
 
     usage = [event for event in events if event.kind == "context_usage"]
     assert [(event.data["phase"], event.data["estimated_tokens"]) for event in usage] == [
-        ("before_compression", 80),
-        ("after_compression", 20),
+        ("before_compaction", 100),
+        ("after_compaction", 20),
     ]
-    assert all(event.data["threshold_tokens"] == 80 for event in usage)
+    assert all(event.data["target_tokens"] == 80 for event in usage)
+
+
+def test_context_manager_uses_input_estimate_without_output_reservation() -> None:
+    class SplitEstimator:
+        context_size = 100
+
+        def estimate_tokens(self, _messages, _tools, _parameters) -> int:
+            return 95
+
+        def estimate_input_tokens(self, _messages, _tools, _parameters) -> int:
+            return 90
+
+    runtime = runtime_for([UserMessage(content="current")], turn_start_index=0)
+    events = []
+    runtime.services.publish = events.append
+
+    ContextManager(SplitEstimator()).prepare(
+        runtime,
+        SystemMessage(content="system"),
+        summarize=lambda _transcript: "unused",
+    )
+
+    assert not any(event.kind.startswith("context_compaction") for event in runtime.run.events)
+    usage = next(event for event in events if event.kind == "context_usage")
+    assert usage.data["input_tokens"] == 90
+    assert usage.data["estimated_tokens"] == 90
+    assert runtime.exchange.context["estimated_input_tokens"] == 90

@@ -142,3 +142,37 @@ def test_tui_does_not_treat_paths_or_urls_as_commands() -> None:
     segments = TerminalApp._split_input("read docs/architecture.md from https://example.com/guide")
 
     assert segments == [("task", "read docs/architecture.md from https://example.com/guide", "")]
+
+
+def test_postgres_stores_reuse_the_process_connection_pool() -> None:
+    first = PostgresSessionStore()
+    second = PostgresSessionStore()
+
+    assert first._database is second._database
+
+
+def test_session_store_reads_conversation_in_chronological_cursor_pages() -> None:
+    store = PostgresSessionStore()
+    session = store.create_session("Paged")
+    for index in range(3):
+        run_id = f"run_page_{index}"
+        store.start_turn(session.session_id, run_id, f"question {index}")
+        store.finish_turn(session.session_id, run_id, "completed", f"answer {index}")
+
+    newest, before_id = store.load_conversation_page(session.session_id, limit=2)
+    older, final_before_id = store.load_conversation_page(session.session_id, before_id=before_id, limit=2)
+    oldest, exhausted_before_id = store.load_conversation_page(session.session_id, before_id=final_before_id, limit=2)
+
+    assert newest == [
+        {"role": "user", "content": "question 2"},
+        {"role": "assistant", "content": "answer 2"},
+    ]
+    assert older == [
+        {"role": "user", "content": "question 1"},
+        {"role": "assistant", "content": "answer 1"},
+    ]
+    assert oldest == [
+        {"role": "user", "content": "question 0"},
+        {"role": "assistant", "content": "answer 0"},
+    ]
+    assert exhausted_before_id is None

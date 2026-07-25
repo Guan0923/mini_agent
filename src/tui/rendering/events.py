@@ -28,9 +28,9 @@ class TranscriptEventMixin:
         if assistant is None:
             return
         if event.kind == "thinking_start":
-            if self.detail_level != "verbose":
+            if self.detail_level == "minimal":
                 return
-            node, body = self._add_assistant_node(assistant, "think_content", collapsed=True)
+            node, body = self._add_assistant_node(assistant, "think_content", collapsed=False)
             node.set_activity(True)
             self._thinking_by_run[run_id] = (node, body)
         elif event.kind == "thinking_delta":
@@ -41,6 +41,7 @@ class TranscriptEventMixin:
             current = self._thinking_by_run.pop(run_id, None)
             if current is not None:
                 current[0].set_activity(False)
+                current[0].collapsed = True
         elif event.kind == "response_start":
             node, body = self._add_assistant_node(assistant, "response_content", collapsed=False)
             node.set_activity(True)
@@ -108,7 +109,7 @@ class TranscriptEventMixin:
             return
         reasoning = message.get("reasoning")
         if (
-            self.detail_level == "verbose"
+            self.detail_level != "minimal"
             and isinstance(reasoning, str)
             and reasoning
             and not data.get("reasoning_streamed")
@@ -204,6 +205,7 @@ class TranscriptEventMixin:
         current = self._thinking_by_run.pop(run_id, None)
         if current is not None:
             current[0].set_activity(False)
+            current[0].collapsed = True
         current = self._response_by_run.pop(run_id, None)
         if current is not None:
             current[0].set_activity(False)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ...core.context import AgentRuntime
 from ...core.events import RuntimeEvent
-from .outcomes import cancel_run, suspend_run
+from .outcomes import cancel_run, pause_run
 
 
 def cancel_if_requested(runtime: AgentRuntime) -> bool:
@@ -12,10 +12,10 @@ def cancel_if_requested(runtime: AgentRuntime) -> bool:
 
     suspend = runtime.services.suspend_requested
     if suspend is not None and suspend():
-        if runtime.run.status == "suspended":
+        if runtime.run.status == "cancelled" and runtime.run.stop_reason == "user_paused":
             return True
         if runtime.run.status == "running":
-            suspend_run(runtime)
+            pause_run(runtime)
             return True
 
     handler = runtime.services.cancel_requested

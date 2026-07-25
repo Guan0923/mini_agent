@@ -95,6 +95,8 @@ class ChoicePromptMixin:
         details: str,
         choices: tuple[ChoiceItem, ...],
         on_complete: Callable[[str, str | None], None],
+        *,
+        initial_choice_id: str | None = None,
     ) -> None:
         if not choices:
             raise ValueError("Review requires at least one choice.")
@@ -107,7 +109,11 @@ class ChoicePromptMixin:
             self.question_header.display = True
             self.review_details.update(details)
             self.review_details.display = bool(details)
-            lists = [InlineChoiceList(choices)]
+            initial_index = next(
+                (index for index, choice in enumerate(choices) if choice.id == initial_choice_id),
+                0,
+            )
+            lists = [InlineChoiceList(choices, initial_index=initial_index)]
             self._mount_choice_lists(lists)
             self._show_choice_list(0)
 

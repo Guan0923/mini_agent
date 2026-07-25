@@ -98,6 +98,9 @@ def model_response_data(state: RuntimeState, exchange: RuntimeExchange, response
         "usage": response.usage,
         "message": _message_to_record(response.message),
     }
+    token_usage = state.token_usage.get("requests", {}).get(exchange.exchange_id)
+    if isinstance(token_usage, dict):
+        data["usage_accounting"] = dict(token_usage)
     if exchange.wire_response is not None:
         data["wire_response"] = exchange.wire_response
     if exchange.transport_metadata:
@@ -121,6 +124,9 @@ def model_error_data(state: RuntimeState, exchange: RuntimeExchange, error: Exce
     }
     if exchange.wire_request is not None:
         data["wire_request"] = exchange.wire_request
+    token_usage = state.token_usage.get("requests", {}).get(exchange.exchange_id)
+    if isinstance(token_usage, dict):
+        data["usage_accounting"] = dict(token_usage)
     if exchange.wire_response is not None:
         data["wire_response"] = exchange.wire_response
     if exchange.transport_metadata:

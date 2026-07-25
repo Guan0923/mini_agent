@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from backend.domain import ChatMessage, ToolSpec
+from backend.domain import AssistantMessage, ChatMessage, ToolSpec
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 
 from ..config import ModelConfig
@@ -69,15 +69,40 @@ class DeepSeek:
         tools: list[ToolSpec],
         request_parameters: dict[str, Any],
     ) -> int:
+        """Return the legacy request budget including the configured output ceiling."""
+
+        return self.estimate_input_tokens(messages, tools, request_parameters) + self._max_tokens(request_parameters)
+
+    def estimate_input_tokens(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolSpec],
+        request_parameters: dict[str, Any],
+    ) -> int:
+        """Estimate request input without treating the output ceiling as consumed context."""
+
         payload: dict[str, Any] = {"messages": _wire_messages_from(messages)}
         if tools:
             payload["tools"] = [_tool_definition(spec) for spec in tools]
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        encoding = self._get_tokenizer().encode(serialized)
+        return len(self._get_tokenizer().encode(serialized).ids)
+
+    def estimate_output_tokens(self, message: AssistantMessage) -> int:
+        """Estimate streamed output until the provider returns final usage."""
+
+        payload = {
+            "content": message.content or "",
+            "reasoning": message.reasoning or "",
+            "tool_calls": [{"name": tool.name, "arguments": tool.arguments} for tool in message.tool_messages],
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        return len(self._get_tokenizer().encode(serialized).ids)
+
+    def _max_tokens(self, request_parameters: dict[str, Any]) -> int:
         max_tokens = request_parameters.get("max_tokens", self.config.max_tokens)
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
             max_tokens = self.config.max_tokens
-        return len(encoding.ids) + max_tokens
+        return max_tokens
 
     def _get_tokenizer(self) -> Any:
         if self._tokenizer is not None:

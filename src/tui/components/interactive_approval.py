@@ -122,7 +122,6 @@ class InteractiveApproval:
                 str(request.data.get("details") or ""),
                 (
                     ChoiceItem("continue", "Continue", "Create a new attempt from the durable checkpoint."),
-                    ChoiceItem("terminate", "Terminate", "Close this workflow without executing more work."),
                     ChoiceItem("back", "Back", "Leave the current session unchanged."),
                 ),
                 self._complete_review,
@@ -173,7 +172,7 @@ class InteractiveApproval:
         if request.kind == "plan":
             allowed = {"implement", "implement_clear_session", "cancel"}
         elif request.kind == "resume":
-            allowed = {"continue", "terminate", "back"}
+            allowed = {"continue", "back"}
         else:
             allowed = {"continue", "cancel", "supplement"}
         self._pending = None

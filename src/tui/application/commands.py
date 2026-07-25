@@ -10,6 +10,7 @@ from backend.domain import PlanningError
 
 from ..components.commands import COMMAND_ARGUMENT_NAMES, COMMAND_PATTERN, render_help
 from ..rendering.state import DETAIL_LEVELS
+from ..widgets import ChoiceItem
 
 HELP = render_help()
 
@@ -87,16 +88,14 @@ class CommandAppMixin:
             self._approval.configure_permission()
             return True
         if command == "display":
+            if not argument:
+                self._show_display_selector()
+                return True
             detail_level = argument.casefold()
             if detail_level not in DETAIL_LEVELS:
                 self._write("Usage: /display <minimal|medium|verbose>")
                 return True
-            self._display_mode = detail_level
-            view = getattr(self, "_view", None)
-            set_detail_level = getattr(view, "set_detail_level", None)
-            if callable(set_detail_level):
-                set_detail_level(detail_level)
-            self._write(f"Display mode set to {detail_level}.")
+            self._set_display_mode(detail_level)
             return True
         if command == "sessions":
             if argument:
@@ -169,6 +168,36 @@ class CommandAppMixin:
             self._show_trace()
             return True
         return True
+
+    def _show_display_selector(self) -> None:
+        view = getattr(self, "_view", None)
+        begin_review = getattr(view, "begin_review", None)
+        if not callable(begin_review):
+            self._write("Display selector requires the interactive TUI.")
+            return
+        begin_review(
+            "DISPLAY MODE",
+            f"Current: {self._display_mode.title()}",
+            "Choose how much detail future agent runs show.",
+            (
+                ChoiceItem("minimal", "Minimal", "Processing status and final responses only."),
+                ChoiceItem("medium", "Medium", "Thinking and tool names, without tool details."),
+                ChoiceItem("verbose", "Verbose", "Thinking, responses, and expandable tool details."),
+            ),
+            lambda choice, _supplement: self._set_display_mode(choice),
+            initial_choice_id=self._display_mode,
+        )
+
+    def _set_display_mode(self, detail_level: str) -> None:
+        self._display_mode = detail_level
+        view = getattr(self, "_view", None)
+        set_detail_level = getattr(view, "set_detail_level", None)
+        if callable(set_detail_level):
+            set_detail_level(detail_level)
+        set_ui = getattr(view, "set_ui", None)
+        if callable(set_ui):
+            set_ui(status=self._status_with_permission("AGENT | IDLE"), interrupt_enabled=False)
+        self._write(f"Display mode set to {detail_level}.")
 
     def _ensure_session(self, title: str | None = None):
         if self.session_store is None:
@@ -274,7 +303,11 @@ class CommandAppMixin:
         load_history = getattr(view, "load_history", None)
         if self.active_session is None or not callable(load_history):
             return
-        load_history(self._conversation_service.history())
+        history_page = getattr(self._conversation_service, "history_page", None)
+        messages, _ = (
+            history_page(limit=50) if callable(history_page) else (self._conversation_service.history()[-50:], None)
+        )
+        load_history(messages)
 
     def _show_history(self) -> None:
         view = getattr(self, "_view", None)
@@ -296,10 +329,23 @@ class CommandAppMixin:
                     else "No active session."
                 )
             return
-        messages = self._conversation_service.history()
+        history_page = getattr(self._conversation_service, "history_page", None)
+        messages, before_id = (
+            history_page(limit=100) if callable(history_page) else (self._conversation_service.history(), None)
+        )
         if callable(show_history):
             session = self.active_session
-            show_history(f"{session.session_id} — {session.title}", messages)
+            try:
+                show_history(
+                    f"{session.session_id} — {session.title}",
+                    messages,
+                    before_id=before_id,
+                    load_older=(
+                        (lambda cursor: history_page(before_id=cursor, limit=100)) if callable(history_page) else None
+                    ),
+                )
+            except TypeError:
+                show_history(f"{session.session_id} — {session.title}", messages)
             return
         if not messages:
             self._write("No conversation history.")

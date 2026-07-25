@@ -19,6 +19,6 @@ os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
 def reset_postgres_schema() -> None:
     """Give every test an empty schema without touching the development database."""
 
-    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as connection:
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True, connect_timeout=3) as connection:
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")

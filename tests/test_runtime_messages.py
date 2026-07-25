@@ -1,6 +1,8 @@
 import json
+import os
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from backend.domain import AssistantMessage, PlanningError, ToolMessage
@@ -412,3 +414,20 @@ def test_unexpected_failure_closes_open_response_stream() -> None:
     assert kinds[-1] == "response_end"
     transient = {"response_start", "response_delta", "response_end"}
     assert transient.isdisjoint(message.kind for message in runtime.run.runtime_messages)
+
+
+def test_session_snapshot_excludes_audit_messages_and_restores_them(tmp_path: Path) -> None:
+    store = PostgresSessionStore()
+    service = ConversationService(AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)), store)
+    state = service.run_task("calculate 2 + 2", mode="agent")
+
+    assert service.active_session is not None
+    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as connection:
+        payload = connection.execute(
+            "SELECT state_json FROM session_runtime WHERE session_id = %s", (service.active_session.session_id,)
+        ).fetchone()[0]
+    assert json.loads(payload)["current_run"]["runtime_messages"] == []
+
+    restored = store.load_runtime(service.active_session.session_id)
+    assert restored is not None and restored.current_run is not None
+    assert restored.current_run.runtime_messages == state.runtime_messages

@@ -171,7 +171,8 @@ class AgentRunner:
 
         self.bind(runtime)
         if runtime.state.status == "running":
-            raise RuntimeError("Context cannot be compacted while a run is active.")
+            raise RuntimeError("Current turn is still running; context cannot be compacted.")
+        runtime.services.publish = RunEventPublisher(runtime)
         if not isinstance(self.planner, ContextCompactor):
             raise PlanningError("Context compaction requires the LLM planner.")
         if runtime.state.current_run is None:
@@ -330,7 +331,7 @@ class AgentRunner:
         run = runtime.run
         runtime.state.usage = runtime.state.turn_usage
         runtime.state.turn_usage = None
-        runtime.state.status = "suspended" if run.status == "suspended" else "idle"
+        runtime.state.status = "idle"
         if not any(summary.run_id == run.run_id for summary in runtime.state.run_history):
             runtime.state.run_history.append(
                 RunSummary(

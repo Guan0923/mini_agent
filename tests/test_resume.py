@@ -124,8 +124,8 @@ def test_resume_creates_linked_attempt_without_replaying_indeterminate_tool(tmp_
     session_id = service.active_session.session_id
     preview = service.prepare_resume(session_id)
     source_run_id = preview.run_id
-    assert preview.status == "interrupted"
-    assert preview.interruption_reason == "process_interrupted"
+    assert preview.status == "failed"
+    assert preview.stop_reason == "process_interrupted"
     assert preview.indeterminate_call_ids == ("call_side_effect",)
 
     reopened = ConversationService(service.runner, store)
@@ -154,17 +154,18 @@ def test_resume_creates_linked_attempt_without_replaying_indeterminate_tool(tmp_
     assert any(summary.run_id == source_run_id for summary in archived.run_history)
 
 
-def test_cooperative_suspend_is_resumable_and_preserves_workflow_identity(tmp_path: Path) -> None:
+def test_cooperative_pause_is_cancelled_resumable_and_preserves_workflow_identity(tmp_path: Path) -> None:
     service, store = shared_service(tmp_path, FinalPlanner(), ToolRegistry())
 
-    suspended = service.run_task("pause me", mode="agent", suspend_requested=lambda: True)
+    paused = service.run_task("pause me", mode="agent", suspend_requested=lambda: True)
 
-    assert suspended.status == "suspended"
+    assert paused.status == "cancelled"
+    assert paused.stop_reason == "user_paused"
     assert service.active_session is not None
-    workflow_id = suspended.provenance.workflow_id
+    workflow_id = paused.provenance.workflow_id
     preview = service.prepare_resume(service.active_session.session_id)
-    assert preview.status == "suspended"
-    assert preview.interruption_reason == "user_suspended"
+    assert preview.status == "cancelled"
+    assert preview.stop_reason == "user_paused"
 
     reopened = ConversationService(service.runner, store)
     resumed = reopened.resume_session(
@@ -178,13 +179,13 @@ def test_cooperative_suspend_is_resumable_and_preserves_workflow_identity(tmp_pa
     with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as connection:
         transition_reason = connection.execute(
             "SELECT reason FROM checkpoints WHERE run_id = %s ORDER BY id DESC LIMIT 1",
-            (suspended.run_id,),
+            (paused.run_id,),
         ).fetchone()[0]
         attempt_starts = connection.execute(
             "SELECT started_at FROM session_runs WHERE workflow_id = %s ORDER BY attempt",
             (workflow_id,),
         ).fetchall()
-    assert transition_reason == "run_suspended"
+    assert transition_reason == "run_cancelled"
     assert len(attempt_starts) == 2
     assert attempt_starts[0][0] != attempt_starts[1][0]
 
@@ -299,22 +300,55 @@ def test_legacy_run_state_defaults_provenance_to_original_run_id() -> None:
     assert restored.provenance.trigger == "legacy"
 
 
-def test_existing_interrupted_state_keeps_process_interruption_reason() -> None:
+def test_running_state_is_archived_as_failed_after_process_interruption() -> None:
     state = RuntimeState(
         session_id="session_1",
-        status="interrupted",
-        current_run=RunState(task="resume me", mode="agent", status="interrupted"),
+        status="running",
+        current_run=RunState(task="resume me", mode="agent", status="running"),
     )
 
     source, resumed = reconstruct_attempt(state)
 
     assert source.current_run is not None and source.current_run.checkpoint is not None
+    assert source.current_run.status == "failed"
+    assert source.current_run.stop_reason == "process_interrupted"
     assert source.current_run.checkpoint.interruption == "process_interrupted"
     assert resumed.current_run is not None
     assert resumed.current_run.run_id != source.current_run.run_id
     assert resumed.current_run.provenance.attempt == source.current_run.provenance.attempt + 1
     assert resumed.current_run.checkpoint is not None
     assert resumed.current_run.checkpoint.reason == "run_resumed"
+
+
+def test_failed_and_cancelled_runs_are_resumable() -> None:
+    for status, reason in (("failed", "execution_failed"), ("cancelled", "user_cancelled")):
+        state = RuntimeState(
+            session_id=f"session_{status}",
+            status="idle",
+            current_run=RunState(task="resume me", mode="agent", status=status, stop_reason=reason),
+        )
+
+        source, resumed = reconstruct_attempt(state)
+
+        assert source.current_run is not None and source.current_run.status == status
+        assert source.current_run.stop_reason == reason
+        assert resumed.current_run is not None and resumed.current_run.status == "running"
+        assert resumed.current_run.provenance.attempt == 2
+
+
+def test_legacy_statuses_migrate_to_four_state_model() -> None:
+    expected = {
+        "suspended": ("cancelled", "user_paused"),
+        "interrupted": ("failed", "process_interrupted"),
+        "terminated": ("cancelled", "user_terminated"),
+    }
+    for legacy_status, (status, reason) in expected.items():
+        restored = RunState.from_dict(
+            {"task": "legacy", "mode": "agent", "run_id": "run_legacy", "status": legacy_status}
+        )
+
+        assert restored.status == status
+        assert restored.stop_reason == reason
 
 
 def test_provenance_and_recovery_checkpoint_round_trip() -> None:
@@ -345,9 +379,9 @@ def test_provenance_and_recovery_checkpoint_round_trip() -> None:
     assert restored.checkpoint == state.checkpoint
 
 
-def test_resume_back_leaves_active_session_unchanged_and_terminate_unlocks_target(tmp_path: Path) -> None:
+def test_resume_back_leaves_cancelled_session_unchanged(tmp_path: Path) -> None:
     service, store = shared_service(tmp_path, FinalPlanner(), ToolRegistry())
-    suspended = service.run_task("pause me", mode="agent", suspend_requested=lambda: True)
+    service.run_task("pause me", mode="agent", suspend_requested=lambda: True)
     assert service.active_session is not None
     session_id = service.active_session.session_id
 
@@ -360,17 +394,10 @@ def test_resume_back_leaves_active_session_unchanged_and_terminate_unlocks_targe
     assert result is None
     assert reopened.active_session is None
 
-    terminated = reopened.resume_session(
-        session_id,
-        interrupt=lambda _request: InterruptDecision("terminate"),
-    )
-    assert terminated is not None and terminated.run_id == suspended.run_id
-    assert terminated.status == "terminated"
     restored = store.load_runtime(session_id)
     assert restored is not None and restored.status == "idle"
-    assert any(
-        message.kind == "run_terminated" for message in store.load_runtime_messages(session_id, suspended.run_id)
-    )
+    assert restored.current_run is not None and restored.current_run.status == "cancelled"
+    assert restored.current_run.stop_reason == "user_paused"
 
 
 def test_resume_without_id_uses_latest_session_and_rejects_workspace_change(tmp_path: Path) -> None:
@@ -418,12 +445,13 @@ def test_checkpoint_event_rolls_back_message_snapshot_and_run_status_together(tm
             """
         )
 
-    service.runtime.run.status = "suspended"
-    service.runtime.state.status = "suspended"
+    service.runtime.run.status = "cancelled"
+    service.runtime.run.stop_reason = "user_paused"
     assert service.runtime.services.publish is not None
     with pytest.raises(psycopg.errors.RaiseException, match="checkpoint rejected"):
-        service.runtime.services.publish(RuntimeEvent("run_suspended", "suspended"))
-
+        service.runtime.services.publish(
+            RuntimeEvent("cancelled", "Run paused by user", {"stop_reason": "user_paused"})
+        )
     with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as connection:
         after_messages = connection.execute(
             "SELECT COUNT(*) FROM session_runtime_messages WHERE run_id = %s",

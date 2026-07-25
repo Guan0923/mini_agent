@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from backend.domain import AssistantMessage, UserMessage
+from backend.domain import AssistantMessage, RunStopReason, UserMessage
 
 from ...core.context import AgentRuntime
 from ...core.events import RuntimeEvent
@@ -38,7 +38,13 @@ def complete_run(
     publish(RuntimeEvent(kind, run.final_answer, {"streamed": response_streamed}))
 
 
-def fail_run(runtime: AgentRuntime, message: str, **data: object) -> None:
+def fail_run(
+    runtime: AgentRuntime,
+    message: str,
+    *,
+    stop_reason: RunStopReason = "execution_failed",
+    **data: object,
+) -> None:
     run = runtime.run
     boundary = min(max(run.turn_start_index, 0), len(runtime.state.messages))
     already_recorded = any(
@@ -49,29 +55,31 @@ def fail_run(runtime: AgentRuntime, message: str, **data: object) -> None:
         runtime.state.messages.append(AssistantMessage(content=message))
     run.history = runtime.state.messages
     run.status = "failed"
+    run.stop_reason = stop_reason
     run.final_answer = message
     run.add_event("error", message, **data)
     publish = runtime.services.publish or (lambda _event: None)
     publish(RuntimeEvent("error", message, dict(data)))
 
 
-def cancel_run(runtime: AgentRuntime) -> None:
+def cancel_run(
+    runtime: AgentRuntime,
+    *,
+    stop_reason: RunStopReason = "user_cancelled",
+    message: str = "Run cancelled by user",
+) -> None:
     run = runtime.run
     run.status = "cancelled"
-    run.add_event("cancelled", "Run cancelled by user")
+    run.stop_reason = stop_reason
+    run.add_event("cancelled", message, stop_reason=stop_reason)
     publish = runtime.services.publish or (lambda _event: None)
-    publish(RuntimeEvent("cancelled", "cancelled"))
+    publish(RuntimeEvent("cancelled", message, {"stop_reason": stop_reason}))
 
 
-def suspend_run(runtime: AgentRuntime) -> None:
-    """Stop at a cooperative boundary while preserving resumable state."""
+def pause_run(runtime: AgentRuntime) -> None:
+    """Stop at a cooperative boundary while preserving a resumable checkpoint."""
 
-    run = runtime.run
-    run.status = "suspended"
-    runtime.state.status = "suspended"
-    run.add_event("run_suspended", "Run suspended by user")
-    publish = runtime.services.publish or (lambda _event: None)
-    publish(RuntimeEvent("run_suspended", "suspended"))
+    cancel_run(runtime, stop_reason="user_paused", message="Run paused by user")
 
 
 def record_plan_feedback(runtime: AgentRuntime, supplement: str | None) -> str | None:

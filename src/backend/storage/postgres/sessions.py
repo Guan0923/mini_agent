@@ -72,7 +72,7 @@ class PostgresSessionStore(PostgresSchemaMixin, SessionMappingMixin):
 
         state = runtime.state
         run = runtime.run
-        payload = json.dumps(state.to_dict(), ensure_ascii=False)
+        payload = self._snapshot_payload(state)
         timestamp = utc_now()
         with self._connect() as connection:
             exists = connection.execute("SELECT 1 FROM sessions WHERE session_id = %s", (state.session_id,)).fetchone()
@@ -104,7 +104,7 @@ class PostgresSessionStore(PostgresSchemaMixin, SessionMappingMixin):
                 "UPDATE session_runs SET status = %s, updated_at = %s WHERE run_id = %s AND session_id = %s",
                 (run.status, timestamp, run.run_id, state.session_id),
             )
-            self._save_runtime_messages(connection, state.session_id, run.run_id, run.runtime_messages)
+            self._save_latest_runtime_message(connection, state.session_id, run.run_id, run.runtime_messages)
             connection.execute(
                 "UPDATE sessions SET updated_at = %s WHERE session_id = %s", (timestamp, state.session_id)
             )
@@ -118,8 +118,33 @@ class PostgresSessionStore(PostgresSchemaMixin, SessionMappingMixin):
             ).fetchall()
         return [{"role": row[0], "content": row[1]} for row in rows]
 
+    def load_conversation_page(
+        self, session_id: str, *, before_id: int | None = None, limit: int = 100
+    ) -> tuple[list[dict[str, str]], int | None]:
+        """Return one cursor page in chronological display order."""
+
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self._connect() as connection:
+            if before_id is None:
+                rows = connection.execute(
+                    """SELECT id, role, content FROM session_messages
+                    WHERE session_id = %s ORDER BY id DESC LIMIT %s""",
+                    (session_id, limit + 1),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """SELECT id, role, content FROM session_messages
+                    WHERE session_id = %s AND id < %s ORDER BY id DESC LIMIT %s""",
+                    (session_id, before_id, limit + 1),
+                ).fetchall()
+        has_older = len(rows) > limit
+        page_rows = rows[:limit]
+        next_before_id = int(page_rows[-1][0]) if has_older and page_rows else None
+        return ([{"role": str(row[1]), "content": str(row[2])} for row in reversed(page_rows)], next_before_id)
+
     def save_runtime(self, state: RuntimeState) -> None:
-        payload = json.dumps(state.to_dict(), ensure_ascii=False)
+        payload = self._snapshot_payload(state)
         timestamp = utc_now()
         with self._connect() as connection:
             exists = connection.execute("SELECT 1 FROM sessions WHERE session_id = %s", (state.session_id,)).fetchone()
@@ -143,7 +168,12 @@ class PostgresSessionStore(PostgresSchemaMixin, SessionMappingMixin):
             row = connection.execute(
                 "SELECT state_json FROM session_runtime WHERE session_id = %s", (session_id,)
             ).fetchone()
-        return RuntimeState.from_dict(json.loads(row[0])) if row else None
+        if row is None:
+            return None
+        state = RuntimeState.from_dict(json.loads(row[0]))
+        if state.current_run is not None:
+            state.current_run.runtime_messages = self.load_runtime_messages(session_id, state.current_run.run_id)
+        return state
 
     def resume_runtime(self, source: RuntimeState, resumed: RuntimeState) -> None:
         """Atomically archive one attempt and install its resumed successor."""
@@ -153,8 +183,8 @@ class PostgresSessionStore(PostgresSchemaMixin, SessionMappingMixin):
         source_run = source.current_run
         resumed_run = resumed.current_run
         timestamp = utc_now()
-        source_payload = json.dumps(source.to_dict(), ensure_ascii=False)
-        resumed_payload = json.dumps(resumed.to_dict(), ensure_ascii=False)
+        source_payload = self._snapshot_payload(source)
+        resumed_payload = self._snapshot_payload(resumed)
         origin = resumed_run.provenance
         with self._connect() as connection:
             updated = connection.execute(
@@ -226,6 +256,21 @@ class PostgresSessionStore(PostgresSchemaMixin, SessionMappingMixin):
             connection.execute(
                 "UPDATE sessions SET updated_at = %s WHERE session_id = %s", (message.timestamp, session_id)
             )
+
+    @staticmethod
+    def _snapshot_payload(state: RuntimeState) -> str:
+        return json.dumps(state.to_dict(include_runtime_messages=False), ensure_ascii=False)
+
+    @classmethod
+    def _save_latest_runtime_message(
+        cls, connection, session_id: str, run_id: str, messages: list[RuntimeMessage]
+    ) -> None:
+        if not messages:
+            return
+        message = messages[-1]
+        cls._insert_runtime_message(
+            connection, session_id, run_id, message, json.dumps(message.data, ensure_ascii=False, default=str)
+        )
 
     @staticmethod
     def _insert_runtime_message(

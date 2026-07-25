@@ -763,3 +763,32 @@ def test_strategy_transport_failure_does_not_fallback() -> None:
     assert state.final_answer == "Strategy selection failed: HTTP 401 authentication failed."
     assert all(event.kind != "strategy" for event in events)
     assert any(event.kind == "error" for event in events)
+
+
+def test_llm_client_reconciles_estimated_and_provider_token_usage() -> None:
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), adapter=object())
+    runtime = runtime_for()
+    runtime.exchange.exchange_id = "exchange_usage"
+    runtime.exchange.context["estimated_input_tokens"] = 11
+
+    client._begin_token_usage(runtime)
+    client._complete_token_usage(
+        runtime,
+        {"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11},
+        AssistantMessage(content="done"),
+    )
+
+    entry = runtime.state.token_usage["requests"]["exchange_usage"]
+    assert entry["estimated_input_tokens"] == 11
+    assert entry["input_tokens"] == 8
+    assert entry["output_tokens"] == 3
+    assert entry["total_tokens"] == 11
+    assert entry["input_source"] == "provider"
+    assert entry["output_source"] == "provider"
+    assert entry["total_source"] == "provider"
+    assert runtime.state.token_usage["totals"] == {
+        "input_tokens": 8,
+        "output_tokens": 3,
+        "total_tokens": 11,
+    }
+    assert runtime.state.token_usage == type(runtime.state).from_dict(runtime.state.to_dict()).token_usage

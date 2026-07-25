@@ -42,6 +42,30 @@ def test_review_panel_embeds_choices_and_preserves_input_draft() -> None:
     asyncio.run(scenario())
 
 
+def test_review_panel_highlights_requested_initial_choice() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test() as pilot:
+            view.begin_review(
+                "DISPLAY MODE",
+                "Current: Medium",
+                "Choose a display mode.",
+                (
+                    ChoiceItem("minimal", "Minimal"),
+                    ChoiceItem("medium", "Medium"),
+                    ChoiceItem("verbose", "Verbose"),
+                ),
+                lambda _choice, _supplement: None,
+                initial_choice_id="medium",
+            )
+            await pilot.pause()
+
+            assert view.choice_menu.index == 1
+            assert view.choice_menu.rows[1].has_class("-highlighted-choice")
+
+    asyncio.run(scenario())
+
+
 def test_question_navigation_and_choice_highlight_do_not_wrap() -> None:
     async def scenario() -> None:
         questions = (

@@ -229,7 +229,7 @@ def test_minimal_detail_hides_thinking_and_tools_but_shows_progress_and_response
     asyncio.run(scenario())
 
 
-def test_medium_detail_shows_only_tool_name_and_keeps_response() -> None:
+def test_medium_detail_shows_thinking_tool_name_and_response() -> None:
     async def scenario() -> None:
         view = TerminalView()
         assert view.detail_level == "medium"
@@ -238,6 +238,10 @@ def test_medium_detail_shows_only_tool_name_and_keeps_response() -> None:
             view.handle_runtime_event(_event("run_started"))
             view.handle_runtime_event(_event("thinking_start"))
             view.handle_runtime_event(_event("thinking_delta", "private reasoning"))
+            thinking_node = view._thinking_by_run["run_1"][0]
+            assert thinking_node.collapsed is False
+            view.handle_runtime_event(_event("thinking_end"))
+            assert thinking_node.collapsed is True
             view.handle_runtime_event(
                 _event(
                     "tool_call",
@@ -256,8 +260,42 @@ def test_medium_detail_shows_only_tool_name_and_keeps_response() -> None:
             assert view._thinking_by_run == {}
             assert view._tools_by_call == {}
             assert "public answer" in view.transcript_text
-            assert "private reasoning" not in view.transcript_text
+            assert "private reasoning" in view.transcript_text
             assert "private result" not in view.transcript_text
+
+    asyncio.run(scenario())
+
+
+def test_medium_detail_shows_non_streamed_reasoning_without_tool_details() -> None:
+    async def scenario() -> None:
+        view = TerminalView(detail_level="medium")
+        async with view.run_test() as pilot:
+            view.begin_conversation("inspect files")
+            view.handle_runtime_event(_event("run_started"))
+            view.handle_runtime_event(
+                RuntimeEvent(
+                    "assistant_message",
+                    data={
+                        "run_id": "run_1",
+                        "exchange_id": "exchange_1",
+                        "message": {
+                            "content": "public answer",
+                            "reasoning": "private reasoning",
+                            "tool_messages": [
+                                {"name": "read_file", "call_id": "call_1", "arguments": {"path": "secret.txt"}}
+                            ],
+                        },
+                    },
+                )
+            )
+            await pilot.pause()
+
+            assert any(node.title_text == "think_content" for node in view.transcript_nodes)
+            assert "private reasoning" in view.transcript_text
+            assert "secret.txt" not in view.transcript_text
+            summaries = list(view.query(".transcript-tool-summary"))
+            assert len(summaries) == 1
+            assert str(summaries[0].render()) == "tool_call: read_file"
 
     asyncio.run(scenario())
 
@@ -270,7 +308,10 @@ def test_verbose_detail_shows_reasoning_and_keeps_tool_collapsed() -> None:
             view.handle_runtime_event(_event("run_started"))
             view.handle_runtime_event(_event("thinking_start"))
             view.handle_runtime_event(_event("thinking_delta", "reasoning"))
+            thinking_node = view._thinking_by_run["run_1"][0]
+            assert thinking_node.collapsed is False
             view.handle_runtime_event(_event("thinking_end"))
+            assert thinking_node.collapsed is True
             view.handle_runtime_event(
                 _event(
                     "tool_call",
@@ -290,5 +331,37 @@ def test_verbose_detail_shows_reasoning_and_keeps_tool_collapsed() -> None:
             assert "result" in view.transcript_text
             assert "public answer" in view.transcript_text
             assert not list(view.query(".transcript-tool-summary"))
+
+    asyncio.run(scenario())
+
+
+def test_history_screen_loads_older_messages_on_demand() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        calls: list[int | None] = []
+
+        def load_older(before_id: int | None) -> tuple[list[dict[str, str]], int | None]:
+            calls.append(before_id)
+            return ([{"role": "user", "content": "older"}], None)
+
+        async with view.run_test() as pilot:
+            view.show_history(
+                "session_1",
+                [{"role": "assistant", "content": "newest"}],
+                before_id=10,
+                load_older=load_older,
+            )
+            await pilot.pause()
+            screen = view.screen
+            assert isinstance(screen, HistoryScreen)
+
+            await screen.action_load_older()
+            await pilot.pause()
+
+            assert calls == [10]
+            assert screen.messages == [
+                {"role": "user", "content": "older"},
+                {"role": "assistant", "content": "newest"},
+            ]
 
     asyncio.run(scenario())

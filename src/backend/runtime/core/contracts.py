@@ -22,7 +22,6 @@ HumanChoice = Literal[
     "cancel",
     "supplement",
     "answer",
-    "terminate",
     "back",
 ]
 

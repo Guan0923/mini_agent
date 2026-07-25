@@ -42,10 +42,16 @@ class ChoiceRow(ListItem):
 class InlineChoiceList(ListView, can_focus_children=True):
     """ListView variant whose custom rows may focus an embedded Input."""
 
-    def __init__(self, items: tuple[ChoiceItem, ...], *, question_index: int | None = None) -> None:
+    def __init__(
+        self,
+        items: tuple[ChoiceItem, ...],
+        *,
+        question_index: int | None = None,
+        initial_index: int = 0,
+    ) -> None:
         self.question_index = question_index
         self.rows = tuple(ChoiceRow(item) for item in items)
-        super().__init__(*self.rows, initial_index=0, classes="choice-list")
+        super().__init__(*self.rows, initial_index=initial_index, classes="choice-list")
 
     @property
     def highlighted_row(self) -> ChoiceRow | None:

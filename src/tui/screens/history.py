@@ -1,6 +1,9 @@
-"""Read-only full-screen conversation history."""
+"""Read-only paged conversation history."""
 
 from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -11,9 +14,11 @@ from textual.widgets import Static
 from ..latex import LatexMarkdown
 from ..selectable import CopyableScroll
 
+HistoryPageLoader = Callable[[int | None], tuple[list[dict[str, str]], int | None]]
+
 
 class HistoryScreen(Screen[None]):
-    """Show the current session transcript without exposing message input."""
+    """Show a bounded transcript and load older pages only on request."""
 
     CSS = """
     HistoryScreen { background: #101418; color: #d7dde5; }
@@ -53,12 +58,22 @@ class HistoryScreen(Screen[None]):
         Binding("pagedown", "page_down", show=False, priority=True),
         Binding("home", "home", show=False, priority=True),
         Binding("end", "end", show=False, priority=True),
+        Binding("ctrl+home", "load_older", show=False, priority=True),
     ]
 
-    def __init__(self, session_label: str, messages: list[dict[str, str]]) -> None:
+    def __init__(
+        self,
+        session_label: str,
+        messages: list[dict[str, str]],
+        *,
+        before_id: int | None = None,
+        load_older: HistoryPageLoader | None = None,
+    ) -> None:
         super().__init__()
         self.session_label = session_label
         self.messages = messages
+        self._before_id = before_id
+        self._load_older = load_older
         self.history_log = CopyableScroll(*self._content_widgets(), id="history-log")
 
     def _content_widgets(self) -> list[Widget]:
@@ -74,7 +89,7 @@ class HistoryScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Static(f"HISTORY | {self.session_label}", id="history-header")
         yield self.history_log
-        yield Static("READ ONLY | Select text and right-click to copy | Esc to return", id="history-footer")
+        yield Static("Ctrl+Home loads older messages | Esc returns", id="history-footer")
 
     def on_mount(self) -> None:
         self.call_after_refresh(self.history_log.scroll_end, animate=False)
@@ -93,3 +108,18 @@ class HistoryScreen(Screen[None]):
 
     def action_end(self) -> None:
         self.history_log.scroll_end(animate=False)
+
+    async def action_load_older(self) -> None:
+        """Fetch and prepend one older page without blocking the Textual loop."""
+
+        if self._load_older is None or self._before_id is None:
+            return
+        messages, before_id = await asyncio.to_thread(self._load_older, self._before_id)
+        if not messages:
+            self._before_id = None
+            return
+        self.messages = [*messages, *self.messages]
+        self._before_id = before_id
+        await self.history_log.remove_children()
+        await self.history_log.mount(*self._content_widgets())
+        self.history_log.scroll_home(animate=False)

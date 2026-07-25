@@ -22,8 +22,9 @@ EventKind = Literal[
     "run_started",
     "skills_selected",
     "strategy",
-    "context_cleaned",
-    "context_compressed",
+    "context_compaction_started",
+    "context_compaction_completed",
+    "context_compaction_failed",
     "model",
     "model_repair",
     "model_retry",
@@ -60,9 +61,13 @@ RunStatus = Literal[
     "completed",
     "failed",
     "cancelled",
-    "suspended",
-    "interrupted",
-    "terminated",
+]
+RunStopReason = Literal[
+    "execution_failed",
+    "user_cancelled",
+    "user_paused",
+    "user_terminated",
+    "process_interrupted",
 ]
 StrategyPolicy = Literal["auto", "reactive", "dynamic_replan"]
 RunTrigger = Literal["tui", "cli", "embedding", "handoff", "resume", "legacy"]
@@ -152,6 +157,7 @@ class RunState:
     final_answer: str | None = None
     model_turns: int = 0
     status: RunStatus = "running"
+    stop_reason: RunStopReason | None = None
     handoff: RunHandoff | None = None
     active_skills: list[SkillSnapshot] = field(default_factory=list)
     provenance: RunProvenance = field(default_factory=RunProvenance)
@@ -180,7 +186,7 @@ class RunState:
         self.runtime_messages.append(runtime_message)
         return runtime_message
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, include_runtime_messages: bool = True) -> dict[str, Any]:
         return {
             "task": self.task,
             "mode": self.mode,
@@ -191,7 +197,9 @@ class RunState:
             "history": [message_to_dict(message) for message in self.history],
             "actions": [tool_message_to_dict(action) for action in self.actions],
             "events": [asdict(event) for event in self.events],
-            "runtime_messages": [asdict(message) for message in self.runtime_messages],
+            "runtime_messages": [asdict(message) for message in self.runtime_messages]
+            if include_runtime_messages
+            else [],
             "completed_steps": self.completed_steps,
             "plan": self._plan_to_dict(self.plan) if self.plan else None,
             "plan_history": [self._plan_to_dict(plan) for plan in self.plan_history],
@@ -199,6 +207,7 @@ class RunState:
             "final_answer": self.final_answer,
             "model_turns": self.model_turns,
             "status": self.status,
+            "stop_reason": self.stop_reason,
             "handoff": asdict(self.handoff) if self.handoff else None,
             "active_skills": [skill.to_dict() for skill in self.active_skills],
             "provenance": asdict(self.provenance),
@@ -293,6 +302,19 @@ class RunState:
                 indeterminate_call_ids=tuple(str(item) for item in checkpoint_data.get("indeterminate_call_ids", [])),
             )
 
+        raw_status = str(data.get("status") or "running")
+        legacy_statuses: dict[str, tuple[RunStatus, RunStopReason | None]] = {
+            "suspended": ("cancelled", "user_paused"),
+            "interrupted": ("failed", "process_interrupted"),
+            "terminated": ("cancelled", "user_terminated"),
+        }
+        status, legacy_reason = legacy_statuses.get(raw_status, (raw_status, None))  # type: ignore[assignment]
+        if status not in {"running", "completed", "failed", "cancelled"}:
+            status = "failed"
+            legacy_reason = "execution_failed"
+        raw_stop_reason = data.get("stop_reason")
+        stop_reason = raw_stop_reason if isinstance(raw_stop_reason, str) else legacy_reason
+
         return cls(
             task=data["task"],
             mode=data["mode"],
@@ -323,7 +345,8 @@ class RunState:
             replan_count=data.get("replan_count", 0),
             final_answer=data.get("final_answer"),
             model_turns=int(data.get("model_turns", 0)),
-            status=data.get("status", "running"),
+            status=status,
+            stop_reason=stop_reason,  # type: ignore[arg-type]
             active_skills=[
                 SkillSnapshot.from_dict(dict(item)) for item in data.get("active_skills", []) if isinstance(item, dict)
             ],

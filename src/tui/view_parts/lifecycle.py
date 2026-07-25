@@ -129,10 +129,19 @@ class ViewLifecycleMixin:
             data["message"] = text
         self._diagnose("system_output_hidden", data)
 
-    def show_history(self, session_label: str, messages: list[dict[str, str]]) -> None:
-        """Push a read-only history screen without replacing the live transcript."""
+    def show_history(
+        self,
+        session_label: str,
+        messages: list[dict[str, str]],
+        *,
+        before_id: int | None = None,
+        load_older=None,
+    ) -> None:
+        """Push a read-only, optionally paged history screen."""
 
-        self._run_on_owner(lambda: self.push_screen(HistoryScreen(session_label, messages)))
+        self._run_on_owner(
+            lambda: self.push_screen(HistoryScreen(session_label, messages, before_id=before_id, load_older=load_older))
+        )
 
     def show_sessions(self, sessions: list[str]) -> None:
         """Push a read-only saved-sessions screen."""

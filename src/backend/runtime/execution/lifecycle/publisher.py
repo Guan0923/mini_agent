@@ -47,7 +47,11 @@ class RunEventPublisher:
                 timestamp=event.timestamp,
                 call_id=str(event.data["call_id"]) if event.data.get("call_id") else None,
                 exchange_id=str(event.data["exchange_id"]) if event.data.get("exchange_id") else None,
-                interruption=("user_suspended" if event.kind == "run_suspended" else None),
+                interruption=(
+                    str(event.data["stop_reason"])
+                    if event.kind == "cancelled" and event.data.get("stop_reason")
+                    else None
+                ),
             )
             checkpoint.save(runtime, event.kind)
             if checkpoint is not runtime.services.runtime_store:

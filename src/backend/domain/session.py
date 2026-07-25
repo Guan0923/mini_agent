@@ -51,6 +51,7 @@ class ResumePreview:
     mode: str | None
     strategy: str | None
     status: str
+    stop_reason: str | None = None
     source_session_id: str | None = None
     source_run_id: str | None = None
     checkpoint_reason: str | None = None
@@ -60,4 +61,4 @@ class ResumePreview:
 
     @property
     def requires_action(self) -> bool:
-        return self.status in {"running", "suspended", "interrupted"}
+        return self.status in {"running", "failed", "cancelled"}
