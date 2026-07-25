@@ -32,6 +32,7 @@ class InteractiveAppMixin:
             completer=SlashCommandCompleter(),
             diagnostic_sink=diagnostics.record if diagnostics is not None else None,
             log_full_messages=getattr(settings, "log_full_messages", True),
+            detail_level=getattr(self, "_display_mode", "medium"),
         )
         if diagnostics is not None:
             diagnostics.record("tui_started", {"mode": self.mode})

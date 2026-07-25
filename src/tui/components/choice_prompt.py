@@ -132,8 +132,8 @@ class ChoicePromptMixin:
         for choice_list in lists:
             choice_list.display = False
         self._hide_completions()
-        self.input.display = False
-        self.screen.mount(*lists, before=self.completion_menu)
+        self.choice_panel.display = True
+        self.choice_panel.mount(*lists)
 
     def _handle_choice_selected(self, event: ListView.Selected) -> None:
         choice_list = event.list_view
@@ -142,10 +142,7 @@ class ChoicePromptMixin:
         row = event.item
         if not isinstance(row, ChoiceRow):
             return
-        if row.choice.custom and self._choice_kind == "review":
-            row.begin_edit()
-            return
-        self._accept_choice(choice_list, row, None)
+        self._activate_choice(choice_list, row)
 
     def _handle_choice_input_submitted(self, event: Input.Submitted) -> None:
         editing = self._editing_row()
@@ -171,7 +168,7 @@ class ChoicePromptMixin:
     def _show_choice_list(self, index: int) -> None:
         for list_index, choice_list in enumerate(self._choice_lists):
             choice_list.display = list_index == index
-        self.call_after_refresh(self._choice_lists[index].focus)
+        self.call_after_refresh(self.input.focus)
 
     def _move_question(self, step: int) -> None:
         target = self._question_index + step
@@ -181,6 +178,38 @@ class ChoicePromptMixin:
     def _active_choice_list(self) -> InlineChoiceList:
         index = self._question_index if self.questionnaire_active else 0
         return self._choice_lists[index]
+
+    def handle_choice_input_key(self, key: str) -> bool:
+        """Route terminal-input keys to the embedded choice prompt when active."""
+
+        if self._choice_kind is None:
+            return False
+        if key == "up":
+            self._active_choice_list().move_highlight(-1)
+            return True
+        if key == "down":
+            self._active_choice_list().move_highlight(1)
+            return True
+        if key == "left":
+            if self.questionnaire_active:
+                self._move_question(-1)
+            return True
+        if key == "right":
+            if self.questionnaire_active:
+                self._move_question(1)
+            return True
+        if key == "enter":
+            row = self._active_choice_list().highlighted_row
+            if row is not None:
+                self._activate_choice(self._active_choice_list(), row)
+            return True
+        return False
+
+    def _activate_choice(self, choice_list: InlineChoiceList, row: ChoiceRow) -> None:
+        if row.choice.custom:
+            row.begin_edit(self._existing_custom_answer(choice_list))
+            return
+        self._accept_choice(choice_list, row, None)
 
     def _editing_row(self) -> ChoiceRow | None:
         for choice_list in self._choice_lists:
@@ -258,5 +287,5 @@ class ChoicePromptMixin:
         self._review_callback = None
         self.question_header.display = False
         self.review_details.display = False
-        self.input.display = True
+        self.choice_panel.display = False
         self.input.focus()

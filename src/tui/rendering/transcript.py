@@ -65,6 +65,47 @@ class CompactProgress(Static):
             self._animation_timer = None
 
 
+class ProcessingProgress(Static):
+    """A concise activity indicator used by minimal transcript rendering."""
+
+    def __init__(self) -> None:
+        self._spinner_index = 0
+        self._animation_timer: Timer | None = None
+        self.running = True
+        super().__init__(self._running_text(), markup=False, classes="processing-progress")
+
+    def on_mount(self) -> None:
+        if self.running and self._animation_timer is None:
+            self._animation_timer = self.set_interval(0.12, self._tick)
+
+    def on_unmount(self) -> None:
+        self.stop()
+
+    def _tick(self) -> None:
+        if not self.running:
+            return
+        self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
+        self.update(self._running_text())
+
+    def _running_text(self) -> str:
+        return f"正在处理中 {SPINNER_FRAMES[self._spinner_index]}"
+
+    def complete(self) -> None:
+        self.stop()
+        self.update("处理完成")
+
+    def fail(self, message: str) -> None:
+        self.stop()
+        detail = " ".join(message.split())[:160]
+        self.update(f"处理失败: {detail}" if detail else "处理失败")
+
+    def stop(self) -> None:
+        self.running = False
+        if self._animation_timer is not None:
+            self._animation_timer.stop()
+            self._animation_timer = None
+
+
 class MarkdownBody(LatexMarkdown):
     """A Markdown widget with a synchronous source cache for streaming text."""
 

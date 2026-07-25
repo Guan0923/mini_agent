@@ -159,7 +159,8 @@ class TaskAppMixin:
 
     def _status_with_permission(self, status: str) -> str:
         permission = self._approval.permission_mode.replace("_", " ").upper()
-        return f"{status} | PERMISSION: {permission}"
+        display = getattr(self, "_display_mode", "medium").upper()
+        return f"{status} | DISPLAY: {display} | PERMISSION: {permission}"
 
     def _write(self, text: str, end: str = "\n") -> None:
         view = getattr(self, "_view", None)

@@ -29,6 +29,9 @@ class ViewInputMixin:
         if event.text_area is not self.input:
             return
         self._resize_input()
+        if self._choice_kind is not None:
+            self._hide_completions()
+            return
         self._suggestions = self._completer.suggestions(self.input.value, self.input.cursor_position)
         self.completion_menu.clear_options()
         self.completion_menu.add_options(
@@ -41,6 +44,9 @@ class ViewInputMixin:
     def on_terminal_input_submitted(self, event: TerminalInput.Submitted) -> None:
         if event.input is not self.input:
             return
+        if self._choice_kind is not None:
+            self.handle_choice_input_key("enter")
+            return
         if self.completion_menu.display and self._suggestions:
             self._accept_completion()
             return
@@ -49,7 +55,9 @@ class ViewInputMixin:
         self.submissions.put_nowait(value)
 
     def _resize_input(self) -> None:
-        self.input.styles.height = max(3, min(self.input.wrapped_document.height, 4))
+        line_count = self.input.value.count("\n") + 1
+        self.input.styles.height = min(line_count, 6)
+        self.input_frame.set_single_line(line_count == 1)
 
     def on_key(self, event: events.Key) -> None:
         editing = self._editing_row()
@@ -57,7 +65,7 @@ class ViewInputMixin:
             if event.key != "escape":
                 return
             editing.end_edit()
-            self._active_choice_list().focus()
+            self.input.focus()
             event.prevent_default()
             event.stop()
             return

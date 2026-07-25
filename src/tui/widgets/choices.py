@@ -52,14 +52,12 @@ class InlineChoiceList(ListView, can_focus_children=True):
         child = self.highlighted_child
         return child if isinstance(child, ChoiceRow) else None
 
-    def action_cursor_down(self) -> None:
-        if self.index is not None and self.index == len(self.rows) - 1:
-            self.index = 0
-            return
-        super().action_cursor_down()
+    def watch_index(self, index: int | None) -> None:
+        for row_index, row in enumerate(self.rows):
+            row.set_class(row_index == index, "-highlighted-choice")
 
-    def action_cursor_up(self) -> None:
-        if self.index == 0:
-            self.index = len(self.rows) - 1
-            return
-        super().action_cursor_up()
+    def move_highlight(self, step: int) -> None:
+        """Move the highlighted row without wrapping at either end."""
+
+        current = self.index if self.index is not None else 0
+        self.index = max(0, min(len(self.rows) - 1, current + step))

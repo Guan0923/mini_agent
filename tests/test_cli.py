@@ -29,6 +29,7 @@ def build_terminal_app(result: RunState | Exception) -> cli.TerminalApp:
     app = object.__new__(cli.TerminalApp)
     app.last_state = None
     app.mode = "agent"
+    app._display_mode = "medium"
     app._conversation_service = StubConversation(result)
     app._event_sink = lambda event: None
     app._approval = TerminalApproval()
@@ -162,3 +163,31 @@ def test_view_routes_conversations_system_output_and_history() -> None:
     assert view.queue_cleared is True
     assert view.system == [("SYSTEM EVENT", "")]
     assert view.histories == [("session_1 — Session 1", history)]
+
+
+def test_display_command_updates_view_and_status() -> None:
+    class DisplayView:
+        def __init__(self) -> None:
+            self.levels: list[str] = []
+            self.system: list[tuple[str, str]] = []
+
+        def set_detail_level(self, detail_level: str) -> None:
+            self.levels.append(detail_level)
+
+        def write_system(self, text: str, end: str = "\n") -> None:
+            self.system.append((text, end))
+
+    app = build_terminal_app(RunState(task="unused", mode="agent", status="completed"))
+    view = DisplayView()
+    app._view = view
+
+    assert cli.TerminalApp._split_input("/display verbose") == [("command", "display", "verbose")]
+    assert app._handle_command("display", "verbose") is True
+    assert app._display_mode == "verbose"
+    assert view.levels == ["verbose"]
+    assert view.system == [("Display mode set to verbose.", "\n")]
+    assert "DISPLAY: VERBOSE" in app._status_with_permission("AGENT | IDLE")
+
+    assert app._handle_command("display", "unknown") is True
+    assert app._display_mode == "verbose"
+    assert view.system[-1] == ("Usage: /display <minimal|medium|verbose>", "\n")

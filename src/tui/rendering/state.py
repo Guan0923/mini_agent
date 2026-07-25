@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from threading import Lock
 
 from .mirror import TranscriptTextMirror
-from .transcript import MarkdownBody, StatusLeaf, TranscriptNode, TranscriptScroll
+from .transcript import MarkdownBody, ProcessingProgress, StatusLeaf, TranscriptNode, TranscriptScroll
 
 _FLUSH_INTERVAL_SECONDS = 1 / 30
 OMITTED_MARKER = "[Earlier terminal output omitted]\n"
+DETAIL_LEVELS = frozenset({"minimal", "medium", "verbose"})
 
 
 @dataclass
@@ -23,9 +24,12 @@ class ToolTranscript:
 class TranscriptStateMixin:
     """Own transcript buffering, structured nodes, and runtime-event rendering."""
 
-    def _init_transcript_state(self, transcript_limit: int, transcript_node_limit: int) -> None:
+    def _init_transcript_state(self, transcript_limit: int, transcript_node_limit: int, detail_level: str) -> None:
+        if detail_level not in DETAIL_LEVELS:
+            raise ValueError(f"Unknown transcript detail level: {detail_level}")
         self._transcript_limit = transcript_limit
         self._transcript_node_limit = transcript_node_limit
+        self._detail_level = detail_level
         self._reconcile_scheduled = False
         self._pending_chunks: list[str] = []
         self._pending_lock = Lock()
@@ -47,9 +51,37 @@ class TranscriptStateMixin:
         self._thinking_by_run: dict[str, tuple[TranscriptNode, MarkdownBody]] = {}
         self._response_by_run: dict[str, tuple[TranscriptNode, MarkdownBody]] = {}
         self._tools_by_call: dict[tuple[str, str], ToolTranscript] = {}
+        self._seen_tool_calls: set[tuple[str, str]] = set()
+        self._processing_by_run: dict[str, ProcessingProgress] = {}
         self._seen_exchanges: set[tuple[str, str]] = set()
         self._last_response_by_run: dict[str, str] = {}
         self._streaming_system: tuple[TranscriptNode, MarkdownBody] | None = None
+
+    @property
+    def detail_level(self) -> str:
+        return self._detail_level
+
+    def _set_detail_level(self, detail_level: str) -> None:
+        if detail_level not in DETAIL_LEVELS:
+            raise ValueError(f"Unknown transcript detail level: {detail_level}")
+        self._detail_level = detail_level
+
+    def _start_processing(self, run_id: str, assistant: TranscriptNode) -> None:
+        if run_id in self._processing_by_run:
+            return
+        progress = ProcessingProgress()
+        self._processing_by_run[run_id] = progress
+        assistant.add_node(progress)
+        self._scroll_after_transcript_change()
+
+    def _finish_processing(self, run_id: str, failure_message: str | None = None) -> None:
+        progress = self._processing_by_run.pop(run_id, None)
+        if progress is None:
+            return
+        if failure_message is None:
+            progress.complete()
+        else:
+            progress.fail(failure_message)
 
     def _schedule_flush(self) -> None:
         if self._writes_closed:

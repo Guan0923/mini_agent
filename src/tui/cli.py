@@ -37,6 +37,7 @@ class TerminalApp(InteractiveAppMixin, TaskAppMixin, CommandAppMixin):
     ) -> None:
         self.last_state = None
         self.mode = "agent"
+        self._display_mode = "medium"
         self._view: TerminalView | None = None
         self._last_tui_run_id: str | None = None
         self._log_dir = log_dir
