@@ -1,5 +1,5 @@
-"""SQLite session adapter import."""
+"""PostgreSQL session adapter import."""
 
-from backend.storage import SQLiteSessionStore
+from backend.storage import PostgresSessionStore
 
-__all__ = ["SQLiteSessionStore"]
+__all__ = ["PostgresSessionStore"]

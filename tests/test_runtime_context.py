@@ -2,7 +2,7 @@ from pathlib import Path
 
 from backend.domain import AssistantMessage, RunState, StrategySelection, ToolMessage, ToolSpec, UserMessage
 from backend.planning import RuleBasedPlanner
-from backend.runtime import AgentRunner, ConversationService, RuntimeState, SQLiteSessionStore
+from backend.runtime import AgentRunner, ConversationService, PostgresSessionStore, RuntimeState
 from backend.tools import Tool, ToolRegistry
 
 
@@ -77,8 +77,8 @@ def test_runtime_state_round_trips_complete_session_state() -> None:
     assert restored.tool_specs[0].provider_options == {"deepseek": {"strict": True}}
 
 
-def test_sqlite_persists_and_reloads_runtime_snapshot(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "runtime.db")
+def test_postgres_persists_and_reloads_runtime_snapshot(tmp_path: Path) -> None:
+    store = PostgresSessionStore()
     session = store.create_session("Runtime")
     tools = ToolRegistry(
         [
@@ -123,7 +123,7 @@ class UsagePlanner:
 
 
 def test_completed_turn_overwrites_session_usage(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "usage.db")
+    store = PostgresSessionStore()
     service = ConversationService(AgentRunner(UsagePlanner(), ToolRegistry()), store)
 
     service.run_task("first", mode="agent")

@@ -4,7 +4,7 @@ from collections import deque
 from pathlib import Path
 
 from backend.domain import AssistantMessage, ToolMessage, UserMessage
-from backend.runtime import AgentRunner, ConversationService, SQLiteSessionStore
+from backend.runtime import AgentRunner, ConversationService, PostgresSessionStore
 from backend.tools import Tool, ToolRegistry
 
 
@@ -124,7 +124,7 @@ def test_cancellation_during_tool_keeps_result_and_skips_remaining_tools() -> No
 
 
 def test_conversation_persists_cooperatively_cancelled_run(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "cancelled.db")
+    store = PostgresSessionStore()
     cancel_requested = False
 
     class CancellingPlanner:
@@ -207,7 +207,7 @@ def test_steering_during_tool_keeps_result_and_stops_remaining_actions() -> None
 
 
 def test_conversation_persists_merged_in_run_messages(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "steering.db")
+    store = PostgresSessionStore()
     service = ConversationService(
         AgentRunner(SteeringPlanner(), ToolRegistry([Tool("work", "Work", lambda: "done")]), strategy="reactive"),
         store,

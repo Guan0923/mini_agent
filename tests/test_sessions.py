@@ -1,15 +1,16 @@
-import sqlite3
+import os
 from pathlib import Path
 
+import psycopg
+
 from backend.domain import AgentAction, RunState, StrategySelection
-from backend.runtime import AgentRunner, SQLiteCheckpointStore, SQLiteSessionStore
+from backend.runtime import AgentRunner, PostgresCheckpointStore, PostgresSessionStore
 from backend.tools import ToolRegistry
 from tui.cli import TerminalApp
 
 
-def test_sqlite_session_store_persists_multi_turn_conversation(tmp_path: Path) -> None:
-    database = tmp_path / ".mini_agent" / "checkpoints.db"
-    store = SQLiteSessionStore(database)
+def test_postgres_session_store_persists_multi_turn_conversation(tmp_path: Path) -> None:
+    store = PostgresSessionStore()
     session = store.create_session()
 
     store.start_turn(session.session_id, "run_one", "Remember that I like Python.")
@@ -17,7 +18,7 @@ def test_sqlite_session_store_persists_multi_turn_conversation(tmp_path: Path) -
     store.start_turn(session.session_id, "run_two", "What do I like?")
     store.finish_turn(session.session_id, "run_two", "completed", "You like Python.")
 
-    reopened = SQLiteSessionStore(database)
+    reopened = PostgresSessionStore()
     assert reopened.load_conversation(session.session_id) == [
         {"role": "user", "content": "Remember that I like Python."},
         {"role": "assistant", "content": "I will remember that."},
@@ -33,7 +34,7 @@ def test_sqlite_session_store_persists_multi_turn_conversation(tmp_path: Path) -
 
 
 def test_session_store_finish_is_idempotent_and_persists_terminal_messages(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "checkpoints.db")
+    store = PostgresSessionStore()
     session = store.create_session("Test session")
 
     store.start_turn(session.session_id, "run_failed", "This will fail.")
@@ -51,12 +52,11 @@ def test_session_store_finish_is_idempotent_and_persists_terminal_messages(tmp_p
 
 
 def test_session_store_shares_database_with_existing_checkpoints(tmp_path: Path) -> None:
-    database = tmp_path / ".mini_agent" / "checkpoints.db"
-    checkpoints = SQLiteCheckpointStore(database)
+    checkpoints = PostgresCheckpointStore()
     state = RunState(task="checkpointed", mode="agent")
     checkpoints.save(state, "run_started")
 
-    sessions = SQLiteSessionStore(database)
+    sessions = PostgresSessionStore()
     session = sessions.create_session()
     sessions.start_turn(session.session_id, state.run_id, state.task)
     sessions.finish_turn(session.session_id, state.run_id, "completed", "done")
@@ -68,58 +68,33 @@ def test_session_store_shares_database_with_existing_checkpoints(tmp_path: Path)
     ]
 
 
-def test_session_store_migrates_legacy_message_uniqueness(tmp_path: Path) -> None:
-    database = tmp_path / "legacy.db"
-    with sqlite3.connect(database) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE sessions (
-                session_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE session_runs (
-                run_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                task TEXT NOT NULL,
-                status TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE session_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE (run_id, role)
-            );
-            INSERT INTO sessions VALUES ('session_legacy', 'Legacy', 'now', 'now');
-            INSERT INTO session_runs VALUES ('run_legacy', 'session_legacy', 'start', 'running', 'now', 'now');
-            INSERT INTO session_messages (session_id, run_id, role, content, created_at)
-            VALUES ('session_legacy', 'run_legacy', 'user', 'start', 'now');
-            """
-        )
+def test_postgres_schema_initialization_is_idempotent(tmp_path: Path) -> None:
+    first_store = PostgresSessionStore()
+    second_store = PostgresSessionStore()
+    session = first_store.create_session("Schema")
+    first_store.start_turn(session.session_id, "run_schema", "start")
+    second_store.append_turn_input(session.session_id, "run_schema", "steer")
+    second_store.finish_turn(session.session_id, "run_schema", "completed", "done")
 
-    SQLiteSessionStore(database)
-    store = SQLiteSessionStore(database)
-    store.append_turn_input("session_legacy", "run_legacy", "steer")
-    store.finish_turn("session_legacy", "run_legacy", "completed", "done")
-
-    assert store.load_conversation("session_legacy") == [
+    assert second_store.load_conversation(session.session_id) == [
         {"role": "user", "content": "start"},
         {"role": "user", "content": "steer"},
         {"role": "assistant", "content": "done"},
     ]
-    with sqlite3.connect(database) as connection:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(session_runs)")}
+    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as connection:
+        columns = {
+            row[0]
+            for row in connection.execute(
+                """SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'session_runs'"""
+            ).fetchall()
+        }
         lineage = connection.execute(
-            "SELECT workflow_id, attempt, origin_kind FROM session_runs WHERE run_id = 'run_legacy'"
+            "SELECT workflow_id, attempt, origin_kind FROM session_runs WHERE run_id = %s",
+            ("run_schema",),
         ).fetchone()
     assert {"workflow_id", "attempt", "origin_kind", "source_session_id", "source_run_id"} <= columns
-    assert lineage == ("run_legacy", 1, "legacy")
+    assert lineage == ("run_schema", 1, "legacy")
 
 
 class HistoryPlanner:

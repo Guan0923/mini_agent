@@ -9,7 +9,7 @@ from backend.domain import (
     UserMessage,
     message_from_dict,
 )
-from backend.runtime import AgentRunner, ConversationService, SQLiteSessionStore
+from backend.runtime import AgentRunner, ConversationService, PostgresSessionStore
 from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from backend.tools import ToolRegistry
@@ -69,7 +69,7 @@ class ConversationPlanner(PlanMessagePlanner):
 
 def build_service(tmp_path: Path, planner: PlanMessagePlanner) -> ConversationService:
     runner = AgentRunner(planner, ToolRegistry(tmp_path))
-    store = SQLiteSessionStore(tmp_path / ".mini_agent" / "checkpoints.db")
+    store = PostgresSessionStore()
     return ConversationService(runner, store)
 
 
@@ -167,7 +167,7 @@ def test_cancelled_plan_history_survives_restart(tmp_path: Path) -> None:
 
     reopened = ConversationService(
         service.runner,
-        SQLiteSessionStore(tmp_path / ".mini_agent" / "checkpoints.db"),
+        PostgresSessionStore(),
         session_id=service.active_session.session_id,
     )
 
@@ -178,9 +178,9 @@ def test_cancelled_plan_history_survives_restart(tmp_path: Path) -> None:
     ]
 
 
-class FailingSecondSessionStore(SQLiteSessionStore):
-    def __init__(self, database: Path) -> None:
-        super().__init__(database)
+class FailingSecondSessionStore(PostgresSessionStore):
+    def __init__(self) -> None:
+        super().__init__()
         self.created_sessions = 0
 
     def create_session(self, title: str | None = None):
@@ -192,7 +192,7 @@ class FailingSecondSessionStore(SQLiteSessionStore):
 
 def test_clear_session_failure_preserves_source_plan_history(tmp_path: Path) -> None:
     planner = PlanMessagePlanner()
-    store = FailingSecondSessionStore(tmp_path / ".mini_agent" / "checkpoints.db")
+    store = FailingSecondSessionStore()
     service = ConversationService(AgentRunner(planner, ToolRegistry(tmp_path)), store)
     source = service.new_session("Source plan")
 

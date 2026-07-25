@@ -116,7 +116,7 @@ def test_terminal_questionnaire_uses_numeric_choices_and_custom_input(monkeypatc
             "Storage",
             "Where should the result be stored?",
             (
-                QuestionOption("SQLite", "Use the existing database."),
+                QuestionOption("PostgreSQL", "Use the existing database."),
                 QuestionOption("JSONL", "Use the audit stream."),
             ),
         ),

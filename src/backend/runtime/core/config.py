@@ -96,7 +96,7 @@ def log_full_messages_from_env(env_path: Path, environ: Mapping[str, str] | None
                 continue
             key, value = line.split("=", 1)
             if key.strip():
-                values[key.strip()] = value.strip().strip("\"'")
+                values[key.strip()] = value.strip("\"'")
     values.update(dict(os.environ if environ is None else environ))
     raw = values.get("LOG_FULL_MESSAGES", "true").strip().lower()
     if raw == "true":
@@ -104,3 +104,22 @@ def log_full_messages_from_env(env_path: Path, environ: Mapping[str, str] | None
     if raw == "false":
         return False
     raise ValueError("LOG_FULL_MESSAGES must be true or false.")
+
+
+def database_url_from_env(env_path: Path, environ: Mapping[str, str] | None = None) -> str:
+    """Read the required PostgreSQL URL, allowing process values to override .env."""
+
+    values: dict[str, str] = {}
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip():
+                values[key.strip()] = value.strip("\"'")
+    values.update(dict(os.environ if environ is None else environ))
+    database_url = values.get("DATABASE_URL", "").strip()
+    if not database_url:
+        raise ValueError("DATABASE_URL must be configured for PostgreSQL storage.")
+    return database_url
