@@ -9,11 +9,11 @@ from typing import Literal
 from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.providers import LLMClient, ModelConfig
 from backend.skills import SkillCatalog
-from backend.storage import SQLiteCheckpointStore, SQLiteSessionStore
+from backend.storage import PostgresCheckpointStore, PostgresSessionStore
 from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry
 
 from ..conversation.references import FileReferenceExpander
-from ..core.config import RunnerSettings, log_full_messages_from_env
+from ..core.config import RunnerSettings, database_url_from_env, log_full_messages_from_env
 from ..core.hooks import AgentHook
 from ..execution.runner import AgentRunner
 from .services import AgentApplication
@@ -21,16 +21,16 @@ from .services import AgentApplication
 PlannerName = Literal["llm", "rule"]
 
 
-def session_database_path(workspace: Path) -> Path:
-    """Return the workspace-local database shared by checkpoints and sessions."""
+def database_url(workspace: Path) -> str:
+    """Return the required PostgreSQL URL for workspace runtime storage."""
 
-    return workspace / ".mini_agent" / "checkpoints.db"
+    return database_url_from_env(workspace / ".env")
 
 
-def build_session_store(workspace: Path) -> SQLiteSessionStore:
-    """Construct the workspace-local session store."""
+def build_session_store(workspace: Path) -> PostgresSessionStore:
+    """Construct the PostgreSQL session store."""
 
-    return SQLiteSessionStore(session_database_path(workspace))
+    return PostgresSessionStore(database_url(workspace))
 
 
 def build_application(
@@ -96,7 +96,7 @@ def _build_runner(
         max_replans=settings.max_replans,
         strategy=settings.strategy,
         log_full_messages=settings.log_full_messages,
-        checkpoints=checkpoints or SQLiteCheckpointStore(session_database_path(workspace)),
+        checkpoints=checkpoints or PostgresCheckpointStore(database_url(workspace)),
         hooks=hooks,
         skill_catalog=skills,
         workspace_root=str(workspace.resolve()),

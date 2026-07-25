@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mini_agent
+      POSTGRES_USER: mini_agent
+      POSTGRES_PASSWORD: mini_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - mini_agent_postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mini_agent -d mini_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  mini_agent_postgres_data:

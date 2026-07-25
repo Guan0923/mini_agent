@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from backend.domain import AssistantMessage, StrategySelection, ToolMessage, UserMessage
-from backend.runtime import AgentRunner, ConversationService, SQLiteSessionStore
+from backend.runtime import AgentRunner, ConversationService, PostgresSessionStore
 from backend.runtime.conversation.user_input import (
     REQUEST_USER_INPUT_NAME,
     format_user_input_answers,
@@ -23,7 +23,7 @@ def question_arguments() -> dict[str, object]:
                 "header": "Storage",
                 "question": "Where should the result be stored?",
                 "options": [
-                    {"label": "SQLite", "description": "Keep the data in the existing database."},
+                    {"label": "PostgreSQL", "description": "Keep the data in the existing database."},
                     {"label": "JSONL", "description": "Write the data to the existing audit stream."},
                 ],
             }
@@ -40,7 +40,7 @@ def test_request_user_input_parser_builds_typed_questions() -> None:
             header="Storage",
             question="Where should the result be stored?",
             options=(
-                QuestionOption("SQLite", "Keep the data in the existing database."),
+                QuestionOption("PostgreSQL", "Keep the data in the existing database."),
                 QuestionOption("JSONL", "Write the data to the existing audit stream."),
             ),
         ),
@@ -64,13 +64,13 @@ def test_request_user_input_parser_filters_exact_client_other_label() -> None:
 
     questions = parse_user_input_questions(arguments)
 
-    assert [option.label for option in questions[0].options] == ["SQLite", "JSONL"]
+    assert [option.label for option in questions[0].options] == ["PostgreSQL", "JSONL"]
 
 
 def test_user_input_answers_use_codex_style_tool_result_shape() -> None:
-    result = format_user_input_answers({"storage": ["SQLite"]})
+    result = format_user_input_answers({"storage": ["PostgreSQL"]})
 
-    assert json.loads(result) == {"answers": {"storage": {"answers": ["SQLite"]}}}
+    assert json.loads(result) == {"answers": {"storage": {"answers": ["PostgreSQL"]}}}
 
 
 class QuestionThenPlanPlanner:
@@ -120,7 +120,7 @@ class ScriptedPlanPlanner(QuestionThenPlanPlanner):
         return super().decide(runtime)
 
 
-PLAN = "# Storage plan\n\n## Summary\nStore the result in SQLite.\n\n## Test Plan\nRun the tests."
+PLAN = "# Storage plan\n\n## Summary\nStore the result in PostgreSQL.\n\n## Test Plan\nRun the tests."
 
 
 def question_call(call_id: str = "question_1") -> ToolMessage:
@@ -133,7 +133,7 @@ def review_call(call_id: str = "review_1") -> ToolMessage:
 
 def build_service(tmp_path: Path, planner: QuestionThenPlanPlanner) -> ConversationService:
     runner = AgentRunner(planner, ToolRegistry(tmp_path))
-    store = SQLiteSessionStore(tmp_path / ".mini_agent" / "checkpoints.db")
+    store = PostgresSessionStore()
     return ConversationService(runner, store)
 
 
@@ -146,7 +146,7 @@ def test_plan_question_answer_is_saved_once_then_plan_review_starts(tmp_path: Pa
         request_kinds.append(request.kind)
         if request.kind == "question":
             assert request.questions[0].id == "storage"
-            return InterruptDecision("answer", answers={"storage": ["SQLite"]})
+            return InterruptDecision("answer", answers={"storage": ["PostgreSQL"]})
         return InterruptDecision("cancel")
 
     result = service.run_task("Plan the change", mode="plan", interrupt=interrupt)
@@ -160,7 +160,7 @@ def test_plan_question_answer_is_saved_once_then_plan_review_starts(tmp_path: Pa
     assert len(question_message.tool_messages) == 1
     assert question_message.tool_messages[0].status == "succeeded"
     assert json.loads(question_message.tool_messages[0].content or "") == {
-        "answers": {"storage": {"answers": ["SQLite"]}}
+        "answers": {"storage": {"answers": ["PostgreSQL"]}}
     }
     review_message = service.runtime.state.messages[2]
     assert isinstance(review_message, AssistantMessage)

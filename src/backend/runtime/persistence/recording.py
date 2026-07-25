@@ -129,7 +129,7 @@ def model_error_data(state: RuntimeState, exchange: RuntimeExchange, error: Exce
 
 
 def persistent_event(event: RuntimeEvent, include_full_messages: bool) -> tuple[str, dict[str, Any]]:
-    """Create the data representation shared by checkpoints, SQLite, and JSONL."""
+    """Create the data representation shared by checkpoints, PostgreSQL, and JSONL."""
 
     message = _redact_text(event.message)
     if not include_full_messages and message:

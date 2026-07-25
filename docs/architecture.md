@@ -10,7 +10,7 @@ TUI -> ConversationService -> RuntimeRunner port -> AgentRunner(runtime) -> work
                               +-> RuntimeExchange
 
 HTTP transport <-> provider adapter prepare_request/prepare_response <-> AgentRuntime
-SQLite        <-> RuntimeState snapshots and user/assistant projections
+PostgreSQL        <-> RuntimeState snapshots and user/assistant projections
 ```
 
 ## Runtime
@@ -52,7 +52,7 @@ Top-level history contains `SystemMessage`, `UserMessage`, and `AssistantMessage
 
 A ToolMessage owns the model's call ID, tool name, arguments, status, result or error content, and retryability. Pending tool calls live in `RuntimeState.active_message`; after every nested tool has a terminal result, the complete AssistantMessage moves into history. `ExecutionPlan` steps use the same ToolMessage type.
 
-SQLite `session_runtime` snapshots retain resumable state, while `session_runtime_messages` keeps the immutable ordered audit stream for every completed or in-progress run. `session_messages` remains a compact user/assistant text projection used by the TUI and session listings; one run may contain multiple ordered user rows when steering is applied, but still has at most one assistant row. Usage is kept in its provider-native JSON shape and overwritten with the most recent completed turn's final model usage.
+PostgreSQL `session_runtime` snapshots retain resumable state, while `session_runtime_messages` keeps the immutable ordered audit stream for every completed or in-progress run. `session_messages` remains a compact user/assistant text projection used by the TUI and session listings; one run may contain multiple ordered user rows when steering is applied, but still has at most one assistant row. Usage is kept in its provider-native JSON shape and overwritten with the most recent completed turn's final model usage.
 
 ## Plan Messages and Handoffs
 
@@ -103,7 +103,7 @@ Tool decisions use DeepSeek native Tool Calls. Strategy selection, plan creation
 - `tools` owns handlers, executable JSON Schema validation, registration, workspace confinement, and confirmation metadata.
   `catalog.py` is a thin composition boundary; grouped default definitions live under `tools/default_tools/`.
 - `providers` owns `LLMClient` selection, generic JSON/SSE transport, and vendor-specific request/response adapters.
-- `storage` persists RuntimeState checkpoints, session snapshots, and compact conversation projections through focused SQLite schema and mapping modules.
+- `storage` persists RuntimeState checkpoints, session snapshots, and compact conversation projections through focused PostgreSQL schema and mapping modules.
 - `tui` handles terminal commands, approval input, RuntimeEvent presentation, and the process-local full-screen transcript only. `application/` owns the CLI loop and command routing; `components/` owns completion and approvals; `screens/`, `rendering/`, `view_parts/`, and `widgets/` isolate Textual responsibilities. Worker threads enqueue display chunks; the Textual event loop owns all widget mutation and rendering.
 
 ## Extension Rules

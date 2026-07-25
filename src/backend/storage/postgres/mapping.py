@@ -1,6 +1,4 @@
-"""SQLite row and conversation projection helpers."""
-
-from __future__ import annotations
+"""PostgreSQL row and conversation projection helpers."""
 
 from backend.domain import DEFAULT_SESSION_TITLE, RunStatus, Session, SessionSummary
 

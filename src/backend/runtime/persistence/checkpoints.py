@@ -1,5 +1,5 @@
-"""SQLite checkpoint adapter import."""
+"""PostgreSQL checkpoint adapter import."""
 
-from backend.storage import SQLiteCheckpointStore
+from backend.storage import PostgresCheckpointStore
 
-__all__ = ["SQLiteCheckpointStore"]
+__all__ = ["PostgresCheckpointStore"]

@@ -9,11 +9,11 @@ from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.runtime import (
     AgentRunner,
     ConversationService,
+    PostgresCheckpointStore,
+    PostgresSessionStore,
     PreparedResponse,
-    SQLiteCheckpointStore,
-    SQLiteSessionStore,
 )
-from backend.runtime.core.config import log_full_messages_from_env
+from backend.runtime.core.config import database_url_from_env, log_full_messages_from_env
 from backend.runtime.execution.lifecycle.outcomes import fail_run
 from backend.tools import Tool, ToolRegistry
 
@@ -78,14 +78,13 @@ class FailingCompletionClient:
 
 
 def test_session_runtime_messages_survive_restart_and_match_run_state(tmp_path: Path) -> None:
-    database = tmp_path / "checkpoints.db"
-    store = SQLiteSessionStore(database)
+    store = PostgresSessionStore()
     service = ConversationService(AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)), store)
 
     state = service.run_task("calculate 2 + 2", mode="agent")
 
     assert service.active_session is not None
-    reopened = SQLiteSessionStore(database)
+    reopened = PostgresSessionStore()
     messages = reopened.load_runtime_messages(service.active_session.session_id, state.run_id)
 
     assert messages == state.runtime_messages
@@ -101,7 +100,7 @@ def test_session_runtime_messages_survive_restart_and_match_run_state(tmp_path: 
 
 
 def test_unexpected_failure_still_ends_the_persisted_runtime_trace(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "checkpoints.db")
+    store = PostgresSessionStore()
     service = ConversationService(AgentRunner(ExplodingPlanner(), ToolRegistry(), strategy="reactive"), store)
 
     with pytest.raises(RuntimeError, match="unexpected failure"):
@@ -115,13 +114,12 @@ def test_unexpected_failure_still_ends_the_persisted_runtime_trace(tmp_path: Pat
 
 
 def test_restored_session_uses_the_current_runtime_message_policy(tmp_path: Path) -> None:
-    database = tmp_path / "checkpoints.db"
-    first_store = SQLiteSessionStore(database)
+    first_store = PostgresSessionStore()
     first_service = ConversationService(AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)), first_store)
     first_service.run_task("calculate 1 + 1", mode="agent")
 
     assert first_service.active_session is not None
-    second_store = SQLiteSessionStore(database)
+    second_store = PostgresSessionStore()
     second_service = ConversationService(
         AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path), log_full_messages=False),
         second_store,
@@ -134,7 +132,7 @@ def test_restored_session_uses_the_current_runtime_message_policy(tmp_path: Path
 
 
 def test_checkpoint_and_jsonl_share_the_same_ordered_runtime_timestamps(tmp_path: Path) -> None:
-    checkpoints = SQLiteCheckpointStore(tmp_path / "checkpoints.db")
+    checkpoints = PostgresCheckpointStore()
     logger = JsonlRunLogger(tmp_path / "logs")
     runner = AgentRunner(ReasoningPlanner(), ToolRegistry(), strategy="reactive", checkpoints=checkpoints)
     runtime = runner.new_runtime(task="think", on_event=logger)
@@ -202,8 +200,7 @@ def test_model_request_failure_is_recorded_without_secret_content() -> None:
 
 
 def test_failed_run_closes_canonical_history_and_survives_restart(tmp_path: Path) -> None:
-    database = tmp_path / "checkpoints.db"
-    store = SQLiteSessionStore(database)
+    store = PostgresSessionStore()
     planner = LLMPlanner(FailingCompletionClient(), [], [])
     service = ConversationService(AgentRunner(planner, ToolRegistry(), strategy="reactive"), store)
 
@@ -217,7 +214,7 @@ def test_failed_run_closes_canonical_history_and_survives_restart(tmp_path: Path
     ]
     assert [(message.role, message.content) for message in service.runtime.state.messages] == expected
 
-    reopened = SQLiteSessionStore(database)
+    reopened = PostgresSessionStore()
     restored = reopened.load_runtime(service.runtime.state.session_id)
     assert restored is not None
     assert [(message.role, message.content) for message in restored.messages] == expected
@@ -274,6 +271,18 @@ def test_log_full_messages_rejects_invalid_env_value(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="LOG_FULL_MESSAGES"):
         log_full_messages_from_env(env_path, environ={})
+
+
+def test_database_url_is_required_and_environment_overrides_env_file(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    with pytest.raises(ValueError, match="DATABASE_URL"):
+        database_url_from_env(env_path, environ={})
+
+    env_path.write_text("DATABASE_URL=postgresql://file\n", encoding="utf-8")
+    assert (
+        database_url_from_env(env_path, environ={"DATABASE_URL": "postgresql://environment"})
+        == "postgresql://environment"
+    )
 
 
 class StreamingCompletionClient:
