@@ -1,10 +1,10 @@
 import sqlite3
 from pathlib import Path
 
-from mini_agent.domain import AgentAction, RunState, StrategySelection
-from mini_agent.runtime import AgentRunner, SQLiteCheckpointStore, SQLiteSessionStore
-from mini_agent.tools import ToolRegistry
-from mini_agent.tui.cli import TerminalApp
+from backend.domain import AgentAction, RunState, StrategySelection
+from backend.runtime import AgentRunner, SQLiteCheckpointStore, SQLiteSessionStore
+from backend.tools import ToolRegistry
+from tui.cli import TerminalApp
 
 
 def test_sqlite_session_store_persists_multi_turn_conversation(tmp_path: Path) -> None:

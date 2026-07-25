@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.domain import (
+from backend.domain import (
     AgentAction,
     AssistantMessage,
     ExecutionPlan,
@@ -15,12 +15,12 @@ from mini_agent.domain import (
     StepEvaluation,
     ToolMessage,
 )
-from mini_agent.runtime import AgentRunner, ConversationService, RuntimeEvent, SQLiteSessionStore
-from mini_agent.runtime.conversation.recovery import reconstruct_attempt
-from mini_agent.runtime.core.context import RuntimeState
-from mini_agent.runtime.core.contracts import InterruptDecision
-from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
-from mini_agent.tools import Tool, ToolRegistry
+from backend.runtime import AgentRunner, ConversationService, RuntimeEvent, SQLiteSessionStore
+from backend.runtime.conversation.recovery import reconstruct_attempt
+from backend.runtime.core.context import RuntimeState
+from backend.runtime.core.contracts import InterruptDecision
+from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
+from backend.tools import Tool, ToolRegistry
 
 
 class InterruptingToolPlanner:

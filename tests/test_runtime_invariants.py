@@ -1,8 +1,8 @@
-from mini_agent.domain import AssistantMessage, ToolMessage
-from mini_agent.runtime import AgentRunner, AgentRuntime
-from mini_agent.runtime.core.contracts import InterruptDecision
-from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
-from mini_agent.tools import Tool, ToolRegistry
+from backend.domain import AssistantMessage, ToolMessage
+from backend.runtime import AgentRunner, AgentRuntime
+from backend.runtime.core.contracts import InterruptDecision
+from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
+from backend.tools import Tool, ToolRegistry
 
 
 class RepeatingReplyPlanner:

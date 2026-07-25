@@ -3,9 +3,9 @@ from __future__ import annotations
 from collections import deque
 from pathlib import Path
 
-from mini_agent.domain import AssistantMessage, ToolMessage, UserMessage
-from mini_agent.runtime import AgentRunner, ConversationService, SQLiteSessionStore
-from mini_agent.tools import Tool, ToolRegistry
+from backend.domain import AssistantMessage, ToolMessage, UserMessage
+from backend.runtime import AgentRunner, ConversationService, SQLiteSessionStore
+from backend.tools import Tool, ToolRegistry
 
 
 class SteeringPlanner:

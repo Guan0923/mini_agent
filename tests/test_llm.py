@@ -3,7 +3,7 @@ import json
 import pytest
 import requests
 
-from mini_agent.domain import (
+from backend.domain import (
     AssistantMessage,
     ModelOutputError,
     PlanningError,
@@ -12,16 +12,16 @@ from mini_agent.domain import (
     ToolSpec,
     UserMessage,
 )
-from mini_agent.planning import LLMPlanner, RuleBasedPlanner
-from mini_agent.providers import (
+from backend.planning import LLMPlanner, RuleBasedPlanner
+from backend.providers import (
     DeepSeek,
     LLMClient,
     ModelConfig,
     ModelConfigurationError,
     ModelRequestError,
 )
-from mini_agent.runtime import AgentRunner, PreparedResponse
-from mini_agent.tools import Tool, ToolRegistry
+from backend.runtime import AgentRunner, PreparedResponse
+from backend.tools import Tool, ToolRegistry
 
 
 def runtime_for(*, messages=None, tools=None):

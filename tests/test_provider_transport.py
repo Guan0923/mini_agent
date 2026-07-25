@@ -1,11 +1,11 @@
 import pytest
 import requests
 
-from mini_agent.domain import AssistantMessage, ToolSpec, UserMessage
-from mini_agent.planning import LLMPlanner, RuleBasedPlanner
-from mini_agent.providers import DeepSeek, LLMClient, ModelConfig, ModelRequestError
-from mini_agent.runtime import AgentRunner, PreparedResponse
-from mini_agent.tools import ToolRegistry
+from backend.domain import AssistantMessage, ToolSpec, UserMessage
+from backend.planning import LLMPlanner, RuleBasedPlanner
+from backend.providers import DeepSeek, LLMClient, ModelConfig, ModelRequestError
+from backend.runtime import AgentRunner, PreparedResponse
+from backend.tools import ToolRegistry
 
 
 class FakeStreamResponse:
@@ -401,7 +401,7 @@ def test_transient_http_status_retries_with_retry_after(monkeypatch, status_code
     events = []
     runtime.services.publish = events.append
     delays = []
-    monkeypatch.setattr("mini_agent.providers.client.time.sleep", delays.append)
+    monkeypatch.setattr("backend.providers.client.time.sleep", delays.append)
 
     response = client.run(runtime)
 
@@ -432,7 +432,7 @@ def test_non_retryable_http_status_fails_immediately(monkeypatch) -> None:
         adapter=CustomAdapter(),
     )
     runtime = runtime_for_custom()
-    monkeypatch.setattr("mini_agent.providers.client.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("backend.providers.client.time.sleep", lambda _delay: None)
 
     with pytest.raises(ModelRequestError, match="HTTPError"):
         client.run(runtime)
@@ -453,7 +453,7 @@ def test_invalid_json_http_body_retries(monkeypatch) -> None:
         adapter=CustomAdapter(),
     )
     runtime = runtime_for_custom()
-    monkeypatch.setattr("mini_agent.providers.client.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("backend.providers.client.time.sleep", lambda _delay: None)
 
     response = client.run(runtime)
 
@@ -472,7 +472,7 @@ def test_stream_retries_only_before_the_first_event(monkeypatch) -> None:
     session = SequencedStreamSession([first, second])
     client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
     runtime = runtime_for_stream()
-    monkeypatch.setattr("mini_agent.providers.client.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("backend.providers.client.time.sleep", lambda _delay: None)
 
     response = client.run(runtime)
 
@@ -554,7 +554,7 @@ def test_connection_timeout_retries(monkeypatch) -> None:
     )
     runtime = runtime_for_custom()
     delays = []
-    monkeypatch.setattr("mini_agent.providers.client.time.sleep", delays.append)
+    monkeypatch.setattr("backend.providers.client.time.sleep", delays.append)
 
     response = client.run(runtime)
 

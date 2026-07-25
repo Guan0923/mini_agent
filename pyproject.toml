@@ -25,7 +25,7 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.6"]
 
 [project.scripts]
-mini-agent = "mini_agent.tui.cli:main"
+mini-agent = "tui.cli:main"
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -38,12 +38,12 @@ xfail_strict = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-"mini_agent.planning.prompts" = ["*.md"]
+"backend.planning.prompts" = ["*.md"]
 
 [tool.coverage.run]
 branch = true
-source = ["mini_agent"]
-omit = ["*/mini_agent/tui/*"]
+source = ["backend"]
+omit = ["*/tui/*"]
 
 [tool.coverage.report]
 skip_covered = true

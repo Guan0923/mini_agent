@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.domain import (
+from backend.domain import (
     AgentAction,
     AssistantMessage,
     ExecutionPlan,
@@ -11,13 +11,13 @@ from mini_agent.domain import (
     StepEvaluation,
     StrategySelection,
 )
-from mini_agent.observability import JsonlRunLogger
-from mini_agent.planning import RuleBasedPlanner
-from mini_agent.providers import ModelRequestError
-from mini_agent.runtime import LegacyAgentRunner as AgentRunner
-from mini_agent.runtime.core.contracts import InterruptDecision
-from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
-from mini_agent.tools import ToolRegistry
+from backend.observability import JsonlRunLogger
+from backend.planning import RuleBasedPlanner
+from backend.providers import ModelRequestError
+from backend.runtime import LegacyAgentRunner as AgentRunner
+from backend.runtime.core.contracts import InterruptDecision
+from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
+from backend.tools import ToolRegistry
 
 
 def test_runner_executes_calculation(tmp_path: Path) -> None:

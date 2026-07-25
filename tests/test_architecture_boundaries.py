@@ -38,27 +38,32 @@ def _run_isolated_import(statement: str, forbidden: tuple[str, ...]) -> None:
 
 def test_domain_import_does_not_load_outer_layers() -> None:
     _run_isolated_import(
-        "import mini_agent.domain",
-        ("mini_agent.runtime", "mini_agent.planning", "mini_agent.providers", "mini_agent.storage", "mini_agent.tools"),
+        "import backend.domain",
+        ("backend.runtime", "backend.planning", "backend.providers", "backend.storage", "backend.tools"),
     )
 
 
 def test_runtime_event_import_does_not_load_application_graph() -> None:
     _run_isolated_import(
-        "import mini_agent.runtime.core.events",
-        ("mini_agent.planning", "mini_agent.providers", "mini_agent.storage", "mini_agent.tools", "requests"),
+        "import backend.runtime.core.events",
+        ("backend.planning", "backend.providers", "backend.storage", "backend.tools", "requests"),
     )
 
 
 def test_deepseek_adapter_does_not_own_http_transport() -> None:
-    imports = _package_imports(SOURCE / "mini_agent" / "providers" / "deepseek")
+    imports = _package_imports(SOURCE / "backend" / "providers" / "deepseek")
     assert "requests" not in imports
+
+
+def test_backend_does_not_import_tui() -> None:
+    imports = _package_imports(SOURCE / "backend")
+    assert not any(name == "tui" or name.startswith("tui.") for name in imports)
 
 
 def test_application_services_depend_on_runner_port() -> None:
     paths = [
-        SOURCE / "mini_agent" / "runtime" / "application" / "services.py",
-        SOURCE / "mini_agent" / "runtime" / "conversation" / "service.py",
+        SOURCE / "backend" / "runtime" / "application" / "services.py",
+        SOURCE / "backend" / "runtime" / "conversation" / "service.py",
     ]
     for path in paths:
         imports = _module_imports(path)

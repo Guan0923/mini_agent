@@ -4,10 +4,10 @@ import asyncio
 
 from textual.app import App, ComposeResult
 
-from mini_agent.tui.latex import LatexMarkdown, latex_markdown_parser, latex_to_terminal_text
-from mini_agent.tui.rendering.transcript import MarkdownBody
-from mini_agent.tui.screens.history import HistoryScreen
-from mini_agent.tui.view import TerminalView
+from tui.latex import LatexMarkdown, latex_markdown_parser, latex_to_terminal_text
+from tui.rendering.transcript import MarkdownBody
+from tui.screens.history import HistoryScreen
+from tui.view import TerminalView
 
 
 class _MarkdownApp(App[None]):

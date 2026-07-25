@@ -5,9 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from mini_agent.domain import RunState
-from mini_agent.tui import cli
-from mini_agent.tui.components.approval import TerminalApproval
+from backend.domain import RunState
+from tui import cli
+from tui.components.approval import TerminalApproval
 
 
 class StubConversation:

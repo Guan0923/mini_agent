@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 
-from mini_agent.runtime.core.events import RuntimeEvent
-from mini_agent.tui.rendering.mirror import TranscriptTextMirror
-from mini_agent.tui.rendering.transcript import TranscriptScroll
-from mini_agent.tui.view import TerminalView
+from backend.runtime.core.events import RuntimeEvent
+from tui.rendering.mirror import TranscriptTextMirror
+from tui.rendering.transcript import TranscriptScroll
+from tui.view import TerminalView
 
 
 def _event(kind: str, message: str = "", **data: object) -> RuntimeEvent:

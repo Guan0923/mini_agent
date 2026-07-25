@@ -1,5 +1,5 @@
-from mini_agent.runtime.core.contracts import InterruptRequest, QuestionOption, UserQuestion
-from mini_agent.tui.components.approval import TerminalApproval
+from backend.runtime.core.contracts import InterruptRequest, QuestionOption, UserQuestion
+from tui.components.approval import TerminalApproval
 
 
 def test_tool_review_collects_english_supplement(monkeypatch, capsys) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mini_agent.domain import (
+from backend.domain import (
     AssistantMessage,
     ExecutionPlan,
     PlanStep,
@@ -12,11 +12,11 @@ from mini_agent.domain import (
     StepEvaluation,
     ToolMessage,
 )
-from mini_agent.planning import LLMPlanner
-from mini_agent.runtime import LegacyAgentRunner as AgentRunner
-from mini_agent.runtime import PreparedResponse, RunnerSettings, RuntimeState
-from mini_agent.tools import Tool, ToolRegistry
-from mini_agent.tui import cli
+from backend.planning import LLMPlanner
+from backend.runtime import LegacyAgentRunner as AgentRunner
+from backend.runtime import PreparedResponse, RunnerSettings, RuntimeState
+from backend.tools import Tool, ToolRegistry
+from tui import cli
 
 
 class BatchedPlanner:

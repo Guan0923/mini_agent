@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from mini_agent.domain import AssistantMessage, RunState, StrategySelection, ToolMessage, ToolSpec, UserMessage
-from mini_agent.planning import RuleBasedPlanner
-from mini_agent.runtime import AgentRunner, ConversationService, RuntimeState, SQLiteSessionStore
-from mini_agent.tools import Tool, ToolRegistry
+from backend.domain import AssistantMessage, RunState, StrategySelection, ToolMessage, ToolSpec, UserMessage
+from backend.planning import RuleBasedPlanner
+from backend.runtime import AgentRunner, ConversationService, RuntimeState, SQLiteSessionStore
+from backend.tools import Tool, ToolRegistry
 
 
 def test_messages_expose_required_fields_and_nest_tools() -> None:

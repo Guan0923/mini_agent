@@ -1,7 +1,7 @@
 import asyncio
 
-from mini_agent.tui.components.completion import SlashCommandCompleter
-from mini_agent.tui.view import TerminalView
+from tui.components.completion import SlashCommandCompleter
+from tui.view import TerminalView
 
 
 def _completions(text: str):

@@ -9,18 +9,19 @@
 
 ## Project Structure & Dependency Direction
 
-Mini-Agent is a Python 3.11+ terminal-first agent lab. Production code lives in `src/mini_agent/`; focused tests live in `tests/`.
+Mini-Agent is a Python 3.11+ agent lab. Production code is split into `src/backend/` (runtime and adapters), `src/tui/` (Textual terminal interface), and `src/frontend/` (reserved for a future web frontend); focused tests live in `tests/`.
 
-- `domain/`: provider-neutral messages, plans, sessions, skills, errors, and run state.
-- `planning/`: rule-based and LLM planners, context management, model request lifecycle, and structured-output parsing.
-- `runtime/`: application composition, conversation orchestration, execution workflows, Plan mode, persistence ports, hooks, and runtime events.
-- `providers/`: `client.py` orchestrates providers, `transport.py` owns generic JSON/SSE HTTP, and `deepseek/` owns DeepSeek wire conversion.
-- `tools/`: contracts and registry plus grouped `filesystem/`, `web/`, `default_tools/`, and command implementations.
-- `storage/`: SQLite checkpoint/session adapters split into operations, schema migration, and row mapping.
+- `backend/domain/`: provider-neutral messages, plans, sessions, skills, errors, and run state.
+- `backend/planning/`: rule-based and LLM planners, context management, model request lifecycle, and structured-output parsing.
+- `backend/runtime/`: application composition, conversation orchestration, execution workflows, Plan mode, persistence ports, hooks, and runtime events.
+- `backend/providers/`: `client.py` orchestrates providers, `transport.py` owns generic JSON/SSE HTTP, and `deepseek/` owns DeepSeek wire conversion.
+- `backend/tools/`: contracts and registry plus grouped `filesystem/`, `web/`, `default_tools/`, and command implementations.
+- `backend/storage/`: SQLite checkpoint/session adapters split into operations, schema migration, and row mapping.
+- `backend/observability/`: JSONL logging, redaction, and event fan-out.
 - `tui/`: CLI/application loops, approval components, screens, rendering, view behavior, and reusable widgets.
-- `observability/`: JSONL logging, redaction, and event fan-out.
+- `frontend/`: reserved for a future browser frontend; it consumes backend APIs and must not import backend implementation modules directly.
 
-Keep dependencies inward: TUI composes runtime services; runtime invokes planner/tool ports; provider adapters never import TUI or storage; domain remains independent of outer layers.
+Keep dependencies inward: TUI composes backend runtime services; runtime invokes planner/tool ports; provider adapters never import TUI or storage; domain remains independent of outer layers. Future frontend code communicates through backend APIs rather than sharing runtime internals.
 
 ## Build, Run, and Validation Commands
 
@@ -35,7 +36,7 @@ python -m ruff check .
 python -m ruff format --check .
 ```
 
-`python run.py`, `python -m mini_agent`, and the installed `mini-agent` command share the same CLI entry point.
+`python run.py`, `python -m tui`, and the installed `mini-agent` command share the same TUI CLI entry point.
 
 ## Design and Coding Guidelines
 

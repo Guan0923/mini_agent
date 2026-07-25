@@ -4,10 +4,10 @@ from typing import Any
 
 import pytest
 
-from mini_agent.domain import AssistantMessage, ToolMessage
-from mini_agent.providers.config import ModelConfig, load_env_file
-from mini_agent.runtime import AgentRunner
-from mini_agent.tools import Tool, ToolError, ToolRegistry, WorkspaceCommand
+from backend.domain import AssistantMessage, ToolMessage
+from backend.providers.config import ModelConfig, load_env_file
+from backend.runtime import AgentRunner
+from backend.tools import Tool, ToolError, ToolRegistry, WorkspaceCommand
 
 
 def test_tool_registry_validates_schema_without_applying_defaults() -> None:

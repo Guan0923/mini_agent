@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.tools import ToolError, WorkspaceFiles
-from mini_agent.tools.filesystem import io as filesystem_io
+from backend.tools import ToolError, WorkspaceFiles
+from backend.tools.filesystem import io as filesystem_io
 
 
 def test_read_file_returns_bounded_lf_line_range(tmp_path: Path) -> None:

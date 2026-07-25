@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.tools import ToolError, ToolRegistry, WorkspaceFiles
+from backend.tools import ToolError, ToolRegistry, WorkspaceFiles
 
 
 def _payload(result: str) -> str:

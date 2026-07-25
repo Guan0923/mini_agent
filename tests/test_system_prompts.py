@@ -1,16 +1,16 @@
 import pytest
 
-from mini_agent.domain import AssistantMessage, SkillSnapshot, SystemMessage
-from mini_agent.planning import LLMPlanner
-from mini_agent.planning import prompts as prompt_module
-from mini_agent.planning.prompts import (
+from backend.domain import AssistantMessage, SkillSnapshot, SystemMessage
+from backend.planning import LLMPlanner
+from backend.planning import prompts as prompt_module
+from backend.planning.prompts import (
     PromptConfigurationError,
     PromptTemplates,
     _read_prompt,
     compose_system_prompt,
 )
-from mini_agent.runtime import AgentRunner, PreparedResponse
-from mini_agent.tools import ToolRegistry
+from backend.runtime import AgentRunner, PreparedResponse
+from backend.tools import ToolRegistry
 
 
 class RecordingClient:

@@ -3,19 +3,19 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.domain import AssistantMessage, PlanningError, ToolMessage
-from mini_agent.observability import EventFanout, JsonlRunLogger
-from mini_agent.planning import LLMPlanner, RuleBasedPlanner
-from mini_agent.runtime import (
+from backend.domain import AssistantMessage, PlanningError, ToolMessage
+from backend.observability import EventFanout, JsonlRunLogger
+from backend.planning import LLMPlanner, RuleBasedPlanner
+from backend.runtime import (
     AgentRunner,
     ConversationService,
     PreparedResponse,
     SQLiteCheckpointStore,
     SQLiteSessionStore,
 )
-from mini_agent.runtime.core.config import log_full_messages_from_env
-from mini_agent.runtime.execution.lifecycle.outcomes import fail_run
-from mini_agent.tools import Tool, ToolRegistry
+from backend.runtime.core.config import log_full_messages_from_env
+from backend.runtime.execution.lifecycle.outcomes import fail_run
+from backend.tools import Tool, ToolRegistry
 
 
 class StaticCompletionClient:

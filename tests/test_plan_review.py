@@ -2,11 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.domain import AssistantMessage, SkillSnapshot, ToolMessage, UserMessage
-from mini_agent.runtime import AgentRunner
-from mini_agent.runtime.core.contracts import InterruptDecision
-from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME, parse_plan_review
-from mini_agent.tools import ToolRegistry
+from backend.domain import AssistantMessage, SkillSnapshot, ToolMessage, UserMessage
+from backend.runtime import AgentRunner
+from backend.runtime.core.contracts import InterruptDecision
+from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME, parse_plan_review
+from backend.tools import ToolRegistry
 
 PLAN = "# Plan title\n\n## Summary\nMake the requested change."
 

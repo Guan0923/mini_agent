@@ -6,9 +6,9 @@ from typing import Any
 
 import pytest
 
-from mini_agent.planning import RuleBasedPlanner
-from mini_agent.runtime import AgentRunner
-from mini_agent.tools import ConfirmationRequired, DdgrWebSearch, SafeWebFetcher, ToolError, ToolRegistry
+from backend.planning import RuleBasedPlanner
+from backend.runtime import AgentRunner
+from backend.tools import ConfirmationRequired, DdgrWebSearch, SafeWebFetcher, ToolError, ToolRegistry
 
 
 class FakeResponse:

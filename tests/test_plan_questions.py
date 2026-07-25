@@ -3,16 +3,16 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.domain import AssistantMessage, StrategySelection, ToolMessage, UserMessage
-from mini_agent.runtime import AgentRunner, ConversationService, SQLiteSessionStore
-from mini_agent.runtime.conversation.user_input import (
+from backend.domain import AssistantMessage, StrategySelection, ToolMessage, UserMessage
+from backend.runtime import AgentRunner, ConversationService, SQLiteSessionStore
+from backend.runtime.conversation.user_input import (
     REQUEST_USER_INPUT_NAME,
     format_user_input_answers,
     parse_user_input_questions,
 )
-from mini_agent.runtime.core.contracts import InterruptDecision, QuestionOption, UserQuestion
-from mini_agent.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
-from mini_agent.tools import ToolRegistry
+from backend.runtime.core.contracts import InterruptDecision, QuestionOption, UserQuestion
+from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
+from backend.tools import ToolRegistry
 
 
 def question_arguments() -> dict[str, object]:

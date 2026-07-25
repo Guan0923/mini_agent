@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mini_agent.domain import (
+from backend.domain import (
     AssistantMessage,
     PlanningError,
     RunState,
@@ -15,13 +15,13 @@ from mini_agent.domain import (
     ToolSpec,
     UserMessage,
 )
-from mini_agent.planning.context_management import ContextManager
-from mini_agent.planning.llm import LLMPlanner
-from mini_agent.planning.rule_based import RuleBasedPlanner
-from mini_agent.providers import DeepSeek, ModelConfig, ModelConfigurationError
-from mini_agent.runtime import AgentRunner
-from mini_agent.runtime.core.context import AgentRuntime, PreparedResponse
-from mini_agent.tools import ToolRegistry
+from backend.planning.context_management import ContextManager
+from backend.planning.llm import LLMPlanner
+from backend.planning.rule_based import RuleBasedPlanner
+from backend.providers import DeepSeek, ModelConfig, ModelConfigurationError
+from backend.runtime import AgentRunner
+from backend.runtime.core.context import AgentRuntime, PreparedResponse
+from backend.tools import ToolRegistry
 
 
 @dataclass

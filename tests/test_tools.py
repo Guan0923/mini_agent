@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from mini_agent.tools import ToolError, ToolRegistry, WorkspaceCommand
+from backend.tools import ToolError, ToolRegistry, WorkspaceCommand
 
 
 class FakeProcess:

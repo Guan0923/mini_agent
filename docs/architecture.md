@@ -33,7 +33,7 @@ The runtime retains a non-blocking process-local steering callback for embedding
 Subclass `AgentHook` and inject instances at the composition boundary:
 
 ```python
-from mini_agent.runtime import AgentHook, ModelHookContext, build_application
+from backend.runtime import AgentHook, ModelHookContext, build_application
 
 
 class TemperatureHook(AgentHook):

@@ -29,7 +29,7 @@ Run the required local checks from the repository root:
 ```powershell
 ruff check .
 ruff format --check .
-python -m pytest --cov=mini_agent --cov-report=term-missing
+python -m pytest --cov=backend --cov-report=term-missing
 ```
 
 For a fast test-only loop:
@@ -44,7 +44,7 @@ The suite keeps focused contract and high-risk integration coverage. Avoid addin
 
 ```powershell
 python run.py --planner rule "calculate (18 + 6) * 4"
-python -m mini_agent --planner rule "calculate 2 + 2"
+python -m tui --planner rule "calculate 2 + 2"
 python run.py "读取 README.md"
 mini-agent
 ```

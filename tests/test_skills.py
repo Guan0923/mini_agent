@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mini_agent.domain import (
+from backend.domain import (
     AssistantMessage,
     RunHandoff,
     RunState,
@@ -15,17 +15,17 @@ from mini_agent.domain import (
     ToolMessage,
     UserMessage,
 )
-from mini_agent.planning import LLMPlanner
-from mini_agent.runtime import AgentRunner, PreparedResponse
-from mini_agent.skills import (
+from backend.planning import LLMPlanner
+from backend.runtime import AgentRunner, PreparedResponse
+from backend.skills import (
     MAX_INSTRUCTION_LINES,
     MAX_SKILL_BYTES,
     SkillCatalog,
     SkillConfigurationError,
     SkillDefinition,
 )
-from mini_agent.tools import ToolRegistry
-from mini_agent.tui.cli import TerminalApp
+from backend.tools import ToolRegistry
+from tui.cli import TerminalApp
 
 
 def write_skill(
