@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import Lock
 from typing import Literal
 
 from backend.runtime.conversation.user_input import OTHER_OPTION_LABEL
@@ -27,6 +28,7 @@ class TerminalApproval:
     ) -> None:
         self._permission_mode = permission_mode
         self._write = write or _console_write
+        self._request_lock = Lock()
 
     @property
     def permission_mode(self) -> PermissionMode:
@@ -73,10 +75,11 @@ class TerminalApproval:
         automatic = self.automatic_decision(request)
         if automatic is not None:
             return automatic
-        self.render_request(request)
-        if request.kind == "question":
-            return self._read_question_decision(request.questions)
-        return self._read_decision(request)
+        with self._request_lock:
+            self.render_request(request)
+            if request.kind == "question":
+                return self._read_question_decision(request.questions)
+            return self._read_decision(request)
 
     def automatic_decision(self, request: InterruptRequest) -> InterruptDecision | None:
         if request.kind == "tool" and self._permission_mode == "full_access":

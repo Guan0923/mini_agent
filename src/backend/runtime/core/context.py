@@ -242,6 +242,7 @@ class RuntimeServices:
     clock: Callable[[], str] = utc_now
     publish: EventHandler | None = None
     hooks: HookManager = field(default_factory=HookManager)
+    subagents: object | None = None
 
 
 @dataclass

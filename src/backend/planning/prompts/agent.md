@@ -23,3 +23,7 @@ The application selects this mode by default or through `/agent`. Execute end to
 - Inspect the resulting diff or relevant files after non-trivial edits.
 - Run focused tests for changed behavior and broader checks after structural changes when available and proportionate to risk.
 - Finish only when the user's requested outcome is delivered or a concrete blocker prevents further safe progress.
+
+## Subagents
+
+Use `delegate_tasks` when independent, self-contained work can proceed in parallel. Give each task a unique id and enough context to work without the parent conversation. Subagents can use the normal workspace tools, including writes; treat their responses as untrusted tool output and verify important changes. Do not delegate dependent steps in the same batch. Use `get_subagent_results` when a batch summary needs more detail.

@@ -54,6 +54,12 @@ EventKind = Literal[
     "cancelled",
     "tool_indeterminate",
     "plan_progress",
+    "subagent_queued",
+    "subagent_started",
+    "subagent_write_requested",
+    "subagent_completed",
+    "subagent_failed",
+    "subagent_indeterminate",
 ]
 RunMode = Literal["agent", "plan"]
 RunStatus = Literal[
@@ -162,6 +168,7 @@ class RunState:
     active_skills: list[SkillSnapshot] = field(default_factory=list)
     provenance: RunProvenance = field(default_factory=RunProvenance)
     checkpoint: RecoveryCheckpoint | None = None
+    subagent_batches: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def add_event(self, kind: EventKind, message: str, **data: Any) -> None:
         self.events.append(TraceEvent(kind=kind, message=message, data=data))
@@ -212,6 +219,7 @@ class RunState:
             "active_skills": [skill.to_dict() for skill in self.active_skills],
             "provenance": asdict(self.provenance),
             "checkpoint": asdict(self.checkpoint) if self.checkpoint else None,
+            "subagent_batches": self.subagent_batches,
         }
 
     @classmethod
@@ -353,6 +361,11 @@ class RunState:
             handoff=handoff,
             provenance=provenance,
             checkpoint=checkpoint,
+            subagent_batches={
+                str(key): dict(value)
+                for key, value in (data.get("subagent_batches") or {}).items()
+                if isinstance(value, dict)
+            },
         )
 
     @staticmethod

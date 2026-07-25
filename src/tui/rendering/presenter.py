@@ -108,6 +108,14 @@ class TerminalPresenter:
             self._write(f"STEERING APPLIED — {event.data['phase']}")
         elif event.kind == "handoff_created":
             self._write(f"HANDOFF — {event.message}")
+        elif event.kind == "subagent_queued":
+            self._write(f"SUBAGENTS QUEUED — {event.data['count']}")
+        elif event.kind == "subagent_started":
+            self._write(f"SUBAGENT {event.data['task_id']} STARTED")
+        elif event.kind == "subagent_write_requested":
+            self._write(f"SUBAGENT {event.data['task_id']} REQUESTED {event.data['tool']}")
+        elif event.kind in {"subagent_completed", "subagent_failed", "subagent_indeterminate"}:
+            self._write(f"SUBAGENT {event.data.get('task_id', '')} — {event.message}")
         elif event.kind == "cancelled":
             self._write("CANCELLED")
         elif event.kind == "run_finished":

@@ -63,11 +63,13 @@ class AgentRunner:
         max_tool_calls: int | None = None,
         skill_catalog: object | None = None,
         workspace_root: str | None = None,
+        subagents: object | None = None,
     ) -> None:
         self.planner = planner
         self.tools = tools
         self.skill_catalog = skill_catalog
         self.workspace_root = workspace_root
+        self.subagents = subagents
         if max_actions is not None and max_tool_calls is not None:
             raise ValueError("max_actions and max_tool_calls cannot be used together.")
         resolved_tool_calls = max_actions if max_actions is not None else max_tool_calls
@@ -152,6 +154,7 @@ class AgentRunner:
             checkpoint_store=self.checkpoints,
             runtime_store=runtime_store,  # type: ignore[arg-type]
             hooks=self.hooks,
+            subagents=self.subagents,
         )
         return AgentRuntime(state=state, services=services)
 
@@ -163,6 +166,7 @@ class AgentRunner:
         runtime.services.checkpoint_store = self.checkpoints
         runtime.services.skill_catalog = self.skill_catalog
         runtime.services.hooks = self.hooks
+        runtime.services.subagents = self.subagents
         runtime.state.runner_settings = self.settings
         return runtime
 

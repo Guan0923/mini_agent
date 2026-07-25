@@ -158,7 +158,11 @@ class ToolStepExecutor:
         )
         for attempt in range(runtime.state.runner_settings.max_retries + 1):
             try:
-                result = tools.invoke(tool, tool_message.arguments, confirmed=True)
+                subagents = runtime.services.subagents
+                if subagents is not None and subagents.handles(tool):
+                    result = subagents.invoke(runtime, tool, tool_message.arguments)
+                else:
+                    result = tools.invoke(tool, tool_message.arguments, confirmed=True)
                 tool_message.status = "succeeded"
                 tool_message.content = result
                 tool_message.retryable = retryable

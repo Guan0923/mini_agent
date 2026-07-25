@@ -56,6 +56,12 @@ RuntimeEventKind = Literal[
     "steering_applied",
     "handoff_created",
     "cancelled",
+    "subagent_queued",
+    "subagent_started",
+    "subagent_write_requested",
+    "subagent_completed",
+    "subagent_failed",
+    "subagent_indeterminate",
 ]
 
 # Text stream chunks are high-volume presentation data, not durable state
@@ -89,6 +95,12 @@ CHECKPOINT_EVENT_KINDS: frozenset[RuntimeEventKind] = frozenset(
         "plan",
         "error",
         "cancelled",
+        "subagent_queued",
+        "subagent_started",
+        "subagent_write_requested",
+        "subagent_completed",
+        "subagent_failed",
+        "subagent_indeterminate",
         "run_finished",
     }
 )

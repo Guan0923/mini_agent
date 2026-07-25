@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from .base import Tool
@@ -34,14 +35,18 @@ def build_tool_registry(
     web_search: DdgrWebSearch | None = None,
     web_fetch: SafeWebFetcher | None = None,
     workspace_files: WorkspaceFiles | None = None,
+    extra_tools: Iterable[Tool] = (),
 ) -> ToolRegistry:
     """Build the standard workspace tool registry."""
 
     return ToolRegistry(
-        _build_tools(
-            workspace,
-            web_search=web_search,
-            web_fetch=web_fetch,
-            workspace_files=workspace_files,
+        (
+            *_build_tools(
+                workspace,
+                web_search=web_search,
+                web_fetch=web_fetch,
+                workspace_files=workspace_files,
+            ),
+            *extra_tools,
         )
     )

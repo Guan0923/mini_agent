@@ -10,12 +10,13 @@ from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.providers import LLMClient, ModelConfig
 from backend.skills import SkillCatalog
 from backend.storage import PostgresCheckpointStore, PostgresDatabase, PostgresSessionStore
-from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry
+from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry, delegation_tools
 
 from ..conversation.references import FileReferenceExpander
 from ..core.config import RunnerSettings, database_url_from_env, log_full_messages_from_env
 from ..core.hooks import AgentHook
 from ..execution.runner import AgentRunner
+from ..subagents import SubagentCoordinator
 from .services import AgentApplication
 
 PlannerName = Literal["llm", "rule"]
@@ -42,17 +43,10 @@ def build_application(
     """Compose one interface-neutral application with its workspace dependencies."""
 
     files = WorkspaceFiles(workspace)
-    tools = build_tool_registry(workspace, workspace_files=files)
+    resolved = _settings_for(workspace, settings)
     database = PostgresDatabase(database_url(workspace))
     session_store = PostgresSessionStore(database=database)
-    runner = _build_runner(
-        workspace,
-        planner_name,
-        _settings_for(workspace, settings),
-        tools,
-        hooks,
-        checkpoints=session_store,
-    )
+    runner = _build_subagent_runner(workspace, planner_name, resolved, hooks, session_store, files)
     return AgentApplication(runner, session_store, FileReferenceExpander(files), database)
 
 
@@ -62,12 +56,32 @@ def build_runner(
     settings: RunnerSettings | None = None,
     hooks: Iterable[AgentHook] = (),
 ) -> AgentRunner:
+    resolved = _settings_for(workspace, settings)
+    return _build_subagent_runner(workspace, planner_name, resolved, hooks)
+
+
+def _build_subagent_runner(
+    workspace: Path,
+    planner_name: PlannerName,
+    settings: RunnerSettings,
+    hooks: Iterable[AgentHook],
+    checkpoints: object | None = None,
+    files: WorkspaceFiles | None = None,
+) -> AgentRunner:
+    def child_factory() -> AgentRunner:
+        return _build_runner(
+            workspace,
+            planner_name,
+            settings,
+            build_tool_registry(workspace),
+            hooks,
+            checkpoints=checkpoints,
+        )
+
+    coordinator = SubagentCoordinator(child_factory)
+    tools = build_tool_registry(workspace, workspace_files=files, extra_tools=delegation_tools())
     return _build_runner(
-        workspace,
-        planner_name,
-        _settings_for(workspace, settings),
-        build_tool_registry(workspace),
-        hooks,
+        workspace, planner_name, settings, tools, hooks, checkpoints=checkpoints, subagents=coordinator
     )
 
 
@@ -78,6 +92,7 @@ def _build_runner(
     tools: ToolExecutor,
     hooks: Iterable[AgentHook],
     checkpoints: object | None = None,
+    subagents: object | None = None,
 ) -> AgentRunner:
     skills = SkillCatalog.discover(workspace)
     if planner_name == "rule":
@@ -101,6 +116,7 @@ def _build_runner(
         hooks=hooks,
         skill_catalog=skills,
         workspace_root=str(workspace.resolve()),
+        subagents=subagents,
     )
 
 
