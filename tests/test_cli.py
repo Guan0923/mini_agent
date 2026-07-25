@@ -120,11 +120,19 @@ def test_view_routes_conversations_system_output_and_history() -> None:
     class TranscriptView:
         def __init__(self) -> None:
             self.conversations: list[str] = []
+            self.queued: list[str] = []
+            self.queue_cleared = False
             self.system: list[tuple[str, str]] = []
             self.histories: list[tuple[str, list[dict[str, str]]]] = []
 
         def begin_conversation(self, content: str) -> None:
             self.conversations.append(content)
+
+        def queue_message(self, content: str) -> None:
+            self.queued.append(content)
+
+        def clear_queued_messages(self) -> None:
+            self.queue_cleared = True
 
         def write_system(self, text: str, end: str = "\n") -> None:
             self.system.append((text, end))
@@ -144,9 +152,13 @@ def test_view_routes_conversations_system_output_and_history() -> None:
     app._conversation_service.history = lambda: history
 
     app._write_user_message("hello")
+    app._write_queued_message("later")
+    app._clear_queued_messages()
     app._write("SYSTEM EVENT", end="")
     app._show_history()
 
     assert view.conversations == ["hello"]
+    assert view.queued == ["later"]
+    assert view.queue_cleared is True
     assert view.system == [("SYSTEM EVENT", "")]
     assert view.histories == [("session_1 — Session 1", history)]

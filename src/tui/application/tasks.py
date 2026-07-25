@@ -182,6 +182,23 @@ class TaskAppMixin:
             return
         self._write(f"USER\n{content}")
 
+    def _write_queued_message(self, content: str) -> None:
+        """Render a pending message separately until execution actually starts."""
+
+        view = getattr(self, "_view", None)
+        queue_message = getattr(view, "queue_message", None)
+        if callable(queue_message):
+            queue_message(content)
+            return
+        self._write(f"QUEUED\n{content}")
+
+    def _clear_queued_messages(self) -> None:
+        """Clear queue-only UI once the queued messages are promoted to a run."""
+
+        clear_queued_messages = getattr(getattr(self, "_view", None), "clear_queued_messages", None)
+        if callable(clear_queued_messages):
+            clear_queued_messages()
+
     def _clear_display(self) -> None:
         view = getattr(self, "_view", None)
         if view is not None:

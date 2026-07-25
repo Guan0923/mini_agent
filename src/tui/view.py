@@ -30,6 +30,7 @@ from .widgets import (
     ChoiceRow,
     ContextProgress,
     InlineChoiceList,
+    QueuedMessages,
     TerminalInput,
     TranscriptTextArea,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "ChoiceRow",
     "ContextProgress",
     "InlineChoiceList",
+    "QueuedMessages",
     "RUNNING_STATUS_WORDS",
     "TerminalInput",
     "TerminalView",
@@ -142,6 +144,16 @@ class TerminalView(
         background: #171c21;
         overflow-y: auto;
     }
+    #queued-messages {
+        height: auto;
+        max-height: 6;
+        margin: 0 1;
+        padding: 0 1;
+        background: #1f2630;
+        color: #c7d6e8;
+        border-left: solid #d9a441;
+        overflow-y: auto;
+    }
     .choice-list {
         height: auto;
         max-height: 8;
@@ -230,6 +242,7 @@ class TerminalView(
         self.context_progress = ContextProgress()
         self.question_header = Static(id="choice-header")
         self.review_details = LatexMarkdown(id="review-details")
+        self.queued_messages = QueuedMessages()
         self.completion_menu = OptionList(id="completion-menu")
         self.input = TerminalInput(
             soft_wrap=True,
@@ -239,6 +252,7 @@ class TerminalView(
 
     def compose(self) -> ComposeResult:
         yield self.transcript
+        yield self.queued_messages
         yield self.question_header
         yield self.review_details
         yield self.completion_menu

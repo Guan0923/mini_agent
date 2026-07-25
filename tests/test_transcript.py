@@ -5,6 +5,7 @@ import asyncio
 from backend.runtime.core.events import RuntimeEvent
 from tui.rendering.mirror import TranscriptTextMirror
 from tui.rendering.transcript import TranscriptScroll
+from tui.screens.history import HistoryScreen
 from tui.view import TerminalView
 
 
@@ -166,5 +167,28 @@ def test_history_clear_and_plain_append_keep_text_compatible() -> None:
             view.write("plain", end="")
             view.flush_now()
             assert view.transcript_text == "plain"
+
+    asyncio.run(scenario())
+
+
+def test_queued_message_uses_its_own_panel_and_survives_history_screen() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test() as pilot:
+            view.queue_message("Use the first result only")
+            await pilot.pause()
+
+            assert view.transcript_text == ""
+            assert view.queued_messages.messages == ["Use the first result only"]
+            assert view.queued_messages.display is True
+
+            view.show_history("session_1", [{"role": "user", "content": "completed task"}])
+            await pilot.pause()
+            assert isinstance(view.screen, HistoryScreen)
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert view.queued_messages.messages == ["Use the first result only"]
+            assert view.queued_messages.display is True
 
     asyncio.run(scenario())

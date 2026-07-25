@@ -79,6 +79,16 @@ class InteractiveAppMixin:
         def launch_compaction() -> asyncio.Task[object]:
             return asyncio.create_task(asyncio.to_thread(self._conversation_service.compact_context))
 
+        def launch_queued_messages() -> asyncio.Task[RunState | None] | None:
+            queued = self._drain_steering(pending_messages)
+            if not queued:
+                return None
+            task = "\n\n".join(queued)
+            self._clear_queued_messages()
+            self._write(f"QUEUE STARTED — {len(queued)} queued message(s)")
+            self._write_user_message(task)
+            return launch(task)
+
         startup_resume_id = getattr(self, "_startup_resume_id", None)
         if startup_resume_id is not None:
             active_run = launch_resume(startup_resume_id)
@@ -210,11 +220,13 @@ class InteractiveAppMixin:
                             pass
                         elif active_run is not None or active_compaction is not None:
                             if task:
-                                if any(kind == "command" for kind, _value, _argument in self._split_input(task)):
+                                if task == "/history":
+                                    self._show_history()
+                                elif any(kind == "command" for kind, _value, _argument in self._split_input(task)):
                                     self._write("Commands are unavailable while the agent is running.")
                                 else:
-                                    self._write_user_message(task)
                                     pending_messages.put(task)
+                                    self._write_queued_message(task)
                                     self._write("MESSAGE QUEUED")
                         else:
                             parts = self._split_input(task)
@@ -285,10 +297,7 @@ class InteractiveAppMixin:
                     if exit_after_run:
                         exit_requested = True
                     else:
-                        queued = self._drain_steering(pending_messages)
-                        if queued:
-                            self._write(f"QUEUE STARTED — {len(queued)} queued message(s)")
-                            active_run = launch("\n\n".join(queued))
+                        active_run = launch_queued_messages()
 
                 if run_finished:
                     assert active_run is not None
@@ -303,10 +312,7 @@ class InteractiveAppMixin:
                     if exit_after_run:
                         exit_requested = True
                     else:
-                        queued = self._drain_steering(pending_messages)
-                        if queued:
-                            self._write(f"QUEUE STARTED — {len(queued)} queued message(s)")
-                            active_run = launch("\n\n".join(queued))
+                        active_run = launch_queued_messages()
 
                 if submission not in done:
                     await self._cancel_task(submission)

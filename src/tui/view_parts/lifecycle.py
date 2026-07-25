@@ -37,6 +37,19 @@ class ViewLifecycleMixin:
 
         self._run_on_owner(begin)
 
+    def queue_message(self, user_input: str) -> None:
+        """Show a message waiting for the active run without creating a conversation turn."""
+
+        def queue() -> None:
+            self.queued_messages.set_messages([*self.queued_messages.messages, user_input])
+
+        self._run_on_owner(queue)
+
+    def clear_queued_messages(self) -> None:
+        """Remove queue-only UI after its messages have started as a real run."""
+
+        self._run_on_owner(lambda: self.queued_messages.set_messages([]))
+
     def begin_compaction(self) -> None:
         """Show an animated compaction row in the main transcript."""
 

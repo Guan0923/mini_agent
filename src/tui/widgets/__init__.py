@@ -2,6 +2,7 @@
 
 from .choices import ChoiceItem, ChoiceRow, InlineChoiceList
 from .input import TerminalInput, TranscriptTextArea
+from .queue import QueuedMessages
 from .status import ContextProgress
 
 __all__ = [
@@ -9,6 +10,7 @@ __all__ = [
     "ChoiceRow",
     "ContextProgress",
     "InlineChoiceList",
+    "QueuedMessages",
     "TerminalInput",
     "TranscriptTextArea",
 ]
