@@ -12,7 +12,7 @@ def test_tool_review_collects_english_supplement(monkeypatch, capsys) -> None:
 
     assert decision.choice == "supplement"
     assert decision.supplement == "Use a smaller change."
-    assert "TOOL REVIEW\nTool: run_command\nAction: Run command\nCommand: <missing>" in capsys.readouterr().out
+    assert "TOOL REVIEW\nTool: run_command\nTarget: <missing>" in capsys.readouterr().out
 
 
 def test_plan_review_implements_plan(monkeypatch, capsys) -> None:
@@ -64,7 +64,7 @@ def test_tool_review_continues_tool(monkeypatch, capsys) -> None:
     )
 
     assert decision.choice == "continue"
-    assert "TOOL REVIEW\nTool: run_command\nAction: Run command\nCommand: <missing>" in capsys.readouterr().out
+    assert "TOOL REVIEW\nTool: run_command\nTarget: <missing>" in capsys.readouterr().out
 
 
 def test_tool_review_rejects_plan_implement_choice(monkeypatch, capsys) -> None:
