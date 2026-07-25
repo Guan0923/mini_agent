@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from textual import events
+from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import TextArea
 from textual.widgets.text_area import Selection
@@ -63,12 +64,35 @@ class TerminalInput(TextArea):
         if event.key == "ctrl+j":
             result = self.replace("\n", self.selection.start, self.selection.end)
             self.selection = Selection.cursor(result.end_location)
-        elif event.key == "enter":
-            self.post_message(self.Submitted(self, self.value))
         else:
-            return
+            handle_choice_key = getattr(self.app, "handle_choice_input_key", None)
+            if callable(handle_choice_key) and handle_choice_key(event.key):
+                event.prevent_default()
+                event.stop()
+                return
+            if event.key != "enter":
+                return
+            self.post_message(self.Submitted(self, self.value))
         event.prevent_default()
         event.stop()
 
     def _on_paste(self, event: events.Paste) -> None:
+        event.stop()
+
+
+class InputFrame(Vertical):
+    """Focusable visual shell used only while the terminal input is single-line."""
+
+    def __init__(self, input_widget: TerminalInput) -> None:
+        self.input_widget = input_widget
+        super().__init__(input_widget, id="input-frame", classes="input-frame -single-line")
+
+    def set_single_line(self, single_line: bool) -> None:
+        """Install or remove the one-line visual shell without replacing the input."""
+
+        self.set_class(single_line, "-single-line")
+        self.set_class(not single_line, "-multiline")
+
+    def on_click(self, event: events.Click) -> None:
+        self.input_widget.focus()
         event.stop()

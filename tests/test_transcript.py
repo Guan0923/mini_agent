@@ -4,7 +4,7 @@ import asyncio
 
 from backend.runtime.core.events import RuntimeEvent
 from tui.rendering.mirror import TranscriptTextMirror
-from tui.rendering.transcript import TranscriptScroll
+from tui.rendering.transcript import ProcessingProgress, TranscriptScroll
 from tui.screens.history import HistoryScreen
 from tui.view import TerminalView
 
@@ -73,7 +73,7 @@ def test_metadata_events_do_not_schedule_transcript_reconcile() -> None:
 
 def test_many_tools_update_incrementally_until_text_is_read() -> None:
     async def scenario() -> None:
-        view = TerminalView()
+        view = TerminalView(detail_level="verbose")
         async with view.run_test() as pilot:
             view.begin_conversation("inspect files")
             view.handle_runtime_event(_event("run_started"))
@@ -190,5 +190,105 @@ def test_queued_message_uses_its_own_panel_and_survives_history_screen() -> None
             await pilot.pause()
             assert view.queued_messages.messages == ["Use the first result only"]
             assert view.queued_messages.display is True
+
+    asyncio.run(scenario())
+
+
+def test_minimal_detail_hides_thinking_and_tools_but_shows_progress_and_response() -> None:
+    async def scenario() -> None:
+        view = TerminalView(detail_level="minimal")
+        async with view.run_test() as pilot:
+            view.begin_conversation("inspect files")
+            view.handle_runtime_event(_event("run_started"))
+            view.handle_runtime_event(_event("thinking_start"))
+            view.handle_runtime_event(_event("thinking_delta", "private reasoning"))
+            view.handle_runtime_event(
+                _event(
+                    "tool_call",
+                    "read_file",
+                    call_id="call_1",
+                    arguments={"path": "secret.txt"},
+                )
+            )
+            view.handle_runtime_event(_event("tool_result", "private result", call_id="call_1", tool="read_file"))
+            view.handle_runtime_event(_event("response_start"))
+            view.handle_runtime_event(_event("response_delta", "public answer"))
+            view.handle_runtime_event(_event("response_end"))
+            view.handle_runtime_event(_event("run_finished"))
+            await pilot.pause()
+
+            progress = next(iter(view.query(ProcessingProgress)))
+            assert progress.running is False
+            assert str(progress.render()) == "处理完成"
+            assert view._thinking_by_run == {}
+            assert view._tools_by_call == {}
+            assert "public answer" in view.transcript_text
+            assert "private reasoning" not in view.transcript_text
+            assert "private result" not in view.transcript_text
+
+    asyncio.run(scenario())
+
+
+def test_medium_detail_shows_only_tool_name_and_keeps_response() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        assert view.detail_level == "medium"
+        async with view.run_test() as pilot:
+            view.begin_conversation("inspect files")
+            view.handle_runtime_event(_event("run_started"))
+            view.handle_runtime_event(_event("thinking_start"))
+            view.handle_runtime_event(_event("thinking_delta", "private reasoning"))
+            view.handle_runtime_event(
+                _event(
+                    "tool_call",
+                    "read_file",
+                    call_id="call_1",
+                    arguments={"path": "secret.txt"},
+                )
+            )
+            view.handle_runtime_event(_event("tool_result", "private result", call_id="call_1", tool="read_file"))
+            view.handle_runtime_event(_event("response", "public answer"))
+            await pilot.pause()
+
+            summaries = list(view.query(".transcript-tool-summary"))
+            assert len(summaries) == 1
+            assert str(summaries[0].render()) == "tool_call: read_file"
+            assert view._thinking_by_run == {}
+            assert view._tools_by_call == {}
+            assert "public answer" in view.transcript_text
+            assert "private reasoning" not in view.transcript_text
+            assert "private result" not in view.transcript_text
+
+    asyncio.run(scenario())
+
+
+def test_verbose_detail_shows_reasoning_and_keeps_tool_collapsed() -> None:
+    async def scenario() -> None:
+        view = TerminalView(detail_level="verbose")
+        async with view.run_test() as pilot:
+            view.begin_conversation("inspect files")
+            view.handle_runtime_event(_event("run_started"))
+            view.handle_runtime_event(_event("thinking_start"))
+            view.handle_runtime_event(_event("thinking_delta", "reasoning"))
+            view.handle_runtime_event(_event("thinking_end"))
+            view.handle_runtime_event(
+                _event(
+                    "tool_call",
+                    "read_file",
+                    call_id="call_1",
+                    arguments={"path": "file.txt"},
+                )
+            )
+            view.handle_runtime_event(_event("tool_result", "result", call_id="call_1", tool="read_file"))
+            view.handle_runtime_event(_event("response", "public answer"))
+            await pilot.pause()
+
+            assert any(node.title_text == "think_content" for node in view.transcript_nodes)
+            tool = view._tools_by_call[("run_1", "call_1")]
+            assert tool.node.collapsed is True
+            assert "file.txt" in view.transcript_text
+            assert "result" in view.transcript_text
+            assert "public answer" in view.transcript_text
+            assert not list(view.query(".transcript-tool-summary"))
 
     asyncio.run(scenario())

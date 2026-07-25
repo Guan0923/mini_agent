@@ -10,7 +10,7 @@ from traceback import format_exception
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, VerticalScroll
 from textual.timer import Timer
 from textual.widgets import OptionList, Static
 
@@ -30,6 +30,7 @@ from .widgets import (
     ChoiceRow,
     ContextProgress,
     InlineChoiceList,
+    InputFrame,
     QueuedMessages,
     TerminalInput,
     TranscriptTextArea,
@@ -40,6 +41,7 @@ __all__ = [
     "ChoiceRow",
     "ContextProgress",
     "InlineChoiceList",
+    "InputFrame",
     "QueuedMessages",
     "RUNNING_STATUS_WORDS",
     "TerminalInput",
@@ -119,6 +121,10 @@ class TerminalView(
         padding: 0 1 1 2;
         color: #9fc3e8;
     }
+    .processing-progress, .transcript-tool-summary {
+        padding: 0 1 1 2;
+        color: #9fc3e8;
+    }
     #separator { color: #5f6b76; height: 1; }
     #status-bar {
         height: 1;
@@ -128,20 +134,36 @@ class TerminalView(
     #status { width: 1fr; min-width: 1; padding: 0 1; background: #263442; color: #9fc3e8; }
     #context-progress { width: 1fr; min-width: 1; height: 1; padding: 0 1; background: #263442; }
     #completion-menu { height: auto; max-height: 8; display: none; }
+    #choice-panel {
+        width: 1fr;
+        height: auto;
+        max-height: 40%;
+        display: none;
+        margin: 0 1;
+        padding: 1 2;
+        background: #17233a;
+        border-left: thick #4f8cff;
+        border-right: solid #314a6e;
+        overflow-y: auto;
+    }
     #choice-header {
+        width: 1fr;
         height: auto;
         max-height: 4;
         display: none;
-        padding: 0 1;
-        color: #d7dde5;
-        background: #171c21;
+        padding: 0 0 1 0;
+        color: #f0f6ff;
+        background: transparent;
+        text-align: left;
     }
     #review-details {
+        width: 1fr;
         height: auto;
-        max-height: 12;
+        max-height: 8;
         display: none;
-        padding: 0 1;
-        background: #171c21;
+        padding: 0 0 1 0;
+        background: transparent;
+        text-align: left;
         overflow-y: auto;
     }
     #queued-messages {
@@ -155,23 +177,34 @@ class TerminalView(
         overflow-y: auto;
     }
     .choice-list {
+        width: 1fr;
         height: auto;
-        max-height: 8;
+        max-height: 6;
         display: none;
-        background: #171c21;
+        background: transparent;
     }
     .choice-row {
         width: 1fr;
         height: auto;
         padding: 0 1;
-        background: #171c21;
+        color: #d7dde5;
+        background: #1b2a42;
+        border-left: solid #314a6e;
+    }
+    .choice-row.-highlighted-choice {
+        color: #ffffff;
+        background: #2368a2;
+        border-left: thick #f0c36a;
     }
     .choice-row.-selected-answer {
-        color: #9fc3e8;
+        color: #102033;
+        background: #84d2bd;
+        border-left: thick #e8f6ed;
     }
     .choice-label {
         width: 1fr;
         height: auto;
+        text-align: left;
     }
     .choice-editor {
         width: 1fr;
@@ -182,13 +215,28 @@ class TerminalView(
         background: #171c21;
         color: white;
     }
+    #input-frame {
+        width: 100%;
+        height: auto;
+        margin-bottom: 0;
+        background: #171c21;
+    }
+    #input-frame.-single-line {
+        outline: solid #405675;
+        background: #1b2736;
+    }
+    #input-frame.-multiline {
+        outline: none;
+        background: #171c21;
+    }
     #input {
         width: 100%;
-        height: 3;
+        height: 1;
+        min-height: 1;
         margin-bottom: 0;
         border: none;
         padding: 0;
-        background: #171c21;
+        background: transparent;
         color: white;
     }
     """
@@ -211,6 +259,7 @@ class TerminalView(
         status_random: random.Random | None = None,
         diagnostic_sink: DiagnosticSink | None = None,
         log_full_messages: bool = True,
+        detail_level: str = "medium",
     ) -> None:
         super().__init__()
         self._owner_loop = loop
@@ -223,7 +272,7 @@ class TerminalView(
         self._stream_diagnostics: dict[tuple[str, str], tuple[int, int, float]] = {}
         self._completer = completer or SlashCommandCompleter()
         self._suggestions: list[CommandSuggestion] = []
-        self._init_transcript_state(transcript_limit, transcript_node_limit)
+        self._init_transcript_state(transcript_limit, transcript_node_limit, detail_level)
         self._compact_node: TranscriptNode | None = None
         self._compact_progress: CompactProgress | None = None
         self._writes_closed = False
@@ -242,21 +291,22 @@ class TerminalView(
         self.context_progress = ContextProgress()
         self.question_header = Static(id="choice-header")
         self.review_details = LatexMarkdown(id="review-details")
+        self.choice_panel = VerticalScroll(self.question_header, self.review_details, id="choice-panel")
         self.queued_messages = QueuedMessages()
         self.completion_menu = OptionList(id="completion-menu")
         self.input = TerminalInput(
-            soft_wrap=True,
+            soft_wrap=False,
             show_line_numbers=False,
             id="input",
         )
+        self.input_frame = InputFrame(self.input)
 
     def compose(self) -> ComposeResult:
         yield self.transcript
         yield self.queued_messages
-        yield self.question_header
-        yield self.review_details
+        yield self.choice_panel
         yield self.completion_menu
-        yield self.input
+        yield self.input_frame
         yield Horizontal(self.status_line, self.context_progress, id="status-bar")
 
     def on_mount(self) -> None:

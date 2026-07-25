@@ -9,6 +9,7 @@ import re
 from backend.domain import PlanningError
 
 from ..components.commands import COMMAND_ARGUMENT_NAMES, COMMAND_PATTERN, render_help
+from ..rendering.state import DETAIL_LEVELS
 
 HELP = render_help()
 
@@ -84,6 +85,18 @@ class CommandAppMixin:
                 self._write("Usage: /permission")
                 return True
             self._approval.configure_permission()
+            return True
+        if command == "display":
+            detail_level = argument.casefold()
+            if detail_level not in DETAIL_LEVELS:
+                self._write("Usage: /display <minimal|medium|verbose>")
+                return True
+            self._display_mode = detail_level
+            view = getattr(self, "_view", None)
+            set_detail_level = getattr(view, "set_detail_level", None)
+            if callable(set_detail_level):
+                set_detail_level(detail_level)
+            self._write(f"Display mode set to {detail_level}.")
             return True
         if command == "sessions":
             if argument:

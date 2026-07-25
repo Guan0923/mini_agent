@@ -6,6 +6,7 @@ from time import monotonic
 
 from backend.runtime.core.events import RuntimeEvent
 
+from ..rendering.state import DETAIL_LEVELS
 from ..rendering.transcript import CompactProgress, MarkdownBody
 from ..screens.history import HistoryScreen
 from ..screens.inspection import SessionsScreen, TraceScreen
@@ -19,6 +20,13 @@ class ViewLifecycleMixin:
     @property
     def transcript_text(self) -> str:
         return self.transcript.text
+
+    def set_detail_level(self, detail_level: str) -> None:
+        """Set the rendering detail used by subsequent runtime events."""
+
+        if detail_level not in DETAIL_LEVELS:
+            raise ValueError(f"Unknown transcript detail level: {detail_level}")
+        self._run_on_owner(lambda: self._set_detail_level(detail_level))
 
     def begin_conversation(self, user_input: str) -> None:
         """Append a USER / ASSISTANT pair before a run is assigned its run id."""

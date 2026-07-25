@@ -10,6 +10,8 @@ class TranscriptRetentionMixin:
         progress = getattr(self, "_compact_progress", None)
         if progress is not None:
             progress.stop()
+        for processing in self._processing_by_run.values():
+            processing.stop()
         self.transcript.clear_nodes(self._top_level_nodes)
         for body in self.markdown_bodies:
             body.set_source_listener(None)
@@ -27,6 +29,8 @@ class TranscriptRetentionMixin:
         self._thinking_by_run = {}
         self._response_by_run = {}
         self._tools_by_call = {}
+        self._seen_tool_calls = set()
+        self._processing_by_run = {}
         self._seen_exchanges = set()
         self._last_response_by_run = {}
         self._streaming_system = None
@@ -90,11 +94,15 @@ class TranscriptRetentionMixin:
         self._pending_assistants = [assistant for assistant in self._pending_assistants if assistant is not node]
         removed_runs = [run_id for run_id, assistant in self._assistant_by_run.items() if assistant is node]
         for run_id in removed_runs:
+            processing = self._processing_by_run.pop(run_id, None)
+            if processing is not None:
+                processing.stop()
             self._assistant_by_run.pop(run_id, None)
             self._thinking_by_run.pop(run_id, None)
             self._response_by_run.pop(run_id, None)
             self._last_response_by_run.pop(run_id, None)
             self._seen_exchanges = {item for item in self._seen_exchanges if item[0] != run_id}
+            self._seen_tool_calls = {item for item in self._seen_tool_calls if item[0] != run_id}
             self._tools_by_call = {key: tool for key, tool in self._tools_by_call.items() if key[0] != run_id}
 
     def _sync_transcript_scroll(self, previous_scroll: float) -> None:

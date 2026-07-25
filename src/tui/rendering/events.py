@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+from textual.widgets import Static
+
 from backend.runtime.core.events import RuntimeEvent
 
 from .state import ToolTranscript
@@ -16,7 +18,9 @@ class TranscriptEventMixin:
         run_id = str(data.get("run_id", ""))
         if event.kind == "run_started":
             if run_id:
-                self._assistant_for_run(run_id)
+                assistant = self._assistant_for_run(run_id)
+                if assistant is not None and self.detail_level == "minimal":
+                    self._start_processing(run_id, assistant)
             return
         if not run_id:
             return
@@ -24,6 +28,8 @@ class TranscriptEventMixin:
         if assistant is None:
             return
         if event.kind == "thinking_start":
+            if self.detail_level != "verbose":
+                return
             node, body = self._add_assistant_node(assistant, "think_content", collapsed=True)
             node.set_activity(True)
             self._thinking_by_run[run_id] = (node, body)
@@ -68,10 +74,12 @@ class TranscriptEventMixin:
                 self._last_response_by_run[run_id] = body.markdown_text
         elif event.kind == "run_finished":
             self._stop_run_activity(run_id)
+            self._finish_processing(run_id)
             self._completed_top_levels.add(assistant)
             self._scroll_after_transcript_change()
         elif event.kind in {"cancelled", "error", "model_error"}:
             self._stop_run_activity(run_id)
+            self._finish_processing(run_id, event.message or "已取消")
             if event.message:
                 self._add_assistant_node(assistant, event.kind, collapsed=False, markdown=event.message)
             self._completed_top_levels.add(assistant)
@@ -99,7 +107,12 @@ class TranscriptEventMixin:
         if not isinstance(message, dict):
             return
         reasoning = message.get("reasoning")
-        if isinstance(reasoning, str) and reasoning and not data.get("reasoning_streamed"):
+        if (
+            self.detail_level == "verbose"
+            and isinstance(reasoning, str)
+            and reasoning
+            and not data.get("reasoning_streamed")
+        ):
             self._add_assistant_node(assistant, "think_content", collapsed=True, markdown=reasoning)
         content = message.get("content")
         if isinstance(content, str) and content and not data.get("content_streamed"):
@@ -117,10 +130,19 @@ class TranscriptEventMixin:
         if not isinstance(call_id, str) or not call_id:
             return None
         key = (run_id, call_id)
+        if key in self._seen_tool_calls:
+            return self._tools_by_call.get(key)
+        self._seen_tool_calls.add(key)
+        if self.detail_level == "minimal":
+            return None
+        name = str(data.get("name") or data.get("tool") or "tool")
+        if self.detail_level == "medium":
+            assistant.add_node(Static(f"tool_call: {name}", markup=False, classes="transcript-tool-summary"))
+            self._scroll_after_transcript_change()
+            return None
         existing = self._tools_by_call.get(key)
         if existing is not None:
             return existing
-        name = str(data.get("name") or data.get("tool") or "tool")
         arguments = data.get("arguments", {})
         formatted = json.dumps(arguments, ensure_ascii=False, indent=2, default=str)
         argument_body = MarkdownBody(f"```json\n{formatted}\n```")
@@ -145,9 +167,9 @@ class TranscriptEventMixin:
     ) -> ToolTranscript | None:
         call_id = data.get("call_id")
         if isinstance(call_id, str) and call_id:
-            tool = self._tools_by_call.get((run_id, call_id))
-            if tool is not None:
-                return tool
+            key = (run_id, call_id)
+            if key in self._seen_tool_calls:
+                return self._tools_by_call.get(key)
             details = dict(data)
             details.setdefault("name", message or data.get("tool", "tool"))
             return self._ensure_tool(run_id, assistant, details)
