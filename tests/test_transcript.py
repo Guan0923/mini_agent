@@ -146,6 +146,55 @@ def test_retention_and_copy_use_the_latest_mirror(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_selection_blurs_input_and_copy_waits_for_later_interaction_to_refocus(monkeypatch) -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        copied: list[str] = []
+        monkeypatch.setattr(view, "copy_to_clipboard", copied.append)
+        async with view.run_test() as pilot:
+            view.begin_conversation("copy this")
+            await pilot.pause()
+            view.input.value = "draft"
+            view.input.focus()
+            view.transcript.select_all()
+            await pilot.pause()
+
+            assert view.transcript.selected_text == "copy this"
+            assert view.focused is None
+            assert view.copy_transcript_selection() is True
+            await pilot.pause()
+            assert copied == ["copy this"]
+            assert view.input.value == "draft"
+            assert view.focused is None
+
+            view.focus_input_if_no_selection()
+            await pilot.pause()
+            assert view.focused is view.input
+
+    asyncio.run(scenario())
+
+
+def test_context_progress_keeps_session_total_while_current_context_changes() -> None:
+    async def scenario() -> None:
+        view = TerminalView()
+        async with view.run_test(size=(120, 24)) as pilot:
+            view.set_context_usage(120, 1_000, cumulative_tokens=300)
+            await pilot.pause()
+            assert "TOKENS 300" in view.context_progress.render().plain
+            assert "CONTEXT 120 / 1,000 12%" in view.context_progress.render().plain
+
+            view.set_context_usage(150, 1_000)
+            await pilot.pause()
+            assert "TOKENS 300" in view.context_progress.render().plain
+            assert "CONTEXT 150 / 1,000 15%" in view.context_progress.render().plain
+
+            view.clear_context_usage()
+            await pilot.pause()
+            assert "TOKENS N/A" in view.context_progress.render().plain
+
+    asyncio.run(scenario())
+
+
 def test_history_clear_and_plain_append_keep_text_compatible() -> None:
     async def scenario() -> None:
         view = TerminalView()

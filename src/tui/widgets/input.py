@@ -19,6 +19,10 @@ class TranscriptTextArea(TextArea):
                 copy_selection()
             event.prevent_default()
             event.stop()
+            return
+        focus_input = getattr(self.app, "focus_input_if_no_selection", None)
+        if callable(focus_input):
+            focus_input()
 
     def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         pause_following = getattr(self.app, "pause_following", None)

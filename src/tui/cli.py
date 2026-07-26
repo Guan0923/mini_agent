@@ -85,11 +85,19 @@ class TerminalApp(InteractiveAppMixin, TaskAppMixin, CommandAppMixin):
             handle_event(event)
         if event.kind != "context_usage":
             return
-        estimated = event.data.get("input_tokens", event.data.get("estimated_tokens"))
+        estimated = event.data.get(
+            "current_input_tokens", event.data.get("input_tokens", event.data.get("estimated_tokens"))
+        )
+        cumulative = event.data.get("cumulative_input_tokens")
         context_size = event.data.get("context_size")
         target_ratio = event.data.get("target_ratio", 0.8)
         if isinstance(estimated, int) and isinstance(context_size, int) and isinstance(target_ratio, int | float):
-            view.set_context_usage(estimated, context_size, float(target_ratio))
+            view.set_context_usage(
+                estimated,
+                context_size,
+                float(target_ratio),
+                cumulative_tokens=cumulative if isinstance(cumulative, int) else None,
+            )
 
     def _present_runtime_event(self, event: RuntimeEvent) -> None:
         """Keep the console presenter as the non-interactive fallback."""
@@ -99,7 +107,7 @@ class TerminalApp(InteractiveAppMixin, TaskAppMixin, CommandAppMixin):
 
     def _reset_context_usage(self) -> None:
         if self._view is not None:
-            self._view.set_context_usage()
+            self._view.clear_context_usage()
 
     @property
     def session_store(self) -> SessionStore | None:
