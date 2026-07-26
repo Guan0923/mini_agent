@@ -1,188 +1,105 @@
 # Mini-Agent
 
-## 一、项目背景
+Mini-Agent 是一个面向学习与实验的 Python Agent Harness。它用可观察的终端界面展示模型决策、工具调用、规划、审批、上下文压缩、持久化恢复、项目级 Skills、MCP 工具服务和并发 Subagents。
 
-现有 Hermes、OpenClaw、LangGraph 等框架已经能快速搭建 Agent，但大量核心机制被封装，使用者很难真正理解 Agent 如何规划任务、选择工具、管理上下文、处理失败和恢复执行。
+当前版本以 Textual TUI 为主要界面，要求 Python 3.11+ 和 PostgreSQL 16。模型侧目前提供 DeepSeek Chat Completions 适配器；`--planner rule` 可离线验证基础工具路径，但应用仍需要 PostgreSQL 保存 session 与 checkpoint。
 
-本项目不复刻完整 Hermes，也不追求商业化，而是开发一个轻量级 Agent 实验平台，用于研究和验证 Agent 的核心运行机制。
+## 已实现能力
 
-项目目标是实现一个能够：
+- **执行与规划**：支持 `reactive`、`dynamic_replan` 和自动策略选择；独立的只读 Plan mode 可调研、提问并提交 Plan Review。
+- **安全工具**：提供 workspace-confined 的文件读取、搜索、写入和精确编辑，以及网页搜索、受 SSRF 防护的网页抓取和跨平台命令执行；写入、命令和联网操作需要审批。
+- **项目级 Skills**：发现 `.mini_agent/skills/<name>/SKILL.md`，支持模型语义选择、`$name` 显式激活、运行快照和 Plan→Agent 交接。
+- **并发 Subagents**：父 Agent 可把独立工作交给多个子 Agent 并发执行；批次结果持久化，同路径写入和命令执行有进程内协调。
+- **MCP Server**：通过 stdio 暴露无需交互审批的 `read_file`、`glob`、`grep`，复用工具参数校验和 workspace 边界。
+- **耐久运行**：PostgreSQL 保存 session、运行时快照、审计事件和 checkpoint；恢复时不会静默重放结果不确定的副作用。
+- **可观察 TUI**：流式展示 reasoning、响应、工具与 Subagent 事件；支持详情级别、下一轮消息队列、历史和结构化 trace。
+- **上下文与审计**：按上下文窗口估算 token，支持自动或手动压缩；JSONL 与 PostgreSQL 保存递归脱敏的运行轨迹。
 
-- 完成多步骤任务；
-- 调用外部工具；
-- 保存任务状态；
-- 在失败后恢复；
-- 管理长上下文；
-- 对不同 Agent 策略进行评测和对比；
+尚未完成的主要方向包括强执行沙箱、统一的全局时间/费用/工具输出预算、后台进程管理、Replay/Eval、浏览器前端和跨进程 Subagent 调度。当前 Subagents 是单进程、单层并发能力，不是分布式多 Agent 系统。
 
-的通用 Agent。
+## 快速开始
 
-项目最终需要证明的不是“功能很多”，而是：
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
 
-**你能够理解、实现并评测一个 Agent 从接收任务到完成任务的完整过程。**
-
-------
-
-## 二、核心功能
-
-| 模块       | 功能                                                     |
-| ---------- | -------------------------------------------------------- |
-| 任务执行   | 接收复杂任务，持续执行多个步骤，直到完成、失败或达到限制 |
-| 工具调用   | 支持文件、网页、搜索、计算、数据分析和命令执行等工具     |
-| 任务规划   | 支持逐步决策、先规划后执行、失败后动态重规划             |
-| 错误处理   | 处理参数错误、工具失败、超时、重复调用和执行偏离         |
-| 上下文管理 | 支持完整历史、滑动窗口、摘要压缩和关键事实保留           |
-| 任务记忆   | 保存目标、约束、已完成步骤、未完成步骤和重要结果         |
-| 状态恢复   | 程序中断后从最近进度继续执行，避免重复完成步骤           |
-| 权限控制   | 文件修改、删除和危险命令等操作必须经过用户确认           |
-| 运行轨迹   | 展示每一步决策、工具调用、错误、重试和最终结果           |
-| 回放对比   | 使用不同模型、规划和记忆策略重新运行同一个任务           |
-| 自动评测   | 统计成功率、步骤数、工具错误、恢复率、耗时和成本         |
-
-首版重点验证三类问题：
-
-1. 不同规划策略对任务成功率有什么影响；
-2. 不同上下文策略如何影响成本和信息遗失；
-3. Agent在工具失败和程序中断后能否正确恢复。
-
-------
-
-## 三、实施规划
-
-项目周期建议为六周。
-
-| 周次  | 目标               | 主要成果                                     |
-| ----- | ------------------ | -------------------------------------------- |
-| 第1周 | 完成最小执行闭环   | Agent能够接收任务、调用工具并输出结果        |
-| 第2周 | 完善工具和错误处理 | 参数校验、超时、重试、重复调用检测和权限确认 |
-| 第3周 | 实现规划策略       | 支持逐步决策、预先规划和动态重规划           |
-| 第4周 | 实现记忆和恢复     | 上下文压缩、任务记忆、暂停和断点恢复         |
-| 第5周 | 建立轨迹和评测     | 运行记录、任务回放、策略对比和自动评分       |
-| 第6周 | 完成实验和展示     | 评测报告、失败案例、演示任务和项目文档       |
-
-### 第一阶段：基础执行
-
-完成任务输入、工具调用、执行次数限制和基础运行记录。
-
-验收标准：
-
-- 能连续调用多个工具；
-- 能根据工具结果继续执行；
-- 达到限制后能够正常停止；
-- 至少完成5个基础任务。
-
-### 第二阶段：可靠性
-
-增加工具参数检查、失败重试、超时、重复调用检测和危险操作确认。
-
-验收标准：
-
-- 工具错误不会导致系统崩溃；
-- Agent能够修正部分错误；
-- 不会无限重复同一操作；
-- 高风险行为必须得到用户批准。
-
-### 第三阶段：规划能力
-
-实现三种规划策略，并使用相同任务进行比较。
-
-验收标准：
-
-- 同一任务可以切换不同策略；
-- Agent能够记录计划完成状态；
-- 工具失败后可以调整剩余计划；
-- 至少完成10组策略对比。
-
-### 第四阶段：上下文与恢复
-
-实现上下文压缩、结构化记忆、任务暂停和断点恢复。
-
-验收标准：
-
-- 长任务中不会遗忘核心目标；
-- 压缩后仍能保留关键约束；
-- 程序重启后可以继续任务；
-- 已完成步骤不会被重复执行。
-
-### 第五阶段：评测系统
-
-建立30—50个固定测试任务，覆盖文件处理、搜索、数据分析、长上下文、工具失败和危险操作。
-
-重点指标：
-
-- 任务完成率；
-- 约束满足率；
-- 工具调用正确率；
-- 错误恢复率；
-- 任务恢复率；
-- 平均步骤数；
-- 平均耗时；
-- 模型调用成本；
-- 未经批准的危险操作次数。
-
-### 第六阶段：求职展示
-
-最终交付内容包括：
-
-- 可运行的 Agent 平台；
-- 至少6种工具；
-- 3种规划策略；
-- 3种上下文或记忆策略；
-- 断点恢复能力；
-- 完整运行轨迹；
-- 30—50个评测任务；
-- 策略对比实验报告；
-- 典型失败案例；
-- 3个稳定演示任务；
-- 项目说明和技术复盘。
-
-首版不做多 Agent 协作、视觉浏览器操作、自动生成 Skill、LoRA 微调、多用户系统和复杂前端。
-
-项目完成标准：
-
-**能够稳定运行多步骤任务，能够解释每一次决策，能够在失败后恢复，并能够用真实实验数据比较不同 Agent 策略。**
-
-------
-
-## 七、当前实现：终端演示版
-
-首版使用 TUI（终端交互界面）而非 Web/GUI，以便直接观察 Agent 的计划、工具调用、重试和结果。运行环境为 Python 3.11+。
-
-```bash
-# 交互模式
-python run.py
-
-# 安装为本地命令（推荐）
-python -m pip install -e .
-mini-agent
-
-# 单次演示
-python run.py "calculate (18 + 6) * 4"
-python run.py "读取 README.md"
-python run.py "list files"
+docker compose up -d
+Copy-Item .env.example .env
 ```
 
-TUI 有两种模式，默认是 Agent 模式：模型每次选择工具调用或直接回复，而不会预先生成完整计划。系统以 provider-neutral Message 保存完整上下文；顶层会话只包含 System/User/Assistant，工具调用和结果作为 ToolMessage 嵌套在 AssistantMessage 中。对 DeepSeek，工具决策使用原生 Tool Calls，SSE `reasoning_content` 会实时显示为 `THINKING`，最终文本显示为 `RESPONSE`。
+Compose 会创建开发数据库 `mini_agent` 和测试数据库 `mini_agent_test`。示例凭据只适合本机开发；使用默认 LLM planner 前需要在 `.env` 填写真实模型配置。
 
-Agent 模式只支持 `reactive` 和 `dynamic_replan`：前者适合简单、逐步确定的任务，后者会按实时工具结果生成并替换后续可执行阶段。默认的 `auto` 会让模型在这两种策略中选择；模型返回其他值时，运行时会按 `--max-model-repairs` 发送纠正请求。
+```powershell
+# 交互式 TUI；三个入口等价
+python run.py
+python -m tui
+mini-agent
 
-主决策循环的 system prompt 使用四层包内资源组合：`instruction.md` 说明 Mini-Agent 的项目意义和真实能力，`default.md` 保存两种模式的共同规则并通过唯一插槽嵌入 `plan.md` 或 `agent.md`，Active Skills 最后追加且不能削弱基础规则。策略选择、上下文摘要、JSON 执行计划和步骤评估仍使用各自的窄职责提示词，避免交互式 Agent 规则干扰结构化输出。维护提示词时应先确认运行时已有对应工具、权限和 UI 协议；尚未实现的能力不能只靠提示词声明。
+# 单任务、离线规则规划器、恢复会话
+python run.py "整理并总结 README.md"
+python run.py --planner rule "calculate (18 + 6) * 4"
+mini-agent --resume session_xxx
+```
 
-输入 `/plan` 会进入只读规划与讨论模式：普通问候、解释和需求讨论直接作为对话返回；`read_file`、`glob` 和 `grep` 可用于本地调研，网页搜索/抓取仍会要求确认，`write_file`、`edit_file` 和 `run_command` 不会暴露。若项目本身无法回答会实质影响方案的问题，模型可单独调用 Plan 专用控制工具 `request_user_input`。只有当完整实施计划确实需要用户审核时，模型才单独调用 `request_plan_review` 并进入 `PLAN REVIEW`。两个控制工具都不注册到 `ToolRegistry`，也不计入 `/tools` 展示的执行工具。
+主要 CLI 参数：
 
-Plan 调研、控制工具调用和结构化结果都作为普通 typed messages 保存在 session runtime history。`request_plan_review` 的计划正文保存在该调用的参数中，同一历史不会再插入重复计划消息；隔离 handoff 仍通过 run 的 `final_answer` 为新 session 提供一条计划 AssistantMessage。`PLAN REVIEW` 保留三个选择：`Implement`、`Implement and Clear Session` 和 `Cancel and Stay in plan mode`。handoff 后仍由正常策略路由器选择执行方式，不强制 `dynamic_replan`。
+```text
+--workspace PATH
+--planner llm|rule
+--strategy auto|reactive|dynamic_replan
+--max-model-turns N
+--max-tool-calls N
+--max-retries N
+--max-model-repairs N
+--max-transport-retries N
+--max-tool-recoveries N
+--max-replans N
+--log-dir PATH
+--resume SESSION_ID
+```
 
-工具仅在其声明需要确认时才请求 Human-in-the-Loop：网页搜索/抓取、`write_file`、`edit_file` 和 `run_command` 均会逐次确认；`read_file`、`glob` 和 `grep` 自动执行。TUI 默认使用 `Approval for me`；输入 `/permission` 可在当前程序内切换为 `Full access`，使所有工具审批自动 Continue。工具审批仍使用 `Continue / Cancel / Supplement`，Supplement 只属于 Tool Review，与 Plan Review 相互独立；`Full access` 不会跳过 `/plan` 生成提案后的 `PLAN REVIEW`，最终计划仍需人工选择 `Implement / Implement and Clear Session / Cancel and Stay in plan mode`。若 reactive 或 `/plan` 调研中的工具失败，运行时会将截断后的调用和错误作为不可信上下文交给 LLM，请其最多连续纠错 `--max-tool-recoveries` 次（默认 2）；任一工具成功会重置该计数。文件修改和命令工具不可自动重试，也不会因相同参数被重复执行。
+`--max-actions` 仅作为 `--max-tool-calls` 的废弃兼容别名，不能与后者同时使用。
 
-交互式 TUI 使用 alternate screen：可滚动消息区占满终端，状态栏和输入框固定在最底部；状态栏始终包含当前 permission 模式。输入框按显式换行和软换行从 1 行自动增高到最多 4 行，超过后保持 4 行并在内部滚动；Enter 提交完整消息，Ctrl+J 在光标处插入换行。退出后会恢复进入前的终端画面，并输出当前 session ID、`/resume <session_id>` 与 `mini-agent --resume <session_id>` 恢复方式。Agent 运行中提交的普通消息进入进程内的下一轮队列；当前 run 结束后，这些消息按提交顺序合并并自动启动一个 follow-up run。Esc 会协作式取消当前 active run（包括 Tool/Plan Review 和 Plan 问题）；`/quit`、Ctrl+C 或关闭 TUI 会在安全边界暂停当前 run、丢弃尚未进入 runtime 的队列并退出。Plan 问题逐题显示在独立候选列表中，期间主输入框隐藏：方向键循环选择，普通候选按 Enter 确认；“其他”直接按 Enter 或鼠标左键表示跳过该问题并返回空答案数组，按 Tab 则进入自由输入，Enter 提交非空答案。非 Textual 运行使用数字选择并在最后一项后读取自由文本。
+## 配置
 
-`/new <title>` 与 `/clear <title>` 清空当前 transcript 并进入待创建 session，不会修改 alternate screen 之外的终端内容。其它 TUI 命令：`/permission` 在底部独立候选区切换当前程序的工具审批模式，`/help` 查看帮助，`/tools` 查看工具，`/trace` 查看上一次运行的结构化轨迹，`/sessions` 列出保存的对话，`/resume [session_id]` 恢复当前、最近或指定 session 并显示来源，`/history` 打开当前 session 的只读全屏历史视图，按 Esc 返回对话，`/quit` 退出。待创建 session 只保存在内存中，终端显示 `SESSION PENDING — <title> (not saved yet)`；用户发送第一条消息时才生成 session ID 并写入 SQLite，未发送消息便退出不会留下空 session。`/clear` 不删除旧 session，可通过 `/sessions` 和 `/resume <session_id>` 恢复；待创建状态会清除当前模型上下文、当前会话记录和上一次运行状态，但不改变进程内的 mode、permission 或工具配置。标题和 session ID 只接受空格参数，不支持 `/new/<title>` 或 `/resume/<session_id>`。
+将 `.env.example` 复制为 `.env`。进程环境变量优先于文件值。
 
-交互模式支持带注释的命令实时补全：输入 `/p` 会显示 `/plan — Create a plan and open Plan Review.` 和 `/permission — Choose the in-memory tool approval mode.`，按 Tab 接受候选，方向键选择候选，Enter 提交；接受候选时只插入命令本身。已识别命令会按文本顺序先执行，剩余普通文字按原顺序合并为一次 task；例如 `你好 /plan` 和 `/plan 你好` 都会先启用 Plan mode，再运行一次“你好”。`/new`、`/clear` 和 `/resume` 会消费其后的文字直到下一个命令作为参数，其他命令后的文字仍属于 task；`/quit` 会停止处理当前行且不会提交 task；`/history` 必须独立提交，不能与普通任务混合。命令可以出现在任务句子中，但前面必须有空格；文件路径和 URL 中的 `/` 不会被识别为命令。任务中可以使用 `@相对路径` 引用工作区文件，例如 `请总结 @README.md`；文件内容会在本次任务中以内嵌引用形式提供给 Agent，引用路径必须位于 workspace 内。每次运行会在 `<workspace>/logs/<run_id>.jsonl` 记录有序 runtime messages，包括模型请求/规范化响应、计划、审批、工具调用和结果；SQLite 同时保存按 session/run 查询的同一审计轨迹、`session_runtime` 快照、checkpoint 和供 `/history` 使用的 user/assistant 文本投影。`LOG_FULL_MESSAGES=true`（默认）记录完整消息正文；设为 `false` 时记录长度、哈希和最多 200 字符预览。两种模式都会脱敏 API key、Authorization、Cookie、token、password 与 secret 字段；runtime 审计日志还会记录 provider 实际发送的 wire request、完整 wire response（流式响应按事件数组保存）、安全的响应 headers 白名单、HTTP 状态、重试次数和耗时，不记录认证 headers、.env 或完整环境变量。每个 turn 结束时，Runtime 的 usage 会被该 turn 最后一次模型响应 usage 覆盖。使用 `--resume <session_id>` 可在新的 CLI 进程中恢复已有对话或暂停的 workflow。
+| 变量 | 默认/要求 | 用途 |
+| --- | --- | --- |
+| `PROVIDER` | `deepseek` | Provider 适配器；当前仅支持 `deepseek`。 |
+| `API_KEY` | LLM planner 必填 | 模型凭据，不会写入日志。 |
+| `BASE_URL` | LLM planner 必填 | 服务根地址、`/v1` 地址或完整 `/chat/completions` 地址。 |
+| `MODEL` | LLM planner 必填 | Provider 侧模型名称。 |
+| `MAX_TOKENS` | `8192` | 单次输出上限，范围 1–384000。 |
+| `CONTEXT_SIZE` | `1024000` | 上下文窗口，必须大于 `MAX_TOKENS`。 |
+| `TOKENIZER_MODEL` | `deepseek-ai/DeepSeek-V3` | 本地 token 估算器。 |
+| `DATABASE_URL` | 必填 | PostgreSQL session/checkpoint 存储。 |
+| `LOG_FULL_MESSAGES` | `true` | 保存完整脱敏 body；设为 `false` 时保存摘要。 |
 
-### 项目级 Skills
+`.env`、日志、缓存和本地运行数据已被 Git 忽略。不要把真实密钥、认证头、完整环境变量或生产数据写入仓库和测试 fixture。
 
-Mini-Agent 会在启动时发现 `<workspace>/.mini_agent/skills/<skill-name>/SKILL.md`。目录不存在时功能保持关闭；存在无效 Skill 时启动会直接报出文件和原因。Skill 名称只能使用小写字母、数字与连字符，且必须与目录名一致。`SKILL.md` 最大 64 KiB、正文最多 500 行，frontmatter 只允许 `name` 和 `description`：
+## TUI 工作流
+
+TUI 使用 alternate screen，消息区可滚动，状态栏和输入框固定在底部。Enter 提交，Ctrl+J 换行；运行中提交的普通消息会排队，在当前 run 完成或 Esc 协作式取消后合并为下一轮。审批出现时，审批选项独占输入区域。
+
+| 命令 | 说明 |
+| --- | --- |
+| `/agent`、`/plan` | 切换正常执行和只读规划/讨论模式。 |
+| `/permission` | 选择当前进程的逐次审批或 Full access。 |
+| `/display [minimal\|medium\|verbose]` | 选择 transcript 详情级别。 |
+| `/skills`、`/tools` | 查看发现的 Skills 和当前工具。 |
+| `/compact` | 立即压缩旧上下文。 |
+| `/trace`、`/history` | 查看最近运行 trace 或当前会话历史。 |
+| `/sessions`、`/resume [id]` | 列出并恢复持久化会话。 |
+| `/new [title]`、`/clear [title]` | 准备新 session；不会删除旧 session。 |
+| `/help`、`/quit` | 查看帮助或退出。 |
+
+任务中可用 `@relative/path` 注入 workspace 文件，也可用 `$skill-name` 显式激活 Skill。Plan mode 只暴露只读调研工具以及 `request_user_input`、`request_plan_review`；只有后者会打开 Plan Review，批准后会创建独立、可审计的 Agent run。
+
+## 项目级 Skills
+
+Skill 位于 `<workspace>/.mini_agent/skills/<skill-name>/SKILL.md`：
 
 ```markdown
 ---
@@ -192,125 +109,78 @@ description: Review Python changes for correctness, typing, and tests.
 
 # Workflow
 
-Read the changed files, inspect relevant tests, then report concrete findings.
+Read changed files, inspect focused tests, and report concrete findings.
 ```
 
-只要项目中存在 Skill，LLM planner 会在每个普通任务开始时增加一次受 `--max-model-turns` 约束的 JSON 选择请求；该请求只看到名称和描述。选中后，完整正文才会作为低于核心系统安全规则的项目指令进入本次 run 的后续模型请求。输入 `$review-python` 可显式激活已发现的同名 Skill；其他 `$...` 保持普通文本。`/skills` 列出已发现的名称和描述。
+- 名称仅允许小写字母、数字和连字符，最长 64 字符，且必须与目录名一致。
+- frontmatter 只允许 `name` 和 `description`；manifest 最大 64 KiB，正文最多 1000 行。
+- LLM planner 先根据名称和描述选择 Skill，再把完整正文加入当前 run；Rule planner 不做语义选择。
+- 激活内容、根目录和 SHA-256 会进入 checkpoint；恢复和 Plan handoff 使用原快照。
+- Skill 可带 `scripts/`、`references/`、`assets/`，但不会注册新工具，也不能绕过 workspace、JSON Schema 或审批策略。
 
-激活结果会以包含正文、相对根目录和 SHA-256 的快照保存在 `RunState`，所以 checkpoint 恢复不会读取已被修改的磁盘版本；Plan Review 批准后的 Agent handoff 会携带同一快照。Skill 可引用自身的 `scripts/`、`references/` 和 `assets/`，但访问仍必须经过现有 workspace-confined 工具，命令与写入审批不会被 Skill 绕过。`--planner rule` 不做自动选择，显式 `$name` 会返回“Skill execution requires the LLM planner.”。当前版本不创建、安装、编辑或远程下载 Skill。
+仓库中的 `.mini_agent/skills/` 提供示例开发工作流。无效 Skill 会在启动时快速失败并指出文件和原因。
 
-Agent 运行时输入框保持可用。期间提交的多条普通消息会按顺序进入进程内队列，并在当前 run 完成后合并启动一次新的 follow-up run；它们不会改变正在执行的 run。已经开始的外部操作不会被强制中止，Esc 会先进入 `CANCELLING`，等待协作式取消完成后再发送队列。运行期间斜杠命令不可用，工具或计划审批出现时输入框会优先切换为审批选项。
+## 并发 Subagents
 
-模型 reasoning 等高频输出会先进入线程安全队列，再以约 30 FPS 合并刷新，因此不会改写输入 Buffer、光标或补全菜单。屏幕 transcript 保留最近 200,000 个字符，完整轨迹仍由 SQLite 与 JSONL 保存。默认自动跟随最新输出；PageUp 或鼠标滚轮可暂停跟随，PageDown 或 Ctrl+End 回到末尾后恢复自动跟随。
+LLM 可调用 `delegate_tasks` 提交一组具有唯一 ID 的独立任务。每个子 Agent 拥有标准 workspace 工具、独立 run/session 状态和父 run 的取消信号；父 Agent 收到有序、可分页的结果后继续综合。
 
-当前已具备：
+同一批任务在线程池中并发运行；同路径文件写入串行化，命令执行与所有文件写入互斥，审批仍由父交互通道处理。子 Agent 没有 delegation 工具，因此不会递归派生。恢复时，未完成批次标为 `indeterminate`。有先后依赖、共享状态或高冲突写入的任务应由父 Agent 顺序执行。
 
-- 可观察的「直接决策 → 工具调用 → 工具结果 → 再决策/最终回复」执行闭环；
-- workspace-confined 的范围读取、glob、grep、精确编辑和原子写入，以及需要用户确认的网页搜索/抓取和跨平台命令执行工具；
-- 安全同参数重试、LLM 工具失败恢复与结构化运行轨迹；
-- Rule/LLM 两类规划器、自动策略选择、结构化输出修复，以及 reactive/dynamic-replan 执行路径；
-- 项目级 Skill 发现、语义选择、显式激活、运行快照和 Plan→Agent 交接；
+## MCP Server
 
-### 当前需要完成：Harness 能力补全
+```powershell
+mini-agent-mcp --workspace C:\path\to\workspace
+```
 
-当前实现已经具备实验型 Agent Runtime 的核心闭环，下一步需要补齐生产级 Harness 的环境控制、扩展机制和可靠性保证。以下项目均为当前未完成 backlog，按优先级推进。
+通用 MCP 客户端配置：
 
-#### P0：可靠性底座
+```json
+{
+  "mcpServers": {
+    "mini-agent": {
+      "command": "mini-agent-mcp",
+      "args": ["--workspace", "C:\\path\\to\\workspace"]
+    }
+  }
+}
+```
 
-- [x] **上下文管理**：按 provider 上下文窗口估算 token，在请求前发布 usage，并支持自动/手动摘要压缩且保留当前 turn。
-- [x] **Hooks**：为 run、模型请求和工具调用提供可注入、可取消、可审计的 before/after 生命周期接口。
-- [ ] **统一工具输出治理**：文件、命令、网页和模型消息已有各自边界；仍需统一跨工具的字符、行数、文件数和 token 总预算。
-- [ ] **工具选择策略**：按任务、模式和风险动态缩小可用工具集合，并要求工具与用户目标直接相关，避免无关的 workspace 扫描或网络请求。
-- [x] **暂停与恢复**：基于 checkpoint、workflow/attempt 来源链和 `indeterminate` 工具结果实现 durable `/resume`；Esc 取消，退出暂停，恢复不自动重放结果不明的副作用。
-- [ ] **执行隔离**：为命令和高风险工具增加 sandbox、文件系统/网络策略、资源限制及子进程树清理。
-- [ ] **全局预算与取消**：限制 run 总时长、token、费用和工具输出预算，并能取消正在进行的模型请求、命令或后台进程。
-- [x] **模型协议恢复**：结构化输出失败后最多修复两次（共三次请求）；strategy 契约耗尽时降级 reactive，transport/认证/配置错误继续快速失败。
+MCP adapter 只暴露 `read_file`、`glob`、`grep`。写入、命令和联网工具不会通过该 server 暴露；所有参数仍经过共享 JSON Schema 校验，路径仍限制在指定 workspace 内。MCP server 本身不需要模型密钥或 PostgreSQL。
 
-#### P1：完整 Harness 工作流
-
-- [ ] **结构化代码工具**：已提供 grep、glob、范围读取、精确编辑和原子写入；继续补齐 patch 与 git diff，进一步减少模型通过通用 shell 完成代码操作。
-- [ ] **变更事务与审查**：支持 diff、批量审批、原子应用、失败回滚和 undo，使一次任务的文件修改形成可审查变更集。
-- [ ] **后台进程管理**：支持启动、轮询输出、查看状态和停止 dev server、watcher 等长期进程。
-- [ ] **Replay 与 Eval**：建立固定任务集、运行回放、自动评分、模型/策略对比和成本报告，将现有日志转化为可重复实验。
-- [ ] **能力扩展协议**：支持动态工具发现、MCP/插件、能力协商和 schema 版本管理，避免工具只能静态编入默认 catalog。
-- [ ] **并发与一致性**：增加跨进程锁、任务队列、session 隔离和崩溃后的 ownership recovery。
-
-P0 完成后再系统推进 P1，避免先扩展功能数量而缺少可靠性边界。多 Agent、视觉浏览器、LoRA、多用户系统继续保持首版非目标。
-
-### 模块结构
+## 架构
 
 ```text
-tui/          终端适配层；application、components、screens、rendering、view_parts 和 widgets 按职责分组
-runtime/      公共 lazy exports；根目录不放具体实现
-  core/         AgentRuntime、事件、契约、配置与生命周期 hooks
-  application/  应用服务与依赖装配
-  execution/    runner、策略路由、工作流、步骤执行与运行结果
-  conversation/ session 编排、steering、文件引用与用户问答
-  planning/      Plan mode 与 Plan Review 协议
-  persistence/   checkpoint 端口与运行事件持久化转换
-observability/事件扇出与 JSONL 持久化日志 Sink
-planning/     规则/LLM 规划策略与显式能力协议
-tools/        工具契约、注册表、默认 catalog，以及分组的 filesystem/web/command 实现
-providers/    LLM 门面、通用 transport、.env 配置和厂商协议子包
-storage/      按 checkpoint、session、schema 和映射职责拆分的 SQLite 适配器
-domain/       Message、ToolMessage、ToolSpec、RunState 与运行轨迹等纯数据模型
+TUI -> ConversationService -> AgentRunner -> workflows -> planner / tools
+                                  |              |
+                                  |              +-> Skills / Subagents
+                                  +-> RuntimeEvent / checkpoints
+
+MCP stdio -> McpToolAdapter -> safe ToolRegistry subset
+LLMClient -> JsonHttpTransport <-> DeepSeek adapter
+PostgreSQL <-> sessions / RuntimeState / audit events / checkpoints
+JSONL      <-> per-run redacted diagnostics
 ```
 
-依赖只向内：TUI 只处理终端输入、确认和 `RuntimeEvent` 渲染；`ConversationService` 管理单轮执行与当前 session，`runtime.application.factory` 负责装配具体实现；runtime 根目录只提供公共 lazy exports，具体实现必须放入六个分类子包；`ToolRegistry` 只负责注册与调用策略，默认工具由独立 catalog 提供；SQLite 位于 `storage/`，不被执行工作流直接依赖。工具和模型提供方可以各自替换或单独测试。
+- `src/backend/domain/`：provider-neutral message、plan、session、skill 和 run state。
+- `src/backend/planning/`：规则/LLM planner、上下文管理、模型请求生命周期和结构化输出。
+- `src/backend/runtime/`：应用装配、conversation、workflow、Plan mode、hooks、恢复和 Subagent 协调。
+- `src/backend/providers/`：通用 HTTP/SSE transport、Provider 门面和 DeepSeek wire adapter。
+- `src/backend/tools/`：ToolRegistry、JSON Schema、文件、网页、命令和 delegation tool。
+- `src/backend/mcp/`：只读 stdio MCP adapter。
+- `src/backend/storage/postgres/`：PostgreSQL schema、session 和 checkpoint adapter。
+- `src/backend/observability/`：事件扇出、JSONL 记录与脱敏。
+- `src/tui/`：CLI、Textual 组件、screen、rendering、view 和 widget。
+- `src/frontend/`：未来浏览器前端占位；只能通过版本化 backend API 通信。
 
-### 大模型配置（无 SDK）
+依赖保持向内：domain 不依赖外层；provider 不导入 TUI 或 storage；TUI 只组合 runtime 服务并渲染 `RuntimeEvent`。详细契约见 [docs/architecture.md](docs/architecture.md)。
 
-将 `.env.example` 复制为 `.env`。进程环境变量优先于 `.env`；当前 provider 实现只支持 `deepseek`。
+## 开发与验证
 
-| 变量 | 必填/默认值 | 说明 |
-| --- | --- | --- |
-| `PROVIDER` | 默认 `deepseek` | Provider 适配器名称。未知值会在启动时失败。 |
-| `API_KEY` | 必填 | Provider 密钥；不会写入日志。 |
-| `BASE_URL` | 必填 | 可填写服务根地址、以 `/v1` 结尾的地址，或完整 `/chat/completions` endpoint。 |
-| `MODEL` | 必填 | Provider 侧模型名称。 |
-| `MAX_TOKENS` | 默认 `8192` | 单次输出上限，范围 `1-384000`。 |
-| `CONTEXT_SIZE` | 默认 `1024000` | 上下文窗口，必须大于 `MAX_TOKENS`。 |
-| `TOKENIZER_MODEL` | 默认 `deepseek-ai/DeepSeek-V3` | 本地 token 估算使用的 Hugging Face tokenizer。 |
-| `LOG_FULL_MESSAGES` | 默认 `true` | `true` 保存完整且递归脱敏的 body；`false` 保存摘要。 |
-
-`.env` 已被 Git 忽略。不要在仓库、测试 fixture、日志或命令输出中放入真实凭据。
-
-默认启动方式会通过 Python 的 `requests` 向由 `BASE_URL` 规范化得到的 chat-completions endpoint 发送请求；项目没有使用模型 SDK。`providers/client.py` 中的 `LLMClient` 负责 Provider 选择、重试和请求诊断，`providers/transport.py` 负责通用 JSON/SSE 传输，`providers/deepseek/` 只负责请求与响应协议转换。接入其他 API 时增加独立 provider adapter，不改变 Agent 内部 Message、Runtime 或通用传输实现。
-
-模型工具调用由 provider adapter 转成 AssistantMessage 内的 ToolMessage；Runtime 校验工具名和参数后按顺序执行，并在全部结果就绪后再次请求模型。策略选择、计划生成和重规划仍使用 JSON Output。`write_file`、`edit_file` 和 `run_command` 都需经过终端的 Human-in-the-Loop 明确批准；直接调用 `ToolRegistry` 时仍需显式传入 `confirmed=True`。
-
-DeepSeek tool arguments 和规划阶段的 JSON Output 都会在本地校验；无效 JSON、未知工具、缺失 call ID 或截断响应不会进入工具执行层。工具运行失败后的模型恢复预算与本地工具重试预算相互独立。
-
-所有工具参数在调用 handler 前还会通过注册时缓存的 JSON Schema 校验，未知字段、缺失字段和错误类型会统一转成 `ToolError`。命令工具会从子进程环境中移除 API Key、Token、Secret 和 Password 类变量，避免已批准的命令意外继承模型凭据。
-
-`web_search` 通过项目依赖的 `ddgr` 以 DuckDuckGo HTML 搜索执行，并只接收它的非交互 JSON 结果。`web_fetch` 由项目自行实现：只允许 HTTP/HTTPS 和 80/443 端口，解析后拒绝本机、私网、链路本地及保留地址；每次重定向都会重新验证目标，最多三跳；响应限制为 2 MB，只接受静态 HTML、纯文本和 JSON，并最多向模型返回 100,000 个字符。两种网页工具都是只读，但因为会向外部发送查询或请求网页，均需 Human-in-the-Loop 批准。网页搜索结果和抓取正文始终是**不可信外部内容**，模型不会把其中的指令视为可执行命令。动态渲染、登录页面、PDF 与图片 OCR 不属于当前版本范围。
-
-```bash
-# 使用 .env 中的大模型（默认）
-python run.py "计算 (18 + 6) * 4"
-
-# 不发起网络请求的离线演示
-python run.py --planner rule "calculate (18 + 6) * 4"
-
-# 搜索与抓取网页；两者都会请求确认
-python run.py --planner rule "search Python documentation"
-python run.py --planner rule "fetch https://docs.python.org/3/"
-
-# 文件写入、精确编辑和通用命令都会请求确认
-python run.py "create draft.txt with an outline"
-python run.py "replace the unique heading in README.md"
-
-# 调整运行限制
-python run.py --max-model-turns 8 --max-tool-calls 32 --max-retries 2 "计算 (18 + 6) * 4"
-
-# 强制动态重规划，并限制最多两次重规划
-python run.py --strategy dynamic_replan --max-replans 2 "整理并更新项目说明"
-
-# 在已有 session 中继续多轮对话
-python run.py --planner rule --resume session_xxx "继续刚才的任务"
-
-# 将运行日志写入自定义目录
-python run.py --log-dir .agent-logs "计算 2 + 2"
+```powershell
+python -m ruff check .
+python -m ruff format --check .
+python -m pytest -q
+python -m pytest --cov=backend --cov-report=term-missing
 ```
 
-开发环境与质量检查约定见 [`docs/development.md`](docs/development.md)。本地提交前至少运行 `ruff check .`、`ruff format --check .` 和 `python -m pytest -q`；非可视核心的覆盖率门槛为 70%。
+测试会重置 `mini_agent_test` 的 `public` schema，绝不能把 `TEST_DATABASE_URL` 指向开发或生产数据库。CI 在 Python 3.11–3.13 和 Windows/Linux 上检查 Ruff，并在 PostgreSQL 服务上运行带 70% 门槛的 backend 覆盖率测试。开发约定详见 [docs/development.md](docs/development.md)。

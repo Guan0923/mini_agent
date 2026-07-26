@@ -4,13 +4,14 @@ Mini-Agent keeps provider wire formats outside its execution model. Public pipel
 
 ```text
 TUI -> ConversationService -> RuntimeRunner port -> AgentRunner(runtime) -> workflows -> planner / tools
-                              |                         |
-                              +-> RuntimeState          +-> RuntimeEvent
+                              |                         |             |
+                              +-> RuntimeState          +-> RuntimeEvent / Skills / Subagents
                               +-> RuntimeServices
                               +-> RuntimeExchange
 
+MCP stdio      -> McpToolAdapter -> approval-free ToolRegistry subset
 HTTP transport <-> provider adapter prepare_request/prepare_response <-> AgentRuntime
-PostgreSQL        <-> RuntimeState snapshots and user/assistant projections
+PostgreSQL        <-> RuntimeState snapshots, audit events, checkpoints, and projections
 ```
 
 ## Runtime
@@ -18,7 +19,7 @@ PostgreSQL        <-> RuntimeState snapshots and user/assistant projections
 `AgentRuntime` is session-scoped and intentionally split into three parts:
 
 - `RuntimeState` is JSON-serializable. It owns typed messages, safe model settings, tool specifications, the active `RunState`, plan state, latest usage, pending assistant/tool progress, and completed run summaries.
-- `RuntimeServices` contains process-local dependencies such as the planner, tool handlers, stores, event sinks, approval and steering callbacks, the clock, and ID generation. Secrets and callables are never serialized.
+- `RuntimeServices` contains process-local dependencies such as the planner, tool handlers, stores, event sinks, approval and steering callbacks, Subagent coordinator, the clock, and ID generation. Secrets and callables are never serialized.
 - `RuntimeServices` also owns the process-local `HookManager`. Synchronous run, model, and tool hooks are rebound after session restoration and never serialized into checkpoints.
 - `RuntimeExchange` contains one transient model operation: request mode, allowed tools, request payload, raw response or SSE iterator, prepared response, and reasoning callback.
 
@@ -77,6 +78,18 @@ Plan questions, Plan Review, and Tool Review intentionally use separate decision
 `LLMPlanner` appends active snapshots to each later operation's system message before context estimation. The appended policy keeps every preceding system constraint authoritative and cannot bypass tool schemas, workspace confinement, or approval. Checkpoints serialize snapshots directly, and Plan Review copies them into `RunHandoff`, so implementation uses the exact approved Skill version even across an isolated session. A later ordinary user turn starts with an empty active set and selects again.
 
 
+## Subagents
+
+`SubagentCoordinator` handles the runtime-only `delegate_tasks` and `get_subagent_results` tools. One parent call starts a thread-pool batch of independent child runs, each with a fresh session ID, standard tools, inherited cancellation, and approval requests routed through the parent interrupt callback. Child runners omit delegation tools, making the topology deliberately single-level.
+
+`RunState.subagent_batches` persists task order, status, clipped answers, and errors. A completed batch can be read in pages; recovery converts a still-running batch to `indeterminate` instead of replaying it. `WorkspaceWriteLock` permits unrelated file writes concurrently, serializes equal normalized paths, and makes commands exclusive with every file mutation. This is process-local coordination, not a distributed lock.
+
+## MCP Boundary
+
+`backend.mcp` is a separate adapter over the shared tool registry, not a second agent runtime. The stdio server derives MCP schemas from ToolSpecs and exposes only read-only tools that do not require confirmation: `read_file`, `glob`, and `grep`. Calls retain JSON Schema validation, bounded output, and workspace confinement. Mutation, command, and network tools are rejected because stdio has no interactive approval channel.
+
+The MCP server requires neither model credentials nor PostgreSQL. Its boundary must remain independent of TUI, provider, runtime-session, and storage implementations.
+
 ## Provider Boundary
 
 `providers/client.py` exposes the provider-selecting `LLMClient` facade, while `providers/transport.py` owns the schema-neutral `JsonHttpTransport`. The facade selects a wire adapter from `ModelConfig.provider`, coordinates transport, and records request diagnostics:
@@ -94,7 +107,7 @@ Tool decisions use DeepSeek native Tool Calls. Strategy selection, plan creation
 ## Responsibilities
 
 - `domain` owns typed messages, ToolSpec, run/plan values, and compatibility serialization.
-- `runtime` owns AgentRuntime, application composition, provider-neutral events, and contracts. Its root contains only lazy public exports. Implementations are grouped by responsibility: `core/` owns state, events, contracts, settings, and hooks; `application/` owns services and dependency composition; `execution/` owns runners, routing, workflows, steps, and outcomes; `conversation/` owns session orchestration, steering, references, and user questions; `planning/` owns Plan mode and Plan Review; `persistence/` owns checkpoint ports and persistent-event conversion.
+- `runtime` owns AgentRuntime, application composition, provider-neutral events, contracts, recovery, and Subagent coordination. Its root contains only lazy public exports. Implementations are grouped by responsibility: `core/` owns state, events, contracts, settings, and hooks; `application/` owns services and dependency composition; `execution/` owns runners, routing, workflows, steps, and outcomes; `conversation/` owns session orchestration, steering, references, recovery, and user questions; `planning/` owns Plan mode and Plan Review; `persistence/` owns checkpoint ports and persistent-event conversion.
 - `ConversationService` and `AgentApplication` depend on the `RuntimeRunner` protocol; only the composition root selects `AgentRunner`.
 - `PlanModeWorkflow` owns final proposal recording, review, and handoff so the runner only dispatches run modes and strategies.
 - Lifecycle hooks use narrow provider-neutral contexts: before hooks may cancel, model hooks may replace messages/tools/request parameters, and tool hooks may replace arguments before validation and approval. After hooks receive snapshots in reverse registration order.
@@ -104,6 +117,7 @@ Tool decisions use DeepSeek native Tool Calls. Strategy selection, plan creation
   `catalog.py` is a thin composition boundary; grouped default definitions live under `tools/default_tools/`.
 - `providers` owns `LLMClient` selection, generic JSON/SSE transport, and vendor-specific request/response adapters.
 - `storage` persists RuntimeState checkpoints, session snapshots, and compact conversation projections through focused PostgreSQL schema and mapping modules.
+- `mcp` adapts the approval-free read-tool subset to stdio without depending on model or persistence services.
 - `tui` handles terminal commands, approval input, RuntimeEvent presentation, and the process-local full-screen transcript only. `application/` owns the CLI loop and command routing; `components/` owns completion and approvals; `screens/`, `rendering/`, `view_parts/`, and `widgets/` isolate Textual responsibilities. Worker threads enqueue display chunks; the Textual event loop owns all widget mutation and rendering.
 
 ## Extension Rules

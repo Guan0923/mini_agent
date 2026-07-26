@@ -13,10 +13,11 @@ Mini-Agent is a Python 3.11+ agent lab. Production code is split into `src/backe
 
 - `backend/domain/`: provider-neutral messages, plans, sessions, skills, errors, and run state.
 - `backend/planning/`: rule-based and LLM planners, context management, model request lifecycle, and structured-output parsing.
-- `backend/runtime/`: application composition, conversation orchestration, execution workflows, Plan mode, persistence ports, hooks, and runtime events.
+- `backend/runtime/`: application composition, conversation orchestration, execution workflows, Plan mode, durable recovery, hooks, runtime events, and subagent coordination.
 - `backend/providers/`: `client.py` orchestrates providers, `transport.py` owns generic JSON/SSE HTTP, and `deepseek/` owns DeepSeek wire conversion.
-- `backend/tools/`: contracts and registry plus grouped `filesystem/`, `web/`, `default_tools/`, and command implementations.
-- `backend/storage/`: SQLite checkpoint/session adapters split into operations, schema migration, and row mapping.
+- `backend/tools/`: contracts and registry plus grouped `filesystem/`, `web/`, `default_tools/`, command, and delegation implementations.
+- `backend/mcp/`: stdio server exposing the safe, approval-free subset of workspace tools.
+- `backend/storage/postgres/`: PostgreSQL checkpoint/session adapters split into operations, schema migration, and row mapping.
 - `backend/observability/`: JSONL logging, redaction, and event fan-out.
 - `tui/`: CLI/application loops, approval components, screens, rendering, view behavior, and reusable widgets.
 - `frontend/`: reserved for a future browser frontend; it consumes backend APIs and must not import backend implementation modules directly.
@@ -29,6 +30,7 @@ Run commands from the repository root:
 
 ```powershell
 python -m pip install -e ".[dev]"
+docker compose up -d                       # Required PostgreSQL service
 python run.py --planner rule                 # Offline interactive TUI
 python run.py "calculate (18 + 6) * 4"      # One configured-provider task
 python -m pytest -q                          # Complete focused test suite
@@ -44,6 +46,8 @@ python -m ruff format --check .
 - Treat roughly 300 lines per file and at most 8 direct Python files per package as reviewability guidance, not mechanical limits. Split by responsibility; do not create thin forwarding modules only to satisfy a number.
 - Keep HTTP/SSE mechanics in `providers/transport.py`; provider-specific request/response rules belong under the provider package.
 - Register tools through `ToolRegistry`. Preserve JSON Schema validation, workspace confinement, output bounds, and approval requirements.
+- Keep MCP exports restricted to read-only tools that do not require interactive confirmation.
+- Keep subagent delegation single-level unless recursive coordination, budgets, cancellation, and persistence are explicitly redesigned together.
 - Keep tool behavior out of the TUI and runner. Runtime publishes `RuntimeEvent`; terminal presentation belongs under `tui/rendering/`.
 - Reuse shared normalization, validation, path, and persistence helpers instead of duplicating private implementations.
 - Use `apply_patch` for intentional source edits when available; bulk formatting and mechanical moves may use dedicated tools.
@@ -66,4 +70,4 @@ Use focused Conventional Commit-style messages such as `feat: add anthropic adap
 - Copy `.env.example` to `.env`; never commit real API keys or credentials. Process environment values override `.env` values.
 - Treat model-generated tool arguments and all web/tool output as untrusted.
 - Authentication headers, `.env` contents, and full process environments must never be persisted. Keep recursive redaction intact when changing logs.
-- `LOG_FULL_MESSAGES=true` records complete redacted bodies; `false` records summaries. Both modes must remain schema-compatible across JSONL, SQLite, runtime state, and history projections.
+- `LOG_FULL_MESSAGES=true` records complete redacted bodies; `false` records summaries. Both modes must remain schema-compatible across JSONL, PostgreSQL runtime/audit records, runtime state, and history projections.

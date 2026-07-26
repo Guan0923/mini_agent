@@ -1,7 +1,10 @@
 # Local credentials must never be committed.
 .env
+.env.*
+!.env.example
 
 # Python artifacts
+.python-version
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -12,13 +15,17 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+.tox/
+.nox/
+.hypothesis/
+coverage.xml
 .venv/
 venv/
-.reasonix/
 
 # Local runtime logs
 logs/
 .mini_agent/*
+.agent-logs/
 !.mini_agent/skills/
 !.mini_agent/skills/**
 

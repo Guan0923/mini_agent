@@ -5,7 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mini-agent"
 version = "0.1.0"
-description = "A terminal-first playground for studying agent execution loops."
+description = "A terminal-first agent harness with durable workflows, Skills, MCP, and concurrent subagents."
+keywords = ["agent", "mcp", "skills", "subagents", "tui"]
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
