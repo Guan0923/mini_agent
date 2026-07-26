@@ -12,6 +12,7 @@ class ContextProgress(Static):
     def __init__(self) -> None:
         super().__init__(id="context-progress")
         self.estimated_tokens: int | None = None
+        self.cumulative_tokens: int | None = None
         self.context_size: int | None = None
         self.threshold = 0.8
 
@@ -26,22 +27,37 @@ class ContextProgress(Static):
         estimated_tokens: int | None,
         context_size: int | None,
         threshold: float = 0.8,
+        *,
+        cumulative_tokens: int | None = None,
     ) -> None:
         self.estimated_tokens = estimated_tokens
+        if cumulative_tokens is not None:
+            self.cumulative_tokens = cumulative_tokens
         self.context_size = context_size
         self.threshold = max(0.0, min(threshold, 1.0))
+        self.refresh()
+
+    def clear_usage(self) -> None:
+        """Clear both the current-context and session-total displays."""
+
+        self.estimated_tokens = None
+        self.cumulative_tokens = None
+        self.context_size = None
         self.refresh()
 
     def render(self) -> Text:
         width = max(1, self.size.width - 2)
         ratio = self.ratio
         if ratio is None:
-            detailed = "CONTEXT N/A "
+            detailed = "TOKENS N/A | CONTEXT N/A "
             compact = "CTX N/A "
         else:
             percent = ratio * 100
-            detailed = f"CONTEXT {self.estimated_tokens:,} / {self.context_size:,} {percent:.0f}% "
-            compact = f"CTX {percent:.0f}% "
+            cumulative = "N/A" if self.cumulative_tokens is None else f"{self.cumulative_tokens:,}"
+            detailed = (
+                f"TOKENS {cumulative} | CONTEXT {self.estimated_tokens:,} / {self.context_size:,} {percent:.0f}% "
+            )
+            compact = f"TOK {cumulative} | CTX {percent:.0f}% "
         if width - len(detailed) >= 8:
             label = detailed
         elif width - len(compact) >= 4:

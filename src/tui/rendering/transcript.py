@@ -171,6 +171,8 @@ class TranscriptScroll(VerticalScroll):
         line_count = max(1, text.count("\n") + 1)
         last_column = len(text.rsplit("\n", 1)[-1])
         self.selection = Selection((0, 0), (line_count - 1, last_column))
+        if self.is_mounted:
+            self.call_after_refresh(self._notify_selection)
 
     def _refresh_text_source(self) -> None:
         if self._text_source is None:
@@ -205,6 +207,20 @@ class TranscriptScroll(VerticalScroll):
                 callback()
             event.prevent_default()
             event.stop()
+            return
+        callback = getattr(self.app, "focus_input_if_no_selection", None)
+        if callback is not None:
+            callback()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        """Check Textual's screen selection after a transcript drag completes."""
+
+        self.call_after_refresh(self._notify_selection)
+
+    def _notify_selection(self) -> None:
+        callback = getattr(self.app, "blur_input_for_transcript_selection", None)
+        if callback is not None:
+            callback()
 
     def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         callback = getattr(self.app, "pause_following", None)

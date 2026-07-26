@@ -199,6 +199,8 @@ class LLMClient:
             )
             raise
         finally:
+            if not completed:
+                self._usage_tracker().discard_unconfirmed(runtime)
             if not completed and runtime.exchange.stream and raw is not None:
                 close = getattr(raw, "close", None)
                 if callable(close):

@@ -98,6 +98,19 @@ class TokenUsageTracker:
         self.refresh(runtime)
         self.publish_context_usage(runtime, entry, phase="provider")
 
+    def discard_unconfirmed(self, runtime: AgentRuntime) -> None:
+        """Remove a provisional request when no provider usage was returned."""
+
+        exchange_id = runtime.exchange.exchange_id
+        if not exchange_id:
+            return
+        entry = self.requests(runtime).get(exchange_id)
+        if entry is None or entry.get("provider_prompt_tokens") is not None:
+            return
+        del self.requests(runtime)[exchange_id]
+        self.refresh(runtime)
+        self.publish_context_usage(runtime, None, phase="discarded")
+
     @staticmethod
     def token_value(value: Any) -> int | None:
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
@@ -142,31 +155,53 @@ class TokenUsageTracker:
         runtime.state.token_usage["current_input_tokens"] = current_input
 
     @staticmethod
-    def publish_context_usage(runtime: AgentRuntime, entry: dict[str, Any], *, phase: str) -> None:
+    def publish_context_usage(
+        runtime: AgentRuntime, entry: dict[str, Any] | None, *, phase: str
+    ) -> None:
         context_size = getattr(runtime.services.planner, "client", None)
         context_size = getattr(context_size, "context_size", None)
         if not isinstance(context_size, int) or context_size < 1:
             return
-        input_tokens = int(entry["input_tokens"])
+        totals = runtime.state.token_usage.get("totals", {})
+        cumulative_input_tokens = TokenUsageTracker.token_value(totals.get("input_tokens")) or 0
+        current_input_tokens = TokenUsageTracker.token_value(runtime.state.token_usage.get("current_input_tokens")) or 0
+        if entry is not None:
+            input_source = entry["input_source"]
+            estimated_input_tokens = entry["estimated_input_tokens"]
+            estimated_output_tokens = entry["estimated_output_tokens"]
+            provider_prompt_tokens = entry["provider_prompt_tokens"]
+            provider_completion_tokens = entry["provider_completion_tokens"]
+            provider_total_tokens = entry["provider_total_tokens"]
+            exchange_id = entry["exchange_id"]
+        else:
+            input_source = "none"
+            estimated_input_tokens = None
+            estimated_output_tokens = None
+            provider_prompt_tokens = None
+            provider_completion_tokens = None
+            provider_total_tokens = None
+            exchange_id = None
         (runtime.services.publish or (lambda _event: None))(
             RuntimeEvent(
                 "context_usage",
                 "Context usage reconciled",
                 {
-                    "estimated_tokens": input_tokens,
-                    "input_tokens": input_tokens,
-                    "input_source": entry["input_source"],
-                    "estimated_input_tokens": entry["estimated_input_tokens"],
-                    "estimated_output_tokens": entry["estimated_output_tokens"],
-                    "provider_prompt_tokens": entry["provider_prompt_tokens"],
-                    "provider_completion_tokens": entry["provider_completion_tokens"],
-                    "provider_total_tokens": entry["provider_total_tokens"],
+                    "estimated_tokens": current_input_tokens,
+                    "input_tokens": current_input_tokens,
+                    "current_input_tokens": current_input_tokens,
+                    "cumulative_input_tokens": cumulative_input_tokens,
+                    "input_source": input_source,
+                    "estimated_input_tokens": estimated_input_tokens,
+                    "estimated_output_tokens": estimated_output_tokens,
+                    "provider_prompt_tokens": provider_prompt_tokens,
+                    "provider_completion_tokens": provider_completion_tokens,
+                    "provider_total_tokens": provider_total_tokens,
                     "context_size": context_size,
                     "target_ratio": 0.8,
                     "target_tokens": int(context_size * 0.8),
-                    "ratio": input_tokens / context_size,
+                    "ratio": current_input_tokens / context_size,
                     "phase": phase,
-                    "exchange_id": entry["exchange_id"],
+                    "exchange_id": exchange_id,
                 },
             )
         )

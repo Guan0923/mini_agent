@@ -54,8 +54,20 @@ class ViewScrollingMixin:
         estimated_tokens: int | None = None,
         context_size: int | None = None,
         threshold: float = 0.8,
+        *,
+        cumulative_tokens: int | None = None,
     ) -> None:
-        self._run_on_owner(lambda: self.context_progress.set_usage(estimated_tokens, context_size, threshold))
+        self._run_on_owner(
+            lambda: self.context_progress.set_usage(
+                estimated_tokens,
+                context_size,
+                threshold,
+                cumulative_tokens=cumulative_tokens,
+            )
+        )
+
+    def clear_context_usage(self) -> None:
+        self._run_on_owner(self.context_progress.clear_usage)
 
     def stop(self) -> None:
         if self._writes_closed:
@@ -128,9 +140,26 @@ class ViewScrollingMixin:
         self.copy_to_clipboard(selected)
         self.screen.clear_selection()
         self.transcript.selection = Selection.cursor(selection_end)
+        self._copy_focus_suspended = True
         self._show_copy_notice(len(selected))
-        self.input.focus()
         return True
+
+    def focus_input_if_no_selection(self) -> None:
+        """Restore default input focus only after a later selection-free interaction."""
+
+        if getattr(self, "_copy_focus_suspended", False):
+            self._copy_focus_suspended = False
+            self.input.focus()
+            return
+        if self.screen.get_selected_text() or self.transcript.selected_text:
+            return
+        self.input.focus()
+
+    def blur_input_for_transcript_selection(self) -> None:
+        """Prevent a transcript selection from receiving terminal paste input."""
+
+        if self.screen.get_selected_text() or self.transcript.selected_text:
+            self.set_focus(None)
 
     def action_page_up(self) -> None:
         self.scroll_page_up()

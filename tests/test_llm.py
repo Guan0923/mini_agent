@@ -792,3 +792,50 @@ def test_llm_client_reconciles_estimated_and_provider_token_usage() -> None:
         "total_tokens": 11,
     }
     assert runtime.state.token_usage == type(runtime.state).from_dict(runtime.state.to_dict()).token_usage
+
+
+def test_llm_client_accumulates_context_input_and_replaces_estimates_with_provider_usage() -> None:
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), adapter=object())
+    runtime = runtime_for()
+    events = []
+    runtime.services.publish = events.append
+    runtime.services.planner = type("Planner", (), {"client": type("Model", (), {"context_size": 100})()})()
+
+    runtime.exchange.exchange_id = "first"
+    runtime.exchange.context["estimated_input_tokens"] = 10
+    client._begin_token_usage(runtime)
+    client._complete_token_usage(runtime, {"prompt_tokens": 8}, AssistantMessage(content="first"))
+
+    runtime.exchange.exchange_id = "second"
+    runtime.exchange.context["estimated_input_tokens"] = 15
+    client._begin_token_usage(runtime)
+    estimated = events[-1]
+    assert estimated.data["cumulative_input_tokens"] == 23
+    assert estimated.data["current_input_tokens"] == 15
+    assert estimated.data["input_source"] == "estimated"
+
+    client._complete_token_usage(runtime, {"prompt_tokens": 12}, AssistantMessage(content="second"))
+    provider = events[-1]
+    assert provider.data["cumulative_input_tokens"] == 20
+    assert provider.data["current_input_tokens"] == 12
+    assert provider.data["input_source"] == "provider"
+    assert runtime.state.token_usage["totals"]["input_tokens"] == 20
+    assert runtime.state.token_usage == type(runtime.state).from_dict(runtime.state.to_dict()).token_usage
+
+
+def test_llm_client_discards_unconfirmed_context_estimate() -> None:
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), adapter=object())
+    runtime = runtime_for()
+    events = []
+    runtime.services.publish = events.append
+    runtime.services.planner = type("Planner", (), {"client": type("Model", (), {"context_size": 100})()})()
+    runtime.exchange.exchange_id = "failed"
+    runtime.exchange.context["estimated_input_tokens"] = 10
+
+    client._begin_token_usage(runtime)
+    client._usage_tracker().discard_unconfirmed(runtime)
+
+    assert runtime.state.token_usage["requests"] == {}
+    assert runtime.state.token_usage["totals"]["input_tokens"] == 0
+    assert events[-1].data["phase"] == "discarded"
+    assert events[-1].data["cumulative_input_tokens"] == 0
