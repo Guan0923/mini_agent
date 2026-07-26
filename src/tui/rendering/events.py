@@ -9,7 +9,8 @@ from textual.widgets import Static
 from backend.runtime.core.events import RuntimeEvent
 
 from .state import ToolTranscript
-from .transcript import MarkdownBody, StatusLeaf, TranscriptNode
+from .transcript import TranscriptNode
+from .transcript_content import MarkdownBody, StatusLeaf
 
 
 class TranscriptEventMixin:

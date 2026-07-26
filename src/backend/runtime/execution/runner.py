@@ -17,12 +17,10 @@ from backend.domain import (
 )
 from backend.planning.base import ContextCompactor
 from backend.planning.context_management import ContextCompactionResult
-from backend.tools import ToolError
 
 from ..conversation.steering import consume_steering
 from ..core.config import RunnerSettings
-from ..core.context import AgentRuntime, RunSummary, RuntimeServices, RuntimeState
-from ..core.contracts import InterruptDecision, InterruptRequest
+from ..core.context import AgentRuntime, RuntimeServices, RuntimeState
 from ..core.events import RuntimeEvent
 from ..core.hooks import (
     AgentHook,
@@ -37,6 +35,8 @@ from ..core.hooks import (
 from ..persistence.checkpointing import CheckpointStore
 from ..planning.mode import PlanModeWorkflow
 from .lifecycle.cancellation import cancel_if_requested
+from .lifecycle.finalization import finish_run
+from .lifecycle.interrupts import default_interrupt
 from .lifecycle.outcomes import cancel_run, fail_run
 from .lifecycle.publisher import RunEventPublisher
 from .routing import StrategyRouter
@@ -313,63 +313,7 @@ class AgentRunner:
             self._reactive.run(runtime)
 
     def _default_interrupt(self, runtime: AgentRuntime):
-        def decide(request: InterruptRequest) -> InterruptDecision:
-            if request.kind == "plan":
-                return InterruptDecision("cancel")
-            tool = request.data.get("tool")
-            if not isinstance(tool, str):
-                return InterruptDecision("cancel")
-            try:
-                requires_confirmation = runtime.services.tools.requires_confirmation(tool)
-            except ToolError:
-                return InterruptDecision("cancel")
-            if not requires_confirmation:
-                return InterruptDecision("continue")
-            message = f"{tool} requires confirmation before an external or destructive operation."
-            confirm = runtime.services.confirm
-            return InterruptDecision("continue" if confirm is not None and confirm(message) else "cancel")
-
-        return decide
+        return default_interrupt(runtime)
 
     def _finish(self, runtime: AgentRuntime, *, started_at: float) -> RunState:
-        run = runtime.run
-        runtime.state.usage = runtime.state.turn_usage
-        runtime.state.turn_usage = None
-        runtime.state.status = "idle"
-        if not any(summary.run_id == run.run_id for summary in runtime.state.run_history):
-            runtime.state.run_history.append(
-                RunSummary(
-                    run.run_id,
-                    run.task,
-                    run.status,
-                    run.mode,
-                    run.final_answer,
-                    run.provenance.workflow_id,
-                    run.provenance.attempt,
-                )
-            )
-        run.add_event("run_finished", "Run finished", status=run.status)
-        if runtime.services.publish is not None:
-            counts: dict[str, int] = {}
-            for message in run.runtime_messages:
-                counts[message.kind] = counts.get(message.kind, 0) + 1
-            runtime.services.publish(
-                RuntimeEvent(
-                    "run_finished",
-                    run.status,
-                    {
-                        "schema_version": 2,
-                        "final_answer": run.final_answer or "",
-                        "duration_ms": round((perf_counter() - started_at) * 1000, 3),
-                        "usage": runtime.state.usage,
-                        "event_counts": counts,
-                        "model_calls": counts.get("model_request", 0),
-                        "tool_calls": counts.get("tool_call", 0),
-                        "retries": counts.get("retry", 0) + counts.get("model_retry", 0),
-                        "replans": counts.get("replan_requested", 0),
-                        "active_skills": [{"name": skill.name, "sha256": skill.sha256} for skill in run.active_skills],
-                    },
-                )
-            )
-        runtime.save()
-        return run
+        return finish_run(runtime, started_at=started_at)

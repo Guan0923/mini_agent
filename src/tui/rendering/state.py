@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from threading import Lock
 
 from .mirror import TranscriptTextMirror
-from .transcript import MarkdownBody, ProcessingProgress, StatusLeaf, TranscriptNode, TranscriptScroll
+from .transcript import TranscriptNode, TranscriptScroll
+from .transcript_content import MarkdownBody, ProcessingProgress, StatusLeaf
 
 _FLUSH_INTERVAL_SECONDS = 1 / 30
 OMITTED_MARKER = "[Earlier terminal output omitted]\n"

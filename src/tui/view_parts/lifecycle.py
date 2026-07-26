@@ -7,7 +7,7 @@ from time import monotonic
 from backend.runtime.core.events import RuntimeEvent
 
 from ..rendering.state import DETAIL_LEVELS
-from ..rendering.transcript import CompactProgress, MarkdownBody
+from ..rendering.transcript_content import CompactProgress, MarkdownBody
 from ..screens.history import HistoryScreen
 from ..screens.inspection import SessionsScreen, TraceScreen
 
