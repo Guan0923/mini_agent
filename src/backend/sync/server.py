@@ -57,6 +57,10 @@ class PostgresSyncRepository:
                 session_meta = snapshot.get("session")
                 if not isinstance(session_meta, dict) or session_meta.get("session_id") != session_id:
                     raise ValueError("snapshot session id must match the operation")
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (session_id,),
+                )
                 previous = connection.execute(
                     "SELECT session_id,device_id,resulting_revision FROM sync_operations WHERE operation_id=%s",
                     (operation_id,),

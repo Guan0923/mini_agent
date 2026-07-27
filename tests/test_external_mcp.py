@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from backend.mcp import client as mcp_client
 
 
@@ -41,6 +43,29 @@ args = ["--project"]
     assert configs["shared"].args == ("--project",)
     assert configs["shared"].cwd is None
     assert configs["shared"].env is None
+
+
+def test_external_mcp_submit_cancels_a_timed_out_future(monkeypatch) -> None:
+    class PendingFuture:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def result(self, *, timeout: float | None = None):
+            assert timeout == 0.01
+            raise TimeoutError
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    future = PendingFuture()
+    monkeypatch.setattr(mcp_client.asyncio, "run_coroutine_threadsafe", lambda _value, _loop: future)
+    manager = object.__new__(mcp_client.ExternalMcpManager)
+    manager._loop = object()
+
+    with pytest.raises(TimeoutError):
+        manager._submit(object(), timeout=0.01)
+
+    assert future.cancelled is True
 
 
 def test_external_mcp_tools_are_approval_gated_and_not_plan_safe(tmp_path: Path, monkeypatch) -> None:

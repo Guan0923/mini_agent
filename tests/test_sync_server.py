@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -47,6 +49,27 @@ def test_postgres_sync_repository_enforces_idempotency_revision_and_owner() -> N
         repository.push("device_b", [_operation("operation_foreign", base_revision=2)])
     with pytest.raises(ValueError, match="another session"):
         repository.push("device_a", [_operation("operation_one", "session_other")])
+
+
+def test_postgres_sync_repository_serializes_concurrent_duplicate_operation() -> None:
+    database_url = os.environ["TEST_DATABASE_URL"].replace("@localhost:", "@127.0.0.1:")
+    repository = PostgresSyncRepository(database_url)
+    session_id = "session_concurrent"
+    repository.push("device_a", [_operation("operation_initial", session_id)])
+    duplicate = _operation("operation_duplicate", session_id, base_revision=1)
+    ready = threading.Barrier(2)
+
+    def push() -> list[dict[str, object]]:
+        ready.wait(timeout=5)
+        return repository.push("device_a", [duplicate])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [future.result(timeout=10) for future in (executor.submit(push), executor.submit(push))]
+
+    assert results == [
+        [{"operation_id": "operation_duplicate", "revision": 2}],
+        [{"operation_id": "operation_duplicate", "revision": 2}],
+    ]
 
 
 def test_sync_api_authenticates_and_passes_device_identity() -> None:

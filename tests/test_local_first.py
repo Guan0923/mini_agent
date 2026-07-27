@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -40,6 +42,82 @@ def test_sqlite_persists_empty_runtime_and_time_zone(tmp_path: Path) -> None:
 
     assert store.load_runtime(session.session_id).timezone == "UTC"
     assert store.pending_sync_operations()[0]["snapshot"]["runtime"]["timezone"] == "UTC"
+
+
+def test_sqlite_closes_connection_when_schema_initialization_fails(tmp_path: Path, monkeypatch) -> None:
+    class BrokenConnection:
+        def __init__(self) -> None:
+            self.row_factory = None
+            self.rolled_back = False
+            self.closed = False
+
+        def execute(self, _statement: str) -> None:
+            return None
+
+        def executescript(self, _script: str) -> None:
+            raise sqlite3.DatabaseError("broken schema")
+
+        def rollback(self) -> None:
+            self.rolled_back = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = BrokenConnection()
+    monkeypatch.setattr(sqlite3, "connect", lambda _path: connection)
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "mini_agent"), "device_a")
+
+    with pytest.raises(sqlite3.DatabaseError, match="broken schema"):
+        with store._connection("session_broken"):
+            pass
+
+    assert connection.rolled_back is True
+    assert connection.closed is True
+
+
+def test_sqlite_migrates_legacy_metadata_and_outbox(tmp_path: Path) -> None:
+    paths = ClientPaths(tmp_path / "mini_agent")
+    session_id = "session_legacy"
+    database = paths.session_db(session_id)
+    database.parent.mkdir(parents=True)
+    state = RuntimeState(session_id=session_id, timezone="UTC")
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE session_meta (
+                session_id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE session_runtime (
+                session_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sync_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO session_meta VALUES (?, ?, ?, ?)",
+            (session_id, "legacy", "2025-01-01T00:00:00Z", "2025-01-01T00:00:00Z"),
+        )
+        connection.execute(
+            "INSERT INTO session_runtime VALUES (?, ?, ?)",
+            (session_id, json.dumps(state.to_dict()), "2025-01-01T00:00:00Z"),
+        )
+        connection.execute(
+            "INSERT INTO sync_outbox(payload_json,created_at) VALUES (?, ?)",
+            ('{"event":"session_changed"}', "2025-01-01T00:00:00Z"),
+        )
+
+    store = SQLiteSessionStore(paths, "device_current")
+
+    assert store.load_runtime(session_id).timezone == "UTC"
+    operations = store.pending_sync_operations()
+    assert len(operations) == 1
+    assert operations[0]["operation_id"].startswith("operation_")
+    assert operations[0]["snapshot"]["session"]["owner_device_id"] == "device_current"
+    assert operations[0]["snapshot"]["runtime"]["timezone"] == "UTC"
 
 
 def test_acknowledgement_rebases_snapshots_created_during_push(tmp_path: Path) -> None:
@@ -176,7 +254,21 @@ def test_sync_client_pushes_then_pulls_without_polling(tmp_path: Path) -> None:
     assert store.pending_sync_operations() == []
 
 
-def test_sync_transport_requires_https() -> None:
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https:///missing-host",
+        "https://user:password@sync.example.test",
+        "https://sync.example.test?token=unsafe",
+        "https://sync.example.test#fragment",
+    ],
+)
+def test_sync_transport_rejects_unsafe_https_endpoints(url: str) -> None:
+    with pytest.raises(ValueError, match="sync.url"):
+        RequestsSyncTransport(url, "token", "device_a")
+
+
+def test_sync_transport_rejects_non_https_endpoint() -> None:
     with pytest.raises(ValueError, match="HTTPS"):
         RequestsSyncTransport("http://sync.example.test", "token", "device_a")
 

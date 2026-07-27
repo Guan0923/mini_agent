@@ -7,6 +7,7 @@ import atexit
 import os
 import threading
 import tomllib
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ class McpServerConfig:
 
 
 _MANAGERS: list[ExternalMcpManager] = []
+_SHUTDOWN_TIMEOUT = 5.0
 
 
 class ExternalMcpManager:
@@ -48,8 +50,13 @@ class ExternalMcpManager:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _submit(self, coroutine):
-        return asyncio.run_coroutine_threadsafe(coroutine, self._loop).result()
+    def _submit(self, coroutine, *, timeout: float | None = None):
+        future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        try:
+            return future.result(timeout=timeout)
+        except FutureTimeoutError:
+            future.cancel()
+            raise
 
     async def _start(self) -> dict[str, list[object]]:
         self._stack = AsyncExitStack()
@@ -77,11 +84,11 @@ class ExternalMcpManager:
             return
         if self._stack is not None:
             try:
-                self._submit(self._stack.aclose())
+                self._submit(self._stack.aclose(), timeout=_SHUTDOWN_TIMEOUT)
             except Exception:
                 pass
         self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=5.0)
+        self._thread.join(timeout=_SHUTDOWN_TIMEOUT)
 
 
 def load_server_configs(global_file: Path, project_file: Path) -> tuple[McpServerConfig, ...]:

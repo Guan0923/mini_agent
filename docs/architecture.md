@@ -11,7 +11,8 @@ TUI -> ConversationService -> RuntimeRunner port -> AgentRunner(runtime) -> work
 
 MCP stdio      -> McpToolAdapter -> approval-free ToolRegistry subset
 HTTP transport <-> provider adapter prepare_request/prepare_response <-> AgentRuntime
-PostgreSQL        <-> RuntimeState snapshots, audit events, checkpoints, and projections
+Per-session SQLite <-> RuntimeState, messages, audit events, checkpoints, and sync outbox
+HTTPS sync service <-> PostgreSQL owner/revision metadata and current JSON snapshots
 ```
 
 ## Runtime
@@ -53,7 +54,7 @@ Top-level history contains `SystemMessage`, `UserMessage`, and `AssistantMessage
 
 A ToolMessage owns the model's call ID, tool name, arguments, status, result or error content, and retryability. Pending tool calls live in `RuntimeState.active_message`; after every nested tool has a terminal result, the complete AssistantMessage moves into history. `ExecutionPlan` steps use the same ToolMessage type.
 
-PostgreSQL `session_runtime` snapshots retain resumable state, while `session_runtime_messages` keeps the immutable ordered audit stream for every completed or in-progress run. `session_messages` remains a compact user/assistant text projection used by the TUI and session listings; one run may contain multiple ordered user rows when steering is applied, but still has at most one assistant row. Usage is kept in its provider-native JSON shape and overwritten with the most recent completed turn's final model usage.
+Each `~/mini_agent/<session_id>/state.db` retains resumable runtime state, ordered runtime messages, checkpoints, compact conversation projections, sync metadata, and an idempotent snapshot outbox. Usage is kept in its provider-native JSON shape and overwritten with the most recent completed turn's final model usage.
 
 ## Plan Messages and Handoffs
 
@@ -69,9 +70,9 @@ The handoff is sequential rather than a mode mutation inside one run: the Plan r
 
 Plan questions, Plan Review, and Tool Review intentionally use separate decision vocabularies. Questions return `answer` with an answer map (an empty list explicitly skips one question) or `cancel`; Plan Review accepts only the three choices above; Tool Review remains `Continue / Cancel / Supplement`, so tool feedback behavior is unchanged.
 
-## Project Skills
+## Layered Skills
 
-`SkillCatalog` discovers direct child manifests under `<workspace>/.mini_agent/skills`. Discovery is fail-fast and validates UTF-8, bounded size and line count, exact `name`/`description` YAML metadata, directory-name equality, duplicate names, and resolved path confinement. Optional resources remain ordinary workspace files; Skills do not register tools or expand permissions.
+`SkillCatalog` merges direct child manifests from `~/mini_agent/skills` and `<workspace>/.mini_agent/skills`; a project Skill fully overrides the same global name. Discovery is fail-fast and validates UTF-8, bounded size and line count, exact metadata, directory-name equality, duplicates within each layer, and resolved path confinement. Optional resources remain ordinary files; Skills do not register tools or expand permissions.
 
 `SkillActivator` runs before both Plan-mode dispatch and Agent strategy routing. With an LLM planner and a non-empty catalog, it claims one model turn and invokes the `SkillSelector` capability with metadata only. The runtime unions semantic selections with installed names explicitly referenced as `$name`, resolves them in stable catalog order, snapshots full instructions/root/hash into `RunState.active_skills`, and emits `skills_selected`. Empty catalogs add no request; planners without the capability retain normal behavior unless a known Skill was explicitly requested, which fails clearly.
 
@@ -88,7 +89,15 @@ Plan questions, Plan Review, and Tool Review intentionally use separate decision
 
 `backend.mcp` is a separate adapter over the shared tool registry, not a second agent runtime. The stdio server derives MCP schemas from ToolSpecs and exposes only read-only tools that do not require confirmation: `read_file`, `glob`, and `grep`. Calls retain JSON Schema validation, bounded output, and workspace confinement. Mutation, command, and network tools are rejected because stdio has no interactive approval channel.
 
-The MCP server requires neither model credentials nor PostgreSQL. Its boundary must remain independent of TUI, provider, runtime-session, and storage implementations.
+The MCP server requires neither model credentials nor PostgreSQL. Separately, the client merges global and project `mcp.toml` server definitions, with a complete project override by name. `ExternalMcpManager` owns long-lived stdio sessions; imported tools are approval-gated mutations from the planner's perspective and are excluded from Plan mode. Configured environment values are process-only and never enter logs, audit records, or model context.
+
+## Local-first persistence and synchronization
+
+The client composition root uses `SQLiteSessionStore` only. Each session database is self-contained and stores an owner device ID, remote revision, read-only flag, schema version, full runtime history, and stable outbox operation IDs. Remote sessions owned by another device are imported read-only; `/fork` copies a terminal run into a new session and gives ownership to the current device.
+
+`SyncCoordinator` has one event-driven background worker. Startup, checkpoint notification, and normal shutdown trigger push-then-pull; there is no periodic polling. Network, authentication, and server failures are categorized without logging tokens or snapshots and leave the outbox for a later lifecycle retry.
+
+The deployable FastAPI service is the only new runtime component that accesses PostgreSQL. It authenticates bearer tokens and device IDs, serializes concurrent writes per session, enforces owner-only updates and base revisions, records operation IDs idempotently, and returns current JSON snapshots. TLS terminates at the deployment layer; clients reject non-HTTPS endpoints and never receive database credentials.
 
 ## Provider Boundary
 
@@ -116,7 +125,7 @@ Tool decisions use DeepSeek native Tool Calls. Strategy selection, plan creation
 - `tools` owns handlers, executable JSON Schema validation, registration, workspace confinement, and confirmation metadata.
   `catalog.py` is a thin composition boundary; grouped default definitions live under `tools/default_tools/`.
 - `providers` owns `LLMClient` selection, generic JSON/SSE transport, and vendor-specific request/response adapters.
-- `storage` persists RuntimeState checkpoints, session snapshots, and compact conversation projections through focused PostgreSQL schema and mapping modules.
+- `storage.sqlite` persists client state and outbox operations; `sync` owns the HTTPS client/coordinator and the isolated PostgreSQL server repository. Legacy PostgreSQL adapters are not selected by the client composition root.
 - `mcp` adapts the approval-free read-tool subset to stdio without depending on model or persistence services.
 - `tui` handles terminal commands, approval input, RuntimeEvent presentation, and the process-local full-screen transcript only. `application/` owns the CLI loop and command routing; `components/` owns completion and approvals; `screens/`, `rendering/`, `view_parts/`, and `widgets/` isolate Textual responsibilities. Worker threads enqueue display chunks; the Textual event loop owns all widget mutation and rendering.
 

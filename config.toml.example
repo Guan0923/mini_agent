@@ -1,0 +1,21 @@
+# Copy this file to ~/mini_agent/config.toml and replace the model placeholders.
+# The client reads only this TOML file; it does not apply process-environment overrides.
+[model]
+provider = "deepseek"
+api_key = "replace-with-your-key"
+# Accepted forms: service root, /v1 URL, or the complete /chat/completions endpoint.
+base_url = "https://api.deepseek.com"
+model = "deepseek-chat"
+max_tokens = 8192
+context_size = 1024000
+tokenizer_model = "deepseek-ai/DeepSeek-V3"
+
+[runtime]
+# true stores complete recursively redacted bodies; false stores summaries.
+log_full_messages = true
+
+[sync]
+# device_id is generated automatically and remains stable on this client.
+# Synchronization is optional. Configure both values to enable lifecycle-triggered HTTPS sync.
+# url = "https://sync.example.com"
+# token = "replace-with-a-sync-bearer-token"

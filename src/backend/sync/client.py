@@ -19,8 +19,17 @@ class SyncTransport(Protocol):
 
 class RequestsSyncTransport:
     def __init__(self, base_url: str, token: str, device_id: str, *, timeout: float = 10.0) -> None:
-        if urlparse(base_url).scheme != "https":
+        parsed = urlparse(base_url)
+        if parsed.scheme.lower() != "https":
             raise ValueError("sync.url must use HTTPS.")
+        if (
+            not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("sync.url must be an HTTPS endpoint without credentials, query, or fragment.")
         self._base_url = base_url.rstrip("/")
         self._headers = {"Authorization": f"Bearer {token}", "X-Device-ID": device_id}
         self._timeout = timeout

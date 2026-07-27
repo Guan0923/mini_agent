@@ -74,11 +74,11 @@ class SQLiteSessionStore:
         path = self.paths.session_db(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.executescript(_SCHEMA)
-        self._migrate_schema(connection)
         try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.executescript(_SCHEMA)
+            self._migrate_schema(connection)
             yield connection
             connection.commit()
         except Exception:
@@ -595,9 +595,10 @@ class SQLiteSessionStore:
         if row is not None and int(row[0]):
             raise PermissionError("Remote sessions are read-only; fork the session before writing.")
 
-    @staticmethod
-    def _migrate_schema(connection: sqlite3.Connection) -> None:
+    def _migrate_schema(self, connection: sqlite3.Connection) -> None:
         meta_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(session_meta)")}
+        if "owner_device_id" not in meta_columns:
+            connection.execute("ALTER TABLE session_meta ADD COLUMN owner_device_id TEXT NOT NULL DEFAULT ''")
         for name, definition in (
             ("remote_revision", "INTEGER NOT NULL DEFAULT 0"),
             ("read_only", "INTEGER NOT NULL DEFAULT 0"),
@@ -606,13 +607,24 @@ class SQLiteSessionStore:
             if name not in meta_columns:
                 connection.execute(f"ALTER TABLE session_meta ADD COLUMN {name} {definition}")
         outbox_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(sync_outbox)")}
+        connection.execute(
+            "UPDATE session_meta SET owner_device_id=? WHERE owner_device_id IS NULL OR owner_device_id=''",
+            (self.device_id,),
+        )
         for name, definition in (
             ("operation_id", "TEXT"),
             ("base_revision", "INTEGER NOT NULL DEFAULT 0"),
             ("kind", "TEXT NOT NULL DEFAULT 'snapshot'"),
+            ("acknowledged_at", "TEXT"),
         ):
             if name not in outbox_columns:
                 connection.execute(f"ALTER TABLE sync_outbox ADD COLUMN {name} {definition}")
+        legacy_outbox = connection.execute("SELECT 1 FROM sync_outbox WHERE operation_id IS NULL LIMIT 1").fetchone()
+        if legacy_outbox is not None:
+            connection.execute("DELETE FROM sync_outbox WHERE operation_id IS NULL")
+            meta = connection.execute("SELECT session_id,read_only FROM session_meta").fetchone()
+            if meta is not None and not int(meta[1]):
+                self._queue(connection, str(meta[0]))
 
     @classmethod
     def _queue(cls, connection: sqlite3.Connection, session_id: str) -> None:

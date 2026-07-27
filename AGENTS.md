@@ -16,8 +16,9 @@ Mini-Agent is a Python 3.11+ agent lab. Production code is split into `src/backe
 - `backend/runtime/`: application composition, conversation orchestration, execution workflows, Plan mode, durable recovery, hooks, runtime events, and subagent coordination.
 - `backend/providers/`: `client.py` orchestrates providers, `transport.py` owns generic JSON/SSE HTTP, and `deepseek/` owns DeepSeek wire conversion.
 - `backend/tools/`: contracts and registry plus grouped `filesystem/`, `web/`, `default_tools/`, command, and delegation implementations.
-- `backend/mcp/`: stdio server exposing the safe, approval-free subset of workspace tools.
-- `backend/storage/postgres/`: PostgreSQL checkpoint/session adapters split into operations, schema migration, and row mapping.
+- `backend/mcp/`: safe stdio server plus layered, approval-gated external MCP clients.
+- `backend/storage/sqlite.py`: per-session local state, checkpoints, audit records, and sync outbox.
+- `backend/sync/`: HTTPS client/coordinator and the isolated PostgreSQL synchronization service.
 - `backend/observability/`: JSONL logging, redaction, and event fan-out.
 - `tui/`: CLI/application loops, approval components, screens, rendering, view behavior, and reusable widgets.
 - `frontend/`: reserved for a future browser frontend; it consumes backend APIs and must not import backend implementation modules directly.
@@ -30,7 +31,7 @@ Run commands from the repository root:
 
 ```powershell
 python -m pip install -e ".[dev]"
-docker compose up -d                       # Required PostgreSQL service
+docker compose up -d                       # Only for PostgreSQL integration/server tests
 python run.py --planner rule                 # Offline interactive TUI
 python run.py "calculate (18 + 6) * 4"      # One configured-provider task
 python -m pytest -q                          # Complete focused test suite
@@ -67,7 +68,7 @@ Use focused Conventional Commit-style messages such as `feat: add anthropic adap
 
 ## Security and Configuration
 
-- Copy `.env.example` to `.env`; never commit real API keys or credentials. Process environment values override `.env` values.
+- Client configuration comes only from `~/mini_agent/config.toml`; a workspace `.env` is a one-time migration source and process environment values do not override client TOML.
 - Treat model-generated tool arguments and all web/tool output as untrusted.
-- Authentication headers, `.env` contents, and full process environments must never be persisted. Keep recursive redaction intact when changing logs.
-- `LOG_FULL_MESSAGES=true` records complete redacted bodies; `false` records summaries. Both modes must remain schema-compatible across JSONL, PostgreSQL runtime/audit records, runtime state, and history projections.
+- Authentication headers, config secrets, legacy `.env` contents, sync tokens, MCP environment values, and full process environments must never be persisted. Keep recursive redaction intact when changing logs.
+- `runtime.log_full_messages = true` records complete redacted bodies; `false` records summaries. Both modes must remain schema-compatible across JSONL, SQLite runtime/audit records, sync snapshots, runtime state, and history projections.

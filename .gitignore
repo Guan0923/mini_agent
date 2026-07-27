@@ -1,7 +1,6 @@
-# Local credentials must never be committed.
+# Legacy workspace credentials must never be committed.
 .env
 .env.*
-!.env.example
 
 # Python artifacts
 .python-version
