@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from backend.domain import ToolSpec
+from backend.domain.state import utc_now
+from backend.domain.timezone import DEFAULT_TIME_ZONE
 
 
 class ToolError(Exception):
@@ -15,6 +17,15 @@ class ToolError(Exception):
 
 class ConfirmationRequired(ToolError):
     """Raised before a tool performs a potentially destructive action."""
+
+
+@dataclass(frozen=True)
+class ToolInvocationContext:
+    """Runtime facts supplied only while executing a tool call."""
+
+    session_id: str | None = None
+    timezone: str = DEFAULT_TIME_ZONE
+    clock: Callable[[], str] = utc_now
 
 
 ToolHandler = Callable[..., str]
@@ -29,6 +40,7 @@ class Tool:
     requires_confirmation: bool = False
     read_only: bool = True
     retryable: bool = False
+    context_handler: ToolHandler | None = None
 
     @property
     def spec(self) -> ToolSpec:
@@ -55,3 +67,11 @@ class ToolExecutor(Protocol):
     def validate_arguments(self, name: str, arguments: dict[str, Any]) -> None: ...
 
     def invoke(self, name: str, arguments: dict[str, Any], confirmed: bool = False) -> str: ...
+
+    def invoke_with_context(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: ToolInvocationContext,
+        confirmed: bool = False,
+    ) -> str: ...

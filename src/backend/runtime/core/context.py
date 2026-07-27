@@ -18,6 +18,7 @@ from backend.domain import (
 )
 from backend.domain.messages import messages_from_dicts
 from backend.domain.state import utc_now
+from backend.domain.timezone import DEFAULT_TIME_ZONE
 
 from .config import RunnerSettings
 from .contracts import CancellationHandler, Confirm, EventHandler, InterruptHandler, SteeringHandler, SuspensionHandler
@@ -54,6 +55,7 @@ class RuntimeState:
 
     session_id: str
     workspace_root: str | None = None
+    timezone: str = DEFAULT_TIME_ZONE
     messages: list[ChatMessage] = field(default_factory=list)
     provider: str = "unknown"
     model: str = "unknown"
@@ -75,6 +77,7 @@ class RuntimeState:
         return {
             "session_id": self.session_id,
             "workspace_root": self.workspace_root,
+            "timezone": self.timezone,
             "messages": [message_to_dict(message) for message in self.messages],
             "provider": self.provider,
             "model": self.model,
@@ -128,6 +131,7 @@ class RuntimeState:
         return cls(
             session_id=str(data["session_id"]),
             workspace_root=(str(data["workspace_root"]) if data.get("workspace_root") is not None else None),
+            timezone=str(data.get("timezone") or DEFAULT_TIME_ZONE),
             messages=messages_from_dicts([dict(item) for item in data.get("messages", [])]),
             provider=str(data.get("provider") or "unknown"),
             model=str(data.get("model") or "unknown"),

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from time import perf_counter
 
-from backend.tools import ToolError
+from backend.tools import ToolError, ToolInvocationContext
 
 from ..core.context import AgentRuntime
 from ..core.contracts import InterruptDecision, InterruptRequest
@@ -162,7 +162,18 @@ class ToolStepExecutor:
                 if subagents is not None and subagents.handles(tool):
                     result = subagents.invoke(runtime, tool, tool_message.arguments)
                 else:
-                    result = tools.invoke(tool, tool_message.arguments, confirmed=True)
+                    invoke_with_context = getattr(tools, "invoke_with_context", None)
+                    if callable(invoke_with_context):
+                        result = invoke_with_context(
+                            tool,
+                            tool_message.arguments,
+                            ToolInvocationContext(
+                                runtime.state.session_id, runtime.state.timezone, runtime.services.clock
+                            ),
+                            confirmed=True,
+                        )
+                    else:
+                        result = tools.invoke(tool, tool_message.arguments, confirmed=True)
                 tool_message.status = "succeeded"
                 tool_message.content = result
                 tool_message.retryable = retryable

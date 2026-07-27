@@ -11,7 +11,7 @@ from jsonschema.exceptions import SchemaError
 
 from backend.domain import ToolSpec
 
-from .base import ConfirmationRequired, Tool, ToolError
+from .base import ConfirmationRequired, Tool, ToolError, ToolInvocationContext
 
 
 class ToolRegistry:
@@ -79,6 +79,15 @@ class ToolRegistry:
         return tool.retryable
 
     def invoke(self, name: str, arguments: dict[str, Any], confirmed: bool = False) -> str:
+        return self.invoke_with_context(name, arguments, ToolInvocationContext(), confirmed=confirmed)
+
+    def invoke_with_context(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: ToolInvocationContext,
+        confirmed: bool = False,
+    ) -> str:
         tool = self._tools.get(name)
         if tool is None:
             raise ToolError(f"Unknown tool: {name}")
@@ -88,7 +97,10 @@ class ToolRegistry:
                 f"{name} requires confirmation before it performs a potentially destructive operation."
             )
         try:
-            result = tool.handler(**arguments)
+            if tool.context_handler is None:
+                result = tool.handler(**arguments)
+            else:
+                result = tool.context_handler(context, **arguments)
             if not isinstance(result, str):
                 raise ToolError(f"Tool {name!r} returned {type(result).__name__}; tool handlers must return text.")
             return result

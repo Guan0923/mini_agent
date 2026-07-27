@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from backend.domain import DEFAULT_SESSION_TITLE, Session, SessionSummary, message_from_dict
+from backend.domain import (
+    DEFAULT_SESSION_TITLE,
+    DEFAULT_TIME_ZONE,
+    Session,
+    SessionSummary,
+    message_from_dict,
+    validate_time_zone,
+)
 
 if TYPE_CHECKING:
     from backend.planning.context_management import ContextCompactionResult
@@ -63,6 +70,27 @@ class ConversationSessionController:
             return None
         value = " ".join((self._pending_title or "").split())
         return value[:80] or DEFAULT_SESSION_TITLE
+
+    @property
+    def current_timezone(self) -> str:
+        """Return the selected zone, including the default before a session exists."""
+
+        if self.runtime is None:
+            return DEFAULT_TIME_ZONE
+        return self.runtime.state.timezone
+
+    def set_timezone(self, timezone: str) -> str:
+        """Persist a supported time zone for the active session."""
+
+        selected = validate_time_zone(timezone)
+        self.ensure_session()
+        assert self.runtime is not None
+        if self.runtime.state.status == "running":
+            raise RuntimeError("Cannot change the time zone while a run is active.")
+        self.runtime.state.timezone = selected
+        self.runtime.save()
+        self._reload_active_session()
+        return selected
 
     def use_session(self, session_id: str) -> Session:
         if self.session_store is None:
