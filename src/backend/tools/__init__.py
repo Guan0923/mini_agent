@@ -1,6 +1,6 @@
 """Local tools and their registry."""
 
-from .base import ConfirmationRequired, Tool, ToolError, ToolExecutor
+from .base import ConfirmationRequired, Tool, ToolError, ToolExecutor, ToolInvocationContext
 from .catalog import build_tool_registry
 from .command import WorkspaceCommand
 from .delegation import delegation_tools
@@ -15,6 +15,7 @@ __all__ = [
     "Tool",
     "ToolError",
     "ToolExecutor",
+    "ToolInvocationContext",
     "ToolRegistry",
     "WorkspaceCommand",
     "WorkspaceFiles",

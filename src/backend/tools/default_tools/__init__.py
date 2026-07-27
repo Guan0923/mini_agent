@@ -10,6 +10,7 @@ from ..filesystem import WorkspaceFiles
 from ..web import DdgrWebSearch, SafeWebFetcher
 from .command import command_tool
 from .filesystem import filesystem_mutation_tools, filesystem_read_tools
+from .time import time_tools
 from .web import web_tools
 
 
@@ -24,6 +25,7 @@ def build_default_tools(
 
     workspace_files = files or WorkspaceFiles(workspace)
     return (
+        *time_tools(),
         *filesystem_read_tools(workspace_files),
         *web_tools(search or DdgrWebSearch(), fetcher or SafeWebFetcher()),
         *filesystem_mutation_tools(workspace_files),

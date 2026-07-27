@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 
-from backend.domain import PlanningError
+from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS, PlanningError
 
 from ..components.commands import COMMAND_ARGUMENT_NAMES, COMMAND_PATTERN, render_help
 from ..rendering.state import DETAIL_LEVELS
@@ -96,6 +96,12 @@ class CommandAppMixin(SessionCommandMixin):
                 self._write("Usage: /display <minimal|medium|verbose>")
                 return True
             self._set_display_mode(detail_level)
+            return True
+        if command == "time":
+            if argument:
+                self._write("Usage: /time")
+                return True
+            self._show_time_selector()
             return True
         if command == "sessions":
             if argument:
@@ -198,6 +204,37 @@ class CommandAppMixin(SessionCommandMixin):
         if callable(set_ui):
             set_ui(status=self._status_with_permission("AGENT | IDLE"), interrupt_enabled=False)
         self._write(f"Display mode set to {detail_level}.")
+
+    def _show_time_selector(self) -> None:
+        view = getattr(self, "_view", None)
+        begin_review = getattr(view, "begin_review", None)
+        if not callable(begin_review):
+            self._write("Time zone selector requires the interactive TUI.")
+            return
+        current = getattr(self._conversation_service, "current_timezone", DEFAULT_TIME_ZONE)
+        initial = current if any(option.identifier == current for option in TIME_ZONE_OPTIONS) else DEFAULT_TIME_ZONE
+        begin_review(
+            "TIME ZONE",
+            f"Current: {current}",
+            "Choose the time zone used by get_current_time for this session.",
+            (
+                *(ChoiceItem(option.identifier, option.label, option.identifier) for option in TIME_ZONE_OPTIONS),
+                ChoiceItem("cancel", "Cancel"),
+            ),
+            lambda choice, _supplement: self._set_timezone(choice) if choice != "cancel" else None,
+            initial_choice_id=initial,
+        )
+
+    def _set_timezone(self, timezone: str) -> None:
+        previous_session_id = self.active_session.session_id if self.active_session is not None else None
+        try:
+            selected = self._conversation_service.set_timezone(timezone)
+        except (RuntimeError, ValueError) as exc:
+            self._write(f"TIME ERROR {exc}")
+            return
+        if self.active_session is not None and self.active_session.session_id != previous_session_id:
+            self._print_active_session()
+        self._write(f"Time zone set to {selected}.")
 
     def _show_trace(self) -> None:
         view = getattr(self, "_view", None)

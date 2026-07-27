@@ -20,6 +20,7 @@ COMMAND_DEFINITIONS = (
     CommandDefinition("plan", "/plan", "Enter read-only planning and discussion mode."),
     CommandDefinition("permission", "/permission", "Choose the in-memory tool approval mode."),
     CommandDefinition("display", "/display <minimal|medium|verbose>", "Set TUI transcript detail level."),
+    CommandDefinition("time", "/time", "Choose the session time zone used by the time tool."),
     CommandDefinition("sessions", "/sessions", "List saved sessions."),
     CommandDefinition("resume", "/resume <session_id>", "Resume the current, latest, or selected session."),
     CommandDefinition("history", "/history", "Open the read-only current-session history view."),
@@ -34,7 +35,7 @@ COMMAND_DEFINITIONS = (
 )
 
 COMMAND_NAMES = tuple(command.name for command in COMMAND_DEFINITIONS)
-COMMAND_ARGUMENT_NAMES = frozenset({"new", "clear", "resume", "display"})
+COMMAND_ARGUMENT_NAMES = frozenset({"new", "clear", "resume", "display", "time"})
 _COMMAND_ALTERNATION = "|".join(re.escape(name) for name in COMMAND_NAMES)
 COMMAND_PATTERN = re.compile(rf"(?<!\S)/(?P<name>{_COMMAND_ALTERNATION})(?=\s|$)")
 
