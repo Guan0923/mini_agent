@@ -1,5 +1,5 @@
-"""Concrete persistence adapters for Mini-Agent runtime data."""
+"""Client storage adapters."""
 
-from .postgres import PostgresCheckpointStore, PostgresDatabase, PostgresSessionStore
+from .sqlite import SQLiteSessionStore
 
-__all__ = ["PostgresDatabase", "PostgresCheckpointStore", "PostgresSessionStore"]
+__all__ = ["SQLiteSessionStore"]

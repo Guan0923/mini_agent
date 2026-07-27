@@ -155,9 +155,7 @@ class TokenUsageTracker:
         runtime.state.token_usage["current_input_tokens"] = current_input
 
     @staticmethod
-    def publish_context_usage(
-        runtime: AgentRuntime, entry: dict[str, Any] | None, *, phase: str
-    ) -> None:
+    def publish_context_usage(runtime: AgentRuntime, entry: dict[str, Any] | None, *, phase: str) -> None:
         context_size = getattr(runtime.services.planner, "client", None)
         context_size = getattr(context_size, "context_size", None)
         if not isinstance(context_size, int) or context_size < 1:

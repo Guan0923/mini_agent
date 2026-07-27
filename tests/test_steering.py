@@ -4,7 +4,8 @@ from collections import deque
 from pathlib import Path
 
 from backend.domain import AssistantMessage, ToolMessage, UserMessage
-from backend.runtime import AgentRunner, ConversationService, PostgresSessionStore
+from backend.runtime import AgentRunner, ConversationService
+from backend.storage.postgres import PostgresSessionStore
 from backend.tools import Tool, ToolRegistry
 
 

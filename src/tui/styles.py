@@ -82,7 +82,7 @@ Screen { background: #101418; color: #d7dde5; }
     background: #17233a;
     border-left: thick #4f8cff;
     border-right: solid #314a6e;
-    overflow-y: auto;
+    overflow: hidden;
 }
 #choice-header {
     width: 1fr;

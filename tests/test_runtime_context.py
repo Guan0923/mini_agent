@@ -2,7 +2,8 @@ from pathlib import Path
 
 from backend.domain import AssistantMessage, RunState, StrategySelection, ToolMessage, ToolSpec, UserMessage
 from backend.planning import RuleBasedPlanner
-from backend.runtime import AgentRunner, ConversationService, PostgresSessionStore, RuntimeState
+from backend.runtime import AgentRunner, ConversationService, RuntimeState
+from backend.storage.postgres import PostgresSessionStore
 from backend.tools import Tool, ToolRegistry
 
 

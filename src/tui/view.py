@@ -10,7 +10,7 @@ from traceback import format_exception
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.timer import Timer
 from textual.widgets import OptionList, Static
 
@@ -116,7 +116,8 @@ class TerminalView(
         self.context_progress = ContextProgress()
         self.question_header = Static(id="choice-header")
         self.review_details = LatexMarkdown(id="review-details")
-        self.choice_panel = VerticalScroll(self.question_header, self.review_details, id="choice-panel")
+        # Details may be long, but review title and actions must remain fixed.
+        self.choice_panel = Vertical(self.question_header, self.review_details, id="choice-panel")
         self.queued_messages = QueuedMessages()
         self.completion_menu = OptionList(id="completion-menu")
         self.input = TerminalInput(

@@ -82,6 +82,28 @@ def test_discovers_valid_skill_and_explicit_reference(tmp_path: Path) -> None:
     assert len(skill.sha256) == 64
 
 
+def test_project_skills_override_global_skills_by_name(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    global_root = tmp_path / "home" / "mini_agent" / "skills"
+    for name, instructions in (("shared", "Global instructions."), ("global-only", "Global only.")):
+        directory = global_root / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Global {name}.\n---\n{instructions}\n",
+            encoding="utf-8",
+        )
+    write_skill(workspace, "shared", instructions="Project instructions.")
+
+    catalog = SkillCatalog.discover(workspace, global_root=global_root)
+    definitions = {item.name: item for item in catalog.definitions()}
+
+    assert catalog.names() == ("global-only", "shared")
+    assert definitions["shared"].instructions == "Project instructions."
+    assert definitions["shared"].root == ".mini_agent/skills/shared"
+    assert definitions["global-only"].root == (global_root / "global-only").resolve().as_posix()
+
+
 @pytest.mark.parametrize(
     ("manifest", "error"),
     [

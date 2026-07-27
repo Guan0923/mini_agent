@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from backend.domain import AssistantMessage, StrategySelection, ToolMessage, UserMessage
-from backend.runtime import AgentRunner, ConversationService, PostgresSessionStore
+from backend.runtime import AgentRunner, ConversationService
 from backend.runtime.conversation.user_input import (
     REQUEST_USER_INPUT_NAME,
     format_user_input_answers,
@@ -12,6 +12,7 @@ from backend.runtime.conversation.user_input import (
 )
 from backend.runtime.core.contracts import InterruptDecision, QuestionOption, UserQuestion
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
+from backend.storage.postgres import PostgresSessionStore
 from backend.tools import ToolRegistry
 
 

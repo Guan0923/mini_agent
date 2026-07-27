@@ -11,12 +11,11 @@ from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.runtime import (
     AgentRunner,
     ConversationService,
-    PostgresCheckpointStore,
-    PostgresSessionStore,
     PreparedResponse,
 )
 from backend.runtime.core.config import database_url_from_env, log_full_messages_from_env
 from backend.runtime.execution.lifecycle.outcomes import fail_run
+from backend.storage.postgres import PostgresCheckpointStore, PostgresSessionStore
 from backend.tools import Tool, ToolRegistry
 
 

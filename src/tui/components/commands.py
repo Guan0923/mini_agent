@@ -23,6 +23,7 @@ COMMAND_DEFINITIONS = (
     CommandDefinition("time", "/time", "Choose the session time zone used by the time tool."),
     CommandDefinition("sessions", "/sessions", "List saved sessions."),
     CommandDefinition("resume", "/resume <session_id>", "Resume the current, latest, or selected session."),
+    CommandDefinition("fork", "/fork <run_id>", "Create a resumable fork from a finished run."),
     CommandDefinition("history", "/history", "Open the read-only current-session history view."),
     CommandDefinition("new", "/new <title>", "Clear the terminal and prepare a new session."),
     CommandDefinition("clear", "/clear <title>", "Clear the terminal and prepare a new session."),
@@ -35,7 +36,7 @@ COMMAND_DEFINITIONS = (
 )
 
 COMMAND_NAMES = tuple(command.name for command in COMMAND_DEFINITIONS)
-COMMAND_ARGUMENT_NAMES = frozenset({"new", "clear", "resume", "display", "time"})
+COMMAND_ARGUMENT_NAMES = frozenset({"new", "clear", "resume", "fork", "display", "time"})
 _COMMAND_ALTERNATION = "|".join(re.escape(name) for name in COMMAND_NAMES)
 COMMAND_PATTERN = re.compile(rf"(?<!\S)/(?P<name>{_COMMAND_ALTERNATION})(?=\s|$)")
 

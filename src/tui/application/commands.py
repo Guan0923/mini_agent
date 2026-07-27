@@ -112,6 +112,9 @@ class CommandAppMixin(SessionCommandMixin):
         if command == "resume":
             self._resume_session(argument or None)
             return True
+        if command == "fork":
+            self._fork_run(argument)
+            return True
         if command == "history":
             if argument:
                 self._write("Usage: /history")

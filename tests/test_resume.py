@@ -16,11 +16,12 @@ from backend.domain import (
     StepEvaluation,
     ToolMessage,
 )
-from backend.runtime import AgentRunner, ConversationService, PostgresSessionStore, RuntimeEvent
+from backend.runtime import AgentRunner, ConversationService, RuntimeEvent
 from backend.runtime.conversation.recovery import reconstruct_attempt
 from backend.runtime.core.context import RuntimeState
 from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
+from backend.storage.postgres import PostgresSessionStore
 from backend.tools import Tool, ToolRegistry
 
 

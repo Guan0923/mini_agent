@@ -1,5 +1,5 @@
 """PostgreSQL session adapter import."""
 
-from backend.storage import PostgresSessionStore
+from backend.storage.postgres import PostgresSessionStore
 
 __all__ = ["PostgresSessionStore"]

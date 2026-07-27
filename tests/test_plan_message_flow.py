@@ -9,9 +9,10 @@ from backend.domain import (
     UserMessage,
     message_from_dict,
 )
-from backend.runtime import AgentRunner, ConversationService, PostgresSessionStore
+from backend.runtime import AgentRunner, ConversationService
 from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
+from backend.storage.postgres import PostgresSessionStore
 from backend.tools import ToolRegistry
 
 PLAN = "# Reviewed change\n\n## Summary\nImplement the reviewed change."

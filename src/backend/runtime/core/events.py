@@ -76,6 +76,7 @@ CHECKPOINT_EVENT_KINDS: frozenset[RuntimeEventKind] = frozenset(
         "run_terminated",
         "skills_selected",
         "strategy",
+        "context_compaction_started",
         "context_compaction_completed",
         "context_compaction_failed",
         "approval_requested",

@@ -17,7 +17,7 @@ def test_mcp_definitions_match_the_safe_registry_specs(tmp_path: Path) -> None:
 
     definitions = adapter.definitions()
 
-    assert [tool.name for tool in definitions] == ["read_file", "glob", "grep"]
+    assert [tool.name for tool in definitions] == ["get_current_time", "read_file", "glob", "grep"]
     safe_specs = {
         spec.name: spec for spec in registry.read_only_specs() if not registry.requires_confirmation(spec.name)
     }
@@ -34,7 +34,7 @@ def test_mcp_server_registers_the_safe_tool_definitions(tmp_path: Path) -> None:
 
     result = asyncio.run(server.request_handlers[types.ListToolsRequest](types.ListToolsRequest()))
 
-    assert [tool.name for tool in result.root.tools] == ["read_file", "glob", "grep"]
+    assert [tool.name for tool in result.root.tools] == ["get_current_time", "read_file", "glob", "grep"]
 
 
 def test_mcp_invokes_a_safe_tool_inside_the_workspace(tmp_path: Path) -> None:

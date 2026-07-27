@@ -73,6 +73,37 @@ class ModelConfig:
             tokenizer_model=tokenizer_model,
         )
 
+    @classmethod
+    def from_toml(cls, config_path: Path) -> ModelConfig:
+        """Read model settings only from ~/mini_agent/config.toml."""
+
+        from backend.configuration import load_config, section
+
+        values = section(load_config(config_path), "model")
+        missing = [name for name in ("api_key", "base_url", "model") if not values.get(name)]
+        if missing:
+            raise ModelConfigurationError(f"Missing {', '.join(missing)} in [model].")
+        try:
+            max_tokens = int(values.get("max_tokens", 8192))
+            context_size = int(values.get("context_size", 1_024_000))
+        except (TypeError, ValueError) as exc:
+            raise ModelConfigurationError("model.max_tokens and model.context_size must be integers.") from exc
+        if not 1 <= max_tokens <= 384_000 or context_size <= max_tokens:
+            raise ModelConfigurationError("Invalid [model] token limits.")
+        provider = str(values.get("provider", "deepseek")).strip().lower()
+        tokenizer_model = str(values.get("tokenizer_model", "deepseek-ai/DeepSeek-V3")).strip()
+        if not provider or not tokenizer_model:
+            raise ModelConfigurationError("model.provider and model.tokenizer_model must not be empty.")
+        return cls(
+            str(values["api_key"]),
+            str(values["base_url"]),
+            str(values["model"]),
+            max_tokens=max_tokens,
+            provider=provider,
+            context_size=context_size,
+            tokenizer_model=tokenizer_model,
+        )
+
     @property
     def endpoint(self) -> str:
         base = self.base_url.rstrip("/")

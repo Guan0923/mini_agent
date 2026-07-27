@@ -6,7 +6,8 @@ import pytest
 from backend.domain import DEFAULT_TIME_ZONE
 from backend.planning import RuleBasedPlanner
 from backend.planning.prompts import compose_system_prompt
-from backend.runtime import AgentRunner, ConversationService, PostgresSessionStore, RuntimeState
+from backend.runtime import AgentRunner, ConversationService, RuntimeState
+from backend.storage.postgres import PostgresSessionStore
 from backend.tools import ToolError, ToolInvocationContext, ToolRegistry, build_tool_registry
 from tui.application.commands import CommandAppMixin
 from tui.components.commands import render_help
@@ -55,7 +56,9 @@ def test_session_timezone_persists_in_runtime_snapshot() -> None:
     assert service.active_session is not None
 
     reopened = ConversationService(
-        AgentRunner(RuleBasedPlanner(), ToolRegistry()), store, service.active_session.session_id
+        AgentRunner(RuleBasedPlanner(), ToolRegistry()),
+        store,
+        session_id=service.active_session.session_id,
     )
 
     assert reopened.current_timezone == "Asia/Tokyo"

@@ -151,6 +151,46 @@ class SessionCommandMixin:
             role = message["role"].upper()
             self._write(f"{role}\n{message['content']}")
 
+    def _show_fork_selector(self) -> None:
+        view = getattr(self, "_view", None)
+        begin_review = getattr(view, "begin_review", None)
+        list_runs = getattr(self.session_store, "list_forkable_runs", None)
+        if not callable(begin_review):
+            self._write("Usage: /fork <run_id>")
+            return
+        runs = list_runs() if callable(list_runs) else []
+        if not runs:
+            self._write("No finished runs are available to fork.")
+            return
+        from ..widgets import ChoiceItem
+
+        begin_review(
+            "FORK RUN",
+            "Choose a finished run",
+            "A new session ID will be created; resume it in another terminal.",
+            tuple(
+                ChoiceItem(item["run_id"], item["run_id"], f"{item['status']} — {item['task'][:80]}")
+                for item in runs[:50]
+            ),
+            lambda choice, _supplement: self._fork_run(choice),
+        )
+
+    def _fork_run(self, run_id: str) -> None:
+        if not run_id:
+            self._show_fork_selector()
+            return
+        fork = getattr(self.session_store, "fork_run", None)
+        if not callable(fork):
+            self._write("Fork is not supported by this session store.")
+            return
+        try:
+            session = fork(run_id)
+        except ValueError as exc:
+            self._write(f"FORK ERROR {exc}")
+            return
+        self._write(f"FORKED SESSION {session.session_id}")
+        self._write(f"Resume in another terminal: /resume {session.session_id}")
+
     def _print_active_session(self) -> None:
         if self.active_session is not None:
             self._write(f"SESSION {self.active_session.session_id} — {self.active_session.title}")

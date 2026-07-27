@@ -6,6 +6,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
+from backend.configuration import ClientPaths, initialize_config
 from backend.observability import EventFanout, JsonlRunLogger
 from backend.providers import ModelConfigurationError
 from backend.runtime import (
@@ -15,7 +16,7 @@ from backend.runtime import (
     RuntimeEvent,
     SessionStore,
     build_application,
-    log_full_messages_from_env,
+    log_full_messages_from_toml,
 )
 
 from .application.commands import CommandAppMixin
@@ -185,7 +186,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Consecutive LLM recovery decisions after tool failures (default: 2).",
     )
     parser.add_argument("--max-replans", type=int, default=2, help="Maximum dynamic replans per task (default: 2).")
-    parser.add_argument("--log-dir", default="logs", help="Directory for persistent JSONL run logs (default: logs).")
     parser.add_argument("--resume", metavar="SESSION_ID", help="Resume an existing workspace session by ID.")
     args = parser.parse_args(argv)
     if args.max_actions is not None and args.max_tool_calls is not None:
@@ -196,7 +196,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.max_tool_calls is not None:
         tool_budget["max_tool_calls"] = args.max_tool_calls
     workspace = args.workspace
+    paths = ClientPaths.from_home()
     try:
+        initialize_config(paths, workspace)
         settings = RunnerSettings(
             max_model_turns=args.max_model_turns,
             max_retries=args.max_retries,
@@ -206,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
             max_replans=args.max_replans,
             strategy=args.strategy,
             **tool_budget,
-            log_full_messages=log_full_messages_from_env(workspace / ".env"),
+            log_full_messages=log_full_messages_from_toml(paths.config_file),
         )
         application = build_application(workspace, args.planner, settings)
         conversation = application.open_conversation(args.resume)
@@ -214,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"{exc} Use --planner rule for offline mode.")
     except ValueError as exc:
         parser.error(str(exc))
-    app = TerminalApp(conversation, workspace / args.log_dir)
+    app = TerminalApp(conversation, paths.logs_dir)
     try:
         app._run_trigger = "cli" if args.task else "tui"
         if args.task:

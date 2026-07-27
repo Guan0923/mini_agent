@@ -4,7 +4,8 @@ from pathlib import Path
 import psycopg
 
 from backend.domain import AgentAction, RunState, StrategySelection
-from backend.runtime import AgentRunner, PostgresCheckpointStore, PostgresSessionStore
+from backend.runtime import AgentRunner
+from backend.storage.postgres import PostgresCheckpointStore, PostgresSessionStore
 from backend.tools import ToolRegistry
 from tui.cli import TerminalApp
 

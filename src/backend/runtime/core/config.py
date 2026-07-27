@@ -123,3 +123,14 @@ def database_url_from_env(env_path: Path, environ: Mapping[str, str] | None = No
     if not database_url:
         raise ValueError("DATABASE_URL must be configured for PostgreSQL storage.")
     return database_url
+
+
+def log_full_messages_from_toml(config_path: Path) -> bool:
+    """Read the diagnostic policy from the sole client TOML configuration."""
+
+    from backend.configuration import load_config, section
+
+    raw = section(load_config(config_path), "runtime").get("log_full_messages", True)
+    if isinstance(raw, bool):
+        return raw
+    raise ValueError("runtime.log_full_messages must be boolean.")
