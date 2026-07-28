@@ -1,49 +1,46 @@
-"""Long-lived external stdio MCP clients and layered configuration."""
+"""Long-lived, application-owned external stdio MCP clients."""
 
 from __future__ import annotations
 
 import asyncio
-import atexit
+import json
 import os
 import threading
-import tomllib
+from collections.abc import Iterator, Sequence
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from backend.tools import Tool, ToolError
 
+from .config import McpServerConfig, McpSettings, read_server_configs, valid_tool_name
 
-@dataclass(frozen=True)
-class McpServerConfig:
-    name: str
-    command: str
-    args: tuple[str, ...] = ()
-    cwd: str | None = None
-    env: dict[str, str] | None = None
-
-
-_MANAGERS: list[ExternalMcpManager] = []
-_SHUTDOWN_TIMEOUT = 5.0
+_MAX_RESULT_CHARS = 20_000
 
 
 class ExternalMcpManager:
-    def __init__(self, configs: tuple[McpServerConfig, ...]) -> None:
+    """Own one event loop and the stdio sessions started on it."""
+
+    def __init__(self, configs: tuple[McpServerConfig, ...], settings: McpSettings | None = None) -> None:
         self._configs = configs
+        self._settings = settings or McpSettings()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, name="mini-agent-mcp", daemon=True)
-        self._thread.start()
         self._stack: AsyncExitStack | None = None
         self._sessions: dict[str, ClientSession] = {}
+        self._closed = False
+        self._thread.start()
         try:
-            self.definitions = self._submit(self._start())
+            self.definitions = self._submit(self._start(), timeout=self._settings.initialization_timeout_seconds)
         except Exception:
-            self.close()
+            try:
+                self.close()
+            except ToolError:
+                pass
             raise
 
     def _run_loop(self) -> None:
@@ -72,62 +69,141 @@ class ExternalMcpManager:
 
     def call(self, server_name: str, tool_name: str, arguments: dict[str, Any]) -> str:
         try:
-            result = self._submit(self._sessions[server_name].call_tool(tool_name, arguments))
+            result = self._submit(
+                self._sessions[server_name].call_tool(tool_name, arguments),
+                timeout=self._settings.call_timeout_seconds,
+            )
+        except FutureTimeoutError as exc:
+            raise ToolError(f"MCP tool {server_name}/{tool_name} timed out.") from exc
         except Exception as exc:
             raise ToolError(f"MCP tool {server_name}/{tool_name} failed: {type(exc).__name__}") from exc
-        if result.isError:
-            raise ToolError("; ".join(_content_text(result.content)) or "MCP server returned an error.")
-        return "\n".join(_content_text(result.content)) or "MCP tool completed without text output."
+        rendered = _render_result(result)
+        if getattr(result, "isError", False):
+            raise ToolError(rendered or "MCP server returned an error.")
+        return rendered or "MCP tool completed without output."
 
     def close(self) -> None:
-        if not self._loop.is_running():
+        if self._closed:
             return
-        if self._stack is not None:
+        self._closed = True
+        timed_out = False
+        if self._loop.is_running() and self._stack is not None:
             try:
-                self._submit(self._stack.aclose(), timeout=_SHUTDOWN_TIMEOUT)
+                self._submit(self._stack.aclose(), timeout=self._settings.shutdown_timeout_seconds)
+            except FutureTimeoutError:
+                timed_out = True
             except Exception:
                 pass
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=_SHUTDOWN_TIMEOUT)
+        if self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=self._settings.shutdown_timeout_seconds)
+        if self._thread.is_alive():
+            timed_out = True
+        else:
+            self._loop.close()
+        if timed_out:
+            raise ToolError("MCP shutdown timed out.")
+
+
+class ExternalMcpResources(Sequence[Tool]):
+    """The discovered tools and the exact manager that owns them."""
+
+    def __init__(self, tools: tuple[Tool, ...] = (), manager: object | None = None) -> None:
+        self.tools = tools
+        self.manager = manager
+        self._closed = False
+
+    def __iter__(self) -> Iterator[Tool]:
+        return iter(self.tools)
+
+    def __len__(self) -> int:
+        return len(self.tools)
+
+    @overload
+    def __getitem__(self, index: int) -> Tool: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[Tool, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> Tool | tuple[Tool, ...]:
+        return self.tools[index]
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self.manager, "close", None)
+        if callable(close):
+            close()
 
 
 def load_server_configs(global_file: Path, project_file: Path) -> tuple[McpServerConfig, ...]:
-    servers = {item.name: item for item in _read_servers(global_file)}
-    servers.update({item.name: item for item in _read_servers(project_file)})
+    """Compatibility helper that parses and merges two configuration files."""
+
+    servers = {item.name: item for item in read_server_configs(global_file)}
+    servers.update({item.name: item for item in read_server_configs(project_file)})
     return tuple(servers[name] for name in sorted(servers))
 
 
-def load_external_tools(global_file: Path, project_file: Path) -> tuple[Tool, ...]:
-    configs = load_server_configs(global_file, project_file)
+def load_external_tools(
+    global_file: Path,
+    project_file: Path,
+    settings: McpSettings | None = None,
+) -> ExternalMcpResources:
+    return start_external_tools(load_server_configs(global_file, project_file), settings)
+
+
+def start_external_tools(
+    configs: tuple[McpServerConfig, ...],
+    settings: McpSettings | None = None,
+) -> ExternalMcpResources:
     if not configs:
-        return ()
+        return ExternalMcpResources()
     try:
-        manager = ExternalMcpManager(configs)
+        manager = ExternalMcpManager(configs) if settings is None else ExternalMcpManager(configs, settings)
+    except FutureTimeoutError as exc:
+        raise ToolError("Cannot initialize external MCP servers: initialization timed out.") from exc
     except Exception as exc:
         raise ToolError(f"Cannot initialize external MCP servers: {type(exc).__name__}") from exc
-    _MANAGERS.append(manager)
+
     tools: list[Tool] = []
-    for server in configs:
-        for definition in manager.definitions[server.name]:
-            definition_name = str(getattr(definition, "name"))
-            schema_value = getattr(definition, "inputSchema", {})
-            schema = dict(schema_value) if isinstance(schema_value, dict) else {"type": "object"}
-            tools.append(
-                Tool(
-                    f"mcp_{server.name}_{definition_name}",
-                    f"MCP {server.name}: {getattr(definition, 'description', None) or definition_name}",
-                    _handler(manager, server.name, definition_name),
-                    schema,
-                    requires_confirmation=True,
-                    read_only=False,
+    names: set[str] = set()
+    try:
+        for server in configs:
+            for definition in manager.definitions[server.name]:
+                definition_name = str(getattr(definition, "name", ""))
+                external_name = f"mcp_{server.name}_{definition_name}"
+                if not valid_tool_name(external_name):
+                    raise ToolError(
+                        f"MCP tool name {external_name!r} must use letters, digits, '_' or '-' "
+                        "and be at most 64 characters."
+                    )
+                if external_name in names:
+                    raise ToolError(f"Duplicate external MCP tool name: {external_name}")
+                names.add(external_name)
+                schema_value = getattr(definition, "inputSchema", {})
+                schema = dict(schema_value) if isinstance(schema_value, dict) else {"type": "object"}
+                tools.append(
+                    Tool(
+                        external_name,
+                        f"MCP {server.name}: {getattr(definition, 'description', None) or definition_name}",
+                        _handler(manager, server.name, definition_name),
+                        schema,
+                        requires_confirmation=True,
+                        read_only=False,
+                    )
                 )
-            )
-    return tuple(tools)
+    except Exception:
+        try:
+            manager.close()
+        except ToolError:
+            pass
+        raise
+    return ExternalMcpResources(tuple(tools), manager)
 
 
 def close_external_tools() -> None:
-    while _MANAGERS:
-        _MANAGERS.pop().close()
+    """Deprecated no-op: resources are now closed by their owning runner."""
 
 
 def _handler(manager: ExternalMcpManager, server_name: str, tool_name: str):
@@ -138,54 +214,54 @@ def _handler(manager: ExternalMcpManager, server_name: str, tool_name: str):
 
 
 def _parameters(server: McpServerConfig) -> StdioServerParameters:
-    environment = {**os.environ, **(server.env or {})}
     return StdioServerParameters(
         command=server.command,
         args=list(server.args),
         cwd=server.cwd,
-        env=environment,
+        env={**os.environ, **(server.env or {})},
     )
 
 
-def _content_text(content: list[object]) -> list[str]:
-    return [str(getattr(item, "text")) for item in content if isinstance(getattr(item, "text", None), str)]
-
-
-def _read_servers(path: Path) -> tuple[McpServerConfig, ...]:
-    if not path.exists():
-        return ()
-    try:
-        with path.open("rb") as handle:
-            values = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ToolError(f"Invalid MCP configuration {path}: {exc}") from exc
-    servers = values.get("servers", {})
-    if not isinstance(servers, dict):
-        raise ToolError(f"{path}: [servers] must be a table.")
-    result: list[McpServerConfig] = []
-    for name, value in servers.items():
-        if not isinstance(name, str) or not isinstance(value, dict):
-            raise ToolError(f"{path}: server entries must be named tables.")
-        command, args, cwd, env = value.get("command"), value.get("args", []), value.get("cwd"), value.get("env")
-        if (
-            not isinstance(command, str)
-            or not command.strip()
-            or not isinstance(args, list)
-            or not all(isinstance(item, str) for item in args)
-        ):
-            raise ToolError(f"{path}: servers.{name} requires command and string args.")
-        if (
-            cwd is not None
-            and not isinstance(cwd, str)
-            or env is not None
-            and (
-                not isinstance(env, dict)
-                or not all(isinstance(key, str) and isinstance(item, str) for key, item in env.items())
+def _render_result(result: object) -> str:
+    rendered: list[object] = []
+    for item in list(getattr(result, "content", ())):
+        text = getattr(item, "text", None)
+        if isinstance(text, str):
+            rendered.append(text)
+            continue
+        resource = getattr(item, "resource", None)
+        resource_text = getattr(resource, "text", None)
+        if isinstance(resource_text, str):
+            rendered.append(
+                {
+                    "type": "resource",
+                    "uri": str(getattr(resource, "uri", "")),
+                    "mimeType": getattr(resource, "mimeType", None),
+                    "text": resource_text,
+                }
             )
-        ):
-            raise ToolError(f"{path}: servers.{name} has invalid cwd or env.")
-        result.append(McpServerConfig(name, command, tuple(args), cwd, dict(env) if isinstance(env, dict) else None))
-    return tuple(result)
-
-
-atexit.register(close_external_tools)
+            continue
+        data = getattr(item, "data", None)
+        blob = getattr(resource, "blob", None)
+        rendered.append(
+            {
+                "type": str(getattr(item, "type", type(item).__name__)),
+                "mimeType": getattr(item, "mimeType", getattr(resource, "mimeType", None)),
+                "size": len(data) if isinstance(data, str) else len(blob) if isinstance(blob, str) else None,
+                "content_omitted": True,
+            }
+        )
+    structured = getattr(result, "structuredContent", None)
+    if structured is not None:
+        rendered.append({"type": "structured", "value": structured})
+    if not rendered:
+        return ""
+    value = (
+        "\n".join(str(item) for item in rendered)
+        if all(isinstance(item, str) for item in rendered)
+        else json.dumps(rendered, ensure_ascii=False, default=str)
+    )
+    if len(value) <= _MAX_RESULT_CHARS:
+        return value
+    omitted = len(value) - _MAX_RESULT_CHARS
+    return f"{value[:_MAX_RESULT_CHARS]}… ({omitted} characters omitted)"

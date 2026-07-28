@@ -81,15 +81,15 @@ Plan questions, Plan Review, and Tool Review intentionally use separate decision
 
 ## Subagents
 
-`SubagentCoordinator` handles the runtime-only `delegate_tasks` and `get_subagent_results` tools. One parent call starts a thread-pool batch of independent child runs, each with a fresh session ID, standard tools, inherited cancellation, and approval requests routed through the parent interrupt callback. Child runners omit delegation tools, making the topology deliberately single-level.
+`SubagentCoordinator` handles the runtime-only `delegate_tasks` and `get_subagent_results` tools. One parent call starts a thread-pool batch of independent child runs, each with a fresh session ID, standard tools, inherited cancellation, and approval requests routed through a bounded bridge that is drained by the parent invocation thread. Worker threads never mutate or publish through the parent Runtime directly. Child runners omit delegation tools, making the topology deliberately single-level.
 
 `RunState.subagent_batches` persists task order, status, clipped answers, and errors. A completed batch can be read in pages; recovery converts a still-running batch to `indeterminate` instead of replaying it. `WorkspaceWriteLock` permits unrelated file writes concurrently, serializes equal normalized paths, and makes commands exclusive with every file mutation. This is process-local coordination, not a distributed lock.
 
 ## MCP Boundary
 
-`backend.mcp` is a separate adapter over the shared tool registry, not a second agent runtime. The stdio server derives MCP schemas from ToolSpecs and exposes only read-only tools that do not require confirmation: `read_file`, `glob`, and `grep`. Calls retain JSON Schema validation, bounded output, and workspace confinement. Mutation, command, and network tools are rejected because stdio has no interactive approval channel.
+`backend.mcp` is a separate adapter over the shared tool registry, not a second agent runtime. The stdio server derives MCP schemas from ToolSpecs and exposes only read-only tools that do not require confirmation: `read_file`, `glob`, `grep`, and `get_current_time`. Calls retain JSON Schema validation, bounded output, and workspace confinement. Mutation, command, and network tools are rejected because stdio has no interactive approval channel.
 
-The MCP server requires neither model credentials nor PostgreSQL. Separately, the client merges global and project `mcp.toml` server definitions, with a complete project override by name. `ExternalMcpManager` owns long-lived stdio sessions; imported tools are approval-gated mutations from the planner's perspective and are excluded from Plan mode. Configured environment values are process-only and never enter logs, audit records, or model context.
+The MCP server requires neither model credentials nor PostgreSQL. Separately, the client merges global and project `mcp.toml` server definitions, with a complete project override by name. Project MCP configuration must be trusted by workspace/config digest before any process starts. Each AgentRunner owns its own `ExternalMcpManager` and long-lived stdio sessions; imported tools are approval-gated mutations from the planner's perspective and are excluded from Plan mode. Initialization, calls, and shutdown have finite configured timeouts. Configured environment values are process-only and never enter logs, audit records, or model context.
 
 ## Local-first persistence and synchronization
 

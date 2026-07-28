@@ -11,6 +11,38 @@ from pathlib import Path
 from ..base import ToolError
 
 
+def workspace_relative_parts(path: str, *, allow_root: bool = False) -> tuple[str, ...]:
+    """Validate and normalize one model-supplied workspace-relative path."""
+
+    if not isinstance(path, str) or not path.strip():
+        raise ToolError("path must be a non-empty string.")
+    normalised = path.replace("\\", "/")
+    candidate = Path(normalised)
+    if candidate.is_absolute() or re.match(r"^[A-Za-z]:", normalised):
+        raise ToolError("path must be relative to the workspace.")
+    parts = tuple(part for part in normalised.split("/") if part not in {"", "."})
+    if ".." in parts:
+        raise ToolError("Path must stay inside the workspace.")
+    if not parts and not allow_root:
+        raise ToolError("path must identify a file inside the workspace.")
+    return parts
+
+
+def normalized_workspace_path(workspace: Path, path: str) -> str:
+    """Return one canonical lock key after enforcing workspace confinement."""
+
+    if not isinstance(path, str) or not path.strip():
+        raise ToolError("path must be a non-empty string.")
+    normalised = path.replace("\\", "/")
+    if Path(normalised).is_absolute() or re.match(r"^[A-Za-z]:", normalised):
+        raise ToolError("path must be relative to the workspace.")
+    root = workspace.resolve()
+    resolved = root.joinpath(normalised).resolve()
+    if resolved == root or root not in resolved.parents:
+        raise ToolError("Path must stay inside the workspace.")
+    return os.path.normcase(str(resolved))
+
+
 class WorkspacePathMixin:
     def _read_path(self, path: str, *, allow_root: bool = False) -> Path:
         return self._resolve_relative(path, allow_root=allow_root)
@@ -29,18 +61,7 @@ class WorkspacePathMixin:
         return self._resolve_inside(self.workspace.joinpath(*parts), allow_root=allow_root)
 
     def _relative_parts(self, path: str, *, allow_root: bool) -> tuple[str, ...]:
-        if not isinstance(path, str) or not path.strip():
-            raise ToolError("path must be a non-empty string.")
-        normalised = path.replace("\\", "/")
-        candidate = Path(normalised)
-        if candidate.is_absolute() or re.match(r"^[A-Za-z]:", normalised):
-            raise ToolError("path must be relative to the workspace.")
-        parts = tuple(part for part in normalised.split("/") if part not in {"", "."})
-        if ".." in parts:
-            raise ToolError("Path must stay inside the workspace.")
-        if not parts and not allow_root:
-            raise ToolError("path must identify a file inside the workspace.")
-        return parts
+        return workspace_relative_parts(path, allow_root=allow_root)
 
     def _resolve_inside(self, candidate: Path, *, allow_root: bool) -> Path:
         resolved = candidate.resolve()

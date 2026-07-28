@@ -41,6 +41,10 @@ class ClientPaths:
     def mcp_file(self) -> Path:
         return self.root / "mcp.toml"
 
+    @property
+    def mcp_trust_file(self) -> Path:
+        return self.root / "mcp-trust.toml"
+
     def session_db(self, session_id: str) -> Path:
         if not session_id or Path(session_id).name != session_id:
             raise ConfigurationError("Unsafe session id for local data path.")
@@ -154,6 +158,13 @@ def _atomic_write(path: Path, content: str) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Atomically replace one client-owned UTF-8 text file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, content)
 
 
 def _ensure_device_id(paths: ClientPaths, values: dict[str, object]) -> dict[str, object]:

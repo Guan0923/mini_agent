@@ -17,12 +17,14 @@ class AgentApplication:
     sync_coordinator: object | None = None
 
     def close(self) -> None:
-        from backend.mcp.client import close_external_tools
-
-        close = getattr(self.sync_coordinator, "close", None)
-        if callable(close):
-            close(timeout=5.0)
-        close_external_tools()
+        try:
+            close = getattr(self.sync_coordinator, "close", None)
+            if callable(close):
+                close(timeout=5.0)
+        finally:
+            runner_close = getattr(self.runner, "close", None)
+            if callable(runner_close):
+                runner_close()
 
     def open_conversation(self, session_id: str | None = None) -> ConversationService:
         return ConversationService(self.runner, self.session_store, self.task_preprocessor, session_id)

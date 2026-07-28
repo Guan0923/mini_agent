@@ -62,14 +62,19 @@ class AgentRunner:
         max_model_turns: int = 8,
         max_tool_calls: int | None = None,
         skill_catalog: object | None = None,
+        skill_auto_select: bool = False,
         workspace_root: str | None = None,
         subagents: object | None = None,
+        resources: tuple[object, ...] = (),
     ) -> None:
         self.planner = planner
         self.tools = tools
         self.skill_catalog = skill_catalog
+        self.skill_auto_select = skill_auto_select
         self.workspace_root = workspace_root
         self.subagents = subagents
+        self._resources = resources
+        self._closed = False
         if max_actions is not None and max_tool_calls is not None:
             raise ValueError("max_actions and max_tool_calls cannot be used together.")
         resolved_tool_calls = max_actions if max_actions is not None else max_tool_calls
@@ -151,6 +156,7 @@ class AgentRunner:
             planner=self.planner,
             tools=self.tools,
             skill_catalog=self.skill_catalog,
+            skill_auto_select=self.skill_auto_select,
             checkpoint_store=self.checkpoints,
             runtime_store=runtime_store,  # type: ignore[arg-type]
             hooks=self.hooks,
@@ -165,6 +171,7 @@ class AgentRunner:
         runtime.services.tools = self.tools
         runtime.services.checkpoint_store = self.checkpoints
         runtime.services.skill_catalog = self.skill_catalog
+        runtime.services.skill_auto_select = self.skill_auto_select
         runtime.services.hooks = self.hooks
         runtime.services.subagents = self.subagents
         runtime.state.runner_settings = self.settings
@@ -317,3 +324,20 @@ class AgentRunner:
 
     def _finish(self, runtime: AgentRuntime, *, started_at: float) -> RunState:
         return finish_run(runtime, started_at=started_at)
+
+    def close(self) -> None:
+        """Close only resources created for this runner."""
+
+        if self._closed:
+            return
+        self._closed = True
+        for resource in reversed(self._resources):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                close()
+
+    def __enter__(self) -> AgentRunner:
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()

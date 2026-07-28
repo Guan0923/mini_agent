@@ -9,7 +9,7 @@ from backend.skills import SkillCatalog, SkillConfigurationError
 from ..core.context import AgentRuntime
 from ..core.events import RuntimeEvent
 from .lifecycle.outcomes import fail_run, planning_failure_data
-from .workflows import _claim_model_turn, _publish_repairs
+from .workflows import _publish_repairs
 
 
 class SkillActivator:
@@ -23,24 +23,40 @@ class SkillActivator:
             return True
 
         catalog = runtime.services.skill_catalog
-        if not isinstance(catalog, SkillCatalog) or not catalog:
+        if not isinstance(catalog, SkillCatalog):
             return True
 
-        explicit = set(catalog.explicit_names(run.task))
+        try:
+            explicit = set(catalog.explicit_names(run.task))
+        except SkillConfigurationError as exc:
+            fail_run(runtime, f"Skill activation failed: {exc}")
+            return False
+
+        if not catalog:
+            return True
+
+        if explicit:
+            run.active_skills = catalog.snapshots(explicit)
+            names = [skill.name for skill in run.active_skills]
+            self._publish(runtime, names, names, [], source="explicit")
+            runtime.save()
+            return True
+
+        if not runtime.services.skill_auto_select:
+            self._publish(runtime, [], [], [], source="disabled")
+            return True
+
         capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
         selector = capabilities.skill_selector
         if selector is None:
-            if explicit:
-                fail_run(runtime, "Skill execution requires the LLM planner.")
-                return False
-            return True
-
-        if not _claim_model_turn(runtime, "skill_selection"):
+            fail_run(runtime, "Automatic Skill selection requires the LLM planner.")
             return False
+
+        run.skill_selection_calls += 1
         try:
             selection = selector.select_skills(runtime)
             automatic = set(selection.names)
-            snapshots = catalog.snapshots(explicit | automatic)
+            snapshots = catalog.snapshots(automatic)
         except (PlanningError, SkillConfigurationError) as exc:
             _publish_repairs(runtime, capabilities)
             fail_run(
@@ -53,13 +69,7 @@ class SkillActivator:
 
         run.active_skills = snapshots
         names = [skill.name for skill in snapshots]
-        self._publish(
-            runtime,
-            names,
-            [name for name in catalog.names() if name in explicit],
-            [name for name in catalog.names() if name in automatic],
-            source="llm",
-        )
+        self._publish(runtime, names, [], [name for name in catalog.names() if name in automatic], source="llm")
         runtime.save()
         return True
 

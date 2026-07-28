@@ -16,7 +16,9 @@ _SENSITIVE_KEY = re.compile(
     r"(?:^|[_-])(?:api[_-]?key|authorization|cookie|password|secret|token)(?:$|[_-])",
     re.IGNORECASE,
 )
-_SENSITIVE_VALUE = re.compile(r"(?i)\b(api[_-]?key|authorization|cookie|password|secret|token)\b\s*([=:])\s*([^\s,;]+)")
+_SENSITIVE_VALUE = re.compile(
+    r"(?i)\b(api[_-]?(?:key|token)|authorization|cookie|password|secret|token)\b\s*([=:])\s*([^\s,;]+)"
+)
 _IDENTIFIER_KEYS = frozenset(
     {
         "attempt",

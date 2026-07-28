@@ -19,3 +19,19 @@ log_full_messages = true
 # Synchronization is optional. Configure both values to enable lifecycle-triggered HTTPS sync.
 # url = "https://sync.example.com"
 # token = "replace-with-a-sync-bearer-token"
+
+[mcp]
+initialization_timeout_seconds = 15
+call_timeout_seconds = 60
+shutdown_timeout_seconds = 5
+
+[skills]
+# Explicit $skill-name references always activate directly. Enable this only
+# when an extra model preflight for tasks without an explicit reference is desired.
+auto_select = false
+
+[subagents]
+max_tasks_per_batch = 8
+max_workers = 4
+task_timeout_seconds = 300
+batch_timeout_seconds = 600

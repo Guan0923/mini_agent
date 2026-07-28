@@ -152,7 +152,7 @@ mini-agent-mcp --workspace C:\path\to\workspace
 }
 ```
 
-MCP adapter 只暴露 `read_file`、`glob`、`grep`。写入、命令和联网工具不会通过该 server 暴露；所有参数仍经过共享 JSON Schema 校验，路径仍限制在指定 workspace 内。MCP server 本身不需要模型密钥或 PostgreSQL。
+MCP adapter 只暴露 `read_file`、`glob`、`grep`、`get_current_time`。写入、命令和联网工具不会通过该 server 暴露；所有参数仍经过共享 JSON Schema 校验，路径仍限制在指定 workspace 内。MCP server 本身不需要模型密钥或 PostgreSQL。
 
 客户端也会合并 `~/mini_agent/mcp.toml` 与 `<workspace>/.mini_agent/mcp.toml`，同名 server 由项目配置完整覆盖：
 
@@ -165,6 +165,10 @@ args = ["--stdio"]
 ```
 
 发现的工具注册为 `mcp_<server>_<tool>`。外部 server 使用长生命周期 stdio session；其工具始终需要审批且不向 Plan mode 暴露。
+
+项目 `.mini_agent/mcp.toml` 在首次启动及配置变化后必须审批。交互启动可选择持久信任、仅本次禁用或取消；脚本环境应先在终端执行 `mini-agent --workspace <path> --trust-project-mcp`。信任文件只保存工作区与配置哈希。MCP 初始化、调用和关闭超时由 `config.toml` 的 `[mcp]` 设置。
+
+Skills 默认只由显式 `$skill-name` 激活且不会额外调用模型；设置 `skills.auto_select = true` 才启用自动选择。Subagent 的批次数量、worker 数和执行期限由 `[subagents]` 设置，父运行状态和持久化事件始终由父线程串行更新。
 
 ## 架构
 

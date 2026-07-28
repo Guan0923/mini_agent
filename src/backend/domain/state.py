@@ -155,6 +155,7 @@ class RunState:
     replan_count: int = 0
     final_answer: str | None = None
     model_turns: int = 0
+    skill_selection_calls: int = 0
     status: RunStatus = "running"
     stop_reason: RunStopReason | None = None
     handoff: RunHandoff | None = None

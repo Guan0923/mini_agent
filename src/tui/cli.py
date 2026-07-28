@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
 from backend.configuration import ClientPaths, initialize_config
+from backend.mcp.config import McpTrustStore, describe_project_servers, prepare_mcp_plan
 from backend.observability import EventFanout, JsonlRunLogger
 from backend.providers import ModelConfigurationError
 from backend.runtime import (
@@ -18,6 +20,7 @@ from backend.runtime import (
     build_application,
     log_full_messages_from_toml,
 )
+from backend.tools import ToolError
 
 from .application.commands import CommandAppMixin
 from .application.interactive import InteractiveAppMixin
@@ -187,6 +190,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-replans", type=int, default=2, help="Maximum dynamic replans per task (default: 2).")
     parser.add_argument("--resume", metavar="SESSION_ID", help="Resume an existing workspace session by ID.")
+    parser.add_argument(
+        "--trust-project-mcp",
+        action="store_true",
+        help="Review and trust this workspace's project MCP configuration, then exit.",
+    )
     args = parser.parse_args(argv)
     if args.max_actions is not None and args.max_tool_calls is not None:
         parser.error("--max-actions and --max-tool-calls cannot be used together.")
@@ -199,6 +207,13 @@ def main(argv: list[str] | None = None) -> int:
     paths = ClientPaths.from_home()
     try:
         initialize_config(paths, workspace)
+        mcp_plan = prepare_mcp_plan(paths, workspace)
+        trust_store = McpTrustStore(paths.mcp_trust_file)
+        if args.trust_project_mcp:
+            if args.task or args.resume:
+                parser.error("--trust-project-mcp cannot be combined with a task or --resume.")
+            return _trust_project_mcp(parser, mcp_plan, trust_store)
+        project_mcp_enabled = _project_mcp_policy(parser, mcp_plan, trust_store)
         settings = RunnerSettings(
             max_model_turns=args.max_model_turns,
             max_retries=args.max_retries,
@@ -210,11 +225,17 @@ def main(argv: list[str] | None = None) -> int:
             **tool_budget,
             log_full_messages=log_full_messages_from_toml(paths.config_file),
         )
-        application = build_application(workspace, args.planner, settings)
+        application = build_application(
+            workspace,
+            args.planner,
+            settings,
+            (),
+            project_mcp_enabled,
+        )
         conversation = application.open_conversation(args.resume)
     except ModelConfigurationError as exc:
         parser.error(f"{exc} Use --planner rule for offline mode.")
-    except ValueError as exc:
+    except (ToolError, ValueError) as exc:
         parser.error(str(exc))
     app = TerminalApp(conversation, paths.logs_dir)
     try:
@@ -233,3 +254,37 @@ def main(argv: list[str] | None = None) -> int:
         close = getattr(application, "close", None)
         if callable(close):
             close()
+
+
+def _trust_project_mcp(parser, plan, trust_store: McpTrustStore) -> int:
+    if not plan.has_project_config:
+        print("No project .mini_agent/mcp.toml is configured.")
+        return 0
+    if not sys.stdin.isatty():
+        parser.error("--trust-project-mcp requires an interactive terminal.")
+    print(describe_project_servers(plan))
+    choice = input("Trust this exact project MCP configuration? [y/N]: ").strip().lower()
+    if choice not in {"y", "yes"}:
+        print("Project MCP configuration was not trusted.")
+        return 1
+    trust_store.trust(plan)
+    print("Project MCP configuration trusted. No server was started.")
+    return 0
+
+
+def _project_mcp_policy(parser, plan, trust_store: McpTrustStore) -> bool:
+    if not plan.has_project_config or trust_store.is_trusted(plan):
+        return True
+    if not sys.stdin.isatty():
+        parser.error("Project MCP configuration is untrusted. Run --trust-project-mcp from an interactive terminal.")
+    print(describe_project_servers(plan))
+    while True:
+        choice = input("[1] Trust and start  [2] Disable for this run  [3] Cancel: ").strip().lower()
+        if choice in {"1", "trust"}:
+            trust_store.trust(plan)
+            return True
+        if choice in {"2", "disable"}:
+            return False
+        if choice in {"3", "cancel"}:
+            raise SystemExit(1)
+        print("Choose 1, 2, or 3.")

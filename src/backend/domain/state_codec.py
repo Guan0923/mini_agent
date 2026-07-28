@@ -33,6 +33,7 @@ def run_state_to_dict(state: RunState, *, include_runtime_messages: bool = True)
         "replan_count": state.replan_count,
         "final_answer": state.final_answer,
         "model_turns": state.model_turns,
+        "skill_selection_calls": state.skill_selection_calls,
         "status": state.status,
         "stop_reason": state.stop_reason,
         "handoff": asdict(state.handoff) if state.handoff else None,
@@ -167,6 +168,7 @@ def run_state_from_dict(data: dict[str, Any]) -> RunState:
         replan_count=data.get("replan_count", 0),
         final_answer=data.get("final_answer"),
         model_turns=int(data.get("model_turns", 0)),
+        skill_selection_calls=int(data.get("skill_selection_calls", 0)),
         status=status,  # type: ignore[arg-type]
         stop_reason=stop_reason,  # type: ignore[arg-type]
         active_skills=[

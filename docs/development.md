@@ -67,7 +67,11 @@ The rule planner is offline and deterministic. The default LLM planner reads `[m
 
 Global Skills live under `~/mini_agent/skills/<name>/SKILL.md`, while workspace Skills live under `.mini_agent/skills/<name>/SKILL.md` and fully override same-named global entries. Discovery validates YAML frontmatter, directory/name equality, UTF-8, size, line count, and path confinement.
 
+Explicit `$skill-name` references activate installed Skills directly and fail before the task model call when a name is unknown. Automatic routing is disabled by default; set `[skills].auto_select = true` only when the extra selector model call is desired. Selector calls are counted separately from task model turns.
+
 The LLM runner exposes `delegate_tasks` and `get_subagent_results` only on the parent runner. Child runs execute concurrently in one process with standard tools and shared-workspace write coordination, but cannot recursively delegate. Delegate only self-contained tasks; dependent tasks and overlapping writes should remain sequential.
+
+The `[subagents]` table bounds `max_tasks_per_batch`, `max_workers`, `task_timeout_seconds`, and `batch_timeout_seconds`. Worker threads submit parent events and approvals through a bounded bridge; only the parent invocation thread mutates durable runtime state. Time spent waiting for approval is excluded from execution deadlines, while cancellation remains cooperative at model, command, and tool boundaries.
 
 Run the safe stdio MCP server without model or database configuration:
 
@@ -76,6 +80,10 @@ mini-agent-mcp --workspace C:\path\to\workspace
 ```
 
 The MCP adapter intentionally exports only approval-free read tools. The client separately merges `~/mini_agent/mcp.toml` with `.mini_agent/mcp.toml`, fully overriding same-named project servers; external tools use long-lived stdio sessions, always require approval, and are unavailable in Plan mode.
+
+Global MCP configuration is treated as user-owned and trusted. A project MCP file is keyed by canonical workspace-path and semantic configuration hashes in `~/mini_agent/mcp-trust.toml`; moving the workspace or changing any command, argument, working directory, or environment value requires approval again. Run `mini-agent --workspace <path> --trust-project-mcp` to review environment variable names (never values), record trust, and exit without starting a server. Non-interactive runs refuse untrusted project MCP.
+
+The `[mcp]` table configures finite positive initialization, call, and shutdown timeouts. Tool names are validated before registry insertion, MCP sessions are owned by one application/runner instance, and closing that instance cannot stop another instance's MCP processes.
 
 Plan mode supports ordinary read-only conversation plus two built-in control ToolSpecs. `request_user_input` asks material clarification questions after exploration cannot resolve them. `request_plan_review` submits a non-empty Markdown plan for explicit review only when a plan is useful and complete. Both controls must be called alone, are excluded from `ToolRegistry`, and persist as one structured ToolMessage. Plain assistant text completes as a normal `response`; only `request_plan_review` opens `PLAN REVIEW`. `/history` opens a read-only full-screen USER/ASSISTANT projection and returns to the live transcript with Esc.
 

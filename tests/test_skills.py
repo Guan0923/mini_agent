@@ -104,6 +104,53 @@ def test_project_skills_override_global_skills_by_name(tmp_path: Path) -> None:
     assert definitions["global-only"].root == (global_root / "global-only").resolve().as_posix()
 
 
+def test_project_override_skips_malformed_global_manifest(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    global_root = tmp_path / "global"
+    malformed = global_root / "shared"
+    malformed.mkdir(parents=True)
+    (malformed / "SKILL.md").write_text("not frontmatter", encoding="utf-8")
+    write_skill(workspace, "shared", instructions="Valid project instructions.")
+
+    catalog = SkillCatalog.discover(workspace, global_root=global_root)
+
+    assert catalog.names() == ("shared",)
+    assert catalog.definitions()[0].instructions == "Valid project instructions."
+
+
+def test_unknown_explicit_skill_reference_is_rejected_before_model_call() -> None:
+    planner = ReplyOnlyPlanner()
+    runner = AgentRunner(
+        planner,
+        ToolRegistry(),
+        strategy="reactive",
+        skill_catalog=SkillCatalog((definition("demo"),)),
+    )
+
+    state = runner.run(runner.new_runtime(task="Use $missing-skill."))
+
+    assert state.status == "failed"
+    assert "Unknown explicit Skill reference: missing-skill" in (state.final_answer or "")
+    assert planner.decision_calls == 0
+
+
+def test_unknown_explicit_skill_is_rejected_when_catalog_is_empty() -> None:
+    planner = ReplyOnlyPlanner()
+    runner = AgentRunner(
+        planner,
+        ToolRegistry(),
+        strategy="reactive",
+        skill_catalog=SkillCatalog(()),
+    )
+
+    state = runner.run(runner.new_runtime(task="Use $missing-skill."))
+
+    assert state.status == "failed"
+    assert "Available Skills: none" in (state.final_answer or "")
+    assert planner.decision_calls == 0
+
+
 @pytest.mark.parametrize(
     ("manifest", "error"),
     [
@@ -225,7 +272,7 @@ class ReplyOnlyPlanner:
         return AssistantMessage(content="done")
 
 
-def test_runner_merges_explicit_and_automatic_skills_in_catalog_order() -> None:
+def test_explicit_skill_bypasses_automatic_selection() -> None:
     planner = SelectingPlanner(("beta", "beta"))
     catalog = SkillCatalog((definition("alpha"), definition("beta")))
     runner = AgentRunner(
@@ -238,12 +285,12 @@ def test_runner_merges_explicit_and_automatic_skills_in_catalog_order() -> None:
     state = runner.run(runner.new_runtime(task="Use $alpha for this task."))
 
     assert state.status == "completed"
-    assert [skill.name for skill in state.active_skills] == ["alpha", "beta"]
-    assert planner.selection_calls == 1
-    assert state.model_turns == 2
+    assert [skill.name for skill in state.active_skills] == ["alpha"]
+    assert planner.selection_calls == 0
+    assert state.model_turns == 1
     event = next(event for event in state.events if event.kind == "skills_selected")
     assert event.data["explicit"] == ["alpha"]
-    assert event.data["automatic"] == ["beta"]
+    assert event.data["automatic"] == []
 
 
 def test_runner_without_skills_does_not_call_selector() -> None:
@@ -257,7 +304,7 @@ def test_runner_without_skills_does_not_call_selector() -> None:
     assert state.model_turns == 1
 
 
-def test_skill_selection_consumes_model_turn_budget() -> None:
+def test_automatic_skill_selection_has_a_separate_budget_counter() -> None:
     planner = SelectingPlanner(("demo",))
     runner = AgentRunner(
         planner,
@@ -265,17 +312,19 @@ def test_skill_selection_consumes_model_turn_budget() -> None:
         strategy="reactive",
         max_model_turns=1,
         skill_catalog=SkillCatalog((definition("demo"),)),
+        skill_auto_select=True,
     )
 
     state = runner.run(runner.new_runtime(task="demo"))
 
-    assert state.status == "failed"
+    assert state.status == "completed"
     assert state.model_turns == 1
+    assert state.skill_selection_calls == 1
     assert planner.selection_calls == 1
-    assert planner.decision_calls == 0
+    assert planner.decision_calls == 1
 
 
-def test_explicit_skill_requires_llm_planner() -> None:
+def test_explicit_skill_does_not_require_a_selector() -> None:
     planner = ReplyOnlyPlanner()
     runner = AgentRunner(
         planner,
@@ -286,9 +335,9 @@ def test_explicit_skill_requires_llm_planner() -> None:
 
     state = runner.run(runner.new_runtime(task="Use $demo."))
 
-    assert state.status == "failed"
-    assert state.final_answer == "Skill execution requires the LLM planner."
-    assert planner.decision_calls == 0
+    assert state.status == "completed"
+    assert [skill.name for skill in state.active_skills] == ["demo"]
+    assert planner.decision_calls == 1
 
 
 class RecordingClient:

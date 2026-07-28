@@ -56,15 +56,28 @@ class SkillCatalog:
         """Merge global and project Skills, with project names taking precedence."""
 
         definitions: dict[str, SkillDefinition] = {}
-        if global_root is not None:
-            definitions.update(cls._discover_root(global_root, global_root, absolute_roots=True))
         project_root = workspace.resolve() / SKILLS_RELATIVE_ROOT
+        project_names = cls._directory_names(project_root)
+        if global_root is not None:
+            definitions.update(
+                cls._discover_root(
+                    global_root,
+                    global_root,
+                    absolute_roots=True,
+                    excluded_names=project_names,
+                )
+            )
         definitions.update(cls._discover_root(project_root, workspace.resolve()))
         return cls(tuple(definitions[name] for name in sorted(definitions)))
 
     @classmethod
     def _discover_root(
-        cls, skills_root: Path, owner_root: Path, *, absolute_roots: bool = False
+        cls,
+        skills_root: Path,
+        owner_root: Path,
+        *,
+        absolute_roots: bool = False,
+        excluded_names: set[str] | None = None,
     ) -> dict[str, SkillDefinition]:
         if not skills_root.exists():
             return {}
@@ -73,6 +86,8 @@ class SkillCatalog:
         resolved_root = cls._confined(skills_root, owner_root, "Skill root")
         definitions: dict[str, SkillDefinition] = {}
         for directory in sorted((item for item in skills_root.iterdir() if item.is_dir()), key=lambda item: item.name):
+            if directory.name in (excluded_names or set()):
+                continue
             resolved_directory = cls._confined(directory, resolved_root, "Skill directory")
             manifest = directory / "SKILL.md"
             if not manifest.exists():
@@ -83,6 +98,14 @@ class SkillCatalog:
                 raise SkillConfigurationError(f"Duplicate Skill name {definition.name!r}: {manifest}")
             definitions[definition.name] = definition
         return definitions
+
+    @staticmethod
+    def _directory_names(skills_root: Path) -> set[str]:
+        if not skills_root.exists():
+            return set()
+        if not skills_root.is_dir():
+            raise SkillConfigurationError(f"Skill root is not a directory: {skills_root}")
+        return {item.name for item in skills_root.iterdir() if item.is_dir()}
 
     @staticmethod
     def _confined(path: Path, root: Path, label: str) -> Path:
@@ -169,6 +192,13 @@ class SkillCatalog:
 
     def explicit_names(self, task: str) -> tuple[str, ...]:
         requested = {match.group(1) for match in _EXPLICIT_PATTERN.finditer(task)}
+        unknown = requested - self._by_name.keys()
+        if unknown:
+            missing = ", ".join(sorted(unknown))
+            available = ", ".join(self.names()) or "none"
+            raise SkillConfigurationError(
+                f"Unknown explicit Skill reference: {missing}. Available Skills: {available}."
+            )
         return tuple(skill.name for skill in self._skills if skill.name in requested)
 
     def snapshots(self, names: set[str]) -> list[SkillSnapshot]:

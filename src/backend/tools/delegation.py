@@ -10,7 +10,7 @@ def _runtime_only(**_arguments: object) -> str:
     raise ToolError("This tool can only run inside an AgentRunner with subagents enabled.")
 
 
-def delegation_tools() -> tuple[Tool, Tool]:
+def delegation_tools(max_tasks_per_batch: int = 8) -> tuple[Tool, Tool]:
     """Return the model-visible tools used to delegate and inspect child work."""
 
     task = object_schema(
@@ -28,7 +28,10 @@ def delegation_tools() -> tuple[Tool, Tool]:
                 "workspace tool set. Use distinct ids and only group work that can proceed independently."
             ),
             _runtime_only,
-            object_schema({"tasks": {"type": "array", "minItems": 1, "items": task}}, ["tasks"]),
+            object_schema(
+                {"tasks": {"type": "array", "minItems": 1, "maxItems": max_tasks_per_batch, "items": task}},
+                ["tasks"],
+            ),
             read_only=False,
         ),
         Tool(
