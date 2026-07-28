@@ -1,8 +1,8 @@
 """Composed transcript rendering behavior for TerminalView."""
 
-from .events import TranscriptEventMixin
-from .retention import TranscriptRetentionMixin
-from .state import TranscriptStateMixin
+from ..rendering.events import TranscriptEventMixin
+from ..rendering.retention import TranscriptRetentionMixin
+from ..rendering.state import TranscriptStateMixin
 
 
 class TranscriptRenderingMixin(

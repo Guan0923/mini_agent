@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 from ..core.context import AgentRuntime, text_messages
 from ..execution import RuntimeRunner
-from .store import SessionStore
+from .ports import SessionStore
 
 
 class ConversationSessionController:

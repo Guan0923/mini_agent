@@ -1,21 +1,18 @@
 """PostgreSQL row and conversation projection helpers."""
 
-from backend.domain import DEFAULT_SESSION_TITLE, RunStatus, Session, SessionSummary
+from backend.domain import RunStatus, Session, SessionSummary
+
+from ..codec import assistant_content, normalize_session_title
 
 
 class SessionMappingMixin:
     @staticmethod
     def _clean_title(title: str | None) -> str:
-        value = " ".join((title or "").split())
-        return value[:80] or DEFAULT_SESSION_TITLE
+        return normalize_session_title(title)
 
     @staticmethod
     def _assistant_content(status: RunStatus, answer: str | None) -> str:
-        if status == "completed":
-            return answer or ""
-        if status == "cancelled":
-            return "Task cancelled by user."
-        return answer or f"Task {status}."
+        return assistant_content(status, answer)
 
     @staticmethod
     def _session_from_row(row: tuple[object, ...]) -> Session:

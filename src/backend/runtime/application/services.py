@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..conversation.service import ConversationService, TaskPreprocessor
-from ..conversation.store import SessionStore
+from ..conversation.ports import SessionStore, TaskPreprocessor
+from ..conversation.service import ConversationService
 from ..execution import RuntimeRunner
 
 

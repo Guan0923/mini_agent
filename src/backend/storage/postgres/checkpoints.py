@@ -8,6 +8,7 @@ from backend.domain import RunState
 from backend.domain.state import utc_now
 from backend.runtime.core.context import AgentRuntime, RuntimeState
 
+from ..codec import decode_message_data, encode_message_data, encode_runtime_state
 from .schema import PostgresSchemaMixin
 
 
@@ -20,7 +21,7 @@ class PostgresCheckpointStore(PostgresSchemaMixin):
             payload = json.dumps(state.to_dict(include_runtime_messages=False), ensure_ascii=False)
         else:
             state = runtime.run
-            payload = json.dumps(runtime.state.to_dict(include_runtime_messages=False), ensure_ascii=False)
+            payload = encode_runtime_state(runtime.state)
         timestamp = utc_now()
         with self._connect() as connection:
             connection.execute(
@@ -81,7 +82,7 @@ class PostgresCheckpointStore(PostgresSchemaMixin):
                     message.sequence,
                     message.kind,
                     message.message,
-                    json.dumps(message.data, ensure_ascii=False, default=str),
+                    encode_message_data(message.data),
                     message.timestamp,
                 ),
             )
@@ -96,7 +97,7 @@ class PostgresCheckpointStore(PostgresSchemaMixin):
         from backend.domain import RuntimeMessage
 
         return [
-            RuntimeMessage(int(sequence), str(kind), str(message), str(created_at), dict(json.loads(str(data_json))))
+            RuntimeMessage(int(sequence), str(kind), str(message), str(created_at), decode_message_data(str(data_json)))
             for sequence, kind, message, data_json, created_at in rows
         ]
 

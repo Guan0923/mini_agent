@@ -6,9 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from backend.domain import ToolSpec
+from backend.domain import DEFAULT_TIME_ZONE, ToolSpec
 from backend.domain.state import utc_now
-from backend.domain.timezone import DEFAULT_TIME_ZONE
 
 
 class ToolError(Exception):

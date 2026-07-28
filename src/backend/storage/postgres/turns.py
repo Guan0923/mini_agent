@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import json
-
 from backend.domain import DEFAULT_SESSION_TITLE, RunProvenance, RunStatus, RuntimeMessage
 from backend.domain.state import utc_now
+
+from ..codec import decode_message_data, encode_message_data
 
 
 class PostgresTurnMixin:
     """Store turn projections and ordered presentation-independent events."""
 
     def append_runtime_message(self, session_id: str, run_id: str, message: RuntimeMessage) -> None:
-        payload = json.dumps(message.data, ensure_ascii=False, default=str)
+        payload = encode_message_data(message.data)
         with self._connect() as connection:
             run = connection.execute(
                 "SELECT 1 FROM session_runs WHERE run_id = %s AND session_id = %s", (run_id, session_id)
@@ -31,9 +31,7 @@ class PostgresTurnMixin:
         if not messages:
             return
         message = messages[-1]
-        cls._insert_runtime_message(
-            connection, session_id, run_id, message, json.dumps(message.data, ensure_ascii=False, default=str)
-        )
+        cls._insert_runtime_message(connection, session_id, run_id, message, encode_message_data(message.data))
 
     @staticmethod
     def _insert_runtime_message(
@@ -57,7 +55,7 @@ class PostgresTurnMixin:
                 session_id,
                 run_id,
                 message,
-                json.dumps(message.data, ensure_ascii=False, default=str),
+                encode_message_data(message.data),
             )
 
     def load_runtime_messages(self, session_id: str, run_id: str | None = None) -> list[RuntimeMessage]:
@@ -79,7 +77,7 @@ class PostgresTurnMixin:
                 kind=str(kind),
                 message=str(message),
                 timestamp=str(timestamp),
-                data=dict(payload) if isinstance(payload := json.loads(str(data_json)), dict) else {},
+                data=decode_message_data(str(data_json)),
             )
             for sequence, kind, message, data_json, timestamp in rows
         ]

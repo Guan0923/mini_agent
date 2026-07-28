@@ -11,7 +11,7 @@ from backend.domain import (
 )
 from backend.domain.state import utc_now
 
-from ..core.context import RunSummary, RuntimeState
+from ...core.context import RunSummary, RuntimeState
 
 
 def build_preview(session: Session, state: RuntimeState | None) -> ResumePreview:

@@ -19,7 +19,6 @@ from .components.completion import CommandSuggestion, SlashCommandCompleter
 from .latex import LatexMarkdown
 from .rendering.transcript import TranscriptNode
 from .rendering.transcript_content import CompactProgress
-from .rendering.transcript_rendering import TranscriptRenderingMixin
 from .screens.diagnostic_mixin import TuiDiagnosticMixin
 from .screens.diagnostics import DiagnosticSink
 from .styles import TERMINAL_CSS
@@ -27,6 +26,7 @@ from .view_parts.input import ViewInputMixin
 from .view_parts.lifecycle import ViewLifecycleMixin
 from .view_parts.scrolling import ViewScrollingMixin
 from .view_parts.status import RUNNING_STATUS_WORDS, ViewStatusMixin
+from .view_parts.transcript import TranscriptRenderingMixin
 from .widgets import (
     ChoiceItem,
     ChoiceRow,

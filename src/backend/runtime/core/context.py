@@ -4,25 +4,25 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 from uuid import uuid4
 
 from backend.domain import (
+    DEFAULT_TIME_ZONE,
     AssistantMessage,
     ChatMessage,
     RunState,
-    RuntimeMessage,
     ToolSpec,
     UserMessage,
     message_to_dict,
 )
 from backend.domain.messages import messages_from_dicts
 from backend.domain.state import utc_now
-from backend.domain.timezone import DEFAULT_TIME_ZONE
 
 from .config import RunnerSettings
 from .contracts import CancellationHandler, Confirm, EventHandler, InterruptHandler, SteeringHandler, SuspensionHandler
 from .hooks import HookManager
+from .ports import RuntimeStore
 
 RuntimeOperation = Literal[
     "skill_selection",
@@ -211,12 +211,6 @@ class RuntimeExchange:
         self.context = {}
         self.on_reasoning = None
         self.on_content = None
-
-
-class RuntimeStore(Protocol):
-    def save_runtime(self, state: RuntimeState) -> None: ...
-
-    def append_runtime_message(self, session_id: str, run_id: str, message: RuntimeMessage) -> None: ...
 
 
 def new_tool_call_id() -> str:

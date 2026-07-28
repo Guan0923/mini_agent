@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Protocol
 
 from backend.domain import ChatMessage, RunState
 
-from ..core.context import AgentRuntime, RuntimeStore
+from ..core.context import AgentRuntime
+from ..core.ports import RuntimeStore
 
 if TYPE_CHECKING:
     from backend.planning.context_management import ContextCompactionResult

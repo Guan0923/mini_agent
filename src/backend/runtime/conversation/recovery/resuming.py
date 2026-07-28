@@ -6,11 +6,11 @@ from typing import Protocol
 
 from backend.domain import ResumePreview, RunState, Session
 
-from ..core.context import AgentRuntime, text_messages
-from ..core.contracts import CancellationHandler, EventHandler, InterruptHandler, InterruptRequest, SteeringHandler
-from ..execution import RuntimeRunner
-from .recovery import build_preview, reconstruct_attempt
-from .store import SessionStore
+from ...core.context import AgentRuntime, text_messages
+from ...core.contracts import CancellationHandler, EventHandler, InterruptHandler, InterruptRequest, SteeringHandler
+from ...execution import RuntimeRunner
+from ..ports import SessionStore
+from .reconstruction import build_preview, reconstruct_attempt
 
 
 class ResumableConversation(Protocol):

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
-
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState
+
+from ..codec import decode_runtime_state, encode_runtime_state
 
 
 class PostgresRuntimeMixin:
@@ -75,7 +75,7 @@ class PostgresRuntimeMixin:
             ).fetchone()
         if row is None:
             return None
-        state = RuntimeState.from_dict(json.loads(row[0]))
+        state = decode_runtime_state(row[0])
         if state.current_run is not None:
             state.current_run.runtime_messages = self.load_runtime_messages(session_id, state.current_run.run_id)
         return state
@@ -149,4 +149,4 @@ class PostgresRuntimeMixin:
 
     @staticmethod
     def _snapshot_payload(state: RuntimeState) -> str:
-        return json.dumps(state.to_dict(include_runtime_messages=False), ensure_ascii=False)
+        return encode_runtime_state(state)

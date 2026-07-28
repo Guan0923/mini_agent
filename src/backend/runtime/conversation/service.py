@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Protocol
-
 from backend.domain import (
     AssistantMessage,
     ResumePreview,
@@ -23,14 +21,10 @@ from ..core.context import text_messages
 from ..core.contracts import CancellationHandler, EventHandler, InterruptHandler, SteeringHandler
 from ..core.events import RuntimeEvent
 from ..execution import RuntimeRunner
-from .resuming import prepare_resume
-from .resuming import resume_session as resume_conversation
+from .ports import SessionStore, TaskPreprocessor
+from .recovery.resuming import prepare_resume
+from .recovery.resuming import resume_session as resume_conversation
 from .session_control import ConversationSessionController
-from .store import SessionStore
-
-
-class TaskPreprocessor(Protocol):
-    def expand(self, task: str) -> str: ...
 
 
 class TaskPreparationError(ValueError):

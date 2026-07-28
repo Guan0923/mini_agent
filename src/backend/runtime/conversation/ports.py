@@ -1,4 +1,4 @@
-"""Storage boundary for durable multi-turn conversation sessions."""
+"""Ports required by durable conversation orchestration."""
 
 from __future__ import annotations
 
@@ -7,10 +7,17 @@ from typing import Protocol
 from backend.domain import RunProvenance, RunStatus, RuntimeMessage, Session, SessionSummary
 
 from ..core.context import RuntimeState
+from ..core.ports import RuntimeStore
 
 
-class SessionStore(Protocol):
-    """Persist session metadata, messages, and their run associations."""
+class TaskPreprocessor(Protocol):
+    """Prepare one user task before it enters the runtime."""
+
+    def expand(self, task: str) -> str: ...
+
+
+class SessionStore(RuntimeStore, Protocol):
+    """Persist session metadata, messages, runs, and resumable state."""
 
     def create_session(self, title: str | None = None) -> Session: ...
 
@@ -28,13 +35,9 @@ class SessionStore(Protocol):
         self, session_id: str, *, before_id: int | None = None, limit: int = 100
     ) -> tuple[list[dict[str, str]], int | None]: ...
 
-    def save_runtime(self, state: RuntimeState) -> None: ...
-
     def load_runtime(self, session_id: str) -> RuntimeState | None: ...
 
     def resume_runtime(self, source: RuntimeState, resumed: RuntimeState) -> None: ...
-
-    def append_runtime_message(self, session_id: str, run_id: str, message: RuntimeMessage) -> None: ...
 
     def load_runtime_messages(self, session_id: str, run_id: str | None = None) -> list[RuntimeMessage]: ...
 

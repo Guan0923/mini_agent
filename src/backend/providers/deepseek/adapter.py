@@ -13,7 +13,8 @@ from ..config import ModelConfig
 from ..errors import ModelConfigurationError, ModelRequestError, ModelTransportError, ProviderOutputError
 from .messages import _tool_definition, _wire_messages_from
 from .requests import _prepare_request
-from .responses import _parse_response, _parse_stream
+from .responses import _parse_response
+from .streaming import _parse_stream
 
 
 def _prepare_response(runtime: AgentRuntime) -> PreparedResponse:
