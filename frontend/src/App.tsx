@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import {
   archiveSession,
   createSession,
@@ -11,17 +12,23 @@ import {
   rewindSession,
   type SessionInfo,
 } from "./api";
+import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import BenchmarkPage from "./pages/BenchmarkPage";
 import ChatPage from "./pages/ChatPage";
 import TrashPage from "./pages/TrashPage";
+import DeviceApprovalPage from "./pages/auth/DeviceApprovalPage";
+import LoginPage from "./pages/auth/LoginPage";
+import RegisterPage from "./pages/auth/RegisterPage";
+import ResetPasswordPage from "./pages/auth/ResetPasswordPage";
+import HomePage from "./pages/HomePage";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
 import type { ChatMessage, ChatMode, Conversation, Page } from "./types";
 
 const STORAGE_KEY = "mini-agent-conversations";
 
-function loadConversations(): Conversation[] {
+function loadConversations(key: string): Conversation[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -81,9 +88,11 @@ function importableMessages(messages: ChatMessage[]): Array<Pick<ChatMessage, "r
 
 export { loadConversations };
 
-export default function App() {
+function AgentApp() {
+  const { user, signOut } = useAuth();
   const [page, setPage] = useState<Page>("chat");
-  const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
+  const storageKey = `${STORAGE_KEY}:${user?.id ?? "anonymous"}`;
+  const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations(storageKey));
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [openHistoryId, setOpenHistoryId] = useState<string | null>(null);
@@ -91,8 +100,8 @@ export default function App() {
   const [draftMode, setDraftMode] = useState<ChatMode>("agent");
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
-  }, [conversations]);
+    localStorage.setItem(storageKey, JSON.stringify(conversations));
+  }, [conversations, storageKey]);
 
   useEffect(() => {
     saveSessionModes(localStorage, modeBySession);
@@ -102,7 +111,7 @@ export default function App() {
     let disposed = false;
 
     async function hydrate() {
-      const local = loadConversations();
+      const local = loadConversations(storageKey);
       let summaries: SessionInfo[] = [];
       try {
         const [active, archived, deleted] = await Promise.all([
@@ -479,6 +488,10 @@ export default function App() {
             📊 Benchmark 成绩单
           </button>
           <div className="app-name">Mini-Agent</div>
+          <div className="account-row">
+            <span className="account-email" title={user?.email}>{user?.email}</span>
+            <button className="logout-button" onClick={() => void signOut()}>退出</button>
+          </div>
         </div>
       </aside>
       <main className="main">
@@ -618,4 +631,40 @@ function HistoryMenu({ conversation, open, onOpenChange, onRename, onArchive, on
       )}
     </div>
   );
+}
+
+function LoadingScreen() {
+  return <div className="auth-loading" aria-live="polite"><span className="loading-orb" />正在确认登录状态…</div>;
+}
+
+function PublicRoute({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading) return <LoadingScreen />;
+  return user ? <Navigate to="/app" replace /> : <>{children}</>;
+}
+
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  const location = useLocation();
+  if (loading) return <LoadingScreen />;
+  if (!user) return <Navigate to={`/login?next=${encodeURIComponent(`${location.pathname}${location.search}`)}`} replace />;
+  return <>{children}</>;
+}
+
+function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/" element={<PublicRoute><HomePage /></PublicRoute>} />
+      <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
+      <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
+      <Route path="/forgot-password" element={<PublicRoute><ResetPasswordPage /></PublicRoute>} />
+      <Route path="/device/approve" element={<DeviceApprovalPage />} />
+      <Route path="/app" element={<ProtectedRoute><AgentApp /></ProtectedRoute>} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
+
+export default function App() {
+  return <BrowserRouter><AuthProvider><AppRoutes /></AuthProvider></BrowserRouter>;
 }

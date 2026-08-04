@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -23,6 +23,8 @@ from backend.providers import ModelConfigurationError
 from backend.runtime import RunnerSettings, build_application
 from backend.runtime.core.events import RuntimeEvent
 
+from .auth_dependencies import require_user
+from .auth_types import UserIdentity
 from .decisions import router as decisions_router
 from .interrupts import auto_approve, make_interactive_interrupt
 from .sessions import _require_active, _store
@@ -83,6 +85,7 @@ def _stream(
     prompt: str,
     interactive: bool = False,
     *,
+    identity: UserIdentity | None = None,
     session_id: str | None = None,
     mode: Literal["agent", "plan"] = "agent",
     permission_mode: Literal["approval_for_me", "full_access"] | None = None,
@@ -108,25 +111,34 @@ def _stream(
         if not cancel_requested.is_set():
             q.put(item)
 
+    owner_id = identity.id if identity is not None else None
     if permission_mode == "full_access":
         interrupt = make_interactive_interrupt(
             sink,
             cancel_requested=cancel_requested.is_set,
             auto_approve_tools=True,
+            owner_id=owner_id,
         )
     elif interactive or permission_mode == "approval_for_me":
-        interrupt = make_interactive_interrupt(sink, cancel_requested=cancel_requested.is_set)
+        interrupt = make_interactive_interrupt(
+            sink,
+            cancel_requested=cancel_requested.is_set,
+            owner_id=owner_id,
+        )
     else:
         interrupt = auto_approve
 
     def worker() -> None:
         app = None
         try:
+            workspace = state.user_workspace(identity.id) if identity is not None else state.chat_workspace
+            path_options = {"paths": state.user_paths(identity.id)} if identity is not None else {}
             app = build_application(
-                state.chat_workspace,
+                workspace,
                 planner_name="llm",
                 settings=RunnerSettings(log_full_messages=True),
                 project_mcp_enabled=False,
+                **path_options,
             )
             conversation = app.open_conversation(session_id) if session_id else app.open_conversation()
             if operation is None:
@@ -196,18 +208,21 @@ def _stream(
 
 
 @router.post("/chat")
-async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
+async def chat(
+    body: ChatRequest, request: Request, identity: UserIdentity = Depends(require_user)
+) -> StreamingResponse:
     state: WebAppState = request.app.state.web
     if not body.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt 不能为空")
     if body.session_id:
-        summary = _require_active(_store(state), body.session_id)
+        summary = _require_active(_store(state, identity.id), body.session_id)
         if summary.last_run_status == "running":
             raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
     return StreamingResponse(
         _stream(
             state,
             body.prompt.strip(),
+            identity=identity,
             session_id=body.session_id,
             mode=body.mode,
             interactive=body.interactive,
@@ -218,13 +233,18 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
 
 
 @router.post("/sessions/{session_id}/resume")
-async def resume(session_id: str, body: ResumeRequest, request: Request) -> StreamingResponse:
+async def resume(
+    session_id: str,
+    body: ResumeRequest,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> StreamingResponse:
     """Resume a durable workflow through the same SSE contract as chat."""
 
     state: WebAppState = request.app.state.web
     from .sessions import _store
 
-    if _store(state).get_session(session_id) is None:
+    if _store(state, identity.id).get_session(session_id) is None:
         raise HTTPException(status_code=404, detail=f"未知会话：{session_id}")
 
     def operation(conversation, interrupt, sink, cancel_requested):
@@ -239,6 +259,7 @@ async def resume(session_id: str, body: ResumeRequest, request: Request) -> Stre
         _stream(
             state,
             "",
+            identity=identity,
             session_id=session_id,
             mode="agent",
             interactive=True,

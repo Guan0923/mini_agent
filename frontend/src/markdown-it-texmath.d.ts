@@ -2,7 +2,7 @@ declare module "markdown-it-texmath" {
   import type MarkdownIt from "markdown-it";
 
   interface TexmathOptions {
-    engine?: typeof import("katex");
+    engine?: Pick<typeof import("katex"), "renderToString">;
     delimiters?: string | string[];
     outerSpace?: boolean;
     katexOptions?: Record<string, unknown>;

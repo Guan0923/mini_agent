@@ -65,14 +65,20 @@ class Sandbox:
         values = (
             _read_toml(self.source_config) if self.source_config is not None and self.source_config.exists() else {}
         )
-        normalized = {name: dict(value) for name, value in values.items() if isinstance(value, dict)}
-        sync = dict(normalized.get("sync", {}))
-        # Never let the benchmark start a sync coordinator.
-        sync.pop("url", None)
-        sync.pop("token", None)
-        # Pre-write a device id so initialize_config does no mid-run writes.
-        sync.setdefault("device_id", f"bench_{int(time.time())}_{id(self)}")
-        normalized["sync"] = sync
+        # Benchmarks need model/runtime/tool settings, but must never copy
+        # browser/email configuration or synchronization credentials into a
+        # per-user sandbox.
+        allowed = {"model", "runtime", "mcp", "skills", "subagents"}
+        normalized = {
+            name: {
+                key: item for key, item in value.items() if isinstance(key, str) and isinstance(item, (str, int, bool))
+            }
+            for name, value in values.items()
+            if name in allowed and isinstance(value, dict)
+        }
+        # Pre-write an independent device id so initialize_config does no
+        # mid-run writes and no sync coordinator can start in the sandbox.
+        normalized["sync"] = {"device_id": f"bench_{int(time.time())}_{id(self)}"}
         runtime = dict(normalized.get("runtime", {}))
         runtime["log_full_messages"] = True
         normalized["runtime"] = runtime

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from .auth_dependencies import require_user
+from .auth_types import UserIdentity
 from .interrupts import registry
 
 # Included under the chat router's /api prefix, so it carries no prefix itself.
@@ -19,7 +23,10 @@ class DecisionBody(BaseModel):
 
 
 @router.post("/decisions")
-def submit_decision(body: DecisionBody) -> dict:
+def submit_decision(
+    body: DecisionBody,
+    identity: Annotated[UserIdentity, Depends(require_user)],
+) -> dict:
     allowed = {
         "continue",
         "cancel",
@@ -35,7 +42,11 @@ def submit_decision(body: DecisionBody) -> dict:
         raise HTTPException(status_code=422, detail="补充说明不能为空")
     if body.choice == "answer" and body.answers is None:
         raise HTTPException(status_code=422, detail="问题决策需要 answers")
-    resolved = registry.resolve(body.decision_id, body.model_dump(exclude={"decision_id"}))
+    resolved = registry.resolve(
+        body.decision_id,
+        body.model_dump(exclude={"decision_id"}),
+        owner_id=identity.id,
+    )
     if not resolved:
         raise HTTPException(status_code=404, detail="未知或已过期的决策")
     return {"ok": True}

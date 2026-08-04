@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS
 from backend.runtime import RunnerSettings, build_application
 
+from .auth_dependencies import require_user
+from .auth_types import UserIdentity
 from .state import WebAppState
 
 router = APIRouter(prefix="/api")
@@ -41,13 +43,14 @@ class TimezoneBody(BaseModel):
     timezone: str
 
 
-def _store(state: WebAppState):
-    from backend.configuration import initialize_config, section
+def _store(state: WebAppState, user_id: str):
+    from backend.configuration import load_config, section
     from backend.storage.sqlite import SQLiteSessionStore
 
-    config = initialize_config(state.paths, state.chat_workspace)
+    paths = state.user_paths(user_id)
+    config = load_config(paths.config_file)
     device_id = str(section(config, "sync")["device_id"])
-    return SQLiteSessionStore(state.paths, device_id)
+    return SQLiteSessionStore(paths, device_id)
 
 
 def _summary_payload(summary) -> dict:
@@ -95,16 +98,24 @@ def _mutation_error(exc: Exception) -> HTTPException:
 
 
 @router.get("/sessions")
-def list_sessions(request: Request, state: Literal["active", "archived", "deleted", "all"] = "active") -> list[dict]:
+def list_sessions(
+    request: Request,
+    state: Literal["active", "archived", "deleted", "all"] = "active",
+    identity: UserIdentity = Depends(require_user),
+) -> list[dict]:
     app_state: WebAppState = request.app.state.web
-    store = _store(app_state)
+    store = _store(app_state, identity.id)
     return [_summary_payload(summary) for summary in store.list_sessions(state=state)]
 
 
 @router.post("/sessions")
-def create_session(body: CreateSessionRequest, request: Request) -> dict:
+def create_session(
+    body: CreateSessionRequest,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    store = _store(state)
+    store = _store(state, identity.id)
     try:
         if body.client_id:
             existing = store.find_session_by_client_id(body.client_id)
@@ -127,22 +138,31 @@ def create_session(body: CreateSessionRequest, request: Request) -> dict:
     return _summary_payload(summary)
 
 
-def _require_session(state: WebAppState, session_id: str):
-    store = _store(state)
+def _require_session(state: WebAppState, user_id: str, session_id: str):
+    store = _store(state, user_id)
     return store, _require_summary(store, session_id)
 
 
 @router.get("/sessions/{session_id}")
-def get_session(session_id: str, request: Request) -> dict:
+def get_session(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    store = _store(state)
+    store = _store(state, identity.id)
     return _summary_payload(_require_summary(store, session_id))
 
 
 @router.patch("/sessions/{session_id}")
-def rename_session(session_id: str, body: RenameSessionRequest, request: Request) -> dict:
+def rename_session(
+    session_id: str,
+    body: RenameSessionRequest,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    store = _store(state)
+    store = _store(state, identity.id)
     try:
         session = store.rename_session(session_id, body.title)
     except Exception as exc:
@@ -153,9 +173,13 @@ def rename_session(session_id: str, body: RenameSessionRequest, request: Request
 
 
 @router.post("/sessions/{session_id}/archive")
-def archive_session(session_id: str, request: Request) -> dict:
+def archive_session(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    store = _store(state)
+    store = _store(state, identity.id)
     _require_summary(store, session_id)
     try:
         session = store.archive_session(session_id)
@@ -167,9 +191,13 @@ def archive_session(session_id: str, request: Request) -> dict:
 
 
 @router.post("/sessions/{session_id}/restore")
-def restore_session(session_id: str, request: Request) -> dict:
+def restore_session(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    store = _store(state)
+    store = _store(state, identity.id)
     _require_summary(store, session_id)
     try:
         session = store.restore_session(session_id)
@@ -181,9 +209,13 @@ def restore_session(session_id: str, request: Request) -> dict:
 
 
 @router.delete("/sessions/{session_id}")
-def delete_session(session_id: str, request: Request) -> dict:
+def delete_session(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    store = _store(state)
+    store = _store(state, identity.id)
     _require_summary(store, session_id)
     try:
         session = store.delete_session(session_id)
@@ -195,19 +227,25 @@ def delete_session(session_id: str, request: Request) -> dict:
 
 
 @router.get("/sessions/{session_id}/messages")
-def get_session_messages(session_id: str, request: Request) -> list[dict]:
+def get_session_messages(
+    session_id: str, request: Request, identity: UserIdentity = Depends(require_user)
+) -> list[dict]:
     state: WebAppState = request.app.state.web
-    store = _store(state)
+    store = _store(state, identity.id)
     _require_summary(store, session_id)
     return store.load_conversation(session_id)
 
 
 @router.get("/sessions/{session_id}/transcript")
-def get_session_transcript(session_id: str, request: Request) -> list[dict]:
+def get_session_transcript(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> list[dict]:
     """Return the Web projection while keeping the legacy messages endpoint stable."""
 
     state: WebAppState = request.app.state.web
-    store = _store(state)
+    store = _store(state, identity.id)
     _require_summary(store, session_id)
     records = store.load_conversation_records(session_id)
 
@@ -282,9 +320,14 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
 
 
 @router.post("/sessions/{session_id}/fork")
-def fork_session(session_id: str, body: BranchRequest, request: Request) -> dict:
+def fork_session(
+    session_id: str,
+    body: BranchRequest,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    store = _store(state)
+    store = _store(state, identity.id)
     source = _require_branchable(store, session_id)
     try:
         summary = _branch_session(store, source, body, rewind=False)
@@ -294,9 +337,14 @@ def fork_session(session_id: str, body: BranchRequest, request: Request) -> dict
 
 
 @router.post("/sessions/{session_id}/rewind")
-def rewind_session(session_id: str, body: BranchRequest, request: Request) -> dict:
+def rewind_session(
+    session_id: str,
+    body: BranchRequest,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    store = _store(state)
+    store = _store(state, identity.id)
     source = _require_branchable(store, session_id)
     try:
         summary = _branch_session(store, source, body, rewind=True)
@@ -306,9 +354,13 @@ def rewind_session(session_id: str, body: BranchRequest, request: Request) -> di
 
 
 @router.get("/sessions/{session_id}/timezone")
-def get_timezone(session_id: str, request: Request) -> dict:
+def get_timezone(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    _store_instance, _summary_value = _require_session(state, session_id)
+    _store_instance, _summary_value = _require_session(state, identity.id, session_id)
     runtime = _store_instance.load_runtime(session_id)
     selected = runtime.state.timezone if runtime is not None else DEFAULT_TIME_ZONE
     return {
@@ -318,16 +370,22 @@ def get_timezone(session_id: str, request: Request) -> dict:
 
 
 @router.put("/sessions/{session_id}/timezone")
-def set_timezone(session_id: str, body: TimezoneBody, request: Request) -> dict:
+def set_timezone(
+    session_id: str,
+    body: TimezoneBody,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    _require_session(state, session_id)
+    _require_session(state, identity.id, session_id)
     application = None
     try:
         application = build_application(
-            state.chat_workspace,
+            state.user_workspace(identity.id),
             planner_name="llm",
             settings=RunnerSettings(log_full_messages=True),
             project_mcp_enabled=False,
+            paths=state.user_paths(identity.id),
         )
         conversation = application.open_conversation(session_id)
         selected = conversation.set_timezone(body.timezone)
@@ -342,16 +400,21 @@ def set_timezone(session_id: str, body: TimezoneBody, request: Request) -> dict:
 
 
 @router.post("/sessions/{session_id}/compact")
-def compact_session(session_id: str, request: Request) -> dict:
+def compact_session(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    _require_session(state, session_id)
+    _require_session(state, identity.id, session_id)
     application = None
     try:
         application = build_application(
-            state.chat_workspace,
+            state.user_workspace(identity.id),
             planner_name="llm",
             settings=RunnerSettings(log_full_messages=True),
             project_mcp_enabled=False,
+            paths=state.user_paths(identity.id),
         )
         conversation = application.open_conversation(session_id)
         result = conversation.compact_context()
@@ -369,9 +432,13 @@ def compact_session(session_id: str, request: Request) -> dict:
 
 
 @router.get("/sessions/{session_id}/trace")
-def get_trace(session_id: str, request: Request) -> dict:
+def get_trace(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
-    store, summary = _require_session(state, session_id)
+    store, summary = _require_session(state, identity.id, session_id)
     runtime = store.load_runtime(session_id)
     current_run = runtime.state.current_run if runtime is not None else None
     return {
@@ -382,18 +449,26 @@ def get_trace(session_id: str, request: Request) -> dict:
 
 
 @router.get("/forkable-runs")
-def list_forkable_runs(request: Request) -> list[dict[str, str]]:
+def list_forkable_runs(
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> list[dict[str, str]]:
     state: WebAppState = request.app.state.web
-    return _store(state).list_forkable_runs()
+    return _store(state, identity.id).list_forkable_runs()
 
 
 @router.post("/runs/{run_id}/fork")
-def fork_run(run_id: str, request: Request) -> dict:
+def fork_run(
+    run_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
     state: WebAppState = request.app.state.web
+    store = _store(state, identity.id)
     try:
-        session = _store(state).fork_run(run_id)
+        session = store.fork_run(run_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    summary = _store(state).get_session_summary(session.session_id)
+    summary = store.get_session_summary(session.session_id)
     assert summary is not None
     return _summary_payload(summary)

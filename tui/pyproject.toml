@@ -9,6 +9,7 @@ description = "Mini-Agent terminal client (client tier)."
 requires-python = ">=3.11"
 dependencies = [
     "mini-agent-backend",
+    "keyring>=25,<26",
     "textual>=8.2,<9",
 ]
 

@@ -3,6 +3,16 @@ export type ChatMode = "agent" | "plan";
 export type PermissionMode = "approval_for_me" | "full_access";
 export type DisplayMode = "minimal" | "medium" | "verbose";
 
+export interface AuthUser {
+  id: string;
+  email: string;
+  legacy_owner: boolean;
+}
+
+export interface AuthResponse {
+  user: AuthUser;
+}
+
 export interface ToolEvent {
   kind: string;
   message: string;

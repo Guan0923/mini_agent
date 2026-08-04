@@ -14,6 +14,22 @@ tokenizer_model = "deepseek-ai/DeepSeek-V3"
 # true stores complete recursively redacted bodies; false stores summaries.
 log_full_messages = true
 
+[web]
+# Browser URL and CORS origins used by the FastAPI web client.
+public_url = "http://localhost:5173"
+allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# Set true when the web app is served over HTTPS.
+cookie_secure = false
+
+[email]
+# Configure a real SMTP relay to enable registration and password recovery.
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_username = "replace-with-your-mail-user"
+smtp_password = "replace-with-your-mail-password"
+from_address = "Mini-Agent <no-reply@example.com>"
+use_starttls = true
+
 [sync]
 # device_id is generated automatically and remains stable on this client.
 # Synchronization is optional. Configure both values to enable lifecycle-triggered HTTPS sync.

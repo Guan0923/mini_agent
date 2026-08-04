@@ -1,4 +1,6 @@
 import type {
+  AuthResponse,
+  AuthUser,
   ChatMessage,
   ChatMode,
   Conversation,
@@ -10,6 +12,24 @@ import type {
   ToolInfo,
 } from "./types";
 
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+let unauthorizedHandler: (() => void) | null = null;
+
+/** Register the app-level response to an expired/revoked browser session. */
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
+function notifyUnauthorized(): void {
+  unauthorizedHandler?.();
+}
+
 async function errorFrom(res: Response): Promise<string> {
   try {
     const body = await res.json();
@@ -20,42 +40,98 @@ async function errorFrom(res: Response): Promise<string> {
   return `HTTP ${res.status}`;
 }
 
+async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(url, { credentials: "include", ...init });
+  if (!res.ok) {
+    if (res.status === 401) notifyUnauthorized();
+    throw new ApiError(res.status, await errorFrom(res));
+  }
+  return res.json() as Promise<T>;
+}
+
+function jsonBody(body: unknown): RequestInit {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
+
+export async function getCurrentUser(): Promise<AuthUser | null> {
+  const res = await fetch("/api/auth/me", { credentials: "include" });
+  if (res.status === 401) return null;
+  if (!res.ok) throw new ApiError(res.status, await errorFrom(res));
+  const body = (await res.json()) as AuthResponse | AuthUser;
+  return "user" in body ? body.user : body;
+}
+
+export async function requestRegisterCode(email: string): Promise<void> {
+  await requestJson("/api/auth/register/code", jsonBody({ email }));
+}
+
+export async function register(email: string, code: string, password: string): Promise<AuthUser> {
+  const body = await requestJson<AuthResponse>("/api/auth/register", jsonBody({ email, code, password }));
+  return body.user;
+}
+
+export async function login(email: string, password: string): Promise<AuthUser> {
+  const body = await requestJson<AuthResponse>("/api/auth/login", jsonBody({ email, password }));
+  return body.user;
+}
+
+export async function requestPasswordResetCode(email: string): Promise<void> {
+  await requestJson("/api/auth/password-reset/code", jsonBody({ email }));
+}
+
+export async function resetPassword(email: string, code: string, password: string): Promise<AuthUser> {
+  const body = await requestJson<AuthResponse>(
+    "/api/auth/password-reset/confirm",
+    jsonBody({ email, code, password }),
+  );
+  return body.user;
+}
+
+export async function logout(): Promise<void> {
+  await requestJson("/api/auth/logout", jsonBody({}));
+}
+
+export interface DeviceStart {
+  poll_secret: string;
+  verification_url: string;
+  expires_in: number;
+  poll_interval: number;
+}
+
+export async function startDeviceAuthorization(): Promise<DeviceStart> {
+  return requestJson<DeviceStart>("/api/auth/device/start", jsonBody({}));
+}
+
+export async function deviceInfo(grant: string): Promise<{ server_url: string; created_at: number; status: string }> {
+  return requestJson(`/api/auth/device/info?grant=${encodeURIComponent(grant)}`);
+}
+
+export async function approveDevice(grant: string, approved: boolean): Promise<void> {
+  await requestJson("/api/auth/device/approve", jsonBody({ grant, approved }));
+}
+
 export async function listTasks(): Promise<TaskInfo[]> {
-  const res = await fetch("/benchmark/tasks");
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<TaskInfo[]>("/benchmark/tasks");
 }
 
 export async function runBenchmark(task: string, planner: string): Promise<Record<string, unknown>> {
-  const res = await fetch("/benchmark/run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task, planner }),
-  });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<Record<string, unknown>>("/benchmark/run", jsonBody({ task, planner }));
 }
 
 export async function runAllBenchmark(planner: string): Promise<Array<Record<string, unknown>>> {
-  const res = await fetch("/benchmark/run-all", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ planner }),
-  });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<Array<Record<string, unknown>>>("/benchmark/run-all", jsonBody({ planner }));
 }
 
 export async function listTools(): Promise<ToolInfo[]> {
-  const res = await fetch("/api/tools");
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<ToolInfo[]>("/api/tools");
 }
 
 export async function listSkills(): Promise<SkillInfo[]> {
-  const res = await fetch("/api/skills");
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<SkillInfo[]>("/api/skills");
 }
 
 export interface SessionInfo {
@@ -89,9 +165,7 @@ export interface ForkableRun {
 }
 
 export async function listSessions(state: "active" | "archived" | "deleted" | "all" = "active"): Promise<SessionInfo[]> {
-  const res = await fetch(`/api/sessions?state=${encodeURIComponent(state)}`);
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<SessionInfo[]>(`/api/sessions?state=${encodeURIComponent(state)}`);
 }
 
 export interface SessionMessage {
@@ -111,41 +185,31 @@ export async function createSession(
   clientId?: string,
   messages: Array<Pick<ChatMessage, "role" | "content">> = [],
 ): Promise<SessionInfo> {
-  const res = await fetch("/api/sessions", {
+  return requestJson<SessionInfo>("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title: title?.trim() || null, client_id: clientId, messages }),
   });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
 }
 
 export async function renameSession(sessionId: string, title: string): Promise<SessionInfo> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
   });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
 }
 
 export async function archiveSession(sessionId: string): Promise<SessionInfo> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, { method: "POST" });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, { method: "POST" });
 }
 
 export async function restoreSession(sessionId: string): Promise<SessionInfo> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/restore`, { method: "POST" });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/restore`, { method: "POST" });
 }
 
 export async function deleteSession(sessionId: string): Promise<SessionInfo> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
 }
 
 export async function forkSession(
@@ -155,13 +219,11 @@ export async function forkSession(
   clientId: string,
   fallbackMessages: Array<Pick<ChatMessage, "role" | "content">>,
 ): Promise<SessionInfo> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
+  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ run_id: runId, title, client_id: clientId, fallback_messages: fallbackMessages }),
   });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
 }
 
 export async function rewindSession(
@@ -171,41 +233,31 @@ export async function rewindSession(
   clientId: string,
   fallbackMessages: Array<Pick<ChatMessage, "role" | "content">>,
 ): Promise<SessionInfo> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/rewind`, {
+  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/rewind`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ run_id: runId, title, client_id: clientId, fallback_messages: fallbackMessages }),
   });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
 }
 
 export async function getSessionMessages(sessionId: string): Promise<SessionMessage[]> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`);
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<SessionMessage[]>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`);
 }
 
 export async function getSessionTranscript(sessionId: string): Promise<SessionMessage[]> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<SessionMessage[]>(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
 }
 
 export async function getTimezone(sessionId: string): Promise<TimezoneInfo> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/timezone`);
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<TimezoneInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/timezone`);
 }
 
 export async function setTimezone(sessionId: string, timezone: string): Promise<{ timezone: string }> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/timezone`, {
+  return requestJson<{ timezone: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/timezone`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ timezone }),
   });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
 }
 
 export async function compactSession(sessionId: string): Promise<{
@@ -214,27 +266,19 @@ export async function compactSession(sessionId: string): Promise<{
   remaining_messages: number;
   summary?: string | null;
 }> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/compact`, { method: "POST" });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/compact`, { method: "POST" });
 }
 
 export async function getTrace(sessionId: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/trace`);
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<Record<string, unknown>>(`/api/sessions/${encodeURIComponent(sessionId)}/trace`);
 }
 
 export async function listForkableRuns(): Promise<ForkableRun[]> {
-  const res = await fetch("/api/forkable-runs");
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<ForkableRun[]>("/api/forkable-runs");
 }
 
 export async function forkRun(runId: string): Promise<SessionInfo> {
-  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/fork`, { method: "POST" });
-  if (!res.ok) throw new Error(await errorFrom(res));
-  return res.json();
+  return requestJson<SessionInfo>(`/api/runs/${encodeURIComponent(runId)}/fork`, { method: "POST" });
 }
 
 export async function submitDecision(
@@ -242,12 +286,11 @@ export async function submitDecision(
   choice: string,
   options: { supplement?: string; answers?: Record<string, string[]> } = {},
 ): Promise<void> {
-  const res = await fetch("/api/decisions", {
+  await requestJson("/api/decisions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ decision_id: decisionId, choice, ...options }),
   });
-  if (!res.ok) throw new Error(await errorFrom(res));
 }
 
 interface StreamOptions {
@@ -269,13 +312,15 @@ async function streamEndpoint(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal,
+      credentials: "include",
     });
   } catch (err) {
     if ((err as Error).name === "AbortError" || signal.aborted) return "aborted";
     throw new Error(String((err as Error).message ?? err));
   }
   if (!res.ok || !res.body) {
-    throw new Error(await errorFrom(res));
+    if (res.status === 401) notifyUnauthorized();
+    throw new ApiError(res.status, await errorFrom(res));
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
