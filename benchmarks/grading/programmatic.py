@@ -1,7 +1,8 @@
 """Programmatic checkers and reusable checker factories.
 
-Each checker is ``Callable[[CheckContext], CheckerVerdict]``. Scores are 0..1
-with 1.0 meaning fully satisfied; partial credit is allowed.
+Each checker is ``Callable[[CheckContext], CheckerVerdict]``. A verifier may
+return diagnostics for several conditions, but the suite aggregates them as a
+strict binary result: every required condition must pass for a score of 1.0.
 """
 
 from __future__ import annotations

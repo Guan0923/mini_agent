@@ -1,0 +1,11 @@
+{
+  "users": {
+    "yara_muller_85041": {"first_name": "Yara", "last_name": "Muller", "zip": "85041"}
+  },
+  "orders": {
+    "#W5056519": {"user_id": "yara_muller_85041", "status": "pending", "items": ["A"]},
+    "#W5995614": {"user_id": "yara_muller_85041", "status": "pending", "items": ["B"]},
+    "#W7777777": {"user_id": "yara_muller_85041", "status": "delivered", "items": ["C"]}
+  },
+  "products": {}
+}

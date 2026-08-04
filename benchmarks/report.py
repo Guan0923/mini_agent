@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -11,10 +12,31 @@ from .model import TaskResult
 
 
 def build_report(results: list[TaskResult], *, meta: dict[str, Any] | None = None) -> dict:
+    groups: dict[str, list[TaskResult]] = defaultdict(list)
+    for result in results:
+        groups[result.task_name].append(result)
+    try:
+        from .tasks import TASKS_BY_NAME
+    except ImportError:
+        TASKS_BY_NAME = {}
+    tasks: list[dict[str, Any]] = []
+    for name, attempts in groups.items():
+        definition = TASKS_BY_NAME.get(name)
+        task = {
+            "task_name": name,
+            "capability": attempts[0].capability,
+            "attempts": len(attempts),
+            "passes": sum(1 for attempt in attempts if attempt.passed),
+            "pass_rate": round(sum(1 for attempt in attempts if attempt.passed) / len(attempts), 4),
+            "source": definition.source.__dict__ if definition is not None else None,
+            "difficulty": definition.difficulty if definition is not None else None,
+        }
+        tasks.append(task)
     return {
         "meta": meta or {},
         "summary": summarize(results),
-        "tasks": [result.to_dict() for result in results],
+        "tasks": tasks,
+        "runs": [result.to_dict() for result in results],
     }
 
 
@@ -26,21 +48,18 @@ def write_report(report: dict, path: Path) -> None:
 def print_summary(report: dict) -> None:
     summary = report["summary"]
     print("\n=== Benchmark summary ===")
-    print(f"tasks: {summary['tasks_scored']} scored / {summary['tasks_run']} run")
+    print(
+        f"tasks: {summary['tasks_scored']} scored / {summary['tasks_run']} unique, "
+        f"{summary.get('attempts_run', 0)} attempts"
+    )
     print(f"overall score: {summary['overall_score']}")
-    print(f"pass rate (>=0.9): {summary['pass_rate']}")
+    print(f"task pass rate (all attempts passed): {summary['pass_rate']}")
     for capability, score in summary.get("by_capability", {}).items():
         print(f"  {capability}: {score}")
     print(f"avg duration: {summary['duration_ms_mean']} ms, avg tokens: {summary['total_tokens_mean']}")
     print("--- per-task ---")
     for task in report["tasks"]:
-        status = task["status"]
-        score = task["score"] if task["score"] is not None else "-"
-        metrics = task["metrics"]
-        detail = task.get("error") or ""
         print(
-            f"  {task['task_name']:<24} status={status:<10} score={score} "
-            f"duration={metrics['duration_ms']}ms calls={metrics['model_calls']} tokens={metrics['total_tokens']}"
-            f" subagents={metrics.get('subagent_completed', 0)}/{metrics.get('subagent_failed', 0)}"
-            f"{('  ' + detail) if detail else ''}"
+            f"  {task['task_name']:<30} passes={task['passes']}/{task['attempts']} "
+            f"pass_rate={task['pass_rate']} source={task['source']['benchmark'] if task['source'] else '-'}"
         )

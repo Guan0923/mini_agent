@@ -1,0 +1,5 @@
+This minimal fixture is an adaptation of astropy__astropy-14365 from SWE-bench
+Lite. Astropy is distributed under BSD-3-Clause; the SWE-bench dataset and
+harness are MIT-licensed. See benchmarks/THIRD_PARTY_BENCHMARKS.md for pinned
+revisions and upstream links. This directory is not the upstream repository
+and does not contain the upstream gold patch.

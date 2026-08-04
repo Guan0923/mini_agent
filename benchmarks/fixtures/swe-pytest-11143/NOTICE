@@ -1,0 +1,5 @@
+This minimal fixture is an adaptation of pytest-dev__pytest-11143 from
+SWE-bench Lite. Pytest is MIT-licensed; the SWE-bench dataset and harness are
+MIT-licensed. See benchmarks/THIRD_PARTY_BENCHMARKS.md for pinned revisions
+and upstream links. This directory is not the upstream repository and does
+not contain the upstream gold patch.

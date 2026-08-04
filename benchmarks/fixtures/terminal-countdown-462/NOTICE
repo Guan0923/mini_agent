@@ -1,0 +1,4 @@
+This task is adapted from Harbor Framework Terminal-Bench under Apache-2.0.
+See benchmarks/THIRD_PARTY_BENCHMARKS.md and the task source metadata for the
+upstream URL and pinned task-contract revision. The local fixture is rewritten
+for an offline Mini-Agent verifier.

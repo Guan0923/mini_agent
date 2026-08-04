@@ -69,6 +69,15 @@ export interface TaskInfo {
   name: string;
   capability: string;
   description: string;
+  difficulty: string;
+  source: {
+    benchmark: string;
+    task_id: string;
+    url: string;
+    source_revision: string;
+    license: string;
+    adaptation_notes: string;
+  };
   planner_modes: string[];
 }
 

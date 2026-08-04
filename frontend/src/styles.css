@@ -1072,11 +1072,42 @@ body {
   flex-shrink: 0;
 }
 
+.task-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.source-badge {
+  background: #f3f4f6;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
 .task-desc {
   color: var(--muted);
   font-size: 13px;
   margin: 8px 0 14px;
   line-height: 1.5;
+}
+
+.task-source {
+  color: var(--muted);
+  font-size: 12px;
+  margin: -4px 0 12px;
+}
+
+.task-source summary {
+  cursor: pointer;
+}
+
+.task-source p {
+  margin: 6px 0 0;
 }
 
 .task-actions {

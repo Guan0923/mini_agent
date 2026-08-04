@@ -1,0 +1,19 @@
+{
+  "users": {
+    "yusuf_rossi_19122": {"first_name": "Yusuf", "last_name": "Rossi", "zip": "19122"}
+  },
+  "orders": {
+    "#W2378156": {
+      "user_id": "yusuf_rossi_19122",
+      "status": "delivered",
+      "items": ["1151293680", "4983901480"],
+      "payment_method_id": "credit_card_9513926"
+    }
+  },
+  "products": {
+    "1656367028": {"name": "mechanical keyboard", "switch": "linear", "backlight": "rgb", "size": "full"},
+    "4896585277": {"name": "smart thermostat", "compatibility": "Apple HomeKit"},
+    "7706410293": {"name": "mechanical keyboard", "switch": "clicky", "backlight": "rgb", "size": "full"},
+    "7747408585": {"name": "smart thermostat", "compatibility": "Google Home"}
+  }
+}
