@@ -197,6 +197,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Run as a network client against a backend server (e.g. http://127.0.0.1:8000).",
     )
     parser.add_argument(
+        "--logout",
+        action="store_true",
+        help="Revoke the saved browser-authorized device session (network mode only).",
+    )
+    parser.add_argument(
         "--trust-project-mcp",
         action="store_true",
         help="Review and trust this workspace's project MCP configuration, then exit.",
@@ -211,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
         tool_budget["max_tool_calls"] = args.max_tool_calls
     if args.server:
         return _run_network_task(args)
+    if args.logout:
+        parser.error("--logout requires --server.")
     workspace = args.workspace
     paths = ClientPaths.from_home()
     try:
@@ -294,11 +301,21 @@ def _run_network_task(args) -> int:
                 value = input(f"  {question.get('question')}: ").strip()
                 answers[str(question.get("id"))] = [value] if value else [""]
             return {"choice": "answer", "answers": answers}
-        print(f"  tool: {request_data.get('tool')}  args: {json.dumps(request_data.get('arguments', {}), ensure_ascii=False)}")
+        print(
+            f"  tool: {request_data.get('tool')}  args: {json.dumps(request_data.get('arguments', {}), ensure_ascii=False)}"
+        )
         choice = input("  Approve and continue? [y/N] ").strip().lower()
         return {"choice": "continue" if choice in {"y", "yes"} else "cancel"}
 
     task = " ".join(args.task) if args.task else None
+    if args.logout:
+        try:
+            client.logout()
+            print("[client] logged out")
+            return 0
+        except ApiError as exc:
+            print(f"[client] error: {exc}")
+            return 1
     if task is None:
         print('Network mode needs a task: mini-agent --server URL "task"')
         return 1

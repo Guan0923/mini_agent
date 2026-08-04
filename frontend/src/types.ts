@@ -1,5 +1,15 @@
 export type Page = "chat" | "benchmark";
 
+export interface AuthUser {
+  id: string;
+  email: string;
+  legacy_owner: boolean;
+}
+
+export interface AuthResponse {
+  user: AuthUser;
+}
+
 export interface ToolEvent {
   kind: string;
   message: string;

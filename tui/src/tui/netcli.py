@@ -41,8 +41,7 @@ def _decide(request_data: dict) -> dict:
             answers[str(question.get("id"))] = [value] if value else [""]
         return {"choice": "answer", "answers": answers}
     print(
-        f"  tool: {request_data.get('tool')}  "
-        f"args: {json.dumps(request_data.get('arguments', {}), ensure_ascii=False)}"
+        f"  tool: {request_data.get('tool')}  args: {json.dumps(request_data.get('arguments', {}), ensure_ascii=False)}"
     )
     choice = input("  Approve and continue? [y/N] ").strip().lower()
     return {"choice": "continue" if choice in {"y", "yes"} else "cancel"}
@@ -56,12 +55,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skills", action="store_true", help="List the backend's discovered skills")
     parser.add_argument("--sessions", action="store_true", help="List the backend's saved sessions")
     parser.add_argument("--health", action="store_true", help="Check backend health")
+    parser.add_argument("--logout", action="store_true", help="Revoke the saved browser-authorized device session")
     args = parser.parse_args(argv)
 
     client = MiniAgentClient(args.server)
     try:
         if args.health:
             print(client.health())
+            return 0
+        if args.logout:
+            client.logout()
+            print("logged out")
             return 0
         if args.tools:
             tools = client.list_tools()

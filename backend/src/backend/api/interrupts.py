@@ -26,9 +26,10 @@ def auto_approve(request: InterruptRequest) -> InterruptDecision:
 
 
 class _PendingDecision:
-    def __init__(self) -> None:
+    def __init__(self, owner_id: str | None = None) -> None:
         self.event = threading.Event()
         self.result: dict[str, Any] = {}
+        self.owner_id = owner_id
 
 
 class DecisionRegistry:
@@ -38,15 +39,23 @@ class DecisionRegistry:
         self._pending: dict[str, _PendingDecision] = {}
         self._lock = threading.Lock()
 
-    def register(self, decision_id: str) -> _PendingDecision:
-        pending = _PendingDecision()
+    def register(self, decision_id: str, owner_id: str | None = None) -> _PendingDecision:
+        pending = _PendingDecision(owner_id)
         with self._lock:
             self._pending[decision_id] = pending
         return pending
 
-    def resolve(self, decision_id: str, decision: dict[str, Any]) -> bool:
+    def resolve(self, decision_id: str, decision: dict[str, Any], owner_id: str | None = None) -> bool:
         with self._lock:
-            pending = self._pending.pop(decision_id, None)
+            pending = self._pending.get(decision_id)
+            if pending is None:
+                return False
+            # Network approvals are scoped to the authenticated user.  The
+            # optional owner keeps the registry compatible with local/runtime
+            # callers that do not have a web identity.
+            if pending.owner_id is not None and pending.owner_id != owner_id:
+                return False
+            self._pending.pop(decision_id, None)
         if pending is None:
             return False
         pending.result.update(decision)
@@ -61,7 +70,7 @@ class DecisionRegistry:
 registry = DecisionRegistry()
 
 
-def make_interactive_interrupt(sink, *, timeout: float = 120.0):
+def make_interactive_interrupt(sink, *, timeout: float = 120.0, owner_id: str | None = None):
     """Build an interrupt handler that pauses the run and asks the client."""
 
     def decide(request: InterruptRequest) -> InterruptDecision:
@@ -80,7 +89,7 @@ def make_interactive_interrupt(sink, *, timeout: float = 120.0):
                 },
             }
         )
-        pending = registry.register(decision_id)
+        pending = registry.register(decision_id, owner_id)
         if not pending.event.wait(timeout=timeout):
             registry.discard(decision_id)
             return InterruptDecision("cancel")

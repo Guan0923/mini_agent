@@ -108,6 +108,7 @@ def run_one_task(
             planner_name=planner,
             settings=settings,
             project_mcp_enabled=True,
+            paths=sandbox.paths,
         )
         conversation = app.open_conversation()
         started = perf_counter()

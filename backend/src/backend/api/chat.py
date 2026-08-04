@@ -13,7 +13,7 @@ import json
 import queue
 import threading
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -21,6 +21,8 @@ from backend.providers import ModelConfigurationError
 from backend.runtime import RunnerSettings, build_application
 from backend.runtime.core.events import RuntimeEvent
 
+from .auth_dependencies import require_user
+from .auth_types import UserIdentity
 from .decisions import router as decisions_router
 from .interrupts import auto_approve, make_interactive_interrupt
 from .state import WebAppState
@@ -63,7 +65,7 @@ def _event_payload(event: RuntimeEvent) -> dict:
     return {}
 
 
-def _stream(state: WebAppState, prompt: str, interactive: bool):
+def _stream(state: WebAppState, identity: UserIdentity, prompt: str, interactive: bool):
     q: queue.Queue = queue.Queue()
     done = threading.Event()
     finished: dict = {}
@@ -77,16 +79,17 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
             finished.update(payload)
         q.put({"type": "event", "kind": item.kind, "message": item.message, "data": payload})
 
-    interrupt = make_interactive_interrupt(sink) if interactive else auto_approve
+    interrupt = make_interactive_interrupt(sink, owner_id=identity.id) if interactive else auto_approve
 
     def worker() -> None:
         app = None
         try:
             app = build_application(
-                state.chat_workspace,
+                state.user_workspace(identity.id),
                 planner_name="llm",
                 settings=RunnerSettings(log_full_messages=True),
                 project_mcp_enabled=False,
+                paths=state.user_paths(identity.id),
             )
             conversation = app.open_conversation()
             run_state = conversation.run_task(prompt, mode="agent", on_event=sink, interrupt=interrupt)
@@ -134,11 +137,13 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
 
 
 @router.post("/chat")
-async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
+async def chat(
+    body: ChatRequest, request: Request, identity: UserIdentity = Depends(require_user)
+) -> StreamingResponse:
     state: WebAppState = request.app.state.web
     if not body.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt 不能为空")
     return StreamingResponse(
-        _stream(state, body.prompt.strip(), body.interactive),
+        _stream(state, identity, body.prompt.strip(), body.interactive),
         media_type="text/event-stream",
     )

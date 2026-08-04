@@ -43,11 +43,13 @@ def build_application(
     settings: RunnerSettings | None = None,
     hooks: Iterable[AgentHook] = (),
     project_mcp_enabled: bool = True,
+    *,
+    paths: ClientPaths | None = None,
 ) -> AgentApplication:
-    paths = client_paths()
-    config = initialize_config(paths, workspace)
-    resolved = _settings_for(paths, settings)
-    store = SQLiteSessionStore(paths, str(section(config, "sync")["device_id"]))
+    resolved_paths = paths or client_paths()
+    config = initialize_config(resolved_paths, workspace)
+    resolved = _settings_for(resolved_paths, settings)
+    store = SQLiteSessionStore(resolved_paths, str(section(config, "sync")["device_id"]))
     files = WorkspaceFiles(workspace)
     runner = _build_subagent_runner(
         workspace,
@@ -57,7 +59,7 @@ def build_application(
         config,
         store,
         files,
-        paths,
+        resolved_paths,
         project_mcp_enabled,
     )
     try:
