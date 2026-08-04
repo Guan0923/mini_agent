@@ -6,10 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run"
   },
   "dependencies": {
-    "marked": "^12.0.2",
+    "katex": "^0.18.1",
+    "markdown-it": "^15.0.0",
+    "markdown-it-texmath": "^1.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -18,6 +21,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
     "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "vite": "^5.4.10",
+    "vitest": "^2.1.9"
   }
 }

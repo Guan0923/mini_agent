@@ -12,6 +12,8 @@ import asyncio
 import json
 import queue
 import threading
+from collections.abc import Callable
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -32,6 +34,13 @@ router.include_router(decisions_router)
 class ChatRequest(BaseModel):
     prompt: str
     interactive: bool = False
+    session_id: str | None = None
+    mode: Literal["agent", "plan"] = "agent"
+    permission_mode: Literal["approval_for_me", "full_access"] | None = None
+
+
+class ResumeRequest(BaseModel):
+    permission_mode: Literal["approval_for_me", "full_access"] = "approval_for_me"
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -49,6 +58,8 @@ def _event_payload(event: RuntimeEvent) -> dict:
         return {"tool": data.get("tool"), "result": _truncate(event.message, 800)}
     if event.kind == "tool_failed":
         return {"tool": data.get("tool")}
+    if event.kind in {"plan", "plan_progress", "run_suspended", "run_resumed", "error"}:
+        return {key: data[key] for key in ("plan", "goal", "steps", "status", "reason") if key in data}
     if event.kind == "run_finished":
         return {
             "status": event.message,
@@ -63,7 +74,16 @@ def _event_payload(event: RuntimeEvent) -> dict:
     return {}
 
 
-def _stream(state: WebAppState, prompt: str, interactive: bool):
+def _stream(
+    state: WebAppState,
+    prompt: str,
+    *,
+    session_id: str | None,
+    mode: Literal["agent", "plan"],
+    interactive: bool,
+    permission_mode: Literal["approval_for_me", "full_access"] | None,
+    operation: Callable[[object, object, Callable], object] | None = None,
+):
     q: queue.Queue = queue.Queue()
     done = threading.Event()
     finished: dict = {}
@@ -77,7 +97,12 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
             finished.update(payload)
         q.put({"type": "event", "kind": item.kind, "message": item.message, "data": payload})
 
-    interrupt = make_interactive_interrupt(sink) if interactive else auto_approve
+    if permission_mode == "full_access":
+        interrupt = make_interactive_interrupt(sink, auto_approve_tools=True)
+    elif interactive or permission_mode == "approval_for_me":
+        interrupt = make_interactive_interrupt(sink)
+    else:
+        interrupt = auto_approve
 
     def worker() -> None:
         app = None
@@ -88,13 +113,24 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
                 settings=RunnerSettings(log_full_messages=True),
                 project_mcp_enabled=False,
             )
-            conversation = app.open_conversation()
-            run_state = conversation.run_task(prompt, mode="agent", on_event=sink, interrupt=interrupt)
+            conversation = app.open_conversation(session_id)
+            if operation is None:
+                run_state = conversation.run_task(prompt, mode=mode, on_event=sink, interrupt=interrupt)
+            else:
+                run_state = operation(conversation, interrupt, sink)
+            active_session = conversation.active_session
+            runtime = conversation.runtime
+            current_run = runtime.state.current_run if runtime is not None else None
             q.put(
                 {
                     "type": "done",
-                    "status": run_state.status,
-                    "final_answer": run_state.final_answer or "",
+                    "status": run_state.status if run_state is not None else "idle",
+                    "final_answer": (run_state.final_answer if run_state is not None else "") or "",
+                    "session_id": active_session.session_id if active_session is not None else session_id,
+                    "run_id": run_state.run_id
+                    if run_state is not None
+                    else (current_run.run_id if current_run else None),
+                    "mode": run_state.mode if run_state is not None else (current_run.mode if current_run else mode),
                     "metrics": {
                         "duration_ms": finished.get("duration_ms"),
                         "model_calls": finished.get("model_calls"),
@@ -139,6 +175,40 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
     if not body.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt 不能为空")
     return StreamingResponse(
-        _stream(state, body.prompt.strip(), body.interactive),
+        _stream(
+            state,
+            body.prompt.strip(),
+            session_id=body.session_id,
+            mode=body.mode,
+            interactive=body.interactive,
+            permission_mode=body.permission_mode,
+        ),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/sessions/{session_id}/resume")
+async def resume(session_id: str, body: ResumeRequest, request: Request) -> StreamingResponse:
+    """Resume a durable workflow through the same SSE contract as chat."""
+
+    state: WebAppState = request.app.state.web
+    from .sessions import _store
+
+    if _store(state).get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail=f"未知会话：{session_id}")
+
+    def operation(conversation, interrupt, sink):
+        return conversation.resume_session(session_id, on_event=sink, interrupt=interrupt)
+
+    return StreamingResponse(
+        _stream(
+            state,
+            "",
+            session_id=session_id,
+            mode="agent",
+            interactive=True,
+            permission_mode=body.permission_mode,
+            operation=operation,
+        ),
         media_type="text/event-stream",
     )
