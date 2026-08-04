@@ -324,7 +324,7 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
                 void send();
               }
             }}
-            placeholder="输入任务，按 Enter 发送（输入 / 可查看命令）"
+            placeholder="输入任务，按 Enter 发送"
             rows={1}
           />
           {busy ? (
