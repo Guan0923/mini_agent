@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_meta (
     session_id TEXT PRIMARY KEY, title TEXT NOT NULL, owner_device_id TEXT NOT NULL,
     remote_revision INTEGER NOT NULL DEFAULT 0, read_only INTEGER NOT NULL DEFAULT 0,
-    schema_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    schema_version INTEGER NOT NULL DEFAULT 2, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    client_id TEXT, archived_at TEXT, deleted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS session_runs (
     run_id TEXT PRIMARY KEY, task TEXT NOT NULL, status TEXT NOT NULL, workflow_id TEXT,
@@ -56,9 +57,15 @@ class SQLiteSchemaMixin:
             ("remote_revision", "INTEGER NOT NULL DEFAULT 0"),
             ("read_only", "INTEGER NOT NULL DEFAULT 0"),
             ("schema_version", "INTEGER NOT NULL DEFAULT 1"),
+            ("client_id", "TEXT"),
+            ("archived_at", "TEXT"),
+            ("deleted_at", "TEXT"),
         ):
             if name not in meta_columns:
                 connection.execute(f"ALTER TABLE session_meta ADD COLUMN {name} {definition}")
+        connection.execute(
+            "UPDATE session_meta SET schema_version=? WHERE schema_version < ?", (SCHEMA_VERSION, SCHEMA_VERSION)
+        )
         connection.execute(
             "UPDATE session_meta SET owner_device_id=? WHERE owner_device_id IS NULL OR owner_device_id=''",
             (self.device_id,),

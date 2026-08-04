@@ -98,6 +98,10 @@ class ConversationSessionController:
         session = self.session_store.get_session(session_id)
         if session is None:
             raise ValueError(f"Unknown session: {session_id}")
+        if session.deleted_at is not None:
+            raise ValueError("Deleted sessions cannot be opened.")
+        if session.archived_at is not None:
+            raise ValueError("Archived sessions must be restored before opening.")
         self.active_session = session
         self._ensure_runtime(session_id)
         assert self.runtime is not None

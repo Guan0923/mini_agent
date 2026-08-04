@@ -18,7 +18,7 @@ class SQLiteSyncMixin:
 
     def pending_sync_operations(self) -> list[dict[str, object]]:
         operations: list[dict[str, object]] = []
-        for summary in self.list_sessions():
+        for summary in self.list_sessions(state="all"):
             with self._connection(summary.session_id) as connection:
                 rows = connection.execute(
                     "SELECT operation_id,base_revision,kind,payload_json FROM sync_outbox "
@@ -44,7 +44,7 @@ class SQLiteSyncMixin:
         }
         if not by_id:
             return
-        for summary in self.list_sessions():
+        for summary in self.list_sessions(state="all"):
             with self._connection(summary.session_id) as connection:
                 for operation_id, revision in by_id.items():
                     row = connection.execute(
@@ -98,7 +98,8 @@ class SQLiteSyncMixin:
             self._clear_snapshot_tables(connection)
             connection.execute(
                 "INSERT INTO session_meta(session_id,title,owner_device_id,remote_revision,read_only,"
-                "schema_version,created_at,updated_at) VALUES (?,?,?,?,1,?,?,?)",
+                "schema_version,created_at,updated_at,client_id,archived_at,deleted_at) "
+                "VALUES (?,?,?,?,1,?,?,?,?,?,?)",
                 (
                     session_id,
                     str(meta.get("title") or DEFAULT_SESSION_TITLE),
@@ -107,6 +108,9 @@ class SQLiteSyncMixin:
                     int(snapshot.get("schema_version", SCHEMA_VERSION)),
                     str(meta.get("created_at") or utc_now()),
                     str(meta.get("updated_at") or utc_now()),
+                    str(meta["client_id"]) if meta.get("client_id") is not None else None,
+                    str(meta["archived_at"]) if meta.get("archived_at") is not None else None,
+                    str(meta["deleted_at"]) if meta.get("deleted_at") is not None else None,
                 ),
             )
             if isinstance(runtime, dict):
@@ -215,7 +219,9 @@ class SQLiteSyncMixin:
 
     @staticmethod
     def _export_snapshot(connection: sqlite3.Connection, session_id: str) -> dict[str, object]:
-        meta = connection.execute("SELECT title,owner_device_id,created_at,updated_at FROM session_meta").fetchone()
+        meta = connection.execute(
+            "SELECT title,owner_device_id,created_at,updated_at,client_id,archived_at,deleted_at FROM session_meta"
+        ).fetchone()
         if meta is None:
             raise ValueError(f"Unknown session: {session_id}")
         runtime = connection.execute("SELECT state_json FROM session_runtime").fetchone()
@@ -227,6 +233,9 @@ class SQLiteSyncMixin:
                 "owner_device_id": str(meta[1]),
                 "created_at": str(meta[2]),
                 "updated_at": str(meta[3]),
+                "client_id": str(meta[4]) if meta[4] is not None else None,
+                "archived_at": str(meta[5]) if meta[5] is not None else None,
+                "deleted_at": str(meta[6]) if meta[6] is not None else None,
             },
             "runtime": json.loads(str(runtime[0])) if runtime is not None else None,
         }

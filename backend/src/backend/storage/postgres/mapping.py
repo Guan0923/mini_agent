@@ -21,6 +21,9 @@ class SessionMappingMixin:
             title=str(row[1]),
             created_at=str(row[2]),
             updated_at=str(row[3]),
+            client_id=str(row[4]) if row[4] is not None else None,
+            archived_at=str(row[5]) if row[5] is not None else None,
+            deleted_at=str(row[6]) if row[6] is not None else None,
         )
 
     @staticmethod
@@ -33,6 +36,9 @@ class SessionMappingMixin:
             message_count=int(row[4]),
             last_run_id=str(row[5]) if row[5] is not None else None,
             last_run_status=str(row[6]) if row[6] is not None else None,
+            client_id=str(row[7]) if row[7] is not None else None,
+            archived_at=str(row[8]) if row[8] is not None else None,
+            deleted_at=str(row[9]) if row[9] is not None else None,
         )
 
     @staticmethod
@@ -45,7 +51,10 @@ class SessionMappingMixin:
                 s.updated_at,
                 COUNT(m.id) AS message_count,
                 r.run_id AS last_run_id,
-                r.status AS last_run_status
+                r.status AS last_run_status,
+                s.client_id,
+                s.archived_at,
+                s.deleted_at
             FROM sessions AS s
             LEFT JOIN session_messages AS m ON m.session_id = s.session_id
             LEFT JOIN session_runs AS r ON r.run_id = (
@@ -56,5 +65,6 @@ class SessionMappingMixin:
                 LIMIT 1
             )
             {where}
-            GROUP BY s.session_id, s.title, s.created_at, s.updated_at, r.run_id, r.status
+            GROUP BY s.session_id, s.title, s.created_at, s.updated_at, r.run_id, r.status,
+                s.client_id, s.archived_at, s.deleted_at
         """

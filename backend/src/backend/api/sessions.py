@@ -2,60 +2,292 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from .state import WebAppState
 
 router = APIRouter(prefix="/api")
 
 
+class SessionMessageInput(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(default="", max_length=100_000)
+
+
+class CreateSessionRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    client_id: str | None = Field(default=None, max_length=200)
+    messages: list[SessionMessageInput] = Field(default_factory=list, max_length=500)
+
+
+class RenameSessionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+class BranchRequest(BaseModel):
+    run_id: str | None = Field(default=None, max_length=200)
+    title: str | None = Field(default=None, max_length=120)
+    client_id: str | None = Field(default=None, max_length=200)
+    fallback_messages: list[SessionMessageInput] = Field(default_factory=list, max_length=500)
+
+
 def _store(state: WebAppState):
-    from backend.configuration import load_config, section
+    from backend.configuration import initialize_config, section
     from backend.storage.sqlite import SQLiteSessionStore
 
-    config = load_config(state.paths.config_file)
+    config = initialize_config(state.paths, state.chat_workspace)
     device_id = str(section(config, "sync")["device_id"])
     return SQLiteSessionStore(state.paths, device_id)
 
 
-@router.get("/sessions")
-def list_sessions(request: Request) -> list[dict]:
-    state: WebAppState = request.app.state.web
-    store = _store(state)
-    return [
-        {
-            "session_id": summary.session_id,
-            "title": summary.title,
-            "created_at": summary.created_at,
-            "updated_at": summary.updated_at,
-            "message_count": summary.message_count,
-            "last_run_status": summary.last_run_status,
-        }
-        for summary in store.list_sessions()
-    ]
-
-
-@router.get("/sessions/{session_id}")
-def get_session(session_id: str, request: Request) -> dict:
-    state: WebAppState = request.app.state.web
-    store = _store(state)
-    summary = store.get_session_summary(session_id)
-    if summary is None:
-        raise HTTPException(status_code=404, detail=f"未知会话：{session_id}")
+def _summary_payload(summary) -> dict:
     return {
         "session_id": summary.session_id,
         "title": summary.title,
         "created_at": summary.created_at,
         "updated_at": summary.updated_at,
         "message_count": summary.message_count,
+        "last_run_id": summary.last_run_id,
         "last_run_status": summary.last_run_status,
+        "client_id": summary.client_id,
+        "archived_at": summary.archived_at,
+        "deleted_at": summary.deleted_at,
     }
+
+
+def _require_summary(store, session_id: str):
+    summary = store.get_session_summary(session_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail=f"未知会话：{session_id}")
+    return summary
+
+
+def _require_active(store, session_id: str):
+    summary = _require_summary(store, session_id)
+    if summary.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="会话已删除，无法继续操作。")
+    if summary.archived_at is not None:
+        raise HTTPException(status_code=409, detail="会话已归档，请先恢复。")
+    return summary
+
+
+def _require_branchable(store, session_id: str):
+    summary = _require_active(store, session_id)
+    if summary.last_run_status == "running":
+        raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
+    return summary
+
+
+def _mutation_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, RuntimeError):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/sessions")
+def list_sessions(request: Request, state: Literal["active", "archived", "deleted", "all"] = "active") -> list[dict]:
+    app_state: WebAppState = request.app.state.web
+    store = _store(app_state)
+    return [_summary_payload(summary) for summary in store.list_sessions(state=state)]
+
+
+@router.post("/sessions")
+def create_session(body: CreateSessionRequest, request: Request) -> dict:
+    state: WebAppState = request.app.state.web
+    store = _store(state)
+    try:
+        if body.client_id:
+            existing = store.find_session_by_client_id(body.client_id)
+            if existing is not None:
+                summary = store.get_session_summary(existing.session_id)
+                assert summary is not None
+                return _summary_payload(summary)
+        if body.messages:
+            session = store.import_conversation(
+                body.title,
+                [message.model_dump() for message in body.messages],
+                client_id=body.client_id,
+            )
+        else:
+            session = store.create_session(body.title, client_id=body.client_id)
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+    summary = store.get_session_summary(session.session_id)
+    assert summary is not None
+    return _summary_payload(summary)
+
+
+@router.get("/sessions/{session_id}")
+def get_session(session_id: str, request: Request) -> dict:
+    state: WebAppState = request.app.state.web
+    store = _store(state)
+    return _summary_payload(_require_summary(store, session_id))
+
+
+@router.patch("/sessions/{session_id}")
+def rename_session(session_id: str, body: RenameSessionRequest, request: Request) -> dict:
+    state: WebAppState = request.app.state.web
+    store = _store(state)
+    try:
+        session = store.rename_session(session_id, body.title)
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+    summary = store.get_session_summary(session.session_id)
+    assert summary is not None
+    return _summary_payload(summary)
+
+
+@router.post("/sessions/{session_id}/archive")
+def archive_session(session_id: str, request: Request) -> dict:
+    state: WebAppState = request.app.state.web
+    store = _store(state)
+    _require_summary(store, session_id)
+    try:
+        session = store.archive_session(session_id)
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+    summary = store.get_session_summary(session.session_id)
+    assert summary is not None
+    return _summary_payload(summary)
+
+
+@router.post("/sessions/{session_id}/restore")
+def restore_session(session_id: str, request: Request) -> dict:
+    state: WebAppState = request.app.state.web
+    store = _store(state)
+    _require_summary(store, session_id)
+    try:
+        session = store.restore_session(session_id)
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+    summary = store.get_session_summary(session.session_id)
+    assert summary is not None
+    return _summary_payload(summary)
+
+
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str, request: Request) -> dict:
+    state: WebAppState = request.app.state.web
+    store = _store(state)
+    _require_summary(store, session_id)
+    try:
+        session = store.delete_session(session_id)
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+    summary = store.get_session_summary(session.session_id)
+    assert summary is not None
+    return _summary_payload(summary)
 
 
 @router.get("/sessions/{session_id}/messages")
 def get_session_messages(session_id: str, request: Request) -> list[dict]:
     state: WebAppState = request.app.state.web
     store = _store(state)
-    if store.get_session_summary(session_id) is None:
-        raise HTTPException(status_code=404, detail=f"未知会话：{session_id}")
+    _require_summary(store, session_id)
     return store.load_conversation(session_id)
+
+
+@router.get("/sessions/{session_id}/transcript")
+def get_session_transcript(session_id: str, request: Request) -> list[dict]:
+    """Return the Web projection while keeping the legacy messages endpoint stable."""
+
+    state: WebAppState = request.app.state.web
+    store = _store(state)
+    _require_summary(store, session_id)
+    records = store.load_conversation_records(session_id)
+
+    result: list[dict] = []
+    for record in records:
+        run_id = str(record["run_id"]) if record.get("run_id") else None
+        payload = {
+            "id": f"{session_id}:{record['id']}",
+            "run_id": run_id,
+            "role": record["role"],
+            "content": record["content"],
+            "events": [],
+        }
+        # Query by run rather than relying on event payloads to carry an ID.
+        # Older runtime records may predate the enriched event envelope.
+        events = store.load_runtime_messages(session_id, run_id=run_id) if run_id else []
+        if record["role"] == "assistant":
+            for event in events:
+                if event.kind in {"tool_call", "tool_result", "tool_failed"}:
+                    payload["events"].append({"kind": event.kind, "message": event.message, "data": dict(event.data)})
+                elif event.kind == "error":
+                    payload["error"] = event.message
+                elif event.kind == "run_finished":
+                    payload["status"] = str(event.data.get("status") or event.message)
+                    payload["metrics"] = {
+                        key: event.data.get(key)
+                        for key in ("duration_ms", "model_calls", "tool_calls", "active_skills")
+                        if event.data.get(key) is not None
+                    }
+                elif event.kind == "cancelled" and "status" not in payload:
+                    payload["status"] = str(event.data.get("status") or event.message or "cancelled")
+            if any(event.kind == "run_started" for event in events) and not any(
+                event.kind == "run_finished" for event in events
+            ):
+                payload["running"] = True
+        result.append(payload)
+    return result
+
+
+def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
+    title = body.title or (source.title if rewind else f"{source.title}（分支）")
+    client_id = body.client_id
+    target = None
+    try:
+        if body.run_id:
+            records = store.load_conversation_records(source.session_id)
+            if not any(str(record["run_id"]) == body.run_id for record in records):
+                raise ValueError("指定的 run 不属于当前会话。")
+            target = store.fork_run(body.run_id)
+            target = store.rename_session(target.session_id, title)
+            if client_id:
+                target = store.set_client_id(target.session_id, client_id)
+        else:
+            target = store.import_conversation(
+                title,
+                [message.model_dump() for message in body.fallback_messages],
+                client_id=client_id,
+                force_new=rewind,
+            )
+        if rewind:
+            try:
+                store.delete_session(source.session_id)
+            except Exception:
+                if target is not None:
+                    store.delete_session(target.session_id)
+                raise
+    except Exception:
+        raise
+    summary = store.get_session_summary(target.session_id)
+    assert summary is not None
+    return summary
+
+
+@router.post("/sessions/{session_id}/fork")
+def fork_session(session_id: str, body: BranchRequest, request: Request) -> dict:
+    state: WebAppState = request.app.state.web
+    store = _store(state)
+    source = _require_branchable(store, session_id)
+    try:
+        summary = _branch_session(store, source, body, rewind=False)
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+    return _summary_payload(summary)
+
+
+@router.post("/sessions/{session_id}/rewind")
+def rewind_session(session_id: str, body: BranchRequest, request: Request) -> dict:
+    state: WebAppState = request.app.state.web
+    store = _store(state)
+    source = _require_branchable(store, session_id)
+    try:
+        summary = _branch_session(store, source, body, rewind=True)
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+    return _summary_payload(summary)

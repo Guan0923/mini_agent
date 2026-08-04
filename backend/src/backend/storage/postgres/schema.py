@@ -52,7 +52,10 @@ class PostgresSchemaMixin:
                 session_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                client_id TEXT,
+                archived_at TEXT,
+                deleted_at TEXT
             )
             """,
             """
@@ -145,3 +148,11 @@ class PostgresSchemaMixin:
                     created_at TEXT NOT NULL, PRIMARY KEY (run_id, sequence))"""
                 )
                 connection.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (3, CURRENT_TIMESTAMP)")
+            if 4 not in applied:
+                for statement in (
+                    "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS client_id TEXT",
+                    "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived_at TEXT",
+                    "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS deleted_at TEXT",
+                ):
+                    connection.execute(statement)
+                connection.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (4, CURRENT_TIMESTAMP)")

@@ -54,6 +54,9 @@ class Session:
     title: str
     created_at: str
     updated_at: str
+    client_id: str | None = None
+    archived_at: str | None = None
+    deleted_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,21 @@ class SessionSummary:
     message_count: int
     last_run_id: str | None = None
     last_run_status: str | None = None
+    client_id: str | None = None
+    archived_at: str | None = None
+    deleted_at: str | None = None
+
+    @property
+    def is_active(self) -> bool:
+        return self.archived_at is None and self.deleted_at is None
+
+    @property
+    def is_archived(self) -> bool:
+        return self.archived_at is not None and self.deleted_at is None
+
+    @property
+    def is_deleted(self) -> bool:
+        return self.deleted_at is not None
 
 
 @dataclass(frozen=True)

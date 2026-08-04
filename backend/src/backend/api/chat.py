@@ -23,6 +23,7 @@ from backend.runtime.core.events import RuntimeEvent
 
 from .decisions import router as decisions_router
 from .interrupts import auto_approve, make_interactive_interrupt
+from .sessions import _require_active, _store
 from .state import WebAppState
 
 router = APIRouter(prefix="/api")
@@ -32,6 +33,7 @@ router.include_router(decisions_router)
 class ChatRequest(BaseModel):
     prompt: str
     interactive: bool = False
+    session_id: str | None = None
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -43,14 +45,16 @@ def _truncate(value: str, limit: int) -> str:
 def _event_payload(event: RuntimeEvent) -> dict:
     """A small, JSON-safe slice of an event's data, mirroring the TUI presenter."""
     data = event.data
+    identifiers = {key: data[key] for key in ("session_id", "run_id") if data.get(key) is not None}
     if event.kind == "tool_call":
-        return {"arguments": _truncate(json.dumps(data.get("arguments", {}), ensure_ascii=False), 600)}
+        return {**identifiers, "arguments": _truncate(json.dumps(data.get("arguments", {}), ensure_ascii=False), 600)}
     if event.kind == "tool_result":
-        return {"tool": data.get("tool"), "result": _truncate(event.message, 800)}
+        return {**identifiers, "tool": data.get("tool"), "result": _truncate(event.message, 800)}
     if event.kind == "tool_failed":
-        return {"tool": data.get("tool")}
+        return {**identifiers, "tool": data.get("tool")}
     if event.kind == "run_finished":
         return {
+            **identifiers,
             "status": event.message,
             "final_answer": _truncate(data.get("final_answer", ""), 6000),
             "duration_ms": data.get("duration_ms"),
@@ -59,11 +63,11 @@ def _event_payload(event: RuntimeEvent) -> dict:
             "active_skills": data.get("active_skills", []),
         }
     if event.kind in {"response_delta", "response_start", "thinking_delta"}:
-        return {"content": _truncate(event.message, 4000)}
-    return {}
+        return {**identifiers, "content": _truncate(event.message, 4000)}
+    return identifiers
 
 
-def _stream(state: WebAppState, prompt: str, interactive: bool):
+def _stream(state: WebAppState, prompt: str, interactive: bool, session_id: str | None = None):
     q: queue.Queue = queue.Queue()
     done = threading.Event()
     cancel_requested = threading.Event()
@@ -85,9 +89,7 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
             q.put(item)
 
     interrupt = (
-        make_interactive_interrupt(sink, cancel_requested=cancel_requested.is_set)
-        if interactive
-        else auto_approve
+        make_interactive_interrupt(sink, cancel_requested=cancel_requested.is_set) if interactive else auto_approve
     )
 
     def worker() -> None:
@@ -99,7 +101,7 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
                 settings=RunnerSettings(log_full_messages=True),
                 project_mcp_enabled=False,
             )
-            conversation = app.open_conversation()
+            conversation = app.open_conversation(session_id) if session_id else app.open_conversation()
             run_state = conversation.run_task(
                 prompt,
                 mode="agent",
@@ -118,6 +120,10 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
                         "tool_calls": finished.get("tool_calls"),
                         "active_skills": finished.get("active_skills", []),
                     },
+                    "session_id": conversation.active_session.session_id
+                    if getattr(conversation, "active_session", None) is not None
+                    else session_id,
+                    "run_id": run_state.run_id,
                 }
             )
         except ModelConfigurationError as exc:
@@ -160,7 +166,11 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
     state: WebAppState = request.app.state.web
     if not body.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt 不能为空")
+    if body.session_id:
+        summary = _require_active(_store(state), body.session_id)
+        if summary.last_run_status == "running":
+            raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
     return StreamingResponse(
-        _stream(state, body.prompt.strip(), body.interactive),
+        _stream(state, body.prompt.strip(), body.interactive, body.session_id),
         media_type="text/event-stream",
     )

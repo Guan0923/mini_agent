@@ -14,7 +14,7 @@ class SQLiteForkMixin:
 
     def list_forkable_runs(self) -> list[dict[str, str]]:
         result: list[dict[str, str]] = []
-        for summary in self.list_sessions():
+        for summary in self.list_sessions(state="all"):
             with self._connection(summary.session_id) as connection:
                 rows = connection.execute(
                     "SELECT s.run_id,s.task,s.status,s.updated_at FROM session_runs AS s "
@@ -33,7 +33,9 @@ class SQLiteForkMixin:
         return sorted(result, key=lambda item: item["updated_at"], reverse=True)
 
     def fork_run(self, run_id: str) -> Session:
-        for summary in self.list_sessions():
+        # Forking is an audit operation; a run remains forkable after its
+        # source session has been archived or soft-deleted.
+        for summary in self.list_sessions(state="all"):
             with self._connection(summary.session_id) as source:
                 row = source.execute("SELECT status, state_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
             if row is None:
