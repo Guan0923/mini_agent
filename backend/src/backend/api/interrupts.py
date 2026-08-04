@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import threading
 import uuid
+from collections.abc import Callable
+from time import monotonic
 from typing import Any
 
 from backend.runtime.core.contracts import InterruptDecision, InterruptRequest
@@ -61,7 +63,12 @@ class DecisionRegistry:
 registry = DecisionRegistry()
 
 
-def make_interactive_interrupt(sink, *, timeout: float = 120.0):
+def make_interactive_interrupt(
+    sink,
+    *,
+    timeout: float = 120.0,
+    cancel_requested: Callable[[], bool] | None = None,
+):
     """Build an interrupt handler that pauses the run and asks the client."""
 
     def decide(request: InterruptRequest) -> InterruptDecision:
@@ -81,7 +88,17 @@ def make_interactive_interrupt(sink, *, timeout: float = 120.0):
             }
         )
         pending = registry.register(decision_id)
-        if not pending.event.wait(timeout=timeout):
+        deadline = monotonic() + timeout
+        while True:
+            if pending.event.wait(timeout=min(0.1, max(0.0, deadline - monotonic()))):
+                break
+            if cancel_requested is not None and cancel_requested():
+                registry.discard(decision_id)
+                return InterruptDecision("cancel")
+            if monotonic() >= deadline:
+                registry.discard(decision_id)
+                return InterruptDecision("cancel")
+        if cancel_requested is not None and cancel_requested():
             registry.discard(decision_id)
             return InterruptDecision("cancel")
         choice = str(pending.result.get("choice", "cancel"))

@@ -66,9 +66,12 @@ def _event_payload(event: RuntimeEvent) -> dict:
 def _stream(state: WebAppState, prompt: str, interactive: bool):
     q: queue.Queue = queue.Queue()
     done = threading.Event()
+    cancel_requested = threading.Event()
     finished: dict = {}
 
     def sink(item) -> None:
+        if cancel_requested.is_set():
+            return
         if isinstance(item, dict):
             q.put(item)
             return
@@ -77,7 +80,15 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
             finished.update(payload)
         q.put({"type": "event", "kind": item.kind, "message": item.message, "data": payload})
 
-    interrupt = make_interactive_interrupt(sink) if interactive else auto_approve
+    def enqueue_terminal(item: dict) -> None:
+        if not cancel_requested.is_set():
+            q.put(item)
+
+    interrupt = (
+        make_interactive_interrupt(sink, cancel_requested=cancel_requested.is_set)
+        if interactive
+        else auto_approve
+    )
 
     def worker() -> None:
         app = None
@@ -89,8 +100,14 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
                 project_mcp_enabled=False,
             )
             conversation = app.open_conversation()
-            run_state = conversation.run_task(prompt, mode="agent", on_event=sink, interrupt=interrupt)
-            q.put(
+            run_state = conversation.run_task(
+                prompt,
+                mode="agent",
+                on_event=sink,
+                interrupt=interrupt,
+                cancel_requested=cancel_requested.is_set,
+            )
+            enqueue_terminal(
                 {
                     "type": "done",
                     "status": run_state.status,
@@ -104,9 +121,9 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
                 }
             )
         except ModelConfigurationError as exc:
-            q.put({"type": "error", "message": f"模型未配置：{exc}"})
+            enqueue_terminal({"type": "error", "message": f"模型未配置：{exc}"})
         except Exception as exc:
-            q.put({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+            enqueue_terminal({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         finally:
             if app is not None:
                 try:
@@ -118,17 +135,22 @@ def _stream(state: WebAppState, prompt: str, interactive: bool):
     threading.Thread(target=worker, daemon=True).start()
 
     async def generator():
-        while True:
-            try:
-                item = q.get_nowait()
-            except queue.Empty:
-                if done.is_set():
+        try:
+            while True:
+                try:
+                    item = q.get_nowait()
+                except queue.Empty:
+                    if done.is_set():
+                        break
+                    await asyncio.sleep(0.05)
+                    continue
+                if item is None:
                     break
-                await asyncio.sleep(0.05)
-                continue
-            if item is None:
-                break
-            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        finally:
+            # A closed browser/TUI response is the cancellation signal for the
+            # associated runtime.  Normal completion is harmlessly idempotent.
+            cancel_requested.set()
 
     return generator()
 

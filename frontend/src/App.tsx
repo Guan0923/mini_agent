@@ -10,11 +10,27 @@ function loadConversations(): Conversation[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as Conversation[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((value): value is Conversation => {
+        if (!value || typeof value !== "object") return false;
+        const candidate = value as Partial<Conversation>;
+        return typeof candidate.id === "string" && Array.isArray(candidate.messages);
+      })
+      .map((conversation) => ({
+        ...conversation,
+        messages: conversation.messages.map((message) =>
+          message.running
+            ? { ...message, running: false, status: message.status ?? "上次运行已中断" }
+            : message,
+        ),
+      }));
   } catch {
     return [];
   }
 }
+
+export { loadConversations };
 
 export default function App() {
   const [page, setPage] = useState<Page>("chat");

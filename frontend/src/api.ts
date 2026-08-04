@@ -78,7 +78,7 @@ export async function streamChat(
   prompt: string,
   onMessage: (m: StreamMessage) => void,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<"completed" | "aborted"> {
   let res: Response;
   try {
     res = await fetch("/api/chat", {
@@ -88,17 +88,16 @@ export async function streamChat(
       signal,
     });
   } catch (err) {
-    if ((err as Error).name === "AbortError") return;
-    onMessage({ type: "error", error: String((err as Error).message ?? err) });
-    return;
+    if ((err as Error).name === "AbortError" || signal.aborted) return "aborted";
+    throw new Error(String((err as Error).message ?? err));
   }
   if (!res.ok || !res.body) {
-    onMessage({ type: "error", error: await errorFrom(res) });
-    return;
+    throw new Error(await errorFrom(res));
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let terminal = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -111,7 +110,9 @@ export async function streamChat(
         for (const line of block.split("\n")) {
           if (!line.startsWith("data: ")) continue;
           try {
-            onMessage(JSON.parse(line.slice(6)) as StreamMessage);
+            const message = JSON.parse(line.slice(6)) as StreamMessage;
+            if (message.type === "done" || message.type === "error") terminal = true;
+            onMessage(message);
           } catch {
             /* ignore malformed frames */
           }
@@ -119,7 +120,12 @@ export async function streamChat(
       }
     }
   } catch (err) {
-    if ((err as Error).name === "AbortError") return;
-    onMessage({ type: "error", error: String((err as Error).message ?? err) });
+    if ((err as Error).name === "AbortError" || signal.aborted) return "aborted";
+    throw new Error(String((err as Error).message ?? err));
+  } finally {
+    reader.releaseLock();
   }
+  if (signal.aborted) return "aborted";
+  if (!terminal) throw new Error("SSE stream unexpectedly ended before completion");
+  return "completed";
 }

@@ -98,17 +98,21 @@ function AssistantMessage({ msg }: { msg: ChatMessage }) {
         ) : msg.content ? (
           <Markdown text={msg.content} />
         ) : msg.running ? (
-          <div className="thinking">
+          <div className="thinking" role="status" aria-label="思考中">
             <span className="dot" />
             <span className="dot" />
             <span className="dot" />
           </div>
         ) : null}
-        {msg.metrics && msg.metrics.duration_ms != null && (
+        {(msg.status || (msg.metrics && msg.metrics.duration_ms != null)) && (
           <div className="meta">
-            {msg.status ? `${msg.status} · ` : ""}
-            {(msg.metrics.duration_ms / 1000).toFixed(1)}s · {msg.metrics.model_calls ?? 0} 次模型调用 ·{" "}
-            {msg.metrics.tool_calls ?? 0} 次工具调用
+            {msg.status ?? ""}
+            {msg.status && msg.metrics && msg.metrics.duration_ms != null ? " · " : ""}
+            {msg.metrics && msg.metrics.duration_ms != null
+              ? `${(msg.metrics.duration_ms / 1000).toFixed(1)}s · ${msg.metrics.model_calls ?? 0} 次模型调用 · ${
+                  msg.metrics.tool_calls ?? 0
+                } 次工具调用`
+              : null}
           </div>
         )}
       </div>
@@ -119,7 +123,13 @@ function AssistantMessage({ msg }: { msg: ChatMessage }) {
 export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: Props) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const activeRef = useRef<{
+    conversationId: string;
+    messageId: string;
+    controller: AbortController;
+    cancelled: boolean;
+  } | null>(null);
+  const previousConversationIdRef = useRef<string | null>(conversation?.id ?? null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   const messages = conversation?.messages ?? [];
@@ -138,6 +148,41 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
     ta.style.height = "auto";
     ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
   }, [input]);
+
+  function updateMessage(
+    conversationId: string,
+    messageId: string,
+    fn: (message: ChatMessage) => ChatMessage,
+  ) {
+    onUpdate(conversationId, (current) => {
+      const index = current.messages.findIndex((message) => message.id === messageId);
+      if (index < 0 || current.messages[index].role !== "assistant") return current;
+      const messages = [...current.messages];
+      messages[index] = fn(messages[index]);
+      return { ...current, messages };
+    });
+  }
+
+  function stopActive(status = "已停止") {
+    const active = activeRef.current;
+    if (!active) return;
+    active.cancelled = true;
+    updateMessage(active.conversationId, active.messageId, (message) => ({
+      ...message,
+      running: false,
+      status,
+    }));
+    active.controller.abort();
+  }
+
+  useEffect(() => {
+    const previousId = previousConversationIdRef.current;
+    const currentId = conversation?.id ?? null;
+    if (previousId !== null && previousId !== currentId) stopActive();
+    previousConversationIdRef.current = currentId;
+  }, [conversation?.id]);
+
+  useEffect(() => () => stopActive(), []);
 
   // 没有会话时先创建一个（会复用未发送过消息的空对话），返回会话 id
   function ensureConv(): string {
@@ -200,30 +245,6 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
     }
   }
 
-  function updateLast(fn: (m: ChatMessage) => ChatMessage) {
-    if (!conversation) return;
-    const id = conversation.id;
-    onUpdate(id, (c) => {
-      const msgs = [...c.messages];
-      const i = msgs.length - 1;
-      if (i < 0 || msgs[i].role !== "assistant") return c;
-      msgs[i] = fn(msgs[i]);
-      return { ...c, messages: msgs };
-    });
-  }
-
-  function appendDelta(content: string) {
-    updateLast((m) => ({ ...m, content: m.content + content }));
-  }
-
-  function appendEvent(ev: ToolEvent) {
-    updateLast((m) => ({ ...m, events: [...m.events, ev] }));
-  }
-
-  function setFinal(fields: Partial<ChatMessage>) {
-    updateLast((m) => ({ ...m, ...fields }));
-  }
-
   async function send() {
     const prompt = input.trim();
     if (!prompt || busy) return;
@@ -245,44 +266,83 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
       messages: [...c.messages, userMsg, assistantMsg],
     }));
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+    const active = {
+      conversationId: convId,
+      messageId: assistantMsg.id,
+      controller: new AbortController(),
+      cancelled: false,
+    };
+    activeRef.current = active;
 
     try {
-      await streamChat(
+      const result = await streamChat(
         prompt,
         (m) => {
+          if (active.cancelled) return;
           if (m.type === "event") {
             const kind = m.kind ?? "";
             if (kind === "response_delta") {
               const content = (m.data?.content as string | undefined) ?? m.message ?? "";
-              if (content) appendDelta(content);
+              if (content) {
+                updateMessage(active.conversationId, active.messageId, (message) => ({
+                  ...message,
+                  content: message.content + content,
+                }));
+              }
             } else if (kind === "tool_call" || kind === "tool_result" || kind === "tool_failed") {
-              appendEvent({ kind, message: m.message ?? "", data: m.data });
-            } else if (kind === "run_finished") {
-              setFinal({ status: m.message });
+              updateMessage(active.conversationId, active.messageId, (message) => ({
+                ...message,
+                events: [...message.events, { kind, message: m.message ?? "", data: m.data }],
+              }));
+            } else if (kind === "run_finished" || kind === "cancelled") {
+              updateMessage(active.conversationId, active.messageId, (message) => ({
+                ...message,
+                status: m.message,
+              }));
             }
           } else if (m.type === "done") {
-            setFinal({
+            updateMessage(active.conversationId, active.messageId, (message) => ({
+              ...message,
               content: m.final_answer ?? "",
               status: m.status,
               metrics: m.metrics,
               running: false,
-            });
+            }));
           } else if (m.type === "error") {
-            setFinal({ error: m.error ?? "发生错误", running: false });
+            updateMessage(active.conversationId, active.messageId, (message) => ({
+              ...message,
+              error: m.error ?? m.message ?? "发生错误",
+              running: false,
+            }));
           }
         },
-        controller.signal,
+        active.controller.signal,
       );
+      if (result === "aborted") {
+        updateMessage(active.conversationId, active.messageId, (message) => ({
+          ...message,
+          running: false,
+          status: message.status ?? "已停止",
+        }));
+      }
+    } catch (error) {
+      if (!active.cancelled) {
+        updateMessage(active.conversationId, active.messageId, (message) => ({
+          ...message,
+          error: String((error as Error).message ?? error),
+          running: false,
+        }));
+      }
     } finally {
-      setBusy(false);
-      abortRef.current = null;
+      if (activeRef.current === active) {
+        setBusy(false);
+        activeRef.current = null;
+      }
     }
   }
 
   function stop() {
-    abortRef.current?.abort();
+    stopActive();
   }
 
   return (
