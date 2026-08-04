@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./ChatPage";
@@ -19,7 +19,17 @@ const baseConversation = (): Conversation => ({
   messages: [],
 });
 
-function Harness({ initial = baseConversation() }: { initial?: Conversation | null }) {
+function Harness({
+  initial = baseConversation(),
+  onEnsureSession,
+  onFork,
+  onRewind,
+}: {
+  initial?: Conversation | null;
+  onEnsureSession?: (id: string) => Promise<string>;
+  onFork?: (conversationId: string, messageId: string) => Promise<void>;
+  onRewind?: (conversationId: string, messageId: string) => Promise<string | undefined>;
+}) {
   const [conversation, setConversation] = React.useState<Conversation | null>(initial);
 
   return (
@@ -35,6 +45,9 @@ function Harness({ initial = baseConversation() }: { initial?: Conversation | nu
         return next.id;
       }}
       onNavigate={() => undefined}
+      onEnsureSession={onEnsureSession}
+      onFork={onFork}
+      onRewind={onRewind}
     />
   );
 }
@@ -44,6 +57,7 @@ import * as React from "react";
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("ChatPage run lifecycle", () => {
@@ -143,5 +157,57 @@ describe("ChatPage run lifecycle", () => {
     view.unmount();
 
     await waitFor(() => expect(aborted).toBe(true));
+  });
+
+  it("copies raw message text and invokes fork and rewind actions", async () => {
+    const onFork = vi.fn().mockResolvedValue(undefined);
+    const onRewind = vi.fn().mockResolvedValue("用户原文");
+    const initial: Conversation = {
+      id: "conversation-actions",
+      title: "操作测试",
+      messages: [
+        { id: "user-1", role: "user", content: "用户原文", events: [] },
+        { id: "assistant-1", role: "assistant", content: "Agent 原文", events: [], runId: "run-1" },
+      ],
+    };
+
+    const user = userEvent.setup();
+    render(<Harness initial={initial} onFork={onFork} onRewind={onRewind} />);
+    const copyButtons = screen.getAllByRole("button", { name: "复制" });
+    await user.click(copyButtons[0]);
+    expect(screen.getByText("已复制")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Fork" }));
+    expect(onFork).toHaveBeenCalledWith("conversation-actions", "assistant-1");
+    await user.click(screen.getByRole("button", { name: "回溯" }));
+    expect(onRewind).toHaveBeenCalledWith("conversation-actions", "user-1");
+    expect(screen.getByPlaceholderText("输入任务，按 Enter 发送")).toHaveValue("用户原文");
+  });
+
+  it("passes an existing backend session to streamChat and records stream identifiers", async () => {
+    mocks.streamChat.mockImplementation(
+      (_prompt: string, onMessage: (message: StreamMessage) => void, _signal: AbortSignal, sessionId?: string) => {
+        expect(sessionId).toBe("session-existing");
+        onMessage({ type: "done", status: "completed", final_answer: "已完成", session_id: sessionId, run_id: "run-new" });
+        return Promise.resolve("completed" as const);
+      },
+    );
+    const initial: Conversation = {
+      id: "conversation-session",
+      title: "已有会话",
+      sessionId: "session-existing",
+      messagesLoaded: true,
+      messages: [],
+    };
+    const user = userEvent.setup();
+    render(<Harness initial={initial} />);
+    await user.type(screen.getByPlaceholderText("输入任务，按 Enter 发送"), "继续提问");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("已完成")).toBeInTheDocument();
+    expect(mocks.streamChat).toHaveBeenCalledWith(
+      "继续提问",
+      expect.any(Function),
+      expect.any(AbortSignal),
+      "session-existing",
+    );
   });
 });

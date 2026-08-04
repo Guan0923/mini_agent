@@ -1,4 +1,4 @@
-import type { SkillInfo, StreamMessage, TaskInfo, ToolInfo } from "./types";
+import type { ChatMessage, Conversation, SkillInfo, StreamMessage, TaskInfo, ToolInfo } from "./types";
 
 async function errorFrom(res: Response): Promise<string> {
   try {
@@ -54,18 +54,103 @@ export interface SessionInfo {
   created_at: string;
   updated_at: string;
   message_count: number;
+  last_run_id?: string | null;
   last_run_status: string | null;
+  client_id?: string | null;
+  archived_at?: string | null;
+  deleted_at?: string | null;
 }
 
-export async function listSessions(): Promise<SessionInfo[]> {
-  const res = await fetch("/api/sessions");
+export async function listSessions(state: "active" | "archived" | "deleted" | "all" = "active"): Promise<SessionInfo[]> {
+  const res = await fetch(`/api/sessions?state=${encodeURIComponent(state)}`);
   if (!res.ok) throw new Error(await errorFrom(res));
   return res.json();
 }
 
 export interface SessionMessage {
-  role: string;
+  id?: string;
+  run_id?: string | null;
+  role: "user" | "assistant";
   content: string;
+  events?: ChatMessage["events"];
+  status?: string;
+  metrics?: ChatMessage["metrics"];
+  error?: string;
+  running?: boolean;
+}
+
+export async function createSession(
+  title: string,
+  clientId: string,
+  messages: Array<Pick<ChatMessage, "role" | "content">> = [],
+): Promise<SessionInfo> {
+  const res = await fetch("/api/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, client_id: clientId, messages }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function renameSession(sessionId: string, title: string): Promise<SessionInfo> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function archiveSession(sessionId: string): Promise<SessionInfo> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, { method: "POST" });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function restoreSession(sessionId: string): Promise<SessionInfo> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/restore`, { method: "POST" });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function deleteSession(sessionId: string): Promise<SessionInfo> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function forkSession(
+  sessionId: string,
+  runId: string | undefined,
+  title: string,
+  clientId: string,
+  fallbackMessages: Array<Pick<ChatMessage, "role" | "content">>,
+): Promise<SessionInfo> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_id: runId, title, client_id: clientId, fallback_messages: fallbackMessages }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function rewindSession(
+  sessionId: string,
+  runId: string | undefined,
+  title: string,
+  clientId: string,
+  fallbackMessages: Array<Pick<ChatMessage, "role" | "content">>,
+): Promise<SessionInfo> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/rewind`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_id: runId, title, client_id: clientId, fallback_messages: fallbackMessages }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
 }
 
 export async function getSessionMessages(sessionId: string): Promise<SessionMessage[]> {
@@ -74,17 +159,24 @@ export async function getSessionMessages(sessionId: string): Promise<SessionMess
   return res.json();
 }
 
+export async function getSessionTranscript(sessionId: string): Promise<SessionMessage[]> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
 export async function streamChat(
   prompt: string,
   onMessage: (m: StreamMessage) => void,
   signal: AbortSignal,
+  sessionId?: string,
 ): Promise<"completed" | "aborted"> {
   let res: Response;
   try {
     res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, ...(sessionId ? { session_id: sessionId } : {}) }),
       signal,
     });
   } catch (err) {

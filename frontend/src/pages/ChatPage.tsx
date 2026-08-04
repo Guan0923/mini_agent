@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { marked } from "marked";
 import { listSessions, listSkills, listTools, streamChat } from "../api";
-import type { ChatMessage, Conversation, Metrics, Page, ToolEvent } from "../types";
+import type { ChatMessage, Conversation, Page, ToolEvent } from "../types";
 
 interface Props {
   conversation: Conversation | null;
   onUpdate: (id: string, updater: (c: Conversation) => Conversation) => void;
   onNew: () => string;
   onNavigate: (page: Page) => void;
+  onEnsureSession?: (id: string) => Promise<string>;
+  onFork?: (conversationId: string, messageId: string) => Promise<void>;
+  onRewind?: (conversationId: string, messageId: string) => Promise<string | undefined>;
 }
 
 interface Command {
@@ -81,7 +84,76 @@ function ToolLine({ ev }: { ev: ToolEvent }) {
   return null;
 }
 
-function AssistantMessage({ msg }: { msg: ChatMessage }) {
+async function copyText(value: string): Promise<void> {
+  const clipboard = typeof window !== "undefined" ? window.navigator.clipboard : navigator.clipboard;
+  if (clipboard?.writeText) {
+    await clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("浏览器拒绝了复制操作");
+}
+
+function MessageActions({
+  msg,
+  busy,
+  onFork,
+  onRewind,
+}: {
+  msg: ChatMessage;
+  busy: boolean;
+  onFork?: () => void;
+  onRewind?: () => void;
+}) {
+  const [feedback, setFeedback] = useState<string | null>(null);
+
+  async function copy() {
+    if (!msg.content) return;
+    try {
+      await copyText(msg.content);
+      setFeedback("已复制");
+      window.setTimeout(() => setFeedback(null), 1400);
+    } catch {
+      setFeedback("复制失败");
+      window.setTimeout(() => setFeedback(null), 1800);
+    }
+  }
+
+  return (
+    <div className="message-actions" aria-label={`${msg.role === "user" ? "用户" : "Agent"}消息操作`}>
+      <button type="button" onClick={() => void copy()} disabled={!msg.content} aria-label="复制">
+        {feedback ?? "复制"}
+      </button>
+      {onRewind && (
+        <button type="button" onClick={onRewind} disabled={busy} aria-label="回溯">
+          回溯
+        </button>
+      )}
+      {onFork && (
+        <button type="button" onClick={onFork} disabled={busy || msg.running || !msg.content} aria-label="Fork">
+          Fork
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AssistantMessage({
+  msg,
+  busy,
+  onFork,
+}: {
+  msg: ChatMessage;
+  busy: boolean;
+  onFork?: () => void;
+}) {
   return (
     <div className="message assistant">
       <div className="avatar">A</div>
@@ -98,7 +170,7 @@ function AssistantMessage({ msg }: { msg: ChatMessage }) {
         ) : msg.content ? (
           <Markdown text={msg.content} />
         ) : msg.running ? (
-          <div className="thinking" role="status" aria-label="思考中">
+          <div className="thinking" role="status" aria-label="思考中" data-state="thinking" aria-live="polite">
             <span className="dot" />
             <span className="dot" />
             <span className="dot" />
@@ -115,12 +187,21 @@ function AssistantMessage({ msg }: { msg: ChatMessage }) {
               : null}
           </div>
         )}
+        <MessageActions msg={msg} busy={busy} onFork={onFork} />
       </div>
     </div>
   );
 }
 
-export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: Props) {
+export default function ChatPage({
+  conversation,
+  onUpdate,
+  onNew,
+  onNavigate,
+  onEnsureSession,
+  onFork,
+  onRewind,
+}: Props) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const activeRef = useRef<{
@@ -156,11 +237,15 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
   ) {
     onUpdate(conversationId, (current) => {
       const index = current.messages.findIndex((message) => message.id === messageId);
-      if (index < 0 || current.messages[index].role !== "assistant") return current;
+      if (index < 0) return current;
       const messages = [...current.messages];
       messages[index] = fn(messages[index]);
       return { ...current, messages };
     });
+  }
+
+  function updateSession(conversationId: string, sessionId: string) {
+    onUpdate(conversationId, (current) => ({ ...current, sessionId, messagesLoaded: true }));
   }
 
   function stopActive(status = "已停止") {
@@ -248,10 +333,24 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
   async function send() {
     const prompt = input.trim();
     if (!prompt || busy) return;
+    const existingConversation = conversation;
+    const convId = ensureConv();
+    let sessionId = existingConversation?.sessionId;
     setInput("");
     setBusy(true);
-    // 没有会话时先创建（复用空对话），发消息才算真正开始一个对话
-    const convId = ensureConv();
+
+    // A persisted conversation must be opened before the new prompt is sent;
+    // otherwise the runtime would create a separate one-turn session.
+    if (!sessionId && existingConversation && onEnsureSession) {
+      try {
+        sessionId = await onEnsureSession(convId);
+      } catch {
+        setInput(prompt);
+        setBusy(false);
+        return;
+      }
+    }
+
     const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [] };
     const assistantMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -271,6 +370,7 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
       messageId: assistantMsg.id,
       controller: new AbortController(),
       cancelled: false,
+      sessionId,
     };
     activeRef.current = active;
 
@@ -279,6 +379,15 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
         prompt,
         (m) => {
           if (active.cancelled) return;
+          const eventSessionId = m.session_id ?? (typeof m.data?.session_id === "string" ? m.data.session_id : undefined);
+          const eventRunId = m.run_id ?? (typeof m.data?.run_id === "string" ? m.data.run_id : undefined);
+          if (eventSessionId) {
+            active.sessionId = eventSessionId;
+            updateSession(active.conversationId, eventSessionId);
+          }
+          if (eventRunId) {
+            updateMessage(active.conversationId, active.messageId, (message) => ({ ...message, runId: eventRunId }));
+          }
           if (m.type === "event") {
             const kind = m.kind ?? "";
             if (kind === "response_delta") {
@@ -297,13 +406,21 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
             } else if (kind === "run_finished" || kind === "cancelled") {
               updateMessage(active.conversationId, active.messageId, (message) => ({
                 ...message,
-                status: m.message,
+                status: m.message ?? (typeof m.data?.status === "string" ? m.data.status : message.status),
+                metrics: m.data
+                  ? {
+                      duration_ms: typeof m.data.duration_ms === "number" ? m.data.duration_ms : message.metrics?.duration_ms,
+                      model_calls: typeof m.data.model_calls === "number" ? m.data.model_calls : message.metrics?.model_calls,
+                      tool_calls: typeof m.data.tool_calls === "number" ? m.data.tool_calls : message.metrics?.tool_calls,
+                      active_skills: Array.isArray(m.data.active_skills) ? (m.data.active_skills as Array<{ name?: string }>) : message.metrics?.active_skills,
+                    }
+                  : message.metrics,
               }));
             }
           } else if (m.type === "done") {
             updateMessage(active.conversationId, active.messageId, (message) => ({
               ...message,
-              content: m.final_answer ?? "",
+              content: m.final_answer ?? message.content,
               status: m.status,
               metrics: m.metrics,
               running: false,
@@ -317,6 +434,7 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
           }
         },
         active.controller.signal,
+        sessionId,
       );
       if (result === "aborted") {
         updateMessage(active.conversationId, active.messageId, (message) => ({
@@ -345,6 +463,19 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
     stopActive();
   }
 
+  async function rewindMessage(messageId: string) {
+    if (!conversation || !onRewind || busy) return;
+    const content = await onRewind(conversation.id, messageId);
+    if (content === undefined) return;
+    setInput(content);
+    window.setTimeout(() => taRef.current?.focus(), 0);
+  }
+
+  function forkMessage(messageId: string) {
+    if (!conversation || !onFork || busy) return;
+    void onFork(conversation.id, messageId);
+  }
+
   return (
     <div className="chat-page">
       <div className="chat-scroll">
@@ -357,10 +488,17 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
           messages.map((msg) =>
             msg.role === "user" ? (
               <div className="message user" key={msg.id}>
-                <div className="bubble">{msg.content}</div>
+                <div className="message-content">
+                  <div className="bubble">{msg.content}</div>
+                  <MessageActions
+                    msg={msg}
+                    busy={busy}
+                    onRewind={onRewind ? () => void rewindMessage(msg.id) : undefined}
+                  />
+                </div>
               </div>
             ) : (
-              <AssistantMessage key={msg.id} msg={msg} />
+              <AssistantMessage key={msg.id} msg={msg} busy={busy} onFork={onFork ? () => forkMessage(msg.id) : undefined} />
             ),
           )
         )}

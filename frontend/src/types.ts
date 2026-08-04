@@ -1,4 +1,4 @@
-export type Page = "chat" | "benchmark";
+export type Page = "chat" | "trash" | "benchmark";
 
 export interface ToolEvent {
   kind: string;
@@ -22,12 +22,18 @@ export interface ChatMessage {
   metrics?: Metrics;
   error?: string;
   running?: boolean;
+  runId?: string;
 }
 
 export interface Conversation {
   id: string;
   title: string;
   messages: ChatMessage[];
+  sessionId?: string;
+  clientId?: string;
+  archivedAt?: string;
+  deletedAt?: string;
+  messagesLoaded?: boolean;
 }
 
 export interface TaskInfo {
@@ -56,4 +62,6 @@ export interface StreamMessage {
   final_answer?: string;
   metrics?: Metrics;
   error?: string;
+  session_id?: string;
+  run_id?: string;
 }
