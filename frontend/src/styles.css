@@ -470,11 +470,24 @@ body {
   text-align: left;
 }
 
-.markdown .katex-display {
+.markdown .math-display,
+.markdown mjx-container[display="true"] {
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   padding: 4px 0;
+}
+
+.markdown .math-source {
+  overflow-wrap: anywhere;
+}
+
+.markdown .math-inline {
+  display: inline;
+}
+
+.markdown .math-display {
+  display: block;
 }
 
 .markdown a {
