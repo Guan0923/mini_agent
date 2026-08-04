@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..grading.programmatic import content_contains, final_answer_contains, files_exist, tool_used
+from ..grading.programmatic import content_contains, files_exist, final_answer_contains, tool_used
 from ..model import BenchmarkTask, Budgets, Seed, SeedFile
 
 _ALPHA = "First alpha line.\nSecond alpha line.\n"

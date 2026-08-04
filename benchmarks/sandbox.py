@@ -106,15 +106,10 @@ class Sandbox:
         mcp_dir = workspace / ".mini_agent"
         mcp_dir.mkdir(parents=True, exist_ok=True)
         (mcp_dir / "mcp.toml").write_text(
-            "[servers.{name}]\n"
-            "command = {command}\n"
-            "args = {args}\n"
-            "cwd = {cwd}\n".format(
-                name=seed.server_name,
-                command=json.dumps(sys.executable),
-                args=json.dumps([str(server_path)]),
-                cwd=json.dumps(str(workspace)),
-            ),
+            f"[servers.{seed.server_name}]\n"
+            f"command = {json.dumps(sys.executable)}\n"
+            f"args = {json.dumps([str(server_path)])}\n"
+            f"cwd = {json.dumps(str(workspace))}\n",
             encoding="utf-8",
         )
 

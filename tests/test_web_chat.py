@@ -44,6 +44,20 @@ class _BlockingConversation:
         return SimpleNamespace(status="cancelled", final_answer="", run_id="run-cancelled")
 
 
+class _CompletingConversation:
+    def run_task(self, _prompt: str, **kwargs: object) -> SimpleNamespace:
+        sink = kwargs["on_event"]
+        assert callable(sink)
+        sink(
+            RuntimeEvent(
+                "run_finished",
+                "completed",
+                {"final_answer": "finished answer", "duration_ms": 12.0, "model_calls": 1, "tool_calls": 0},
+            )
+        )
+        return SimpleNamespace(status="completed", final_answer="finished answer", run_id="run-completed")
+
+
 def test_closing_sse_stream_requests_runtime_cancellation(monkeypatch, tmp_path: Path) -> None:
     conversation = _BlockingConversation()
     app = _FakeApp(conversation)
@@ -81,3 +95,18 @@ def test_interactive_interrupt_wakes_when_connection_is_cancelled() -> None:
     assert result and getattr(result[0], "choice") == "cancel"
     decision_id = messages[0]["data"]["decision_id"]
     assert registry.resolve(decision_id, {"choice": "continue"}) is False
+
+
+def test_completed_sse_stream_delivers_done_payload(monkeypatch, tmp_path: Path) -> None:
+    app = _FakeApp(_CompletingConversation())
+    monkeypatch.setattr(chat, "build_application", lambda *_args, **_kwargs: app)
+    state = SimpleNamespace(chat_workspace=tmp_path)
+
+    async def scenario() -> list[str]:
+        stream = chat._stream(state, "finish me", False)
+        return [item async for item in stream]
+
+    items = asyncio.run(scenario())
+    assert any('"kind": "run_finished"' in item for item in items)
+    assert any('"type": "done"' in item and "finished answer" in item for item in items)
+    assert app.closed is True

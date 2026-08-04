@@ -43,6 +43,8 @@ def build_metrics(collector: EventCollector, state, duration_ms: float) -> RunMe
         completion_tokens=collector.completion_tokens,
         total_tokens=collector.total_tokens,
         active_skill_names=[skill.name for skill in state.active_skills],
+        subagent_completed=collector.subagent_completed,
+        subagent_failed=collector.subagent_failed,
     )
 
 

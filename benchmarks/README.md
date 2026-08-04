@@ -1,7 +1,7 @@
 # Mini-Agent Benchmark（精简版）
 
 给 mini-agent 出的一套"考试题"：把任务交给 agent 去做，然后自动判卷、算分、出成绩单。
-目前共 4 道题，覆盖 3 个能力（工具 / Skills / MCP），子代理题、AI 判卷、并行等留到后续版本。
+目前共 10 道题，覆盖 4 个能力（工具 / Skills / MCP / 子代理）。判卷全部使用确定性的程序化检查器；真实模型运行用于评估 agent，离线规则模式提供免费冒烟测试。
 
 ## 怎么跑
 
@@ -11,8 +11,8 @@
 # 查看有哪些题
 uv run python -m benchmarks.run --list
 
-# 免费离线冒烟：不调用模型，验证考试系统本身没写错（期望 score 1.0）
-uv run python -m benchmarks.run --task tools-read-file --planner rule
+# 免费离线冒烟：不调用模型，验证考试系统本身没写错（两题都应为 score 1.0）
+uv run python -m benchmarks.run --task tools-read-file --task tools-list-files --planner rule
 
 # 真实模型跑全部题
 uv run python -m benchmarks.run --all --output report.json
@@ -32,6 +32,15 @@ uv run python -m benchmarks.run --capability tools
 
 - `summary` —— 总分、及格率、各能力得分、平均耗时/ token
 - `tasks` —— 每道题的状态、分数、耗时、模型调用次数、token 用量、判卷明细
+
+## 当前覆盖
+
+- **工具**：读取文件、发现嵌套文件、跨文件汇总、精确搜索编辑、命令计算。
+- **Skills**：显式激活并遵守 Markdown 笔记与 release-notes 输出契约。
+- **MCP**：库存正常查询/汇总，以及未知 SKU 的安全处理。
+- **子代理**：两个独立读取任务的并行委派与父 agent 汇总。
+
+所有题目都在隔离 workspace 中运行。`rule` 模式仅支持标记为离线的确定性题目；其余题目需要 `llm`，真实运行会消耗模型调用预算。
 
 ## 怎么加新题
 

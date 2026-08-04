@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from ..model import CheckContext, CheckerVerdict, BenchmarkTask
+from ..model import BenchmarkTask, CheckContext, CheckerVerdict
 
 
 def run_checkers(task: BenchmarkTask, context: CheckContext) -> list[CheckerVerdict]:
@@ -77,6 +77,21 @@ def content_matches(relpath: str, regex: str) -> Callable[[CheckContext], Checke
     return _check
 
 
+def content_equals(relpath: str, expected: str) -> Callable[[CheckContext], CheckerVerdict]:
+    """Require a seeded or generated text file to have exactly one content value."""
+
+    def _check(context: CheckContext) -> CheckerVerdict:
+        path = context.workspace / relpath
+        if not path.exists():
+            return CheckerVerdict(0.0, detail=f"{relpath} does not exist")
+        actual = path.read_text(encoding="utf-8", errors="replace")
+        if actual == expected:
+            return CheckerVerdict(1.0, detail=f"{relpath} matches the expected content")
+        return CheckerVerdict(0.0, detail=f"{relpath} content differs from the expected value")
+
+    return _check
+
+
 def tool_used(name: str, *, minimum: int = 1) -> Callable[[CheckContext], CheckerVerdict]:
     def _check(context: CheckContext) -> CheckerVerdict:
         count = context.tool_calls_by_name.get(name, 0)
@@ -108,5 +123,25 @@ def skill_activated(name: str) -> Callable[[CheckContext], CheckerVerdict]:
         if name in active:
             return CheckerVerdict(1.0, detail=f"skill {name!r} activated")
         return CheckerVerdict(0.0, detail=f"skill {name!r} not activated (active: {active})")
+
+    return _check
+
+
+def subagents_completed(minimum: int = 1) -> Callable[[CheckContext], CheckerVerdict]:
+    def _check(context: CheckContext) -> CheckerVerdict:
+        count = context.metrics.subagent_completed
+        if count >= minimum:
+            return CheckerVerdict(1.0, detail=f"{count} subagents completed")
+        return CheckerVerdict(0.0, detail=f"{count} subagents completed (expected at least {minimum})")
+
+    return _check
+
+
+def subagents_failed(maximum: int = 0) -> Callable[[CheckContext], CheckerVerdict]:
+    def _check(context: CheckContext) -> CheckerVerdict:
+        count = context.metrics.subagent_failed
+        if count <= maximum:
+            return CheckerVerdict(1.0, detail=f"{count} subagents failed")
+        return CheckerVerdict(0.0, detail=f"{count} subagents failed (expected at most {maximum})")
 
     return _check

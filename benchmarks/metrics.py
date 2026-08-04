@@ -16,6 +16,8 @@ class RunMetrics:
     completion_tokens: int
     total_tokens: int
     active_skill_names: list[str]
+    subagent_completed: int = 0
+    subagent_failed: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)

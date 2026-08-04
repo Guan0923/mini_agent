@@ -41,6 +41,7 @@ function ResultCard({ result }: { result: Record<string, unknown> }) {
         <span>⏱ {(Number(metrics.duration_ms) / 1000).toFixed(1)}s</span>
         <span>🔄 {String(metrics.model_calls ?? 0)} 次模型</span>
         <span>🔧 {String(metrics.tool_calls ?? 0)} 次工具</span>
+        <span>👥 {String(metrics.subagent_completed ?? 0)} 个子代理完成</span>
         <span>📊 {String(metrics.total_tokens ?? 0)} tokens</span>
       </div>
       {verdicts.length > 0 && (
@@ -102,7 +103,7 @@ export default function BenchmarkPage() {
     <div className="benchmark-page">
       <header className="page-header">
         <h1>Benchmark 成绩单</h1>
-        <p>让 agent 完成一批任务并自动判卷，衡量它的工具 / 技能 / MCP 能力</p>
+        <p>让 agent 完成 10 道任务并自动判卷，衡量它的工具 / 技能 / MCP / 子代理能力</p>
         <div className="bench-toolbar">
           <div className="planner-select">
             <label>运行方式</label>

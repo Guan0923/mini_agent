@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 from ..model import BenchmarkTask
+from .mcp_extended import TASKS as _MCP_EXTENDED_TASKS
 from .mcp_mock import TASKS as _MCP_TASKS
 from .skills_basic import TASKS as _SKILLS_TASKS
+from .skills_extended import TASKS as _SKILLS_EXTENDED_TASKS
+from .subagents_basic import TASKS as _SUBAGENT_TASKS
+from .tools_extended import TASKS as _TOOLS_EXTENDED_TASKS
 from .tools_filesystem import TASKS as _TOOLS_TASKS
 
-ALL_TASKS: tuple[BenchmarkTask, ...] = (*_TOOLS_TASKS, *_SKILLS_TASKS, *_MCP_TASKS)
+ALL_TASKS: tuple[BenchmarkTask, ...] = (
+    *_TOOLS_TASKS,
+    *_TOOLS_EXTENDED_TASKS,
+    *_SKILLS_TASKS,
+    *_SKILLS_EXTENDED_TASKS,
+    *_MCP_TASKS,
+    *_MCP_EXTENDED_TASKS,
+    *_SUBAGENT_TASKS,
+)
 
 TASKS_BY_NAME: dict[str, BenchmarkTask] = {task.name: task for task in ALL_TASKS}
 

@@ -41,5 +41,6 @@ def print_summary(report: dict) -> None:
         print(
             f"  {task['task_name']:<24} status={status:<10} score={score} "
             f"duration={metrics['duration_ms']}ms calls={metrics['model_calls']} tokens={metrics['total_tokens']}"
+            f" subagents={metrics.get('subagent_completed', 0)}/{metrics.get('subagent_failed', 0)}"
             f"{('  ' + detail) if detail else ''}"
         )
