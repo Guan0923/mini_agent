@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-SOURCE = ROOT / "src"
+SOURCE = ROOT / "backend" / "src"
 
 
 def _module_imports(path: Path) -> set[str]:

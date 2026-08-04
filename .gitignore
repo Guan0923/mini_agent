@@ -31,5 +31,13 @@ logs/
 # Local editor settings
 .vscode/
 
+# Benchmark run artifacts
+benchmarks/output/
+
+# Web app
+frontend/node_modules/
+frontend/dist/
+webapp-data/
+
 # Local desktop task metadata
 .reasonix/

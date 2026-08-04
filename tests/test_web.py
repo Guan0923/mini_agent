@@ -206,3 +206,64 @@ def test_rule_planner_generates_web_tool_calls() -> None:
 
     assert (search.name, search.arguments) == ("web_search", {"query": "Python docs"})
     assert (fetch.name, fetch.arguments) == ("web_fetch", {"url": "https://example.com/docs"})
+
+
+from backend.tools.web.html import ReadableHtmlParser
+
+
+class _FakeSocket:
+    def __init__(self, peer: tuple[str, int]) -> None:
+        self._peer = peer
+
+    def getpeername(self) -> tuple[str, int]:
+        return self._peer
+
+
+class _FakeConnection:
+    def __init__(self, sock: _FakeSocket) -> None:
+        self.sock = sock
+
+
+class _FakeRaw:
+    def __init__(self, sock: _FakeSocket) -> None:
+        self._connection = _FakeConnection(sock)
+
+
+def test_html_parser_recovers_after_unclosed_ignored_tag() -> None:
+    parser = ReadableHtmlParser()
+    parser.feed("<p>before</p><nav>hidden<p>lost</p><p>after</p>")
+    parser.close()
+
+    assert "before" in parser.text
+    assert "after" in parser.text
+    assert "hidden" not in parser.text
+    assert "lost" not in parser.text
+
+
+def test_html_parser_unclosed_script_swallows_to_end_of_input() -> None:
+    parser = ReadableHtmlParser()
+    parser.feed("<p>kept</p><script>js code</p><p>dropped</p>")
+    parser.close()
+
+    assert "kept" in parser.text
+    assert "dropped" not in parser.text
+    assert "js code" not in parser.text
+
+
+def test_web_fetch_rejects_response_connected_to_non_public_peer() -> None:
+    response = FakeResponse(200, {"Content-Type": "text/plain"}, b"internal secret")
+    response.raw = _FakeRaw(_FakeSocket(("10.0.0.5", 443)))
+    session = FakeSession([response])
+
+    with pytest.raises(ToolError, match="non-public address"):
+        SafeWebFetcher(session=session, resolver=public_resolver).fetch("https://example.com/")
+
+
+def test_web_fetch_accepts_response_connected_to_public_peer() -> None:
+    response = FakeResponse(200, {"Content-Type": "text/plain"}, b"public content")
+    response.raw = _FakeRaw(_FakeSocket(("93.184.216.34", 443)))
+    session = FakeSession([response])
+
+    output = SafeWebFetcher(session=session, resolver=public_resolver).fetch("https://example.com/")
+
+    assert "public content" in output

@@ -1,62 +1,24 @@
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+# Workspace root for the three-tier mini-agent: backend (server), tui (client), frontend (client).
+[tool.uv.workspace]
+members = ["backend", "tui"]
 
-[project]
-name = "mini-agent"
-version = "0.1.0"
-description = "A terminal-first agent harness with durable workflows, Skills, MCP, and concurrent subagents."
-keywords = ["agent", "mcp", "skills", "subagents", "tui"]
-readme = "README.md"
-requires-python = ">=3.11"
-dependencies = [
-    "ddgr>=2.2,<3",
-    "huggingface-hub>=0.30,<2",
-    "jsonschema>=4.23,<5",
-    "mcp>=1.28,<2",
-    "mdit-py-plugins>=0.6,<1",
-    "pylatexenc>=2.10,<3",
-    "pyyaml>=6,<7",
-    "regex>=2024.11.6,<2027",
-    "requests>=2.31,<3",
-    "textual>=8.2,<9",
-    "tokenizers>=0.21,<1",
-]
+[tool.uv.sources]
+mini-agent-backend = { workspace = true }
 
-[project.optional-dependencies]
-server = [
-    "fastapi>=0.115,<1",
-    "uvicorn>=0.34,<1",
-    "psycopg[binary]>=3.2,<4",
-    "psycopg-pool>=3.2,<4",
-]
+[dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.6",
-    "fastapi>=0.115,<1",
     "httpx>=0.27,<1",
-    "psycopg[binary]>=3.2,<4",
-    "psycopg-pool>=3.2,<4",
 ]
-
-[project.scripts]
-mini-agent = "tui.cli:main"
-mini-agent-mcp = "backend.mcp.cli:main"
-mini-agent-sync-server = "backend.sync.cli:main"
 
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-ra --strict-config --strict-markers"
-pythonpath = ["src"]
+pythonpath = ["."]
 testpaths = ["tests"]
 xfail_strict = true
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-"backend.planning.prompts" = ["*.md"]
 
 [tool.coverage.run]
 branch = true

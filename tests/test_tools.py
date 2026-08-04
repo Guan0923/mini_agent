@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from backend.tools import ToolError, ToolRegistry, WorkspaceCommand
+from backend.tools import Tool, ToolError, ToolRegistry, WorkspaceCommand
 
 
 class FakeProcess:
@@ -137,3 +137,22 @@ def test_command_tool_requires_confirmation_and_validates_timeout(tmp_path: Path
     tools.invoke("run_command", {"command": "mkdir demo"}, confirmed=True)
     with pytest.raises(ToolError, match="between 1 and 120"):
         WorkspaceCommand(tmp_path, is_windows=False).run("mkdir demo", timeout_seconds=0)
+
+
+def test_registry_wraps_unexpected_handler_exceptions_as_tool_error() -> None:
+    def boom(**_arguments: Any) -> str:
+        raise RuntimeError("boom")
+
+    registry = ToolRegistry(
+        [
+            Tool(
+                "boom_tool",
+                "Always fails unexpectedly.",
+                boom,
+                {"type": "object", "properties": {}, "required": []},
+            )
+        ]
+    )
+
+    with pytest.raises(ToolError, match="RuntimeError: boom"):
+        registry.invoke("boom_tool", {})

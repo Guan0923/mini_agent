@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-agent-backend"
+version = "0.1.0"
+description = "Mini-Agent core runtime and FastAPI service (server tier)."
+keywords = ["agent", "mcp", "skills", "subagents"]
+requires-python = ">=3.11"
+dependencies = [
+    "ddgr>=2.2,<3",
+    "fastapi>=0.115,<1",
+    "huggingface-hub>=0.30,<2",
+    "jsonschema>=4.23,<5",
+    "mcp>=1.28,<2",
+    "mdit-py-plugins>=0.6,<1",
+    "pylatexenc>=2.10,<3",
+    "pyyaml>=6,<7",
+    "regex>=2024.11.6,<2027",
+    "requests>=2.31,<3",
+    "tokenizers>=0.21,<1",
+    "uvicorn>=0.34,<1",
+]
+
+[project.optional-dependencies]
+sync = [
+    "psycopg[binary]>=3.2,<4",
+    "psycopg-pool>=3.2,<4",
+]
+
+[project.scripts]
+mini-agent-mcp = "backend.mcp.cli:main"
+mini-agent-sync-server = "backend.sync.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"backend.planning.prompts" = ["*.md"]

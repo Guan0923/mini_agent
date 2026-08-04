@@ -149,3 +149,16 @@ def test_write_operations_reject_symbolic_links(tmp_path: Path) -> None:
     with pytest.raises(ToolError, match="Symbolic links"):
         WorkspaceFiles(tmp_path).write_file("link.txt", "changed", overwrite=True)
     assert target.read_text(encoding="utf-8") == "target"
+
+
+def test_glob_stops_walking_once_the_directory_bound_is_reached(tmp_path: Path) -> None:
+    class BoundedFiles(WorkspaceFiles):
+        _MAX_WALKED_FILES = 3
+
+    for index in range(10):
+        (tmp_path / f"file{index}.txt").write_text(str(index), encoding="utf-8")
+
+    result = BoundedFiles(tmp_path).glob("**/*.txt")
+
+    assert "directory search truncated" in result
+    assert "file9.txt" not in result

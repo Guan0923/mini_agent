@@ -2,6 +2,23 @@
 
 Mini-Agent keeps provider wire formats outside its execution model. Public pipeline methods accept one `AgentRuntime`; provider adapters translate between that runtime and vendor payloads.
 
+## Three-tier layout (deployment boundaries)
+
+The repository is split into three independent top-level packages that only talk over the network (no cross-package imports between clients and server):
+
+```text
+backend/        server tier  — core runtime + FastAPI service, port 8000
+tui/            client tier  — terminal UI, network client of the backend
+frontend/       client tier  — React (Vite), network client of the backend, port 5173
+```
+
+- `backend/` owns the runtime and the `backend.api` FastAPI service (`python -m backend.api`). The main API (chat, tools, skills, decisions, health) never imports the benchmark harness; benchmark routes live in a separately mounted sub-application at `/benchmark` (`backend.api.benchmark_app`).
+- `tui/` owns the terminal client. `tui.client.MiniAgentClient` streams `/api/chat` over SSE and resolves interactive approvals via `/api/decisions` — no backend imports on that path (`mini-agent --server <url> "task"`).
+- `frontend/` owns the React client and talks only to the backend's HTTP API through the Vite dev proxy.
+- Each tier runs independently (`scripts/dev.sh backend|frontend|tui`); `benchmarks/` is an optional harness imported by the benchmark sub-application, not by the main API.
+
+## Runtime
+
 ```text
 TUI -> ConversationService -> RuntimeRunner port -> AgentRunner(runtime) -> workflows -> planner / tools
                               |                         |             |

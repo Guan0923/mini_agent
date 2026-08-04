@@ -1,0 +1,232 @@
+"""The composition root for a local-first Mini-Agent client."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Literal
+
+from backend.configuration import ClientPaths, initialize_config, section
+from backend.mcp.client import ExternalMcpResources, start_external_tools
+from backend.mcp.config import McpSettings, McpTrustStore, prepare_mcp_plan
+from backend.planning import LLMPlanner, RuleBasedPlanner
+from backend.providers import LLMClient, ModelConfig
+from backend.skills import SkillCatalog
+from backend.storage.sqlite import SQLiteSessionStore
+from backend.sync import RequestsSyncTransport, SyncClient, SyncCoordinator
+from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry, delegation_tools
+
+from ..capability_settings import SkillSettings, SubagentSettings
+from ..conversation.references import FileReferenceExpander
+from ..core.config import RunnerSettings, log_full_messages_from_toml
+from ..core.hooks import AgentHook
+from ..execution.runner import AgentRunner
+from ..subagents import SubagentCoordinator
+from .services import AgentApplication
+
+PlannerName = Literal["llm", "rule"]
+
+
+def client_paths() -> ClientPaths:
+    return ClientPaths.from_home()
+
+
+def build_session_store(workspace: Path, paths: ClientPaths | None = None) -> SQLiteSessionStore:
+    resolved = paths or client_paths()
+    config = initialize_config(resolved, workspace)
+    return SQLiteSessionStore(resolved, str(section(config, "sync")["device_id"]))
+
+
+def build_application(
+    workspace: Path,
+    planner_name: PlannerName = "llm",
+    settings: RunnerSettings | None = None,
+    hooks: Iterable[AgentHook] = (),
+    project_mcp_enabled: bool = True,
+) -> AgentApplication:
+    paths = client_paths()
+    config = initialize_config(paths, workspace)
+    resolved = _settings_for(paths, settings)
+    store = SQLiteSessionStore(paths, str(section(config, "sync")["device_id"]))
+    files = WorkspaceFiles(workspace)
+    runner = _build_subagent_runner(
+        workspace,
+        planner_name,
+        resolved,
+        hooks,
+        config,
+        store,
+        files,
+        paths,
+        project_mcp_enabled,
+    )
+    try:
+        sync_coordinator = _build_sync_coordinator(config, store)
+    except Exception:
+        runner.close()
+        raise
+    return AgentApplication(runner, store, FileReferenceExpander(files), sync_coordinator)
+
+
+def build_runner(
+    workspace: Path,
+    planner_name: PlannerName = "llm",
+    settings: RunnerSettings | None = None,
+    hooks: Iterable[AgentHook] = (),
+    project_mcp_enabled: bool = True,
+) -> AgentRunner:
+    paths = client_paths()
+    config = initialize_config(paths, workspace)
+    return _build_subagent_runner(
+        workspace,
+        planner_name,
+        _settings_for(paths, settings),
+        hooks,
+        config,
+        paths=paths,
+        project_mcp_enabled=project_mcp_enabled,
+    )
+
+
+def _build_subagent_runner(
+    workspace: Path,
+    planner_name: PlannerName,
+    settings: RunnerSettings,
+    hooks: Iterable[AgentHook],
+    config: dict[str, object],
+    checkpoints: object | None = None,
+    files: WorkspaceFiles | None = None,
+    paths: ClientPaths | None = None,
+    project_mcp_enabled: bool = True,
+) -> AgentRunner:
+    resolved_paths = paths or client_paths()
+    skill_settings = SkillSettings.from_config(config)
+    subagent_settings = SubagentSettings.from_config(config)
+
+    def child_factory() -> AgentRunner:
+        return _build_runner(
+            workspace,
+            planner_name,
+            settings,
+            build_tool_registry(workspace),
+            hooks,
+            checkpoints,
+            resolved_paths,
+            skill_settings,
+        )
+
+    coordinator = SubagentCoordinator(child_factory, workspace, subagent_settings)
+    external = _external_resources(
+        workspace,
+        resolved_paths,
+        config,
+        project_mcp_enabled=project_mcp_enabled,
+    )
+    try:
+        tools = build_tool_registry(
+            workspace,
+            workspace_files=files,
+            extra_tools=(
+                *delegation_tools(subagent_settings.max_tasks_per_batch),
+                *external,
+            ),
+        )
+        return _build_runner(
+            workspace,
+            planner_name,
+            settings,
+            tools,
+            hooks,
+            checkpoints,
+            resolved_paths,
+            skill_settings,
+            coordinator,
+            resources=(external,),
+        )
+    except Exception:
+        external.close()
+        raise
+
+
+def _build_runner(
+    workspace: Path,
+    planner_name: PlannerName,
+    settings: RunnerSettings,
+    tools: ToolExecutor,
+    hooks: Iterable[AgentHook],
+    checkpoints: object | None,
+    paths: ClientPaths,
+    skill_settings: SkillSettings,
+    subagents: object | None = None,
+    *,
+    resources: tuple[object, ...] = (),
+) -> AgentRunner:
+    skills = SkillCatalog.discover(workspace, global_root=paths.skills_dir)
+    if planner_name == "rule":
+        planner = RuleBasedPlanner()
+    else:
+        planner = LLMPlanner(
+            LLMClient(ModelConfig.from_toml(paths.config_file)), tools.specs(), tools.read_only_specs()
+        )
+    return AgentRunner(
+        planner=planner,
+        tools=tools,
+        max_model_repairs=settings.max_model_repairs,
+        max_transport_retries=settings.max_transport_retries,
+        max_retries=settings.max_retries,
+        max_tool_recoveries=settings.max_tool_recoveries,
+        max_model_turns=settings.max_model_turns,
+        max_tool_calls=settings.max_tool_calls,
+        max_replans=settings.max_replans,
+        strategy=settings.strategy,
+        log_full_messages=settings.log_full_messages,
+        checkpoints=checkpoints,
+        hooks=hooks,
+        skill_catalog=skills,
+        skill_auto_select=skill_settings.auto_select,
+        workspace_root=str(workspace.resolve()),
+        subagents=subagents,
+        resources=resources,
+    )
+
+
+def _external_resources(
+    workspace: Path,
+    paths: ClientPaths,
+    config: dict[str, object],
+    *,
+    project_mcp_enabled: bool,
+) -> ExternalMcpResources:
+    plan = prepare_mcp_plan(paths, workspace)
+    include_project = project_mcp_enabled and plan.has_project_config
+    if include_project and not McpTrustStore(paths.mcp_trust_file).is_trusted(plan):
+        raise ValueError(
+            "Project MCP configuration is not trusted. Run with --trust-project-mcp "
+            "from an interactive terminal, or disable project MCP for this process."
+        )
+    return start_external_tools(
+        plan.effective_servers(include_project=include_project),
+        McpSettings.from_config(config),
+    )
+
+
+def _settings_for(paths: ClientPaths, settings: RunnerSettings | None) -> RunnerSettings:
+    return settings or RunnerSettings(log_full_messages=log_full_messages_from_toml(paths.config_file))
+
+
+def _build_sync_coordinator(config: dict[str, object], store: SQLiteSessionStore) -> SyncCoordinator | None:
+    sync = section(config, "sync")
+    url = sync.get("url")
+    token = sync.get("token")
+    if url is None and token is None:
+        return None
+    if not isinstance(url, str) or not url or not isinstance(token, str) or not token:
+        raise ValueError("sync.url and sync.token must be configured together.")
+    device_id = str(sync["device_id"])
+    coordinator = SyncCoordinator(
+        SyncClient(device_id, RequestsSyncTransport(url, token, device_id)),
+        store,
+    )
+    store.set_sync_listener(coordinator.notify)
+    coordinator.start()
+    return coordinator

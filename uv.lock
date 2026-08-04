@@ -8,6 +8,29 @@ resolution-markers = [
     "python_full_version < '3.14' and sys_platform != 'win32'",
 ]
 
+[manifest]
+members = [
+    "mini-agent-backend",
+    "mini-agent-tui",
+]
+
+[manifest.dependency-groups]
+dev = [
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-cov", specifier = ">=5.0" },
+    { name = "ruff", specifier = ">=0.6" },
+]
+
+[[package]]
+name = "annotated-doc"
+version = "0.0.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/8e/38aa427ed5402449e226975b649c5dc73ccadfefeb95e6aecb8f8ea4b6b6/annotated_doc-0.0.5.tar.gz", hash = "sha256:c7e58ce09192557605d8bbd92836d7e1d520ac9580096042c0bfd197efacf1bb", size = 10758, upload-time = "2026-07-28T13:50:58.129Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3e/30/e900b21425a860e195f32e37657aa1f7c7f2b1bfb26f03ca209b90933c06/annotated_doc-0.0.5-py3-none-any.whl", hash = "sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101", size = 5302, upload-time = "2026-07-28T13:50:57.239Z" },
+]
+
 [[package]]
 name = "annotated-types"
 version = "0.8.0"
@@ -396,6 +419,22 @@ wheels = [
 ]
 
 [[package]]
+name = "fastapi"
+version = "0.141.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annotated-doc" },
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/02/91e3416a8fdd715abb903a952a6bec7cdd8d14eed55d415fc8595524c319/fastapi-0.141.1.tar.gz", hash = "sha256:e8822fc40db1e1858054d7a949a888695bc9bdce70139178e33bd2871a453ca1", size = 425799, upload-time = "2026-07-29T17:18:05.568Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/03/10388a42375ee7e4ac9b94eb2c5c569c8b5795e377e701c9ac3ad63de890/fastapi-0.141.1-py3-none-any.whl", hash = "sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3", size = 131954, upload-time = "2026-07-29T17:18:04.364Z" },
+]
+
+[[package]]
 name = "filelock"
 version = "3.30.3"
 source = { registry = "https://pypi.org/simple" }
@@ -624,52 +663,63 @@ wheels = [
 ]
 
 [[package]]
-name = "mini-agent"
+name = "mini-agent-backend"
 version = "0.1.0"
-source = { editable = "." }
+source = { editable = "backend" }
 dependencies = [
     { name = "ddgr" },
+    { name = "fastapi" },
     { name = "huggingface-hub" },
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "mdit-py-plugins" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "psycopg-pool" },
     { name = "pylatexenc" },
     { name = "pyyaml" },
     { name = "regex" },
     { name = "requests" },
-    { name = "textual" },
     { name = "tokenizers" },
+    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
+sync = [
+    { name = "psycopg", extra = ["binary"] },
+    { name = "psycopg-pool" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "ddgr", specifier = ">=2.2,<3" },
+    { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "huggingface-hub", specifier = ">=0.30,<2" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "mcp", specifier = ">=1.28,<2" },
     { name = "mdit-py-plugins", specifier = ">=0.6,<1" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
-    { name = "psycopg-pool", specifier = ">=3.2,<4" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'sync'", specifier = ">=3.2,<4" },
+    { name = "psycopg-pool", marker = "extra == 'sync'", specifier = ">=3.2,<4" },
     { name = "pylatexenc", specifier = ">=2.10,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "regex", specifier = ">=2024.11.6,<2027" },
     { name = "requests", specifier = ">=2.31,<3" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "textual", specifier = ">=8.2,<9" },
     { name = "tokenizers", specifier = ">=0.21,<1" },
+    { name = "uvicorn", specifier = ">=0.34,<1" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["sync"]
+
+[[package]]
+name = "mini-agent-tui"
+version = "0.1.0"
+source = { editable = "tui" }
+dependencies = [
+    { name = "mini-agent-backend" },
+    { name = "textual" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mini-agent-backend", editable = "backend" },
+    { name = "textual", specifier = ">=8.2,<9" },
+]
 
 [[package]]
 name = "packaging"
