@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { getSessionMessages, listSessions, type SessionInfo } from "./api";
+import { useEffect, useState } from "react";
 import BenchmarkPage from "./pages/BenchmarkPage";
 import ChatPage from "./pages/ChatPage";
 import type { ChatMessage, Conversation, Page } from "./types";
@@ -17,51 +16,30 @@ function loadConversations(): Conversation[] {
   }
 }
 
-function toChatMessage(message: { role: string; content: string }, index: number): ChatMessage {
-  return {
-    id: `srv-${index}`,
-    role: message.role === "user" ? "user" : "assistant",
-    content: message.content,
-    events: [],
-  };
-}
-
 export default function App() {
   const [page, setPage] = useState<Page>("chat");
   const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
   const [currentId, setCurrentId] = useState<string | null>(null);
-  const [serverSessions, setServerSessions] = useState<SessionInfo[]>([]);
-  const initialized = useRef(false);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
   }, [conversations]);
 
-  const refreshSessions = useCallback(() => {
-    listSessions()
-      .then(setServerSessions)
-      .catch(() => {
-        /* backend offline: keep whatever we had */
-      });
-  }, []);
-
-  useEffect(() => {
-    if (!initialized.current) {
-      initialized.current = true;
-      refreshSessions();
-      if (conversations.length === 0) newConversation();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshSessions]);
-
   const current = conversations.find((c) => c.id === currentId) ?? conversations[0] ?? null;
 
-  function newConversation() {
+  function newConversation(): string {
+    // 存在未发送过消息的空对话时直接复用，避免产生一堆空对话
+    const empty = conversations.find((c) => c.messages.length === 0);
+    if (empty) {
+      setCurrentId(empty.id);
+      setPage("chat");
+      return empty.id;
+    }
     const conv: Conversation = { id: crypto.randomUUID(), title: "新对话", messages: [] };
     setConversations((prev) => [conv, ...prev]);
     setCurrentId(conv.id);
     setPage("chat");
-    refreshSessions();
+    return conv.id;
   }
 
   function updateConversation(id: string, updater: (c: Conversation) => Conversation) {
@@ -73,25 +51,6 @@ export default function App() {
     setPage("chat");
   }
 
-  async function openServerSession(session: SessionInfo) {
-    try {
-      const messages = await getSessionMessages(session.session_id);
-      const conv: Conversation = {
-        id: `server:${session.session_id}`,
-        title: session.title || session.session_id.slice(0, 18),
-        messages: messages.map(toChatMessage),
-      };
-      setConversations((prev) => {
-        const without = prev.filter((c) => c.id !== conv.id);
-        return [conv, ...without];
-      });
-      setCurrentId(conv.id);
-      setPage("chat");
-    } catch {
-      /* ignore load errors */
-    }
-  }
-
   return (
     <div className="app">
       <aside className="sidebar">
@@ -99,26 +58,9 @@ export default function App() {
           ＋ 新建对话
         </button>
         <div className="history">
-          {serverSessions.length > 0 && (
-            <>
-              <div className="history-label">历史记录（后端会话）</div>
-              {serverSessions.map((s) => (
-                <button
-                  key={s.session_id}
-                  className={
-                    "history-item" + (current?.id === `server:${s.session_id}` && page === "chat" ? " active" : "")
-                  }
-                  onClick={() => void openServerSession(s)}
-                  title={s.title || s.session_id}
-                >
-                  <span className="history-title">{s.title || s.session_id.slice(0, 18)}</span>
-                </button>
-              ))}
-            </>
-          )}
           {conversations.length > 0 && (
             <>
-              <div className="history-label">当前会话</div>
+              <div className="history-label">对话</div>
               {conversations.map((c) => (
                 <button
                   key={c.id}
@@ -126,7 +68,7 @@ export default function App() {
                   onClick={() => selectConversation(c.id)}
                   title={c.title}
                 >
-                  <span className="history-title">{c.title || "新对话"}</span>
+                <span className="history-title">{c.title || "新对话"}</span>
                 </button>
               ))}
             </>

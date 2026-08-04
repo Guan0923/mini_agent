@@ -6,7 +6,7 @@ import type { ChatMessage, Conversation, Metrics, Page, ToolEvent } from "../typ
 interface Props {
   conversation: Conversation | null;
   onUpdate: (id: string, updater: (c: Conversation) => Conversation) => void;
-  onNew: () => void;
+  onNew: () => string;
   onNavigate: (page: Page) => void;
 }
 
@@ -124,7 +124,7 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
 
   const messages = conversation?.messages ?? [];
 
-  const commandMenuVisible = input.startsWith("/") && !busy && conversation != null;
+  const commandMenuVisible = input.startsWith("/") && !busy;
   const filteredCommands =
     commandMenuVisible && input.length > 1
       ? COMMANDS.filter((c) => c.name.startsWith(input.toLowerCase()))
@@ -139,13 +139,18 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
     ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
   }, [input]);
 
+  // 没有会话时先创建一个（会复用未发送过消息的空对话），返回会话 id
+  function ensureConv(): string {
+    if (conversation) return conversation.id;
+    return onNew();
+  }
+
   async function applyCommand(cmd: Command) {
     setInput("");
     const insert = (content: string) => {
       const msg: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content, events: [] };
-      if (conversation) {
-        onUpdate(conversation.id, (c) => ({ ...c, messages: [...c.messages, msg] }));
-      }
+      const id = ensureConv();
+      onUpdate(id, (c) => ({ ...c, messages: [...c.messages, msg] }));
     };
     if (cmd.name === "/help") {
       insert(HELP_TEXT);
@@ -221,9 +226,11 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
 
   async function send() {
     const prompt = input.trim();
-    if (!prompt || !conversation || busy) return;
+    if (!prompt || busy) return;
     setInput("");
     setBusy(true);
+    // 没有会话时先创建（复用空对话），发消息才算真正开始一个对话
+    const convId = ensureConv();
     const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [] };
     const assistantMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -232,7 +239,7 @@ export default function ChatPage({ conversation, onUpdate, onNew, onNavigate }: 
       events: [],
       running: true,
     };
-    onUpdate(conversation.id, (c) => ({
+    onUpdate(convId, (c) => ({
       ...c,
       title: deriveTitle(prompt),
       messages: [...c.messages, userMsg, assistantMsg],
