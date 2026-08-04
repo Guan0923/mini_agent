@@ -14,7 +14,8 @@ import {
 import BenchmarkPage from "./pages/BenchmarkPage";
 import ChatPage from "./pages/ChatPage";
 import TrashPage from "./pages/TrashPage";
-import type { ChatMessage, Conversation, Page } from "./types";
+import { loadSessionModes, saveSessionModes } from "./sessionModes";
+import type { ChatMessage, ChatMode, Conversation, Page } from "./types";
 
 const STORAGE_KEY = "mini-agent-conversations";
 
@@ -86,10 +87,16 @@ export default function App() {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [openHistoryId, setOpenHistoryId] = useState<string | null>(null);
+  const [modeBySession, setModeBySession] = useState<Record<string, ChatMode>>(() => loadSessionModes(localStorage));
+  const [draftMode, setDraftMode] = useState<ChatMode>("agent");
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
   }, [conversations]);
+
+  useEffect(() => {
+    saveSessionModes(localStorage, modeBySession);
+  }, [modeBySession]);
 
   useEffect(() => {
     let disposed = false;
@@ -228,25 +235,27 @@ export default function App() {
     return summary.session_id;
   }
 
-  function newConversation(): string {
+  async function newConversation(title?: string): Promise<string> {
     const empty = activeConversations.find((conversation) => conversation.messages.length === 0);
-    if (empty) {
+    if (empty && !title) {
       setCurrentId(empty.id);
       setPage("chat");
       return empty.id;
     }
-    const id = crypto.randomUUID();
-    const conversation: Conversation = {
-      id,
-      clientId: id,
-      title: "新对话",
+    const clientId = crypto.randomUUID();
+    const summary = await createSession(title?.trim() || "新对话", clientId);
+    const conversation = summaryToConversation(summary, {
+      id: summary.session_id,
+      clientId,
+      title: title?.trim() || "新对话",
       messages: [],
       messagesLoaded: true,
-    };
+    });
+    setModeBySession((currentModes) => ({ ...currentModes, [summary.session_id]: draftMode }));
     setConversations((previous) => [conversation, ...previous]);
-    setCurrentId(id);
+    setCurrentId(conversation.id);
     setPage("chat");
-    return id;
+    return conversation.id;
   }
 
   function selectConversation(id: string) {
@@ -371,10 +380,65 @@ export default function App() {
     }
   }
 
+  async function reloadConversation(id: string): Promise<void> {
+    const conversation = conversations.find((item) => item.id === id);
+    if (!conversation) throw new Error("会话不存在");
+    const sessionId = await ensureSession(id);
+    const transcript = await getSessionTranscript(sessionId);
+    updateConversation(id, (currentConversation) => ({
+      ...currentConversation,
+      messages: transcriptToMessages(transcript),
+      messagesLoaded: true,
+    }));
+  }
+
+  async function refreshSessions(): Promise<void> {
+    const summaries = await listSessions("active");
+    setConversations((previous) => {
+      const next = [...previous];
+      for (const summary of summaries) {
+        const index = next.findIndex((item) => item.sessionId === summary.session_id || item.clientId === summary.client_id);
+        if (index >= 0) next[index] = summaryToConversation(summary, next[index]);
+        else next.push(summaryToConversation(summary));
+      }
+      return next;
+    });
+  }
+
+  async function useSession(sessionId: string): Promise<string> {
+    let target = conversations.find((item) => item.sessionId === sessionId);
+    if (!target) {
+      const summaries = await listSessions("active");
+      const summary = summaries.find((item) => item.session_id === sessionId);
+      if (!summary) throw new Error(`未知会话：${sessionId}`);
+      target = summaryToConversation(summary);
+      setConversations((previous) => [target!, ...previous]);
+    }
+    setCurrentId(target.id);
+    setPage("chat");
+    if (!target.messagesLoaded) {
+      const transcript = await getSessionTranscript(sessionId);
+      const messages = transcriptToMessages(transcript);
+      setConversations((previous) => previous.map((item) => (
+        item.id === target!.id ? { ...item, messages, messagesLoaded: true } : item
+      )));
+    }
+    return target.id;
+  }
+
+  function setConversationMode(conversation: Conversation | null, mode: ChatMode) {
+    if (!conversation) {
+      setDraftMode(mode);
+      return;
+    }
+    const key = conversation.sessionId ?? conversation.id;
+    setModeBySession((currentModes) => ({ ...currentModes, [key]: mode }));
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
-        <button className="new-chat-btn" onClick={newConversation}>
+        <button className="new-chat-btn" onClick={() => void newConversation()}>
           ＋ 新建对话
         </button>
         <div className="history">
@@ -429,12 +493,17 @@ export default function App() {
         {page === "chat" ? (
           <ChatPage
             conversation={current}
+            mode={current ? modeBySession[current.sessionId ?? current.id] ?? "agent" : draftMode}
+            onModeChange={(mode) => setConversationMode(current, mode)}
             onUpdate={updateConversation}
             onNew={newConversation}
             onNavigate={setPage}
             onEnsureSession={ensureSession}
             onFork={forkConversation}
             onRewind={rewindConversation}
+            onSelectSession={useSession}
+            onReload={reloadConversation}
+            onRefresh={refreshSessions}
           />
         ) : page === "trash" ? (
           <TrashPage conversations={archivedConversations} onRestore={restoreConversation} onDelete={deleteConversation} />

@@ -1,4 +1,14 @@
-import type { ChatMessage, Conversation, SkillInfo, StreamMessage, TaskInfo, ToolInfo } from "./types";
+import type {
+  ChatMessage,
+  ChatMode,
+  Conversation,
+  DecisionRequest,
+  PermissionMode,
+  SkillInfo,
+  StreamMessage,
+  TaskInfo,
+  ToolInfo,
+} from "./types";
 
 async function errorFrom(res: Response): Promise<string> {
   try {
@@ -61,6 +71,23 @@ export interface SessionInfo {
   deleted_at?: string | null;
 }
 
+export interface TimezoneOption {
+  identifier: string;
+  label: string;
+}
+
+export interface TimezoneInfo {
+  timezone: string;
+  options: TimezoneOption[];
+}
+
+export interface ForkableRun {
+  run_id: string;
+  task: string;
+  status: string;
+  updated_at: string;
+}
+
 export async function listSessions(state: "active" | "archived" | "deleted" | "all" = "active"): Promise<SessionInfo[]> {
   const res = await fetch(`/api/sessions?state=${encodeURIComponent(state)}`);
   if (!res.ok) throw new Error(await errorFrom(res));
@@ -80,14 +107,14 @@ export interface SessionMessage {
 }
 
 export async function createSession(
-  title: string,
-  clientId: string,
+  title?: string,
+  clientId?: string,
   messages: Array<Pick<ChatMessage, "role" | "content">> = [],
 ): Promise<SessionInfo> {
   const res = await fetch("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, client_id: clientId, messages }),
+    body: JSON.stringify({ title: title?.trim() || null, client_id: clientId, messages }),
   });
   if (!res.ok) throw new Error(await errorFrom(res));
   return res.json();
@@ -165,18 +192,82 @@ export async function getSessionTranscript(sessionId: string): Promise<SessionMe
   return res.json();
 }
 
-export async function streamChat(
-  prompt: string,
+export async function getTimezone(sessionId: string): Promise<TimezoneInfo> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/timezone`);
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function setTimezone(sessionId: string, timezone: string): Promise<{ timezone: string }> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/timezone`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ timezone }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function compactSession(sessionId: string): Promise<{
+  compacted: boolean;
+  previous_messages: number;
+  remaining_messages: number;
+  summary?: string | null;
+}> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/compact`, { method: "POST" });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function getTrace(sessionId: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/trace`);
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function listForkableRuns(): Promise<ForkableRun[]> {
+  const res = await fetch("/api/forkable-runs");
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function forkRun(runId: string): Promise<SessionInfo> {
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/fork`, { method: "POST" });
+  if (!res.ok) throw new Error(await errorFrom(res));
+  return res.json();
+}
+
+export async function submitDecision(
+  decisionId: string,
+  choice: string,
+  options: { supplement?: string; answers?: Record<string, string[]> } = {},
+): Promise<void> {
+  const res = await fetch("/api/decisions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision_id: decisionId, choice, ...options }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res));
+}
+
+interface StreamOptions {
+  sessionId?: string;
+  mode?: ChatMode;
+  permissionMode?: PermissionMode;
+}
+
+async function streamEndpoint(
+  url: string,
+  body: Record<string, unknown>,
   onMessage: (m: StreamMessage) => void,
   signal: AbortSignal,
-  sessionId?: string,
 ): Promise<"completed" | "aborted"> {
   let res: Response;
   try {
-    res = await fetch("/api/chat", {
+    res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, ...(sessionId ? { session_id: sessionId } : {}) }),
+      body: JSON.stringify(body),
       signal,
     });
   } catch (err) {
@@ -220,4 +311,39 @@ export async function streamChat(
   if (signal.aborted) return "aborted";
   if (!terminal) throw new Error("SSE stream unexpectedly ended before completion");
   return "completed";
+}
+
+export async function streamChat(
+  prompt: string,
+  onMessage: (m: StreamMessage) => void,
+  signal: AbortSignal,
+  options: StreamOptions | string = {},
+): Promise<"completed" | "aborted"> {
+  const normalized = typeof options === "string" ? { sessionId: options } : options;
+  return streamEndpoint(
+    "/api/chat",
+    {
+      prompt,
+      session_id: normalized.sessionId,
+      mode: normalized.mode ?? "agent",
+      permission_mode: normalized.permissionMode,
+      interactive: normalized.permissionMode != null,
+    },
+    onMessage,
+    signal,
+  );
+}
+
+export async function streamResume(
+  sessionId: string,
+  onMessage: (m: StreamMessage) => void,
+  signal: AbortSignal,
+  permissionMode: PermissionMode,
+): Promise<"completed" | "aborted"> {
+  return streamEndpoint(
+    `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
+    { permission_mode: permissionMode },
+    onMessage,
+    signal,
+  );
 }

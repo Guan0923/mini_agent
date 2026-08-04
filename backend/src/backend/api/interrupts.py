@@ -68,11 +68,23 @@ def make_interactive_interrupt(
     *,
     timeout: float = 120.0,
     cancel_requested: Callable[[], bool] | None = None,
+    auto_approve_tools: bool = False,
 ):
     """Build an interrupt handler that pauses the run and asks the client."""
 
     def decide(request: InterruptRequest) -> InterruptDecision:
+        if request.kind == "tool" and auto_approve_tools:
+            return InterruptDecision("continue")
         decision_id = f"dec_{uuid.uuid4().hex}"
+        questions = [
+            {
+                "id": question.id,
+                "header": question.header,
+                "question": question.question,
+                "options": [{"label": option.label, "description": option.description} for option in question.options],
+            }
+            for question in request.questions
+        ]
         sink(
             {
                 "type": "event",
@@ -83,7 +95,11 @@ def make_interactive_interrupt(
                     "kind": request.kind,
                     "tool": request.data.get("tool"),
                     "arguments": request.data.get("arguments", {}),
-                    "questions": [{"id": q.id, "question": q.question} for q in request.questions],
+                    "questions": questions,
+                    "plan": request.data.get("plan"),
+                    "goal": request.data.get("goal"),
+                    "steps": request.data.get("steps", []),
+                    "details": request.data.get("details"),
                 },
             }
         )
@@ -104,15 +120,24 @@ def make_interactive_interrupt(
         choice = str(pending.result.get("choice", "cancel"))
         if request.kind == "tool":
             supplement = pending.result.get("supplement")
+            if choice == "supplement":
+                return InterruptDecision(
+                    "supplement",
+                    supplement=supplement if isinstance(supplement, str) and supplement else None,
+                )
             return InterruptDecision(
                 "continue" if choice == "continue" else "cancel",
                 supplement=supplement if isinstance(supplement, str) and supplement else None,
             )
         if request.kind == "plan":
+            if choice == "implement_clear_session":
+                return InterruptDecision("implement_clear_session")
             return InterruptDecision("implement" if choice == "implement" else "cancel")
         if request.kind == "question":
             answers = pending.result.get("answers")
             return InterruptDecision("answer", answers=answers if isinstance(answers, dict) else None)
+        if request.kind == "resume":
+            return InterruptDecision("continue" if choice == "continue" else "back")
         return InterruptDecision("continue")
 
     return decide

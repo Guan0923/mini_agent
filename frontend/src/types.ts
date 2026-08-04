@@ -1,4 +1,7 @@
 export type Page = "chat" | "trash" | "benchmark";
+export type ChatMode = "agent" | "plan";
+export type PermissionMode = "approval_for_me" | "full_access";
+export type DisplayMode = "minimal" | "medium" | "verbose";
 
 export interface ToolEvent {
   kind: string;
@@ -23,6 +26,7 @@ export interface ChatMessage {
   error?: string;
   running?: boolean;
   runId?: string;
+  decision?: DecisionRequest;
 }
 
 export interface Conversation {
@@ -34,6 +38,31 @@ export interface Conversation {
   archivedAt?: string;
   deletedAt?: string;
   messagesLoaded?: boolean;
+}
+
+export interface DecisionOption {
+  label: string;
+  description: string;
+}
+
+export interface DecisionQuestion {
+  id: string;
+  header?: string;
+  question: string;
+  options: DecisionOption[];
+}
+
+export interface DecisionRequest {
+  decision_id: string;
+  kind: "tool" | "plan" | "question" | "resume";
+  message?: string;
+  tool?: string;
+  arguments?: Record<string, unknown> | string;
+  plan?: string;
+  goal?: string;
+  steps?: string[];
+  details?: string;
+  questions?: DecisionQuestion[];
 }
 
 export interface TaskInfo {
@@ -64,4 +93,5 @@ export interface StreamMessage {
   error?: string;
   session_id?: string;
   run_id?: string;
+  mode?: ChatMode;
 }
