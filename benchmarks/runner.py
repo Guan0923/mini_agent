@@ -15,7 +15,7 @@ from .event_collector import EventCollector
 from .grading.programmatic import run_checkers
 from .grading.scoring import aggregate_score
 from .metrics import RunMetrics
-from .model import BenchmarkTask, Budgets, CheckContext, TaskResult
+from .model import BenchmarkTask, Budgets, CheckContext, CheckerVerdict, TaskResult
 from .sandbox import Sandbox, trust_project_mcp
 
 
@@ -46,7 +46,9 @@ def build_metrics(collector: EventCollector, state, duration_ms: float) -> RunMe
     )
 
 
-def apply_budget_overrides(task: BenchmarkTask, *, max_model_turns: int | None, max_tool_calls: int | None) -> BenchmarkTask:
+def apply_budget_overrides(
+    task: BenchmarkTask, *, max_model_turns: int | None, max_tool_calls: int | None
+) -> BenchmarkTask:
     if max_model_turns is None and max_tool_calls is None:
         return task
     budgets = task.budgets
@@ -61,7 +63,7 @@ def apply_budget_overrides(task: BenchmarkTask, *, max_model_turns: int | None, 
     )
 
 
-def _error_result(task: BenchmarkTask, message: str) -> TaskResult:
+def _error_result(task: BenchmarkTask, message: str, *, attempt: int = 1) -> TaskResult:
     return TaskResult(
         task_name=task.name,
         capability=task.capability,
@@ -71,6 +73,8 @@ def _error_result(task: BenchmarkTask, message: str) -> TaskResult:
         metrics=RunMetrics(0.0, 0, 0, 0, 0, 0, 0, 0, []),
         verdicts=[],
         error=message,
+        passed=False,
+        attempt=attempt,
     )
 
 
@@ -82,10 +86,11 @@ def run_one_task(
     keep_workspaces: bool = False,
     max_model_turns: int | None = None,
     max_tool_calls: int | None = None,
+    attempt: int = 1,
 ) -> TaskResult:
     """Run one task end to end and return its graded result."""
     if planner not in task.planner_modes:
-        return _error_result(task, f"planner {planner!r} is not supported by this task")
+        return _error_result(task, f"planner {planner!r} is not supported by this task", attempt=attempt)
 
     task = apply_budget_overrides(task, max_model_turns=max_model_turns, max_tool_calls=max_tool_calls)
     workspace: Path | None = None
@@ -129,20 +134,25 @@ def run_one_task(
             tool_calls_by_name=dict(collector.tool_calls_by_name),
         )
         verdicts = run_checkers(task, context)
+        if state.status != "completed":
+            verdicts = [CheckerVerdict(0.0, detail=f"agent run status: {state.status}")]
+        score = aggregate_score(verdicts)
         return TaskResult(
             task_name=task.name,
             capability=task.capability,
             status=state.status,
-            score=aggregate_score(verdicts),
+            score=score,
             final_answer=state.final_answer or "",
             metrics=metrics,
             verdicts=verdicts,
             run_id=state.run_id,
+            passed=score == 1.0,
+            attempt=attempt,
         )
     except ModelConfigurationError as exc:
-        return _error_result(task, f"model is not configured: {exc}")
+        return _error_result(task, f"model is not configured: {exc}", attempt=attempt)
     except Exception as exc:  # keep the harness alive across task failures
-        return _error_result(task, f"{type(exc).__name__}: {exc}")
+        return _error_result(task, f"{type(exc).__name__}: {exc}", attempt=attempt)
     finally:
         if app is not None:
             try:

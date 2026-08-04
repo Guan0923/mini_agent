@@ -1,66 +1,68 @@
-# Mini-Agent Benchmark（精简版）
+# Mini-Agent adapted open-source benchmark suite
 
-给 mini-agent 出的一套"考试题"：把任务交给 agent 去做，然后自动判卷、算分、出成绩单。
-目前共 4 道题，覆盖 3 个能力（工具 / Skills / MCP），子代理题、AI 判卷、并行等留到后续版本。
+This suite contains nine self-contained tasks adapted from Terminal-Bench,
+SWE-bench Lite, and τ³-bench. It is designed to measure whether Mini-Agent
+can produce a correct artifact, repair a real regression, or complete a
+policy-constrained tool workflow. It is not an official implementation of any
+upstream leaderboard and its scores must not be compared directly with those
+leaderboards.
 
-## 怎么跑
+## Run
 
-在仓库根目录执行（用 `uv` 管理环境）：
+List tasks without calling a model:
 
-```bash
-# 查看有哪些题
-uv run python -m benchmarks.run --list
-
-# 免费离线冒烟：不调用模型，验证考试系统本身没写错（期望 score 1.0）
-uv run python -m benchmarks.run --task tools-read-file --planner rule
-
-# 真实模型跑全部题
-uv run python -m benchmarks.run --all --output report.json
-
-# 只跑某一题 / 只测某个能力
-uv run python -m benchmarks.run --task skills-write-note
-uv run python -m benchmarks.run --capability tools
+```powershell
+python -m benchmarks.run --list
 ```
 
-运行前提：`~/mini_agent/config.toml` 里要配好 `[model]` 的 `api_key` / `base_url` / `model`
-（任意 OpenAI 兼容接口都行，比如 vLLM、Ollama 或本地代理）。没配好时 llm 模式会报错提示你配置，
-或者用 `--planner rule` 免费跑。
+Run one task or the complete suite with a configured OpenAI-compatible model:
 
-## 成绩单
-
-输出是 JSON，默认写在 `benchmarks/output/<时间戳>/report.json`。结构：
-
-- `summary` —— 总分、及格率、各能力得分、平均耗时/ token
-- `tasks` —— 每道题的状态、分数、耗时、模型调用次数、token 用量、判卷明细
-
-## 怎么加新题
-
-1. 在 `benchmarks/tasks/` 下新建一个模块（参考已有的 `tools_filesystem.py`），
-   定义 `TASKS = (BenchmarkTask(...),)`：
-
-   - `prompt` —— 发给 agent 的任务文本（显式用技能时写 `$技能名`）
-   - `seed` —— 提前铺好的初始文件 / 技能 / MCP 配置
-   - `checkers` —— 判卷检查器：文件存不存在、内容对不对、某个工具是不是真的调了
-   - `budgets` —— 每题的最多模型轮数 / 工具调用数（控制成本）
-   - `planner_modes` —— 能离线跑（`"rule"`）还是只能真实模型（`"llm"`）
-
-2. 在 `benchmarks/tasks/__init__.py` 里导入并加进 `ALL_TASKS`。
-
-判断"改好了还是改差了"：改完代码后重跑，看分数和耗时/token 变化。注意 LLM 有随机性，
-同一题多跑几次看中位数更可靠。
-
-## 目录
-
+```powershell
+python -m benchmarks.run --task swe-requests-2317
+python -m benchmarks.run --all --output report.json
 ```
-benchmarks/
-  run.py                 命令行入口
-  model.py               任务 / 判卷的数据结构
-  sandbox.py             隔离环境（不碰你真实的 ~/mini_agent）
-  runner.py              把任务交给 agent 并收集指标
-  event_collector.py     收集事件（耗时、调用次数、token）
-  grading/               判卷（检查器 + 算分）
-  report.py              成绩单
-  tasks/                 题目定义
-  mcp/mock_server.py     MCP 题用的迷你模拟服务器
-  output/                运行产物（已 gitignore）
+
+Repeat each task to observe model variability. Every attempt receives a fresh
+workspace and fresh MCP state; the report aggregates attempts equally by task:
+
+```powershell
+python -m benchmarks.run --all --repeat 3
 ```
+
+`--repeat N` requires `N >= 1` and defaults to one attempt. Repeating a task
+multiplies model/API usage and cost; use it only when you have accepted that
+cost and want a variability estimate. The JSON report keeps every attempt and
+computes the overall score as the equal-weight mean of per-task pass rates.
+
+The benchmark runner reads model credentials only from the configured
+`~/mini_agent/config.toml` (or `--config PATH`). It does not download source
+repositories, install task dependencies, call external web services, or use
+Docker while evaluating a task.
+
+The formal registry contains three Terminal-Bench tasks, three SWE-bench Lite
+regression tasks, and three τ³-bench tool workflows. All nine are LLM-planner
+tasks; `rule` remains a CLI parser option for harness compatibility but has no
+registered formal tasks.
+
+## Scoring
+
+Every task has one deterministic, subprocess-backed verifier. A task receives
+`1.0` only when the complete verifier passes and `0.0` otherwise. Verifiers
+check semantics and final state rather than requiring a particular tool name or
+answer wording. The test suite also checks the important benchmark invariant:
+the untouched fixture fails and a test-only oracle result passes.
+
+Reports contain flat attempt records under `runs` and equal-weight per-task
+aggregates under `tasks`. Source metadata includes the upstream benchmark,
+task ID, pinned revision, URL, license, and the exact local adaptation.
+
+These are Mini-Agent adaptations with rewritten fixtures and a single-call
+τ³ interaction model. They are useful for deterministic regression tracking,
+not substitutes for the upstream harnesses, and their scores cannot be
+compared with official Terminal-Bench, SWE-bench, or τ³-bench leaderboards.
+
+## Sources and licensing
+
+See [THIRD_PARTY_BENCHMARKS.md](THIRD_PARTY_BENCHMARKS.md) for provenance and
+notices. Only the smallest code/data fixtures needed to reproduce each issue
+or workflow are vendored; no gold patch is included in an agent workspace.

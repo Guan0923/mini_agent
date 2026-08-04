@@ -1,0 +1,4 @@
+This task is adapted from the MIT-licensed tau2-bench (τ³-bench) v1.0.1.
+See benchmarks/THIRD_PARTY_BENCHMARKS.md and the task source metadata for the
+upstream URL and adaptation details. The local state machine is a self-contained
+offline adaptation and is not an official τ³-bench harness.

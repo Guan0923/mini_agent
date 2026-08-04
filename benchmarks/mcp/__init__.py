@@ -1,1 +1,1 @@
-"""Mock MCP server used by the benchmark MCP task."""
+"""Profile-driven local MCP servers used by the τ³-bench adaptations."""

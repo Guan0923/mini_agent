@@ -49,6 +49,15 @@ def list_tasks(request: Request) -> list[dict]:
             "name": task.name,
             "capability": task.capability,
             "description": task.description,
+            "difficulty": task.difficulty,
+            "source": {
+                "benchmark": task.source.benchmark,
+                "task_id": task.source.task_id,
+                "url": task.source.url,
+                "source_revision": task.source.source_revision,
+                "license": task.source.license,
+                "adaptation_notes": task.source.adaptation_notes,
+            },
             "planner_modes": sorted(task.planner_modes),
         }
         for task in ALL_TASKS

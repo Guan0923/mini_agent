@@ -1,0 +1,8 @@
+{
+  "users": {
+    "anya_garcia_5901": {"first_name": "Anya", "last_name": "Garcia", "membership": "Silver"}
+  },
+  "reservations": {
+    "JMO1MG": {"user_id": "anya_garcia_5901", "cabin": "economy", "passengers": 2}
+  }
+}

@@ -1,14 +1,16 @@
-"""Data model for benchmark tasks, workspace seeds, and per-task results."""
+"""Data model for the source-backed Mini-Agent benchmark suite."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 from .metrics import RunMetrics
 
-Capability = Literal["skills", "tools", "mcp", "subagents"]
+Capability = Literal["terminal", "software_engineering", "tool_workflow"]
+Difficulty = Literal["easy", "medium", "hard"]
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class SeedSkill:
 class SeedMcp:
     server_name: str
     tools: tuple[str, ...] = ()
+    profile: str = "retail"
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,7 @@ class Seed:
     files: tuple[SeedFile, ...] = ()
     skills: tuple[SeedSkill, ...] = ()
     mcp: SeedMcp | None = None
+    fixture: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,11 +80,25 @@ Checker = Callable[[CheckContext], CheckerVerdict]
 
 
 @dataclass(frozen=True)
+class SourceMetadata:
+    """Provenance for an adapted upstream benchmark task."""
+
+    benchmark: str
+    task_id: str
+    url: str
+    source_revision: str
+    license: str
+    adaptation_notes: str
+
+
+@dataclass(frozen=True)
 class BenchmarkTask:
     name: str
     description: str
     capability: Capability
     prompt: str
+    difficulty: Difficulty
+    source: SourceMetadata
     seed: Seed = Seed()
     checkers: tuple[Checker, ...] = ()
     budgets: Budgets = Budgets()
@@ -99,6 +117,8 @@ class TaskResult:
     verdicts: list[CheckerVerdict]
     error: str | None = None
     run_id: str | None = None
+    passed: bool = False
+    attempt: int = 1
 
     def to_dict(self) -> dict:
         return {
@@ -114,4 +134,6 @@ class TaskResult:
             ],
             "error": self.error,
             "run_id": self.run_id,
+            "passed": self.passed,
+            "attempt": self.attempt,
         }
