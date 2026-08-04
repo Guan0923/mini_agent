@@ -1228,17 +1228,18 @@ body {
   position: relative;
   min-height: 100vh;
   overflow: hidden;
-  color: #eefcff;
-  background: #031126;
+  color: #073b51;
+  background: #b9eee7;
 }
 
 .ocean-scene {
   position: absolute;
   inset: 0;
   overflow: hidden;
+  pointer-events: none;
   background:
-    radial-gradient(circle at 52% 80%, rgba(0, 131, 171, 0.42), transparent 38%),
-    linear-gradient(145deg, #020916 0%, #062343 56%, #071b35 100%);
+    radial-gradient(circle at 18% 10%, rgba(255, 248, 215, 0.72), transparent 30%),
+    linear-gradient(155deg, #e6fbf3 0%, #9ce6df 42%, #45b9cb 100%);
 }
 
 .ocean-canvas {
@@ -1252,14 +1253,14 @@ body {
   inset: 0;
   pointer-events: none;
   background:
-    linear-gradient(180deg, rgba(2, 9, 22, 0.45) 0%, transparent 42%, rgba(2, 8, 22, 0.72) 100%),
-    radial-gradient(ellipse at center, transparent 32%, rgba(1, 6, 17, 0.46) 100%);
+    radial-gradient(circle at 16% 8%, rgba(255, 250, 225, 0.34), transparent 27%),
+    linear-gradient(180deg, rgba(236, 255, 249, 0.22) 0%, transparent 48%, rgba(3, 99, 124, 0.08) 100%);
 }
 
 .ocean-scene-fallback {
   background:
-    radial-gradient(ellipse at 50% 80%, rgba(20, 150, 181, 0.54), transparent 34%),
-    linear-gradient(145deg, #020916, #092f53 58%, #06152d);
+    radial-gradient(circle at 18% 12%, rgba(255, 249, 218, 0.78), transparent 30%),
+    linear-gradient(155deg, #def8ee 0%, #8bddd7 46%, #32aabe 100%);
 }
 
 .ocean-scene-fallback::after {
@@ -1267,30 +1268,10 @@ body {
   position: absolute;
   left: -10%;
   right: -10%;
-  bottom: 12%;
-  height: 34%;
-  opacity: 0.42;
-  background: repeating-radial-gradient(ellipse at 50% 100%, transparent 0 20px, rgba(107, 233, 238, 0.18) 21px 22px, transparent 23px 44px);
-  transform: perspective(300px) rotateX(58deg);
-}
-
-.auth-background {
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(ellipse at 50% 80%, rgba(18, 131, 164, 0.42), transparent 36%),
-    linear-gradient(145deg, #020916 0%, #062343 58%, #06152d 100%);
-}
-
-.auth-background::after {
-  content: "";
-  position: absolute;
-  left: -10%;
-  right: -10%;
-  bottom: 11%;
-  height: 36%;
-  opacity: 0.28;
-  background: repeating-radial-gradient(ellipse at 50% 100%, transparent 0 20px, rgba(107, 233, 238, 0.18) 21px 22px, transparent 23px 44px);
+  bottom: -8%;
+  height: 72%;
+  opacity: 0.34;
+  background: repeating-radial-gradient(ellipse at 50% 100%, transparent 0 25px, rgba(241, 255, 249, 0.42) 26px 28px, transparent 29px 54px);
   transform: perspective(300px) rotateX(58deg);
 }
 
@@ -1311,7 +1292,7 @@ body {
 }
 
 .brand-mark {
-  color: #f2fdff;
+  color: #07384d;
   font-size: 15px;
   font-weight: 760;
   letter-spacing: 0.18em;
@@ -1319,7 +1300,7 @@ body {
 }
 
 .brand-mark span {
-  color: #65e7e7;
+  color: #078795;
   padding: 0 2px;
 }
 
@@ -1333,7 +1314,7 @@ body {
 .secondary-cta,
 .form-links a,
 .auth-back a {
-  color: rgba(235, 253, 255, 0.78);
+  color: rgba(5, 58, 76, 0.76);
   text-decoration: none;
   transition: color 160ms ease;
 }
@@ -1342,7 +1323,7 @@ body {
 .secondary-cta:hover,
 .form-links a:hover,
 .auth-back a:hover {
-  color: #fff;
+  color: #043045;
 }
 
 .outline-cta,
@@ -1351,34 +1332,35 @@ body {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  border: 1px solid rgba(154, 241, 241, 0.5);
+  border: 1px solid rgba(5, 105, 123, 0.32);
   border-radius: 999px;
-  color: #eaffff;
+  color: #073b51;
   padding: 10px 19px;
   font-size: 13px;
   font-weight: 650;
   text-decoration: none;
   cursor: pointer;
-  background: rgba(28, 156, 177, 0.12);
-  box-shadow: 0 10px 34px rgba(0, 30, 60, 0.22);
+  background: rgba(238, 255, 250, 0.34);
+  box-shadow: 0 10px 34px rgba(4, 88, 107, 0.12);
   transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
 }
 
 .outline-cta:hover,
 .primary-cta:hover:not(:disabled) {
-  border-color: rgba(176, 255, 255, 0.9);
-  background: rgba(47, 198, 204, 0.28);
+  border-color: rgba(4, 102, 119, 0.62);
+  background: rgba(245, 255, 251, 0.64);
   transform: translateY(-1px);
 }
 
 .hero-copy {
-  width: min(650px, calc(100% - 48px));
-  margin: auto clamp(24px, 10vw, 160px) 7vh;
+  width: min(1180px, calc(100% - 48px));
+  margin: auto auto 7vh;
+  text-align: center;
 }
 
 .eyebrow {
   margin: 0 0 18px;
-  color: #76e6e7;
+  color: #086b79;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.23em;
@@ -1387,21 +1369,26 @@ body {
 
 .hero-copy h1 {
   margin: 0;
-  color: #f3feff;
-  font-size: clamp(42px, 6.3vw, 82px);
+  color: #07364d;
+  font-size: clamp(42px, 5.55vw, 78px);
   font-weight: 620;
   letter-spacing: -0.055em;
   line-height: 1.06;
+  white-space: nowrap;
 }
 
 .hero-copy h1 span {
-  color: #7ee6e4;
+  color: #087f8d;
+}
+
+.hero-copy h1 .hero-title-lead {
+  color: inherit;
 }
 
 .hero-description {
   max-width: 510px;
-  margin: 28px 0 0;
-  color: rgba(224, 248, 251, 0.72);
+  margin: 28px auto 0;
+  color: rgba(5, 55, 72, 0.76);
   font-size: 16px;
   line-height: 1.85;
 }
@@ -1411,18 +1398,20 @@ body {
   align-items: center;
   gap: 24px;
   margin-top: 36px;
+  justify-content: center;
 }
 
 .hero-actions .primary-cta {
   min-width: 148px;
   padding: 14px 23px;
-  background: #62dfe0;
-  border-color: #9df5f2;
-  color: #03223b;
+  background: #f2fff8;
+  border-color: rgba(255, 255, 255, 0.8);
+  color: #07475a;
+  box-shadow: 0 14px 38px rgba(3, 82, 101, 0.16);
 }
 
 .hero-actions .primary-cta:hover {
-  background: #a2f7f1;
+  background: #ffffff;
 }
 
 .secondary-cta {
@@ -1431,17 +1420,13 @@ body {
 
 .landing-footer {
   display: flex;
-  justify-content: space-between;
+  justify-content: center;
   gap: 24px;
   padding: 0 clamp(24px, 6vw, 92px) 28px;
-  color: rgba(213, 245, 247, 0.5);
+  color: rgba(5, 56, 73, 0.58);
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-.footer-hint {
-  color: rgba(213, 245, 247, 0.76);
 }
 
 .auth-overlay {
@@ -1459,16 +1444,16 @@ body {
 .auth-card {
   width: min(430px, 100%);
   padding: 38px 38px 34px;
-  border: 1px solid rgba(175, 238, 242, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.58);
   border-radius: 24px;
-  background: rgba(3, 18, 38, 0.72);
-  box-shadow: 0 24px 90px rgba(0, 6, 22, 0.38), inset 0 1px rgba(238, 255, 255, 0.08);
+  background: rgba(243, 255, 250, 0.72);
+  box-shadow: 0 24px 90px rgba(3, 82, 101, 0.18), inset 0 1px rgba(255, 255, 255, 0.72);
   backdrop-filter: blur(22px);
 }
 
 .auth-card h1 {
   margin: 0;
-  color: #f2feff;
+  color: #07364d;
   font-size: 30px;
   font-weight: 620;
   letter-spacing: -0.04em;
@@ -1476,7 +1461,7 @@ body {
 
 .auth-subtitle {
   margin: 10px 0 26px;
-  color: rgba(220, 246, 248, 0.66);
+  color: rgba(5, 55, 72, 0.66);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -1491,38 +1476,38 @@ body {
   display: flex;
   flex-direction: column;
   gap: 7px;
-  color: rgba(222, 248, 250, 0.72);
+  color: rgba(5, 55, 72, 0.74);
   font-size: 12px;
 }
 
 .auth-form input {
   width: 100%;
-  border: 1px solid rgba(155, 224, 230, 0.2);
+  border: 1px solid rgba(5, 105, 123, 0.18);
   border-radius: 10px;
   outline: none;
   padding: 12px 13px;
-  color: #eafcff;
+  color: #07364d;
   font: inherit;
-  background: rgba(1, 10, 27, 0.42);
+  background: rgba(255, 255, 255, 0.46);
   transition: border-color 160ms ease, background 160ms ease;
 }
 
 .auth-form input:focus {
-  border-color: rgba(107, 235, 235, 0.82);
-  background: rgba(2, 16, 38, 0.72);
+  border-color: rgba(4, 116, 132, 0.62);
+  background: rgba(255, 255, 255, 0.78);
 }
 
 .auth-form input::placeholder {
-  color: rgba(208, 241, 244, 0.32);
+  color: rgba(5, 67, 82, 0.34);
 }
 
 .form-submit {
   width: 100%;
   margin-top: 4px;
   padding: 12px 18px;
-  border: 1px solid #8af3ed;
-  background: #63dede;
-  color: #03223b;
+  border: 1px solid rgba(4, 108, 124, 0.36);
+  background: #eafff6;
+  color: #07475a;
 }
 
 .form-submit:disabled,
@@ -1538,7 +1523,7 @@ body {
   justify-content: space-between;
   gap: 12px;
   margin-top: 22px;
-  color: rgba(222, 248, 250, 0.56);
+  color: rgba(5, 55, 72, 0.56);
   font-size: 12px;
 }
 
@@ -1551,14 +1536,14 @@ body {
 
 .code-button {
   height: 41px;
-  border: 1px solid rgba(155, 231, 233, 0.36);
+  border: 1px solid rgba(5, 105, 123, 0.28);
   border-radius: 10px;
   padding: 0 11px;
-  color: #b4f3f0;
+  color: #075f70;
   font-size: 11px;
   white-space: nowrap;
   cursor: pointer;
-  background: rgba(35, 153, 165, 0.16);
+  background: rgba(255, 255, 255, 0.44);
 }
 
 .form-error,
@@ -1573,7 +1558,7 @@ body {
 }
 
 .success-text {
-  color: #9ff8e5;
+  color: #08745f;
 }
 
 .auth-back {
@@ -1585,7 +1570,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 17px;
-  color: rgba(224, 249, 251, 0.73);
+  color: rgba(5, 55, 72, 0.74);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -1598,7 +1583,7 @@ body {
   overflow-wrap: anywhere;
   padding: 11px 13px;
   border-radius: 10px;
-  background: rgba(2, 10, 25, 0.4);
+  background: rgba(255, 255, 255, 0.38);
 }
 
 .device-actions {
@@ -1613,7 +1598,7 @@ body {
 .quiet-button,
 .logout-button {
   border: 0;
-  color: rgba(225, 249, 250, 0.62);
+  color: rgba(5, 55, 72, 0.62);
   cursor: pointer;
   background: transparent;
 }
@@ -1627,16 +1612,16 @@ body {
   min-height: 100vh;
   place-items: center;
   gap: 12px;
-  color: #a3eef0;
-  background: #031126;
+  color: #076474;
+  background: linear-gradient(155deg, #e6fbf3 0%, #9ce6df 50%, #45b9cb 100%);
   font-size: 13px;
 }
 
 .loading-orb {
   width: 18px;
   height: 18px;
-  border: 2px solid rgba(123, 239, 235, 0.28);
-  border-top-color: #7cebe6;
+  border: 2px solid rgba(5, 105, 123, 0.22);
+  border-top-color: #087f8d;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -1674,11 +1659,19 @@ body {
   }
 
   .hero-copy {
-    margin: auto 24px 10vh;
+    width: calc(100% - 48px);
+    margin: auto 24px 9vh;
   }
 
   .hero-copy h1 {
-    font-size: clamp(38px, 12vw, 60px);
+    font-size: clamp(34px, 10vw, 48px);
+    white-space: normal;
+    text-wrap: balance;
+  }
+
+  .hero-copy h1 .hero-title-lead,
+  .hero-copy h1 > span:last-child {
+    display: block;
   }
 
   .hero-description {
@@ -1689,10 +1682,6 @@ body {
     flex-direction: column;
     gap: 8px;
     padding-bottom: 20px;
-  }
-
-  .footer-hint {
-    display: none;
   }
 
   .auth-card {

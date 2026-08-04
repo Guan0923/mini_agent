@@ -1,9 +1,10 @@
 import { Link } from "react-router-dom";
+import OceanScene from "../../components/OceanScene";
 
 export default function AuthLayout({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
   return (
     <main className="auth-page">
-      <div className="auth-background" aria-hidden="true" />
+      <OceanScene />
       <div className="auth-overlay">
         <Link className="brand-mark auth-brand" to="/">MINI<span>·</span>AGENT</Link>
         <section className="auth-card">
