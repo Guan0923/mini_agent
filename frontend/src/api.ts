@@ -6,6 +6,7 @@ import type {
   Conversation,
   DecisionRequest,
   PermissionMode,
+  ReasoningEffort,
   SkillInfo,
   StreamMessage,
   TaskInfo,
@@ -297,6 +298,7 @@ interface StreamOptions {
   sessionId?: string;
   mode?: ChatMode;
   permissionMode?: PermissionMode;
+  reasoningEffort?: ReasoningEffort;
 }
 
 async function streamEndpoint(
@@ -372,6 +374,7 @@ export async function streamChat(
       session_id: normalized.sessionId,
       mode: normalized.mode ?? "agent",
       permission_mode: normalized.permissionMode,
+      reasoning_effort: normalized.reasoningEffort,
       interactive: normalized.permissionMode != null,
     },
     onMessage,
@@ -384,10 +387,11 @@ export async function streamResume(
   onMessage: (m: StreamMessage) => void,
   signal: AbortSignal,
   permissionMode: PermissionMode,
+  reasoningEffort: ReasoningEffort = "medium",
 ): Promise<"completed" | "aborted"> {
   return streamEndpoint(
     `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
-    { permission_mode: permissionMode },
+    { permission_mode: permissionMode, reasoning_effort: reasoningEffort },
     onMessage,
     signal,
   );

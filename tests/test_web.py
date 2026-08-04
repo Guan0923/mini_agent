@@ -1,14 +1,12 @@
-import json
 import socket
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
-
 from backend.planning import RuleBasedPlanner
 from backend.runtime import AgentRunner
 from backend.tools import ConfirmationRequired, DdgrWebSearch, SafeWebFetcher, ToolError, ToolRegistry
+from backend.tools.web.html import ReadableHtmlParser
 
 
 class FakeResponse:
@@ -49,64 +47,49 @@ def public_resolver(host: str, port: int, **kwargs: Any) -> list[tuple[Any, ...]
     return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
 
 
-def test_ddgr_search_uses_noninteractive_json_and_formats_results() -> None:
-    calls = []
+def test_ddgr_search_uses_html_endpoint_and_formats_results() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {"Content-Type": "text/html"},
+                b'<a class="result__a" href="https://docs.python.org/">Python docs</a>'
+                b'<div class="result__snippet">The official Python documentation.</div>',
+            )
+        ]
+    )
 
-    def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(
-            args,
-            0,
-            stdout=json.dumps(
-                [
-                    {
-                        "title": "Python docs",
-                        "url": "https://docs.python.org/",
-                        "abstract": "The official Python documentation.",
-                    }
-                ]
-            ),
-            stderr="",
-        )
-
-    output = DdgrWebSearch(runner=runner).search("Python documentation", max_results=3)
+    output = DdgrWebSearch(session=session).search("Python documentation", max_results=3)
 
     assert "Python docs" in output
     assert "https://docs.python.org/" in output
-    assert calls == [
-        (
-            ["ddgr", "--json", "--np", "-n", "3", "Python documentation"],
-            {
-                "capture_output": True,
-                "check": False,
-                "encoding": "utf-8",
-                "errors": "replace",
-                "text": True,
-                "timeout": 15,
-                "shell": False,
-            },
-        )
-    ]
+    assert session.calls[0][0] == "https://html.duckduckgo.com/html/"
+    assert session.calls[0][1]["params"] == {"q": "Python documentation"}
 
 
-def test_ddgr_search_rejects_invalid_input_and_bad_json() -> None:
-    search = DdgrWebSearch(
-        runner=lambda args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="not json", stderr="")
-    )
+def test_ddgr_search_rejects_invalid_input_and_bad_pages() -> None:
+    search = DdgrWebSearch(session=FakeSession([FakeResponse(200, {"Content-Type": "text/html"}, b"not html")]))
 
     with pytest.raises(ToolError, match="query"):
         search.search("")
     with pytest.raises(ToolError, match="max_results"):
         search.search("python", max_results=0)
-    with pytest.raises(ToolError, match="invalid JSON"):
+    with pytest.raises(ToolError, match="unrecognizable"):
+        search.search("python")
+
+
+def test_ddgr_search_reports_http_202_instead_of_empty_results() -> None:
+    search = DdgrWebSearch(session=FakeSession([FakeResponse(202, {}, b"Accepted")]))
+
+    with pytest.raises(ToolError, match="HTTP status 202"):
         search.search("python")
 
 
 def test_web_search_requires_confirmation_when_registered(tmp_path: Path) -> None:
-    def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args, 0, stdout="[]", stderr="")
-
-    tools = ToolRegistry(tmp_path, web_search=DdgrWebSearch(runner=runner))
+    session = FakeSession(
+        [FakeResponse(200, {"Content-Type": "text/html"}, b'<div class="no-results">No results</div>')]
+    )
+    tools = ToolRegistry(tmp_path, web_search=DdgrWebSearch(session=session))
 
     with pytest.raises(ConfirmationRequired):
         tools.invoke("web_search", {"query": "Python"})
@@ -161,6 +144,72 @@ def test_web_fetch_blocks_non_public_addresses_before_request() -> None:
     assert session.calls == []
 
 
+def test_web_fetch_pins_a_verified_public_address_after_synthetic_dns() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def synthetic_resolver(host: str, port: int, **kwargs: Any) -> list[tuple[Any, ...]]:
+        del host, kwargs
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.222", port)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fdfe:dcba:9876::63", port, 0, 0)),
+        ]
+
+    class CapturingTransport:
+        def get(self, url: str, address: str, **kwargs: Any) -> FakeResponse:
+            del kwargs
+            calls.append((url, address))
+            return FakeResponse(200, {"Content-Type": "text/plain"}, b"verified content")
+
+    fetcher = SafeWebFetcher(
+        resolver=synthetic_resolver,
+        doh_resolver=lambda host: ["93.184.216.34"],
+    )
+    fetcher._transport = CapturingTransport()  # type: ignore[assignment]
+
+    assert "verified content" in fetcher.fetch("https://example.com/")
+    assert calls == [("https://example.com/", "93.184.216.34")]
+
+
+def test_web_fetch_rejects_private_address_in_any_fixed_doh_answer() -> None:
+    def synthetic_resolver(host: str, port: int, **kwargs: Any) -> list[tuple[Any, ...]]:
+        del host, kwargs
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.222", port))]
+
+    class DohTransport:
+        def get(self, url: str, address: str, **kwargs: Any) -> FakeResponse:
+            del kwargs
+            assert address == "1.1.1.1"
+            assert "cloudflare-dns.com/dns-query" in url
+            if url.endswith("type=A"):
+                body = b'{"Answer":[{"type":1,"data":"93.184.216.34"}]}'
+            else:
+                body = b'{"Answer":[{"type":28,"data":"fd00::1"}]}'
+            return FakeResponse(200, {"Content-Type": "application/dns-json"}, body)
+
+    fetcher = SafeWebFetcher(resolver=synthetic_resolver)
+    fetcher._transport = DohTransport()  # type: ignore[assignment]
+
+    with pytest.raises(ToolError, match="non-public"):
+        fetcher._assert_public_target("https://example.com/")
+
+
+def test_web_fetch_reports_fixed_doh_failures() -> None:
+    def synthetic_resolver(host: str, port: int, **kwargs: Any) -> list[tuple[Any, ...]]:
+        del host, kwargs
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.222", port))]
+
+    class FailedTransport:
+        def get(self, url: str, address: str, **kwargs: Any) -> FakeResponse:
+            del url, address, kwargs
+            raise ToolError("DNS endpoint unavailable")
+
+    fetcher = SafeWebFetcher(resolver=synthetic_resolver)
+    fetcher._transport = FailedTransport()  # type: ignore[assignment]
+
+    with pytest.raises(ToolError, match="Unable to resolve web host"):
+        fetcher._assert_public_target("https://example.com/")
+
+
 def test_web_fetch_revalidates_redirect_targets() -> None:
     session = FakeSession(
         [
@@ -206,9 +255,6 @@ def test_rule_planner_generates_web_tool_calls() -> None:
 
     assert (search.name, search.arguments) == ("web_search", {"query": "Python docs"})
     assert (fetch.name, fetch.arguments) == ("web_fetch", {"url": "https://example.com/docs"})
-
-
-from backend.tools.web.html import ReadableHtmlParser
 
 
 class _FakeSocket:

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getCurrentUser, login, streamChat } from "./api";
+import { getCurrentUser, login, streamChat, streamResume } from "./api";
 import type { StreamMessage } from "./types";
 
 afterEach(() => vi.restoreAllMocks());
@@ -40,6 +40,41 @@ describe("streamChat", () => {
     const controller = new AbortController();
     controller.abort();
     await expect(streamChat("task", () => undefined, controller.signal)).resolves.toBe("aborted");
+  });
+
+  it("snapshots permission and reasoning effort in the chat request body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(responseWithChunks('data: {"type":"done","status":"completed"}\n\n')));
+
+    await streamChat("task", () => undefined, new AbortController().signal, {
+      sessionId: "session-1",
+      mode: "plan",
+      permissionMode: "full_access",
+      reasoningEffort: "xhigh",
+    });
+
+    const fetchMock = vi.mocked(fetch);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/chat");
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toMatchObject({
+      prompt: "task",
+      session_id: "session-1",
+      mode: "plan",
+      permission_mode: "full_access",
+      reasoning_effort: "xhigh",
+      interactive: true,
+    });
+  });
+
+  it("includes reasoning effort when resuming a session", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(responseWithChunks('data: {"type":"done","status":"completed"}\n\n')));
+
+    await streamResume("session-2", () => undefined, new AbortController().signal, "approval_for_me", "high");
+
+    const fetchMock = vi.mocked(fetch);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/sessions/session-2/resume");
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      permission_mode: "approval_for_me",
+      reasoning_effort: "high",
+    });
   });
 });
 

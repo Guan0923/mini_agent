@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from collections.abc import Mapping
+from typing import Any, Protocol
 
 from backend.domain import ResumePreview, RunState, Session
 
@@ -54,6 +55,7 @@ def resume_session(
     steering: SteeringHandler | None = None,
     cancel_requested: CancellationHandler | None = None,
     suspend_requested: CancellationHandler | None = None,
+    request_parameters: Mapping[str, Any] | None = None,
 ) -> RunState | None:
     """Select an idle session or continue a stopped workflow as a new attempt."""
 
@@ -112,6 +114,8 @@ def resume_session(
     conversation.runtime.services.steering = steering
     conversation.runtime.services.cancel_requested = cancel_requested
     conversation.runtime.services.suspend_requested = suspend_requested
+    if request_parameters:
+        conversation.runtime.state.request_parameters.update(dict(request_parameters))
     try:
         result = conversation.runner.resume(conversation.runtime)
     except Exception as exc:

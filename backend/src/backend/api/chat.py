@@ -33,6 +33,8 @@ from .state import WebAppState
 router = APIRouter(prefix="/api")
 router.include_router(decisions_router)
 
+ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+
 
 class ChatRequest(BaseModel):
     prompt: str
@@ -40,10 +42,16 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     mode: Literal["agent", "plan"] = "agent"
     permission_mode: Literal["approval_for_me", "full_access"] | None = None
+    reasoning_effort: ReasoningEffort = "medium"
 
 
 class ResumeRequest(BaseModel):
     permission_mode: Literal["approval_for_me", "full_access"] = "approval_for_me"
+    reasoning_effort: ReasoningEffort = "medium"
+
+
+def _reasoning_parameters(effort: ReasoningEffort) -> dict[str, object]:
+    return {"thinking": {"type": "enabled"}, "reasoning_effort": effort}
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -89,6 +97,7 @@ def _stream(
     session_id: str | None = None,
     mode: Literal["agent", "plan"] = "agent",
     permission_mode: Literal["approval_for_me", "full_access"] | None = None,
+    reasoning_effort: ReasoningEffort = "medium",
     operation: Callable[..., object] | None = None,
 ):
     q: queue.Queue = queue.Queue()
@@ -148,9 +157,16 @@ def _stream(
                     on_event=sink,
                     interrupt=interrupt,
                     cancel_requested=cancel_requested.is_set,
+                    request_parameters=_reasoning_parameters(reasoning_effort),
                 )
             else:
-                run_state = operation(conversation, interrupt, sink, cancel_requested.is_set)
+                run_state = operation(
+                    conversation,
+                    interrupt,
+                    sink,
+                    cancel_requested.is_set,
+                    _reasoning_parameters(reasoning_effort),
+                )
             active_session = getattr(conversation, "active_session", None)
             runtime = getattr(conversation, "runtime", None)
             current_run = runtime.state.current_run if runtime is not None else None
@@ -227,6 +243,7 @@ async def chat(
             mode=body.mode,
             interactive=body.interactive,
             permission_mode=body.permission_mode,
+            reasoning_effort=body.reasoning_effort,
         ),
         media_type="text/event-stream",
     )
@@ -242,17 +259,18 @@ async def resume(
     """Resume a durable workflow through the same SSE contract as chat."""
 
     state: WebAppState = request.app.state.web
-    from .sessions import _store
 
-    if _store(state, identity.id).get_session(session_id) is None:
-        raise HTTPException(status_code=404, detail=f"未知会话：{session_id}")
+    summary = _require_active(_store(state, identity.id), session_id)
+    if summary.last_run_status == "running":
+        raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
 
-    def operation(conversation, interrupt, sink, cancel_requested):
+    def operation(conversation, interrupt, sink, cancel_requested, request_parameters):
         return conversation.resume_session(
             session_id,
             on_event=sink,
             interrupt=interrupt,
             cancel_requested=cancel_requested,
+            request_parameters=request_parameters,
         )
 
     return StreamingResponse(
@@ -264,6 +282,7 @@ async def resume(
             mode="agent",
             interactive=True,
             permission_mode=body.permission_mode,
+            reasoning_effort=body.reasoning_effort,
             operation=operation,
         ),
         media_type="text/event-stream",

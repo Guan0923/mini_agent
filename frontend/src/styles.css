@@ -221,6 +221,33 @@ body {
   text-overflow: ellipsis;
 }
 
+.history-running {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: conic-gradient(var(--accent) 0 48%, #d9def7 48% 100%);
+  animation: history-spin 0.9s linear infinite;
+  position: relative;
+}
+
+.history-running::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--sidebar-bg);
+}
+
+@keyframes history-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .history-running { animation: none; }
+}
+
 .sidebar-bottom {
   border-top: 1px solid var(--border);
   padding-top: 10px;
@@ -327,6 +354,76 @@ body {
   line-height: 1.6;
   word-break: break-word;
   min-width: 0;
+}
+
+.message.user .user-bubble {
+  cursor: text;
+  transition: box-shadow 120ms ease, outline-color 120ms ease;
+}
+
+.message.user .user-bubble:hover {
+  box-shadow: 0 0 0 1px rgba(79, 107, 255, 0.28);
+}
+
+.message-edit {
+  width: min(100%, 560px);
+  padding: 10px;
+  border: 1px solid var(--accent);
+  border-radius: 14px 4px 14px 14px;
+  background: var(--user-bubble);
+  box-shadow: 0 2px 8px rgba(79, 107, 255, 0.12);
+}
+
+.message-edit textarea {
+  display: block;
+  width: 100%;
+  min-height: 66px;
+  max-height: 240px;
+  padding: 8px 9px;
+  border: 1px solid rgba(79, 107, 255, 0.3);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.message-edit textarea:focus {
+  border-color: var(--accent);
+}
+
+.message-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.message-edit-actions button,
+.picker-trigger {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8f9fb;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.message-edit-actions button:last-child {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.message-edit-actions button:disabled,
+.picker-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .message.assistant .bubble {
@@ -632,11 +729,13 @@ body {
   bottom: 10px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
+  flex-wrap: wrap;
   z-index: 2;
 }
 
-.mode-picker {
+.mode-picker,
+.composer-picker {
   position: relative;
 }
 
@@ -653,6 +752,10 @@ body {
 .mode-trigger:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.picker-trigger {
+  white-space: nowrap;
 }
 
 .mode-menu,
@@ -672,6 +775,18 @@ body {
 .composer-mode-menu {
   left: 32px;
   max-width: calc(100% - 64px);
+}
+
+.composer-picker-menu {
+  left: auto;
+  right: 0;
+  min-width: 190px;
+  max-width: min(260px, calc(100vw - 24px));
+  box-sizing: border-box;
+}
+
+.reasoning-picker-menu {
+  min-width: 150px;
 }
 
 .mode-menu button,
@@ -711,6 +826,22 @@ body {
   color: var(--muted);
   font-size: 11px;
   white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .composer-toolbar {
+    right: 12px;
+    bottom: 8px;
+    gap: 4px;
+  }
+
+  .composer-box .send-btn {
+    bottom: 10px;
+  }
+
+  .composer textarea {
+    padding-bottom: 76px;
+  }
 }
 
 .picker-title {

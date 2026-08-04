@@ -4,7 +4,7 @@ import threading
 import time
 
 from backend.api.app import create_app
-from backend.api.chat import ChatRequest
+from backend.api.chat import ChatRequest, ResumeRequest, _reasoning_parameters
 from backend.api.interrupts import make_interactive_interrupt, registry
 from backend.runtime.core.contracts import InterruptRequest, QuestionOption, UserQuestion
 
@@ -37,6 +37,18 @@ def test_chat_request_accepts_mode_session_and_permission() -> None:
     assert request.mode == "plan"
     assert request.session_id == "session_1"
     assert request.permission_mode == "full_access"
+
+
+def test_chat_and_resume_requests_validate_reasoning_effort() -> None:
+    chat = ChatRequest(prompt="inspect", reasoning_effort="xhigh")
+    resume = ResumeRequest(permission_mode="approval_for_me", reasoning_effort="low")
+
+    assert chat.reasoning_effort == "xhigh"
+    assert resume.reasoning_effort == "low"
+    assert _reasoning_parameters(chat.reasoning_effort) == {
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "xhigh",
+    }
 
 
 def test_interactive_decision_payload_includes_plan_and_question_options() -> None:

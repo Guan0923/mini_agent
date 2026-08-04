@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol
 
-DdgrRunner = Callable[..., subprocess.CompletedProcess[str]]
 HostResolver = Callable[..., list[tuple[Any, ...]]]
 
 

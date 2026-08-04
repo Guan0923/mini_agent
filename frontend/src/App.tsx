@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import {
   archiveSession,
@@ -10,6 +10,8 @@ import {
   renameSession,
   restoreSession,
   rewindSession,
+  streamChat,
+  streamResume,
   type SessionInfo,
 } from "./api";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
@@ -22,9 +24,32 @@ import RegisterPage from "./pages/auth/RegisterPage";
 import ResetPasswordPage from "./pages/auth/ResetPasswordPage";
 import HomePage from "./pages/HomePage";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
-import type { ChatMessage, ChatMode, Conversation, Page } from "./types";
+import type {
+  ChatMessage,
+  ChatMode,
+  Conversation,
+  Page,
+  PermissionMode,
+  ReasoningEffort,
+  StreamMessage,
+} from "./types";
 
 const STORAGE_KEY = "mini-agent-conversations";
+
+interface ChatRunRequest {
+  conversationId: string;
+  sessionId: string;
+  prompt: string | null;
+  resume: boolean;
+  mode: ChatMode;
+  permissionMode: PermissionMode;
+  reasoningEffort: ReasoningEffort;
+}
+
+interface ActiveRun {
+  controller: AbortController;
+  sessionId: string;
+}
 
 function loadConversations(key: string): Conversation[] {
   try {
@@ -98,6 +123,7 @@ function AgentApp() {
   const [openHistoryId, setOpenHistoryId] = useState<string | null>(null);
   const [modeBySession, setModeBySession] = useState<Record<string, ChatMode>>(() => loadSessionModes(localStorage));
   const [draftMode, setDraftMode] = useState<ChatMode>("agent");
+  const activeRunsRef = useRef<Map<string, ActiveRun>>(new Map());
 
   useEffect(() => {
     localStorage.setItem(storageKey, JSON.stringify(conversations));
@@ -106,6 +132,18 @@ function AgentApp() {
   useEffect(() => {
     saveSessionModes(localStorage, modeBySession);
   }, [modeBySession]);
+
+  useEffect(() => {
+    const abortAllRuns = () => {
+      for (const run of activeRunsRef.current.values()) run.controller.abort();
+      activeRunsRef.current.clear();
+    };
+    window.addEventListener("pagehide", abortAllRuns);
+    return () => {
+      window.removeEventListener("pagehide", abortAllRuns);
+      abortAllRuns();
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -219,6 +257,131 @@ function AgentApp() {
 
   function updateConversation(id: string, updater: (conversation: Conversation) => Conversation) {
     setConversations((previous) => previous.map((conversation) => (conversation.id === id ? updater(conversation) : conversation)));
+  }
+
+  function updateLastMessage(id: string, updater: (message: ChatMessage) => ChatMessage) {
+    updateConversation(id, (conversation) => {
+      const messages = [...conversation.messages];
+      const index = messages.length - 1;
+      if (index < 0 || messages[index].role !== "assistant") return conversation;
+      messages[index] = updater(messages[index]);
+      return { ...conversation, messages };
+    });
+  }
+
+  async function rebindRunSession(conversationId: string, sessionId: string): Promise<void> {
+    try {
+      const summaries = await listSessions("active");
+      const summary = summaries.find((item) => item.session_id === sessionId);
+      if (!summary) return;
+      updateConversation(conversationId, (conversation) => summaryToConversation(summary, conversation));
+    } catch {
+      // The stream result remains usable even when a summary refresh is unavailable.
+    }
+  }
+
+  async function runConversation(request: ChatRunRequest): Promise<void> {
+    if (activeRunsRef.current.has(request.conversationId)) {
+      updateLastMessage(request.conversationId, (item) => ({
+        ...item,
+        running: false,
+        error: "上一运行仍在停止，请稍后再试。",
+        decision: undefined,
+      }));
+      return;
+    }
+    const controller = new AbortController();
+    activeRunsRef.current.set(request.conversationId, { controller, sessionId: request.sessionId });
+
+    const onMessage = (message: StreamMessage) => {
+      const active = activeRunsRef.current.get(request.conversationId);
+      if (active?.controller !== controller || controller.signal.aborted) return;
+      if (message.type === "event") {
+        const kind = message.kind ?? "";
+        if (kind === "response_delta") {
+          const content = (message.data?.content as string | undefined) ?? message.message ?? "";
+          if (content) updateLastMessage(request.conversationId, (item) => ({ ...item, content: item.content + content }));
+        } else if (kind === "tool_call" || kind === "tool_result" || kind === "tool_failed") {
+          updateLastMessage(request.conversationId, (item) => ({
+            ...item,
+            events: [...item.events, { kind, message: message.message ?? "", data: message.data }],
+          }));
+        } else if (kind === "decision_requested" && message.data) {
+          updateLastMessage(request.conversationId, (item) => ({
+            ...item,
+            decision: { ...message.data, message: message.message } as ChatMessage["decision"],
+          }));
+        } else if (kind === "run_finished") {
+          updateLastMessage(request.conversationId, (item) => ({ ...item, status: message.message }));
+        }
+        const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
+        if (runId) updateLastMessage(request.conversationId, (item) => ({ ...item, runId }));
+      } else if (message.type === "done") {
+        updateLastMessage(request.conversationId, (item) => ({
+          ...item,
+          content: message.final_answer ?? "",
+          status: message.status,
+          metrics: message.metrics,
+          running: false,
+          decision: undefined,
+          runId: message.run_id,
+        }));
+        if (message.session_id && message.session_id !== request.sessionId) {
+          void rebindRunSession(request.conversationId, message.session_id);
+        }
+        void refreshSessions().catch(() => undefined);
+      } else if (message.type === "error") {
+        updateLastMessage(request.conversationId, (item) => ({
+          ...item,
+          error: message.error ?? message.message ?? "发生错误",
+          running: false,
+          decision: undefined,
+        }));
+      }
+    };
+
+    try {
+      const result = request.resume
+        ? await streamResume(request.sessionId, onMessage, controller.signal, request.permissionMode, request.reasoningEffort)
+        : await streamChat(
+            request.prompt ?? "",
+            onMessage,
+            controller.signal,
+            {
+              sessionId: request.sessionId,
+              mode: request.mode,
+              permissionMode: request.permissionMode,
+              reasoningEffort: request.reasoningEffort,
+            },
+          );
+      if (result === "aborted") {
+        updateLastMessage(request.conversationId, (item) => ({
+          ...item,
+          running: false,
+          status: "已停止",
+          decision: undefined,
+        }));
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        updateLastMessage(request.conversationId, (item) => ({
+          ...item,
+          error: String((error as Error).message ?? error),
+          running: false,
+          decision: undefined,
+        }));
+      }
+    } finally {
+      const active = activeRunsRef.current.get(request.conversationId);
+      if (active?.controller === controller) activeRunsRef.current.delete(request.conversationId);
+    }
+  }
+
+  function stopConversation(id: string): void {
+    const active = activeRunsRef.current.get(id);
+    if (!active) return;
+    active.controller.abort();
+    updateLastMessage(id, (item) => ({ ...item, running: false, status: "已停止", decision: undefined }));
   }
 
   async function ensureSession(id: string): Promise<string> {
@@ -359,7 +522,7 @@ function AgentApp() {
     }
   }
 
-  async function rewindConversation(id: string, messageId: string): Promise<string | undefined> {
+  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string } | undefined> {
     setActionError(null);
     const source = conversations.find((conversation) => conversation.id === id);
     if (!source) return undefined;
@@ -382,7 +545,7 @@ function AgentApp() {
       }));
       setCurrentId(id);
       setPage("chat");
-      return source.messages[index].content;
+      return { content: source.messages[index].content, sessionId: summary.session_id };
     } catch (error) {
       setActionError(String((error as Error).message ?? error));
       return undefined;
@@ -461,13 +624,16 @@ function AgentApp() {
                     onClick={() => selectConversation(conversation.id)}
                     title={conversation.title}
                   >
+                    {conversation.messages.some((message) => message.running) ? (
+                      <span className="history-running" aria-label="正在运行" title="正在运行" />
+                    ) : null}
                     <span className="history-title">{conversation.title || "新对话"}</span>
                   </button>
-                    <HistoryMenu
-                      conversation={conversation}
-                      open={openHistoryId === conversation.id}
-                      onOpenChange={(open) => setOpenHistoryId(open ? conversation.id : null)}
-                      onRename={renameConversation}
+                  <HistoryMenu
+                    conversation={conversation}
+                    open={openHistoryId === conversation.id}
+                    onOpenChange={(open) => setOpenHistoryId(open ? conversation.id : null)}
+                    onRename={renameConversation}
                     onArchive={archiveConversation}
                     onDelete={deleteConversation}
                   />
@@ -517,6 +683,9 @@ function AgentApp() {
             onSelectSession={useSession}
             onReload={reloadConversation}
             onRefresh={refreshSessions}
+            running={Boolean(current?.messages.some((message) => message.running))}
+            onRun={runConversation}
+            onStopRun={stopConversation}
           />
         ) : page === "trash" ? (
           <TrashPage conversations={archivedConversations} onRestore={restoreConversation} onDelete={deleteConversation} />

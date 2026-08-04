@@ -6,11 +6,12 @@ from .command import WorkspaceCommand
 from .delegation import delegation_tools
 from .filesystem import WorkspaceFiles
 from .registry import ToolRegistry
-from .web import DdgrWebSearch, SafeWebFetcher
+from .web import DdgrWebSearch, DuckDuckGoWebSearch, SafeWebFetcher
 
 __all__ = [
     "ConfirmationRequired",
     "DdgrWebSearch",
+    "DuckDuckGoWebSearch",
     "SafeWebFetcher",
     "Tool",
     "ToolError",
