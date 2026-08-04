@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 from backend.domain import (
     AssistantMessage,
     ResumePreview,
@@ -53,6 +56,7 @@ class ConversationService(ConversationSessionController):
         cancel_requested: CancellationHandler | None = None,
         suspend_requested: CancellationHandler | None = None,
         trigger: RunTrigger = "embedding",
+        request_parameters: Mapping[str, Any] | None = None,
     ) -> RunState:
         prepared = self._prepare(task)
         state = self._run_single_turn(
@@ -64,6 +68,7 @@ class ConversationService(ConversationSessionController):
             cancel_requested=cancel_requested,
             suspend_requested=suspend_requested,
             trigger=trigger,
+            request_parameters=request_parameters,
         )
         handoff = state.handoff
         if handoff is None:
@@ -85,6 +90,7 @@ class ConversationService(ConversationSessionController):
             trigger="handoff",
             source_session_id=source_session_id,
             source_run_id=state.run_id,
+            request_parameters=request_parameters,
         )
         if follow_up.handoff is not None:
             raise RuntimeError("Nested run handoffs are not supported.")
@@ -137,6 +143,7 @@ class ConversationService(ConversationSessionController):
         trigger: RunTrigger = "embedding",
         source_session_id: str | None = None,
         source_run_id: str | None = None,
+        request_parameters: Mapping[str, Any] | None = None,
     ) -> RunState:
         provenance = RunProvenance(
             trigger=trigger,
@@ -180,6 +187,8 @@ class ConversationService(ConversationSessionController):
         self.runtime.services.steering = steering
         self.runtime.services.cancel_requested = cancel_requested
         self.runtime.services.suspend_requested = suspend_requested
+        if request_parameters:
+            self.runtime.state.request_parameters.update(dict(request_parameters))
         runtime = self.runner.bind(self.runtime)
         try:
             state = self.runner.run(runtime)
@@ -209,6 +218,7 @@ class ConversationService(ConversationSessionController):
         steering: SteeringHandler | None = None,
         cancel_requested: CancellationHandler | None = None,
         suspend_requested: CancellationHandler | None = None,
+        request_parameters: Mapping[str, Any] | None = None,
     ) -> RunState | None:
         return resume_conversation(
             self,
@@ -218,6 +228,7 @@ class ConversationService(ConversationSessionController):
             steering=steering,
             cancel_requested=cancel_requested,
             suspend_requested=suspend_requested,
+            request_parameters=request_parameters,
         )
 
     def _prepare(self, task: str) -> str:

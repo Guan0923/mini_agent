@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./ChatPage";
-import type { Conversation, StreamMessage } from "../types";
+import type { ChatMode, Conversation, PermissionMode, ReasoningEffort, StreamMessage } from "../types";
 
 const mocks = vi.hoisted(() => ({
   streamChat: vi.fn(),
@@ -24,11 +24,15 @@ function Harness({
   onEnsureSession,
   onFork,
   onRewind,
+  onRun,
+  onStopRun,
 }: {
   initial?: Conversation | null;
   onEnsureSession?: (id: string) => Promise<string>;
   onFork?: (conversationId: string, messageId: string) => Promise<void>;
-  onRewind?: (conversationId: string, messageId: string) => Promise<string | undefined>;
+  onRewind?: (conversationId: string, messageId: string) => Promise<{ content: string; sessionId: string } | string | undefined>;
+  onRun?: (request: { conversationId: string; sessionId: string; prompt: string | null; resume: boolean; mode: ChatMode; permissionMode: PermissionMode; reasoningEffort: ReasoningEffort }) => Promise<void>;
+  onStopRun?: (conversationId: string) => void;
 }) {
   const [conversation, setConversation] = React.useState<Conversation | null>(initial);
 
@@ -48,6 +52,8 @@ function Harness({
       onEnsureSession={onEnsureSession}
       onFork={onFork}
       onRewind={onRewind}
+      onRun={onRun}
+      onStopRun={onStopRun}
     />
   );
 }
@@ -209,5 +215,66 @@ describe("ChatPage run lifecycle", () => {
       expect.any(AbortSignal),
       "session-existing",
     );
+  });
+
+  it("renders permission, display, and reasoning controls as upward pickers", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    await user.click(screen.getByRole("button", { name: /逐次审批/ }));
+    expect(screen.getByText("完全访问")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /完全访问/ }));
+    expect(screen.getByRole("button", { name: /完全访问/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /显示：medium/ }));
+    await user.click(screen.getByRole("button", { name: "verbose" }));
+    expect(screen.getByRole("button", { name: /显示：verbose/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /思考：中/ }));
+    await user.click(screen.getByRole("button", { name: /^高 high$/ }));
+    expect(screen.getByRole("button", { name: /思考：高/ })).toBeInTheDocument();
+  });
+
+  it("edits a user message in place, rewinds, and starts a replacement run", async () => {
+    const onRewind = vi.fn().mockResolvedValue({ content: "用户原文", sessionId: "session-rewound" });
+    const onRun = vi.fn().mockResolvedValue(undefined);
+    const initial: Conversation = {
+      id: "conversation-edit",
+      title: "编辑测试",
+      sessionId: "session-old",
+      messages: [
+        { id: "user-edit", role: "user", content: "用户原文", events: [] },
+        { id: "assistant-edit", role: "assistant", content: "旧回答", events: [], runId: "run-old" },
+      ],
+    };
+
+    const user = userEvent.setup();
+    render(<Harness initial={initial} onRewind={onRewind} onRun={onRun} />);
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+    const editor = screen.getByRole("textbox", { name: "编辑用户消息" });
+    await user.clear(editor);
+    await user.type(editor, "修改后的任务");
+    await user.click(screen.getByRole("button", { name: "保存并重新生成" }));
+
+    expect(onRewind).toHaveBeenCalledWith("conversation-edit", "user-edit");
+    expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "conversation-edit",
+      sessionId: "session-rewound",
+      prompt: "修改后的任务",
+      resume: false,
+    }));
+  });
+
+  it("enters edit mode when the user bubble is clicked", async () => {
+    const initial: Conversation = {
+      id: "conversation-click-edit",
+      title: "点击编辑",
+      messages: [{ id: "user-click", role: "user", content: "点击我编辑", events: [] }],
+    };
+    const user = userEvent.setup();
+    render(<Harness initial={initial} onRewind={vi.fn().mockResolvedValue({ content: "点击我编辑", sessionId: "s1" })} />);
+
+    await user.click(screen.getByText("点击我编辑"));
+    expect(screen.getByRole("textbox", { name: "编辑用户消息" })).toHaveValue("点击我编辑");
   });
 });

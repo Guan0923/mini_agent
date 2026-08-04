@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   compactSession,
   forkRun,
@@ -27,6 +27,7 @@ import type {
   Metrics,
   Page,
   PermissionMode,
+  ReasoningEffort,
   StreamMessage,
   ToolEvent,
 } from "../types";
@@ -40,11 +41,37 @@ interface Props {
   onNavigate: (page: Page) => void;
   onEnsureSession?: (id: string) => Promise<string>;
   onFork?: (conversationId: string, messageId: string) => Promise<void>;
-  onRewind?: (conversationId: string, messageId: string) => Promise<string | undefined>;
+  onRewind?: (conversationId: string, messageId: string) => Promise<RewindResult | string | undefined>;
   onSelectSession?: (id: string) => Promise<string>;
   onReload?: (id: string) => Promise<void>;
   onRefresh?: () => Promise<void>;
+  running?: boolean;
+  onRun?: (request: ChatRunRequest) => Promise<void>;
+  onStopRun?: (conversationId: string) => void;
 }
+
+interface RewindResult {
+  content: string;
+  sessionId: string;
+}
+
+interface ChatRunRequest {
+  conversationId: string;
+  sessionId: string;
+  prompt: string | null;
+  resume: boolean;
+  mode: ChatMode;
+  permissionMode: PermissionMode;
+  reasoningEffort: ReasoningEffort;
+}
+
+const REASONING_LABELS: Record<ReasoningEffort, string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "超高",
+  max: "最大",
+};
 
 async function copyText(value: string): Promise<void> {
   const clipboard = typeof window !== "undefined" ? window.navigator.clipboard : navigator.clipboard;
@@ -68,11 +95,13 @@ function MessageActions({
   busy,
   onFork,
   onRewind,
+  onEdit,
 }: {
   msg: ChatMessage;
   busy: boolean;
   onFork?: () => void;
   onRewind?: () => void;
+  onEdit?: () => void;
 }) {
   const [feedback, setFeedback] = useState<string | null>(null);
 
@@ -94,6 +123,7 @@ function MessageActions({
         {feedback ?? "复制"}
       </button>
       {onRewind ? <button type="button" onClick={onRewind} disabled={busy} aria-label="回溯">回溯</button> : null}
+      {onEdit ? <button type="button" onClick={onEdit} disabled={busy || !msg.content} aria-label="编辑">编辑</button> : null}
       {onFork ? <button type="button" onClick={onFork} disabled={busy || msg.running || !msg.content} aria-label="Fork">Fork</button> : null}
     </div>
   );
@@ -179,28 +209,36 @@ export default function ChatPage({
   onSelectSession = async (id) => id,
   onReload = async () => undefined,
   onRefresh = async () => undefined,
+  running: runningProp,
+  onRun,
+  onStopRun,
 }: Props) {
   const mode = selectedMode ?? "agent";
   const enhancedChatOptions = selectedMode !== undefined;
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [localBusy, setLocalBusy] = useState(false);
   const [modeMenu, setModeMenu] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("approval_for_me");
   const [permissionMenu, setPermissionMenu] = useState(false);
   const [display, setDisplay] = useState<DisplayMode>("medium");
   const [displayMenu, setDisplayMenu] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
+  const [reasoningMenu, setReasoningMenu] = useState(false);
   const [timezoneOptions, setTimezoneOptions] = useState<Array<{ identifier: string; label: string }>>([]);
   const [timezoneMenu, setTimezoneMenu] = useState(false);
   const [forkOptions, setForkOptions] = useState<ForkableRun[]>([]);
   const [forkMenu, setForkMenu] = useState(false);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const [commandMenuDismissedFor, setCommandMenuDismissedFor] = useState<string | null>(null);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingDraft, setEditingDraft] = useState("");
   const abortRef = useRef<AbortController | null>(null);
-  const previousConversationIdRef = useRef<string | null>(conversation?.id ?? null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const editRef = useRef<HTMLTextAreaElement>(null);
   const pendingCaretRef = useRef<number | null>(null);
 
   const messages = conversation?.messages ?? [];
+  const busy = runningProp ?? localBusy;
   const filteredCommands = commandSuggestions(input);
   const commandMenuVisible = !busy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
 
@@ -216,14 +254,50 @@ export default function ChatPage({
     }
   }, [input]);
 
-  useEffect(() => {
-    const previousId = previousConversationIdRef.current;
-    const currentId = conversation?.id ?? null;
-    if (previousId !== null && previousId !== currentId) abortRef.current?.abort();
-    previousConversationIdRef.current = currentId;
-  }, [conversation?.id]);
-
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (editingMessageId) {
+      editRef.current?.focus();
+      editRef.current?.select();
+    }
+  }, [editingMessageId]);
+
+  useEffect(() => {
+    const textarea = editRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
+  }, [editingDraft, editingMessageId]);
+
+  useEffect(() => {
+    if (!modeMenu && !permissionMenu && !displayMenu && !reasoningMenu && !timezoneMenu && !forkMenu) return undefined;
+    const closeOnOutsideClick = (event: globalThis.MouseEvent) => {
+      if (!(event.target as HTMLElement).closest(".composer")) {
+        setModeMenu(false);
+        setPermissionMenu(false);
+        setDisplayMenu(false);
+        setReasoningMenu(false);
+        setTimezoneMenu(false);
+        setForkMenu(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setModeMenu(false);
+      setPermissionMenu(false);
+      setDisplayMenu(false);
+      setReasoningMenu(false);
+      setTimezoneMenu(false);
+      setForkMenu(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [displayMenu, forkMenu, modeMenu, permissionMenu, reasoningMenu, timezoneMenu]);
 
   function changeInput(value: string) {
     setInput(value);
@@ -283,7 +357,7 @@ export default function ChatPage({
   async function runStream(conversationId: string, sessionId: string, prompt: string | null, resume = false) {
     const controller = new AbortController();
     abortRef.current = controller;
-    setBusy(true);
+    setLocalBusy(true);
     try {
       const onMessage = (message: StreamMessage) => {
         if (message.type === "event") {
@@ -319,14 +393,14 @@ export default function ChatPage({
         }
       };
       if (resume) {
-        const result = await streamResume(sessionId, onMessage, controller.signal, permissionMode);
+        const result = await streamResume(sessionId, onMessage, controller.signal, permissionMode, reasoningEffort);
         if (result === "aborted") setLast({ running: false, status: "已停止", decision: undefined }, conversationId);
       } else {
         const result = await streamChat(
           prompt ?? "",
           onMessage,
           controller.signal,
-          enhancedChatOptions ? { sessionId, mode, permissionMode } : sessionId,
+          enhancedChatOptions ? { sessionId, mode, permissionMode, reasoningEffort } : sessionId,
         );
         if (result === "aborted") setLast({ running: false, status: "已停止", decision: undefined }, conversationId);
       }
@@ -335,13 +409,29 @@ export default function ChatPage({
         setLast({ error: String((error as Error).message ?? error), running: false, decision: undefined }, conversationId);
       }
     } finally {
-      setBusy(false);
+      setLocalBusy(false);
       abortRef.current = null;
     }
   }
 
-  async function runPrompt(prompt: string) {
-    const { conversationId, sessionId } = await ensureSession();
+  async function dispatchRun(conversationId: string, sessionId: string, prompt: string | null, resume = false) {
+    if (onRun) {
+      await onRun({
+        conversationId,
+        sessionId,
+        prompt,
+        resume,
+        mode,
+        permissionMode,
+        reasoningEffort,
+      });
+      return;
+    }
+    await runStream(conversationId, sessionId, prompt, resume);
+  }
+
+  async function runPrompt(prompt: string, target?: { conversationId: string; sessionId: string }) {
+    const { conversationId, sessionId } = target ?? await ensureSession();
     const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [] };
     const assistantMessage: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", events: [], running: true };
     onUpdate(conversationId, (current) => ({
@@ -349,7 +439,7 @@ export default function ChatPage({
       title: current.title === "新对话" ? prompt.slice(0, 18) + (prompt.length > 18 ? "…" : "") : current.title,
       messages: [...current.messages, userMessage, assistantMessage],
     }));
-    await runStream(conversationId, sessionId, prompt);
+    await dispatchRun(conversationId, sessionId, prompt);
   }
 
   async function resumeSession(sessionId?: string) {
@@ -367,7 +457,7 @@ export default function ChatPage({
     }
     const assistant: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", events: [], running: true };
     onUpdate(conversationId, (current) => ({ ...current, messages: [...current.messages, assistant] }));
-    await runStream(conversationId, targetSessionId, null, true);
+    await dispatchRun(conversationId, targetSessionId, null, true);
   }
 
   async function executeCommand(name: string, argument: string) {
@@ -509,9 +599,13 @@ export default function ChatPage({
   }
 
   function stop() {
+    if (conversation && onStopRun) {
+      onStopRun(conversation.id);
+      return;
+    }
     abortRef.current?.abort();
     setLast({ running: false, status: "已停止", decision: undefined });
-    setBusy(false);
+    setLocalBusy(false);
   }
 
   async function openTimezoneMenu() {
@@ -523,10 +617,53 @@ export default function ChatPage({
 
   async function rewindMessage(messageId: string) {
     if (!conversation || !onRewind || busy) return;
-    const content = await onRewind(conversation.id, messageId);
-    if (content === undefined) return;
-    setInput(content);
+    const result = await onRewind(conversation.id, messageId);
+    if (result === undefined) return;
+    setInput(typeof result === "string" ? result : result.content);
     window.setTimeout(() => taRef.current?.focus(), 0);
+  }
+
+  function beginEdit(message: ChatMessage) {
+    if (busy || !onRewind || !message.content) return;
+    setEditingMessageId(message.id);
+    setEditingDraft(message.content);
+  }
+
+  function cancelEdit() {
+    setEditingMessageId(null);
+    setEditingDraft("");
+  }
+
+  async function saveEdit(message: ChatMessage) {
+    if (!conversation || !onRewind || busy || !editingDraft.trim() || editingDraft.trim() === message.content.trim()) {
+      cancelEdit();
+      return;
+    }
+    const result = await onRewind(conversation.id, message.id);
+    if (result === undefined) return;
+    const nextPrompt = editingDraft.trim();
+    const sessionId = typeof result === "string" ? conversation.sessionId : result.sessionId;
+    if (!sessionId) return;
+    cancelEdit();
+    await runPrompt(nextPrompt, { conversationId: conversation.id, sessionId });
+  }
+
+  function handleUserBubbleClick(event: ReactMouseEvent<HTMLDivElement>, message: ChatMessage) {
+    if (
+      busy ||
+      !onRewind ||
+      !message.content ||
+      event.button !== 0 ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey
+    ) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("a,button,textarea,input,code,pre,details,summary")) return;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) return;
+    beginEdit(message);
   }
 
   function forkMessage(messageId: string) {
@@ -545,8 +682,46 @@ export default function ChatPage({
         ) : messages.map((message) => message.role === "user" ? (
           <div className="message user" key={message.id}>
             <div className="message-content">
-              <div className="bubble"><MarkdownContent text={message.content} /></div>
-              <MessageActions msg={message} busy={busy} onRewind={onRewind ? () => void rewindMessage(message.id) : undefined} />
+              {editingMessageId === message.id ? (
+                <div className="message-edit" aria-label="编辑用户消息">
+                  <textarea
+                    ref={editRef}
+                    aria-label="编辑用户消息"
+                    value={editingDraft}
+                    onChange={(event) => setEditingDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        cancelEdit();
+                      } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                        event.preventDefault();
+                        void saveEdit(message);
+                      }
+                    }}
+                    rows={Math.min(8, Math.max(2, editingDraft.split("\n").length))}
+                  />
+                  <div className="message-edit-actions">
+                    <button type="button" onClick={cancelEdit}>取消</button>
+                    <button type="button" onClick={() => void saveEdit(message)} disabled={!editingDraft.trim()}>保存并重新生成</button>
+                  </div>
+                </div>
+              ) : (
+                <div
+                  className="bubble user-bubble"
+                  onClick={(event) => handleUserBubbleClick(event, message)}
+                  title={onRewind && !busy ? "点击编辑此消息" : undefined}
+                >
+                  <MarkdownContent text={message.content} />
+                </div>
+              )}
+              {editingMessageId !== message.id ? (
+                <MessageActions
+                  msg={message}
+                  busy={busy}
+                  onRewind={onRewind ? () => void rewindMessage(message.id) : undefined}
+                  onEdit={onRewind ? () => beginEdit(message) : undefined}
+                />
+              ) : null}
             </div>
           </div>
         ) : (
@@ -576,19 +751,6 @@ export default function ChatPage({
             ))}
           </div>
         ) : null}
-        {permissionMenu ? (
-          <div className="picker-menu permission-menu">
-            <div className="picker-title">权限模式</div>
-            <button className={permissionMode === "approval_for_me" ? "selected" : ""} onClick={() => { setPermissionMode("approval_for_me"); setPermissionMenu(false); }}>逐次审批<small>每个需要确认的工具都询问</small></button>
-            <button className={permissionMode === "full_access" ? "selected" : ""} onClick={() => { setPermissionMode("full_access"); setPermissionMenu(false); }}>完全访问<small>工具自动批准，但 Plan Review 仍需确认</small></button>
-          </div>
-        ) : null}
-        {displayMenu ? (
-          <div className="picker-menu display-menu">
-            <div className="picker-title">显示级别</div>
-            {DISPLAY_LEVELS.map((level) => <button className={display === level ? "selected" : ""} key={level} onClick={() => { setDisplay(level); setDisplayMenu(false); }}>{level}</button>)}
-          </div>
-        ) : null}
         {timezoneMenu ? (
           <div className="picker-menu timezone-menu">
             <div className="picker-title">会话时区</div>
@@ -601,7 +763,6 @@ export default function ChatPage({
             {forkOptions.length === 0 ? <div className="picker-empty">暂无可分叉运行</div> : forkOptions.map((run) => <button key={run.run_id} onClick={async () => { const session = await forkRun(run.run_id); setForkMenu(false); await onSelectSession(session.session_id); await onRefresh(); }}><b>{run.run_id.slice(0, 18)}…</b><small>{run.task} · {run.status}</small></button>)}
           </div>
         ) : null}
-        {modeMenu ? <div className="mode-menu composer-mode-menu"><button className={mode === "agent" ? "selected" : ""} onClick={() => { onModeChange("agent"); setModeMenu(false); }}>⚙ Agent<small>执行工具并修改工作区</small></button><button className={mode === "plan" ? "selected" : ""} onClick={() => { onModeChange("plan"); setModeMenu(false); }}>📋 Plan<small>只读规划和讨论</small></button></div> : null}
         <div className="composer-box">
           <textarea
             ref={taRef}
@@ -639,11 +800,101 @@ export default function ChatPage({
           />
           <div className="composer-toolbar">
             <div className="mode-picker">
-              <button className="mode-trigger" disabled={busy} onClick={() => setModeMenu((current) => !current)}>
+              <button
+                type="button"
+                className="mode-trigger"
+                disabled={busy}
+                aria-expanded={modeMenu}
+                aria-haspopup="menu"
+                onClick={() => {
+                  setModeMenu((current) => !current);
+                  setPermissionMenu(false);
+                  setDisplayMenu(false);
+                  setReasoningMenu(false);
+                }}
+              >
                 {mode === "plan" ? "📋 Plan" : "⚙ Agent"} <span>⌃</span>
               </button>
+              {modeMenu ? (
+                <div className="mode-menu composer-mode-menu">
+                  <button type="button" className={mode === "agent" ? "selected" : ""} onClick={() => { onModeChange("agent"); setModeMenu(false); }}>⚙ Agent<small>执行工具并修改工作区</small></button>
+                  <button type="button" className={mode === "plan" ? "selected" : ""} onClick={() => { onModeChange("plan"); setModeMenu(false); }}>📋 Plan<small>只读规划和讨论</small></button>
+                </div>
+              ) : null}
             </div>
-            <span className="composer-hint">{permissionMode === "full_access" ? "完全访问" : "逐次审批"} · {display}</span>
+            <div className="composer-picker">
+              <button
+                type="button"
+                className="picker-trigger"
+                disabled={busy}
+                aria-expanded={permissionMenu}
+                aria-haspopup="menu"
+                onClick={() => {
+                  setPermissionMenu((current) => !current);
+                  setModeMenu(false);
+                  setDisplayMenu(false);
+                  setReasoningMenu(false);
+                }}
+              >
+                {permissionMode === "full_access" ? "完全访问" : "逐次审批"} <span>⌃</span>
+              </button>
+              {permissionMenu ? (
+                <div className="picker-menu composer-picker-menu">
+                  <div className="picker-title">权限模式</div>
+                  <button type="button" className={permissionMode === "approval_for_me" ? "selected" : ""} onClick={() => { setPermissionMode("approval_for_me"); setPermissionMenu(false); }}>逐次审批<small>每个需要确认的工具都询问</small></button>
+                  <button type="button" className={permissionMode === "full_access" ? "selected" : ""} onClick={() => { setPermissionMode("full_access"); setPermissionMenu(false); }}>完全访问<small>工具自动批准，但 Plan Review 仍需确认</small></button>
+                </div>
+              ) : null}
+            </div>
+            <div className="composer-picker">
+              <button
+                type="button"
+                className="picker-trigger"
+                aria-expanded={displayMenu}
+                aria-haspopup="menu"
+                onClick={() => {
+                  setDisplayMenu((current) => !current);
+                  setModeMenu(false);
+                  setPermissionMenu(false);
+                  setReasoningMenu(false);
+                }}
+              >
+                显示：{display} <span>⌃</span>
+              </button>
+              {displayMenu ? (
+                <div className="picker-menu composer-picker-menu">
+                  <div className="picker-title">显示级别</div>
+                  {DISPLAY_LEVELS.map((level) => <button type="button" className={display === level ? "selected" : ""} key={level} onClick={() => { setDisplay(level); setDisplayMenu(false); }}>{level}</button>)}
+                </div>
+              ) : null}
+            </div>
+            <div className="composer-picker">
+              <button
+                type="button"
+                className="picker-trigger"
+                disabled={busy}
+                aria-expanded={reasoningMenu}
+                aria-haspopup="menu"
+                onClick={() => {
+                  setReasoningMenu((current) => !current);
+                  setModeMenu(false);
+                  setPermissionMenu(false);
+                  setDisplayMenu(false);
+                }}
+              >
+                思考：{REASONING_LABELS[reasoningEffort]} <span>⌃</span>
+              </button>
+              {reasoningMenu ? (
+                <div className="picker-menu composer-picker-menu reasoning-picker-menu">
+                  <div className="picker-title">思考等级</div>
+                  {(["low", "medium", "high", "xhigh", "max"] as ReasoningEffort[]).map((level) => (
+                    <button type="button" className={reasoningEffort === level ? "selected" : ""} key={level} onClick={() => { setReasoningEffort(level); setReasoningMenu(false); }}>
+                      {REASONING_LABELS[level]}<small>{level}</small>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           </div>
           {busy ? <button className="send-btn stop" onClick={stop}>停止</button> : <button className="send-btn" onClick={() => void send()} disabled={!input.trim()}>发送</button>}
         </div>

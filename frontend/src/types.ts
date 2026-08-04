@@ -2,6 +2,7 @@ export type Page = "chat" | "trash" | "benchmark";
 export type ChatMode = "agent" | "plan";
 export type PermissionMode = "approval_for_me" | "full_access";
 export type DisplayMode = "minimal" | "medium" | "verbose";
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface AuthUser {
   id: string;
