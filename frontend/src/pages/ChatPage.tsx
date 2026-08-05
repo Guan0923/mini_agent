@@ -722,8 +722,8 @@ export default function ChatPage({
         disabled={busy}
         value={mode}
         options={[
-          { value: "agent", label: "⚙ Agent — 执行工具并修改工作区" },
-          { value: "plan", label: "📋 Plan — 只读规划和讨论" },
+          { value: "agent", label: "⚙ Agent" },
+          { value: "plan", label: "📋 Plan" },
         ]}
         onChange={(value: ChatMode) => {
           onModeChange(value);
@@ -745,8 +745,8 @@ export default function ChatPage({
         disabled={busy}
         value={permissionMode}
         options={[
-          { value: "approval_for_me", label: "逐次审批 — 每个需要确认的工具都询问" },
-          { value: "full_access", label: "完全访问 — 工具自动批准，但 Plan Review 仍需确认" },
+          { value: "approval_for_me", label: "逐次审批" },
+          { value: "full_access", label: "完全访问" },
         ]}
         onChange={(value: PermissionMode) => {
           setPermissionMode(value);
@@ -763,32 +763,13 @@ export default function ChatPage({
       <Select
         className="composer-picker"
         placement="topLeft"
-        open={openSettingsSelect === "display"}
-        aria-label="显示级别"
-        value={display}
-        options={DISPLAY_LEVELS.map((level) => ({ value: level, label: `显示：${level}` }))}
-        onChange={(value: DisplayMode) => {
-          setDisplay(value);
-          setOpenSettingsSelect(null);
-        }}
-        onOpenChange={(open) => {
-          setOpenSettingsSelect(open ? "display" : null);
-          if (open) {
-            setTimezoneMenu(false);
-            setForkMenu(false);
-          }
-        }}
-      />
-      <Select
-        className="composer-picker"
-        placement="topLeft"
         open={openSettingsSelect === "reasoning"}
         aria-label="思考等级"
         disabled={busy}
         value={reasoningEffort}
         options={(Object.keys(REASONING_LABELS) as ReasoningEffort[]).map((level) => ({
           value: level,
-          label: `思考：${REASONING_LABELS[level]} (${level})`,
+          label: `${level}`,
         }))}
         onChange={(value: ReasoningEffort) => {
           setReasoningEffort(value);

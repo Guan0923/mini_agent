@@ -1019,13 +1019,21 @@ body {
 }
 
 /* ---------- Ocean landing and authentication ---------- */
+.public-shell {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+  color: #073b51;
+  background: #b9eee7;
+}
+
 .landing-page,
 .auth-page {
   position: relative;
   min-height: 100vh;
   overflow: hidden;
   color: #073b51;
-  background: #b9eee7;
+  background: transparent;
 }
 
 .ocean-scene {

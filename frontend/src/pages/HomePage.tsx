@@ -1,11 +1,9 @@
 import { ArrowRightOutlined } from "@ant-design/icons";
 import { Link } from "react-router-dom";
-import OceanScene from "../components/OceanScene";
 
 export default function HomePage() {
   return (
     <main className="landing-page">
-      <OceanScene />
       <div className="landing-content">
         <header className="landing-header">
           <Link className="brand-mark" to="/">MINI<span>·</span>AGENT</Link>

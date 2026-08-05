@@ -277,10 +277,10 @@ export default function AppSidebar({
           block
           icon={<BarChartOutlined />}
           onClick={() => onNavigate("benchmark")}
-          aria-label="Benchmark 成绩单"
+          aria-label="Benchmark"
           style={{ textAlign: "left" }}
         >
-          Benchmark 成绩单
+          Benchmark
         </Button>
       </div>
 

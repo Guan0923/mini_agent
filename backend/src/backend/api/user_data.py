@@ -53,6 +53,8 @@ def migrate_legacy_for_owner(
         for source in source_paths.root.glob("session_*"):
             if source.is_dir() and (source / "state.db").exists():
                 shutil.copytree(source, target_paths.root / source.name, dirs_exist_ok=True)
+        if source_paths.logs_dir.exists():
+            shutil.copytree(source_paths.logs_dir, target_paths.logs_dir, dirs_exist_ok=True)
         if source_workspace.exists():
             shutil.copytree(source_workspace, user_workspace(data_root, identity.id), dirs_exist_ok=True)
     except OSError:

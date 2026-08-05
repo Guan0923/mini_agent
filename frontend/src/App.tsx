@@ -26,6 +26,7 @@ import LoginPage from "./pages/auth/LoginPage";
 import RegisterPage from "./pages/auth/RegisterPage";
 import ResetPasswordPage from "./pages/auth/ResetPasswordPage";
 import HomePage from "./pages/HomePage";
+import PublicLayout from "./pages/PublicLayout";
 import AppSidebar from "./components/AppSidebar";
 import IconAction from "./components/IconAction";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
@@ -812,11 +813,13 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 function AppRoutes() {
   return (
     <Routes>
-      <Route path="/" element={<PublicRoute><HomePage /></PublicRoute>} />
-      <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
-      <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
-      <Route path="/forgot-password" element={<PublicRoute><ResetPasswordPage /></PublicRoute>} />
-      <Route path="/device/approve" element={<DeviceApprovalPage />} />
+      <Route element={<PublicLayout />}>
+        <Route path="/" element={<PublicRoute><HomePage /></PublicRoute>} />
+        <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
+        <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
+        <Route path="/forgot-password" element={<PublicRoute><ResetPasswordPage /></PublicRoute>} />
+        <Route path="/device/approve" element={<DeviceApprovalPage />} />
+      </Route>
       <Route path="/app" element={<ProtectedRoute><AgentApp /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
