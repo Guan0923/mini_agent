@@ -74,6 +74,7 @@ function loadConversations(key: string): Conversation[] {
       .map((conversation) => ({
         ...conversation,
         clientId: conversation.clientId ?? conversation.id,
+        messageCount: conversation.messageCount ?? conversation.messages.length,
         messagesLoaded: conversation.messagesLoaded ?? conversation.messages.length > 0,
         messages: conversation.messages.map((message) =>
           message.running
@@ -123,6 +124,8 @@ function summaryToConversation(summary: SessionInfo, existing?: Conversation): C
     id: existing?.id ?? summary.client_id ?? summary.session_id,
     title: summary.title || existing?.title || "新对话",
     messages: existing?.messages ?? [],
+    messageCount: summary.message_count ?? existing?.messageCount ?? existing?.messages.length ?? 0,
+    updatedAt: summary.updated_at ?? existing?.updatedAt,
     sessionId: summary.session_id,
     clientId: summary.client_id ?? existing?.clientId ?? existing?.id ?? summary.session_id,
     archivedAt: summary.archived_at ?? undefined,

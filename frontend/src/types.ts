@@ -44,6 +44,8 @@ export interface Conversation {
   id: string;
   title: string;
   messages: ChatMessage[];
+  messageCount?: number;
+  updatedAt?: string;
   sessionId?: string;
   clientId?: string;
   archivedAt?: string;

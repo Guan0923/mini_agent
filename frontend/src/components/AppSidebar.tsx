@@ -25,7 +25,7 @@ import {
   BarChartOutlined,
   MessageOutlined,
 } from "@ant-design/icons";
-import { useState } from "react";
+import { useRef, useState, type CSSProperties } from "react";
 import type { AuthUser, Conversation, Page } from "../types";
 import IconAction from "./IconAction";
 
@@ -155,6 +155,89 @@ function HistoryActions({ conversation, onRename, onArchive, onDelete }: History
   );
 }
 
+const historyDateFormatter = new Intl.DateTimeFormat("zh-CN", {
+  month: "numeric",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
+function formatHistoryUpdatedAt(value?: string): string {
+  if (!value) return "";
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? "" : historyDateFormatter.format(timestamp);
+}
+
+interface HistoryRowProps extends HistoryActionsProps {
+  selected: boolean;
+  onSelect: (id: string) => void;
+}
+
+function HistoryRow({ conversation, selected, onSelect, onRename, onArchive, onDelete }: HistoryRowProps) {
+  const title = conversation.title || "新对话";
+  const running = conversation.messages.some((message) => message.running);
+  const messageCount = conversation.messageCount ?? conversation.messages.length;
+  const updatedAt = formatHistoryUpdatedAt(conversation.updatedAt);
+  const meta = `${messageCount} 条消息${updatedAt ? ` · ${updatedAt}` : ""}`;
+  const viewportRef = useRef<HTMLSpanElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [overflow, setOverflow] = useState(0);
+
+  function measureOverflow() {
+    const viewport = viewportRef.current;
+    const text = textRef.current;
+    if (!viewport || !text) return;
+    const next = Math.max(0, text.scrollWidth - viewport.clientWidth);
+    setOverflow(next > 1 ? next : 0);
+  }
+
+  function resetOverflow() {
+    setOverflow(0);
+  }
+
+  const textStyle = { "--history-shift": `-${overflow}px` } as CSSProperties;
+
+  return (
+    <List.Item className="history-list-item" style={{ padding: "2px 0", border: 0 }}>
+      <div className="history-item" onMouseEnter={measureOverflow} onMouseLeave={resetOverflow}>
+        <Button
+          className={`history-entry-button${selected ? " selected" : ""}`}
+          type="text"
+          title={title}
+          onClick={() => onSelect(conversation.id)}
+          aria-label={title}
+          aria-current={selected ? "page" : undefined}
+        >
+          <span className="history-entry-icon">
+            {running ? (
+              <span role="status" aria-label="正在运行" title="正在运行">
+                <Badge status="processing" />
+                <Spin size="small" indicator={<LoadingOutlined spin />} style={{ marginLeft: 2 }} />
+              </span>
+            ) : (
+              <MessageOutlined aria-hidden="true" />
+            )}
+          </span>
+          <span className="history-entry-copy">
+            <span className={`history-summary-viewport${overflow ? " is-scrolling" : ""}`} ref={viewportRef}>
+              <span className="history-summary-text" ref={textRef} style={textStyle}>{title}</span>
+            </span>
+            <span className="history-meta">{meta}</span>
+          </span>
+        </Button>
+        <div className="history-actions">
+          <HistoryActions
+            conversation={conversation}
+            onRename={onRename}
+            onArchive={onArchive}
+            onDelete={onDelete}
+          />
+        </div>
+      </div>
+    </List.Item>
+  );
+}
+
 export default function AppSidebar({
   user,
   conversations,
@@ -202,57 +285,17 @@ export default function AppSidebar({
           dataSource={conversations}
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无对话" /> }}
           renderItem={(conversation) => {
-            const running = conversation.messages.some((message) => message.running);
             const selected = conversation.id === currentId && page === "chat";
-            const title = conversation.title || "新对话";
             return (
-              <List.Item
+              <HistoryRow
                 key={conversation.id}
-                style={{ padding: "2px 0", border: 0 }}
-                actions={[
-                  <HistoryActions
-                    key={`${conversation.id}-actions`}
-                    conversation={conversation}
-                    onRename={onRename}
-                    onArchive={onArchive}
-                    onDelete={onDelete}
-                  />,
-                ]}
-              >
-                <Button
-                  type="text"
-                  block
-                  title={title}
-                  onClick={() => onSelect(conversation.id)}
-                  aria-label={title}
-                  aria-current={selected ? "page" : undefined}
-                  style={{
-                    justifyContent: "flex-start",
-                    minWidth: 0,
-                    overflow: "hidden",
-                    textAlign: "left",
-                    background: selected ? "rgba(8, 127, 141, 0.1)" : undefined,
-                  }}
-                >
-                  <Space size={7} style={{ minWidth: 0, maxWidth: "100%" }}>
-                    {running ? (
-                      <span role="status" aria-label="正在运行" title="正在运行">
-                        <Badge status="processing" />
-                        <Spin
-                          size="small"
-                          indicator={<LoadingOutlined spin />}
-                          style={{ marginLeft: 2 }}
-                        />
-                      </span>
-                    ) : (
-                      <MessageOutlined aria-hidden="true" />
-                    )}
-                    <Typography.Text ellipsis style={{ maxWidth: "100%" }}>
-                      {title}
-                    </Typography.Text>
-                  </Space>
-                </Button>
-              </List.Item>
+                conversation={conversation}
+                selected={selected}
+                onSelect={onSelect}
+                onRename={onRename}
+                onArchive={onArchive}
+                onDelete={onDelete}
+              />
             );
           }}
         />

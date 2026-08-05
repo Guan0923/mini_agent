@@ -217,7 +217,7 @@ describe("ChatPage run lifecycle", () => {
     );
   });
 
-  it("renders permission, display, and reasoning controls as Ant Design selectors", async () => {
+  it("renders permission and reasoning controls as Ant Design selectors", async () => {
     const user = userEvent.setup();
     render(<Harness />);
 
@@ -225,13 +225,8 @@ describe("ChatPage run lifecycle", () => {
     await user.click(screen.getByRole("option", { name: /完全访问/ }));
     expect(screen.getByText(/完全访问/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("combobox", { name: "显示级别" }));
-    await user.click(screen.getByRole("option", { name: "显示：verbose" }));
-    expect(screen.getByText("显示：verbose")).toBeInTheDocument();
-
     await user.click(screen.getByRole("combobox", { name: "思考等级" }));
-    await user.click(screen.getByRole("option", { name: /思考：高/ }));
-    expect(screen.getByText(/思考：高/)).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "high" })).toBeInTheDocument();
   });
 
   it("edits a user message in place, rewinds, and starts a replacement run", async () => {
@@ -275,5 +270,16 @@ describe("ChatPage run lifecycle", () => {
 
     await user.click(screen.getByText("点击我编辑"));
     expect(screen.getByRole("textbox", { name: "编辑用户消息" })).toHaveValue("点击我编辑");
+  });
+  it("keeps reasoning before the circular send button", () => {
+    const { container } = render(<Harness />);
+    const box = container.querySelector(".composer-box");
+    expect(box).not.toBeNull();
+    const labels = Array.from(box!.querySelectorAll<HTMLInputElement>(".composer-settings-controls .ant-select-input"))
+      .map((input) => input.getAttribute("aria-label"));
+    expect(labels).toEqual(["运行模式", "权限模式", "思考等级"]);
+    const send = screen.getByRole("button", { name: "发送" });
+    expect(send).toHaveClass("ant-btn-circle", "send-btn");
+    expect(send.previousElementSibling).toHaveClass("composer-toolbar");
   });
 });

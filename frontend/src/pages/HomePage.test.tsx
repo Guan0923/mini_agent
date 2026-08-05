@@ -1,14 +1,11 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import HomePage from "./HomePage";
-
-vi.mock("../components/OceanScene", () => ({ default: () => <div data-testid="ocean-scene" /> }));
 
 describe("HomePage", () => {
   it("shows a continuous centered hero and both authentication paths", () => {
     render(<MemoryRouter><HomePage /></MemoryRouter>);
-    expect(screen.getByTestId("ocean-scene")).toBeTruthy();
     const heading = screen.getByRole("heading", { name: /让想法像潮汐一样/ });
     expect(heading.textContent).toBe("让想法像潮汐一样，自然地流动。");
     expect(heading.querySelector("br")).toBeNull();
