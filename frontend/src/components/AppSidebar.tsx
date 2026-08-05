@@ -259,8 +259,8 @@ export default function AppSidebar({
       </div>
 
       <Divider style={{ margin: "12px 0" }} />
-      <Space direction="vertical" size={4} style={{ width: "100%" }}>
-        <Badge count={archivedCount} size="small" offset={[5, 0]}>
+      <div className="sidebar-utility-links">
+        <Badge className="sidebar-utility-badge" count={archivedCount} size="small" offset={[5, 0]}>
           <Button
             type={page === "trash" ? "default" : "text"}
             block
@@ -282,7 +282,7 @@ export default function AppSidebar({
         >
           Benchmark 成绩单
         </Button>
-      </Space>
+      </div>
 
       <div style={{ marginTop: 16 }}>
         <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>

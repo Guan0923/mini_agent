@@ -100,8 +100,10 @@ export default function ResetPasswordPage() {
         >
           <Input type="email" autoComplete="email" placeholder="you@example.com" required />
         </Form.Item>
-        <div className="code-row">
+        <div className="code-row" style={{ marginBottom: 16 }}>
           <Form.Item
+            className="code-field"
+            style={{ marginBottom: 0 }}
             label="邮箱验证码"
             name="code"
             rules={[{ required: true, len: 6, message: "请输入 6 位验证码。" }]}
@@ -115,7 +117,7 @@ export default function ResetPasswordPage() {
               aria-label="邮箱验证码"
             />
           </Form.Item>
-          <Button className="code-button" type="default" onClick={() => void sendCode()} loading={codeBusy} disabled={!email || cooldown > 0 || codeBusy}>
+          <Button className="code-button" style={{ height: 48, minHeight: 48 }} type="default" onClick={() => void sendCode()} loading={codeBusy} disabled={!email || cooldown > 0 || codeBusy}>
             {cooldown ? `${cooldown}s 后重发` : sent ? "重新发送" : "发送验证码"}
           </Button>
         </div>

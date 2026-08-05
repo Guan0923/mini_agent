@@ -787,7 +787,7 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 32px 40px;
-  max-width: 1080px;
+  max-width: 1440px;
   margin: 0 auto;
   width: 100%;
 }
@@ -835,17 +835,11 @@ body {
 }
 
 .task-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 16px;
+  width: 100%;
 }
 
 .task-card {
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  width: 100%;
 }
 
 .task-head {
@@ -859,6 +853,8 @@ body {
   font-weight: 600;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13.5px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .capability-badge {
@@ -875,6 +871,8 @@ body {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .source-badge {
@@ -892,6 +890,11 @@ body {
   font-size: 13px;
   margin: 8px 0 14px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.task-desc a {
+  overflow-wrap: anywhere;
 }
 
 .task-source {
@@ -1236,6 +1239,9 @@ body {
 
 .auth-card {
   width: min(430px, 100%);
+  --mini-agent-form-item-margin-bottom: 16px;
+  --mini-agent-form-label-height: auto;
+  --mini-agent-form-vertical-label-padding: 0 0 4px;
   padding: 38px 38px 34px;
   border: 1px solid rgba(255, 255, 255, 0.58);
   border-radius: 24px;
@@ -1260,15 +1266,15 @@ body {
 }
 
 .auth-form {
+  --mini-agent-form-item-margin-bottom: 16px !important;
+  --mini-agent-form-label-height: auto !important;
+  --mini-agent-form-vertical-label-padding: 0 0 4px !important;
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
 .auth-form label {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
   color: rgba(5, 55, 72, 0.74);
   font-size: 12px;
 }
@@ -1283,6 +1289,20 @@ body {
   font: inherit;
   background: rgba(255, 255, 255, 0.46);
   transition: border-color 160ms ease, background 160ms ease;
+}
+
+.auth-form .ant-input-affix-wrapper {
+  min-height: 48px;
+  padding: 0 12px;
+}
+
+.auth-form .ant-input-affix-wrapper > input.ant-input {
+  padding: 12px 0;
+}
+
+.auth-form .ant-input-otp {
+  width: 100%;
+  min-height: 48px;
 }
 
 .auth-form input:focus {
@@ -1328,7 +1348,9 @@ body {
 }
 
 .code-button {
-  height: 41px;
+  height: 48px;
+  min-height: 48px;
+  box-sizing: border-box;
   border: 1px solid rgba(5, 105, 123, 0.28);
   border-radius: 10px;
   padding: 0 11px;
@@ -1697,7 +1719,7 @@ body {
 }
 
 .benchmark-page {
-  padding: 32px clamp(20px, 4vw, 40px);
+  padding: 28px clamp(16px, 3vw, 32px);
 }
 
 .benchmark-page .page-header {
@@ -1708,6 +1730,30 @@ body {
 .benchmark-page .task-card,
 .benchmark-page .result-card {
   height: 100%;
+}
+
+.benchmark-page .ant-col {
+  display: flex;
+  min-width: 0;
+}
+
+.benchmark-page .task-card {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-utility-links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  width: 100%;
+}
+
+.sidebar-utility-links > .ant-btn,
+.sidebar-utility-badge,
+.sidebar-utility-badge > .ant-btn {
+  width: 100%;
+  min-width: 0;
 }
 
 .benchmark-page .task-actions {
@@ -1733,8 +1779,21 @@ body {
   gap: 0;
 }
 
+.auth-form > div {
+  --mini-agent-form-item-margin-bottom: 16px !important;
+  --mini-agent-form-label-height: auto !important;
+  --mini-agent-form-vertical-label-padding: 0 0 4px !important;
+}
+.auth-form .code-row > div {
+  --mini-agent-form-item-margin-bottom: 16px !important;
+  --mini-agent-form-label-height: auto !important;
+  --mini-agent-form-vertical-label-padding: 0 0 4px !important;
+}
+.auth-form .code-row .code-field {
+  margin-bottom: 0;
+}
 .auth-form .code-row {
-  margin-bottom: 8px;
+  margin-bottom: 16px;
 }
 
 .auth-form .form-error {
@@ -1749,7 +1808,7 @@ body {
 
 .auth-form .code-button {
   align-self: flex-end;
-  min-height: 40px;
+  min-height: 48px;
 }
 
 .device-details {
@@ -1785,6 +1844,10 @@ body {
   .trash-page,
   .benchmark-page {
     padding: 20px 14px;
+  }
+
+  .sidebar-utility-links {
+    grid-template-columns: 1fr;
   }
 
   .form-links {

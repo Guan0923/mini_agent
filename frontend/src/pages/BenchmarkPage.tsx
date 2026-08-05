@@ -47,7 +47,7 @@ function ResultCard({ result }: { result: Record<string, unknown> }) {
           value={score != null ? score * 100 : "未评分"}
           precision={score != null ? 0 : undefined}
           suffix={score != null ? "分" : undefined}
-          valueStyle={{ color: scoreColor(score) }}
+          styles={{ content: { color: scoreColor(score) } }}
         />
         <Tag color={statusColor}>状态：{statusLabel}</Tag>
         {result.error ? <Alert className="error-text" message={String(result.error)} type="error" showIcon /> : null}
@@ -140,18 +140,18 @@ export default function BenchmarkPage() {
         </div>
       </Card>
 
-      {loadError ? <Alert className="error-text" message={loadError} type="error" showIcon /> : null}
+      {loadError ? <Alert className="error-text" title={loadError} type="error" showIcon /> : null}
 
       {tasksLoading ? (
-        <div className="benchmark-loading"><Spin tip="正在加载基准任务…" /></div>
+        <div className="benchmark-loading"><Spin description="正在加载基准任务…" /></div>
       ) : tasks.length === 0 ? (
-        <Alert type="info" showIcon message="暂无可运行的基准任务。" />
+        <Alert type="info" showIcon title="暂无可运行的基准任务。" />
       ) : (
         <Row className="task-grid" gutter={[16, 16]}>
           {tasks.map((task) => {
             const run = runs[task.name];
             return (
-              <Col xs={24} md={12} key={task.name}>
+              <Col xs={24} lg={12} key={task.name}>
                 <Card className="task-card">
                   <div className="task-head">
                     <span className="task-name">{task.name}</span>
@@ -187,7 +187,7 @@ export default function BenchmarkPage() {
                     )}
                   </div>
                   {run?.busy ? <Spin className="spinner" size="small" /> : null}
-                  {run?.error ? <Alert className="error-text" message={run.error} type="error" showIcon /> : null}
+                  {run?.error ? <Alert className="error-text" title={run.error} type="error" showIcon /> : null}
                   {run?.result ? <ResultCard result={run.result} /> : null}
                 </Card>
               </Col>

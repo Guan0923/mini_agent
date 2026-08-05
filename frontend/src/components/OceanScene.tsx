@@ -8,10 +8,12 @@ varying vec3 vWorldNormal;
 varying float vElevation;
 
 float waveHeight(vec2 point) {
-  float height = sin(dot(point, vec2(0.48, 0.20)) + uTime * 0.58) * 0.24;
-  height += sin(dot(point, vec2(-0.18, 0.42)) - uTime * 0.39) * 0.17;
-  height += cos(dot(point, vec2(0.12, 0.10)) + uTime * 0.24) * 0.25;
-  height += sin(length(point + vec2(9.0, -6.0)) * 0.24 - uTime * 0.31) * 0.08;
+  float height = sin(dot(point, vec2(0.56, 0.26)) + uTime * 0.82) * 0.30;
+  height += sin(dot(point, vec2(-0.24, 0.52)) - uTime * 0.62) * 0.21;
+  height += cos(dot(point, vec2(0.16, 0.14)) + uTime * 0.38) * 0.27;
+  height += sin(length(point + vec2(9.0, -6.0)) * 0.30 - uTime * 0.48) * 0.11;
+  height += sin(dot(point, vec2(0.92, -0.68)) + uTime * 1.04) * 0.065;
+  height += cos(dot(point, vec2(-0.78, -0.94)) - uTime * 0.88) * 0.045;
   return height;
 }
 

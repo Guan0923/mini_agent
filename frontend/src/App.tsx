@@ -41,6 +41,7 @@ import type {
 } from "./types";
 
 const STORAGE_KEY = "mini-agent-conversations";
+const ARCHIVE_READ_KEY = "mini-agent-archive-read";
 
 interface ChatRunRequest {
   conversationId: string;
@@ -84,6 +85,38 @@ function loadConversations(key: string): Conversation[] {
   }
 }
 
+type ArchiveReadState = Record<string, string>;
+
+function loadArchiveReadState(userId: string | undefined): ArchiveReadState {
+  if (!userId) return {};
+  try {
+    const raw = localStorage.getItem(`${ARCHIVE_READ_KEY}:${userId}`);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function markArchivedAsRead(state: ArchiveReadState, conversations: Conversation[]): ArchiveReadState {
+  let changed = false;
+  const next = { ...state };
+  for (const conversation of conversations) {
+    if (!conversation.archivedAt || next[conversation.id] === conversation.archivedAt) continue;
+    next[conversation.id] = conversation.archivedAt;
+    changed = true;
+  }
+  return changed ? next : state;
+}
+
+function countUnreadArchived(conversations: Conversation[], state: ArchiveReadState): number {
+  return conversations.filter((conversation) => state[conversation.id] !== conversation.archivedAt).length;
+}
+
 function summaryToConversation(summary: SessionInfo, existing?: Conversation): Conversation {
   return {
     id: existing?.id ?? summary.client_id ?? summary.session_id,
@@ -117,13 +150,14 @@ function importableMessages(messages: ChatMessage[]): Array<Pick<ChatMessage, "r
     .map(({ role, content }) => ({ role, content }));
 }
 
-export { loadConversations };
+export { countUnreadArchived, loadArchiveReadState, loadConversations, markArchivedAsRead };
 
 function AgentApp() {
   const { user, signOut } = useAuth();
   const [page, setPage] = useState<Page>("chat");
   const storageKey = `${STORAGE_KEY}:${user?.id ?? "anonymous"}`;
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations(storageKey));
+  const [archiveReadState, setArchiveReadState] = useState<ArchiveReadState>(() => loadArchiveReadState(user?.id));
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [modeBySession, setModeBySession] = useState<Record<string, ChatMode>>(() => loadSessionModes(localStorage));
@@ -134,6 +168,11 @@ function AgentApp() {
   useEffect(() => {
     localStorage.setItem(storageKey, JSON.stringify(conversations));
   }, [conversations, storageKey]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    localStorage.setItem(`${ARCHIVE_READ_KEY}:${user.id}`, JSON.stringify(archiveReadState));
+  }, [archiveReadState, user?.id]);
 
   useEffect(() => {
     saveSessionModes(localStorage, modeBySession);
@@ -237,6 +276,14 @@ function AgentApp() {
     () => conversations.filter((conversation) => Boolean(conversation.archivedAt) && !conversation.deletedAt),
     [conversations],
   );
+  const unreadArchivedCount = useMemo(
+    () => countUnreadArchived(archivedConversations, archiveReadState),
+    [archiveReadState, archivedConversations],
+  );
+
+  useEffect(() => {
+    if (page === "trash") setArchiveReadState((previous) => markArchivedAsRead(previous, archivedConversations));
+  }, [archivedConversations, page]);
   const current = activeConversations.find((conversation) => conversation.id === currentId) ?? activeConversations[0] ?? null;
 
   useEffect(() => {
@@ -653,7 +700,7 @@ function AgentApp() {
     <AppSidebar
       user={user}
       conversations={activeConversations}
-      archivedCount={archivedConversations.length}
+      archivedCount={unreadArchivedCount}
       currentId={current?.id ?? null}
       page={page}
       onNew={newConversationAndClose}
