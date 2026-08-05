@@ -272,4 +272,15 @@ describe("ChatPage run lifecycle", () => {
     await user.click(screen.getByText("点击我编辑"));
     expect(screen.getByRole("textbox", { name: "编辑用户消息" })).toHaveValue("点击我编辑");
   });
+  it("keeps reasoning before the circular send button", () => {
+    const { container } = render(<Harness />);
+    const box = container.querySelector(".composer-box");
+    expect(box).not.toBeNull();
+    const labels = Array.from(box!.querySelectorAll<HTMLInputElement>(".composer-settings-controls .ant-select-input"))
+      .map((input) => input.getAttribute("aria-label"));
+    expect(labels).toEqual(["运行模式", "权限模式", "思考等级"]);
+    const send = screen.getByRole("button", { name: "发送" });
+    expect(send).toHaveClass("ant-btn-circle", "send-btn");
+    expect(send.previousElementSibling).toHaveClass("composer-toolbar");
+  });
 });
