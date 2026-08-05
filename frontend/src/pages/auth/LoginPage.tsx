@@ -1,4 +1,5 @@
-import { FormEvent, useState } from "react";
+import { useState } from "react";
+import { Alert, Button, Form, Input } from "antd";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ApiError } from "../../api";
 import { useAuth } from "../../auth/AuthProvider";
@@ -21,16 +22,14 @@ export default function LoginPage() {
   const location = useLocation();
   const next = new URLSearchParams(location.search).get("next");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
+  async function submit(values: { email: string; password: string }) {
     setError(null);
     setBusy(true);
     try {
-      await signIn(email, password);
+      await signIn(values.email, values.password);
       navigate(safeNext(next), { replace: true });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "登录失败，请稍后再试。");
@@ -41,12 +40,33 @@ export default function LoginPage() {
 
   return (
     <AuthLayout title="欢迎回来" subtitle="登录后继续你的智能体工作流。">
-      <form className="auth-form" onSubmit={submit}>
-        <label>邮箱<input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" required /></label>
-        <label>密码<input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="输入密码" required /></label>
-        {error ? <p className="form-error" role="alert">{error}</p> : null}
-        <button className="primary-cta form-submit" type="submit" disabled={busy}>{busy ? "登录中…" : "登录"}</button>
-      </form>
+      <Form<{ email: string; password: string }>
+        className="auth-form"
+        layout="vertical"
+        onValuesChange={(changed) => {
+          if (Object.prototype.hasOwnProperty.call(changed, "email")) setEmail(String(changed.email ?? ""));
+        }}
+        onFinish={(values) => void submit(values)}
+        requiredMark={false}
+      >
+        <Form.Item
+          label="邮箱"
+          name="email"
+          rules={[
+            { required: true, message: "请输入邮箱。" },
+            { type: "email", message: "请输入有效的邮箱地址。" },
+          ]}
+        >
+          <Input type="email" autoComplete="email" placeholder="you@example.com" required />
+        </Form.Item>
+        <Form.Item label="密码" name="password" rules={[{ required: true, message: "请输入密码。" }]}>
+          <Input.Password autoComplete="current-password" placeholder="输入密码" required />
+        </Form.Item>
+        {error ? <Alert className="form-error" message={error} type="error" showIcon /> : null}
+        <Button className="primary-cta form-submit" type="primary" htmlType="submit" loading={busy} block>
+          登录
+        </Button>
+      </Form>
       <div className="form-links"><Link to={`/forgot-password${email ? `?email=${encodeURIComponent(email)}` : ""}`}>忘记密码？</Link><span>还没有账号？ <Link to="/register">立即注册</Link></span></div>
     </AuthLayout>
   );

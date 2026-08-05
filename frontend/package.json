@@ -11,6 +11,8 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.3.2",
+    "antd": "^6.5.3",
     "markdown-it": "^15.0.0",
     "markdown-it-texmath": "^1.0.0",
     "mathjax": "^4.1.3",

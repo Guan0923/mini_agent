@@ -1,5 +1,32 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
+  Alert,
+  Avatar,
+  Button,
+  Collapse,
+  Drawer,
+  Grid,
+  Input,
+  Select,
+  Space,
+  Tooltip,
+  App as AntApp,
+  message as staticMessage,
+} from "antd";
+import {
+  BranchesOutlined,
+  CloseCircleOutlined,
+  CopyOutlined,
+  EditOutlined,
+  FileTextOutlined,
+  RollbackOutlined,
+  ArrowUpOutlined,
+  SettingOutlined,
+  StopOutlined,
+  ToolOutlined,
+} from "@ant-design/icons";
+import type { TextAreaRef } from "antd/es/input/TextArea";
+import {
   compactSession,
   forkRun,
   getTimezone,
@@ -17,6 +44,7 @@ import {
 import { DISPLAY_LEVELS, HELP_TEXT, parseCommand } from "../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../commandCompletion";
 import DecisionCard from "../components/DecisionCard";
+import IconAction from "../components/IconAction";
 import MarkdownContent from "../components/MarkdownContent";
 import type {
   ChatMessage,
@@ -24,7 +52,6 @@ import type {
   Conversation,
   DecisionRequest,
   DisplayMode,
-  Metrics,
   Page,
   PermissionMode,
   ReasoningEffort,
@@ -90,6 +117,15 @@ async function copyText(value: string): Promise<void> {
   if (!copied) throw new Error("浏览器拒绝了复制操作");
 }
 
+type SettingsSelectKey = "mode" | "permission" | "display" | "reasoning";
+
+function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
+  const native = ref?.nativeElement;
+  if (!native) return null;
+  if (typeof HTMLTextAreaElement !== "undefined" && native instanceof HTMLTextAreaElement) return native;
+  return native.querySelector("textarea");
+}
+
 function MessageActions({
   msg,
   busy,
@@ -103,28 +139,25 @@ function MessageActions({
   onRewind?: () => void;
   onEdit?: () => void;
 }) {
-  const [feedback, setFeedback] = useState<string | null>(null);
+  const { message: contextMessage } = AntApp.useApp();
+  const message = contextMessage && typeof contextMessage.success === "function" ? contextMessage : staticMessage;
 
   async function copy() {
     if (!msg.content) return;
     try {
       await copyText(msg.content);
-      setFeedback("已复制");
-      window.setTimeout(() => setFeedback(null), 1400);
+      message.success("已复制");
     } catch {
-      setFeedback("复制失败");
-      window.setTimeout(() => setFeedback(null), 1800);
+      message.error("复制失败");
     }
   }
 
   return (
     <div className="message-actions" aria-label={`${msg.role === "user" ? "用户" : "Agent"}消息操作`}>
-      <button type="button" onClick={() => void copy()} disabled={!msg.content} aria-label="复制">
-        {feedback ?? "复制"}
-      </button>
-      {onRewind ? <button type="button" onClick={onRewind} disabled={busy} aria-label="回溯">回溯</button> : null}
-      {onEdit ? <button type="button" onClick={onEdit} disabled={busy || !msg.content} aria-label="编辑">编辑</button> : null}
-      {onFork ? <button type="button" onClick={onFork} disabled={busy || msg.running || !msg.content} aria-label="Fork">Fork</button> : null}
+      <IconAction label="复制" icon={<CopyOutlined />} onClick={() => void copy()} disabled={!msg.content} />
+      {onRewind ? <IconAction label="回溯" icon={<RollbackOutlined />} onClick={onRewind} disabled={busy} /> : null}
+      {onEdit ? <IconAction label="编辑" icon={<EditOutlined />} onClick={onEdit} disabled={busy || !msg.content} /> : null}
+      {onFork ? <IconAction label="Fork" icon={<BranchesOutlined />} onClick={onFork} disabled={busy || msg.running || !msg.content} /> : null}
     </div>
   );
 }
@@ -136,20 +169,26 @@ function ToolLine({ ev, display }: { ev: ToolEvent; display: DisplayMode }) {
     const shown = typeof args === "string" ? args : JSON.stringify(args ?? "");
     return (
       <div className="tool-line">
-        <span>🔧</span>
+        <ToolOutlined aria-hidden="true" />
         <b>{ev.message}</b>
         {display === "verbose" ? <span className="mono">{shown}</span> : null}
       </div>
     );
   }
-  if (ev.kind === "tool_failed") return <div className="tool-line failed">✖ {ev.message}</div>;
+  if (ev.kind === "tool_failed") return <Alert className="tool-line failed" type="error" showIcon icon={<CloseCircleOutlined />} title={ev.message} />;
   if (ev.kind === "tool_result") {
     const result = (ev.data?.result as string | undefined) ?? ev.message;
     return (
-      <details className="tool-result" open={display === "verbose"}>
-        <summary>📄 {ev.data?.tool ? String(ev.data.tool) : "工具"} 结果</summary>
-        {display === "verbose" ? <pre>{result}</pre> : null}
-      </details>
+      <Collapse
+        className="tool-result"
+        ghost
+        defaultActiveKey={display === "verbose" ? ["result"] : []}
+        items={[{
+          key: "result",
+          label: <><FileTextOutlined /> {ev.data?.tool ? String(ev.data.tool) : "工具"} 结果</>,
+          children: <pre>{result}</pre>,
+        }]}
+      />
     );
   }
   return null;
@@ -170,7 +209,7 @@ function AssistantMessage({
 }) {
   return (
     <div className="message assistant">
-      <div className="avatar">A</div>
+      <Avatar className="avatar" size={32}>A</Avatar>
       <div className="bubble">
         {msg.events.length > 0 && display !== "minimal" ? (
           <div className="event-list">
@@ -180,7 +219,7 @@ function AssistantMessage({
         {msg.decision ? (
           <DecisionCard request={msg.decision} onSubmit={(choice, options) => onDecision(msg.decision!, choice, options)} />
         ) : null}
-        {msg.error ? <div className="error-text">⚠️ {msg.error}</div> : msg.content ? <MarkdownContent text={msg.content} /> : msg.running && !msg.decision ? (
+        {msg.error ? <Alert className="error-text" type="error" showIcon title={`⚠️ ${msg.error}`} /> : msg.content ? <MarkdownContent text={msg.content} /> : msg.running && !msg.decision ? (
           <div className="thinking" role="status" aria-label="思考中" data-state="thinking" aria-live="polite"><span className="dot" /><span className="dot" /><span className="dot" /></div>
         ) : null}
         {msg.status || (msg.metrics && msg.metrics.duration_ms != null) ? (
@@ -215,26 +254,30 @@ export default function ChatPage({
 }: Props) {
   const mode = selectedMode ?? "agent";
   const enhancedChatOptions = selectedMode !== undefined;
+  const screens = Grid.useBreakpoint();
+  const isMobile = screens.md === false && (typeof window === "undefined" || window.innerWidth < 768);
   const [input, setInput] = useState("");
   const [localBusy, setLocalBusy] = useState(false);
-  const [modeMenu, setModeMenu] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("approval_for_me");
-  const [permissionMenu, setPermissionMenu] = useState(false);
   const [display, setDisplay] = useState<DisplayMode>("medium");
-  const [displayMenu, setDisplayMenu] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
-  const [reasoningMenu, setReasoningMenu] = useState(false);
   const [timezoneOptions, setTimezoneOptions] = useState<Array<{ identifier: string; label: string }>>([]);
+  const [timezoneValue, setTimezoneValue] = useState<string>();
   const [timezoneMenu, setTimezoneMenu] = useState(false);
+  const [timezoneLoading, setTimezoneLoading] = useState(false);
   const [forkOptions, setForkOptions] = useState<ForkableRun[]>([]);
+  const [forkValue, setForkValue] = useState<string>();
   const [forkMenu, setForkMenu] = useState(false);
+  const [forkLoading, setForkLoading] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [openSettingsSelect, setOpenSettingsSelect] = useState<SettingsSelectKey | null>(null);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const [commandMenuDismissedFor, setCommandMenuDismissedFor] = useState<string | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingDraft, setEditingDraft] = useState("");
   const abortRef = useRef<AbortController | null>(null);
-  const taRef = useRef<HTMLTextAreaElement>(null);
-  const editRef = useRef<HTMLTextAreaElement>(null);
+  const taRef = useRef<TextAreaRef>(null);
+  const editRef = useRef<TextAreaRef>(null);
   const pendingCaretRef = useRef<number | null>(null);
 
   const messages = conversation?.messages ?? [];
@@ -243,13 +286,14 @@ export default function ChatPage({
   const commandMenuVisible = !busy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
 
   useEffect(() => {
-    const textarea = taRef.current;
-    if (!textarea) return;
-    textarea.style.height = "auto";
-    textarea.style.height = Math.min(textarea.scrollHeight, 200) + "px";
+    if (busy) setOpenSettingsSelect(null);
+  }, [busy]);
+
+  useEffect(() => {
     if (pendingCaretRef.current !== null) {
       const caret = pendingCaretRef.current;
-      textarea.setSelectionRange(caret, caret);
+      const textarea = nativeTextArea(taRef.current);
+      textarea?.setSelectionRange(caret, caret);
       pendingCaretRef.current = null;
     }
   }, [input]);
@@ -259,45 +303,9 @@ export default function ChatPage({
   useEffect(() => {
     if (editingMessageId) {
       editRef.current?.focus();
-      editRef.current?.select();
+      nativeTextArea(editRef.current)?.select();
     }
   }, [editingMessageId]);
-
-  useEffect(() => {
-    const textarea = editRef.current;
-    if (!textarea) return;
-    textarea.style.height = "auto";
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
-  }, [editingDraft, editingMessageId]);
-
-  useEffect(() => {
-    if (!modeMenu && !permissionMenu && !displayMenu && !reasoningMenu && !timezoneMenu && !forkMenu) return undefined;
-    const closeOnOutsideClick = (event: globalThis.MouseEvent) => {
-      if (!(event.target as HTMLElement).closest(".composer")) {
-        setModeMenu(false);
-        setPermissionMenu(false);
-        setDisplayMenu(false);
-        setReasoningMenu(false);
-        setTimezoneMenu(false);
-        setForkMenu(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setModeMenu(false);
-      setPermissionMenu(false);
-      setDisplayMenu(false);
-      setReasoningMenu(false);
-      setTimezoneMenu(false);
-      setForkMenu(false);
-    };
-    document.addEventListener("mousedown", closeOnOutsideClick);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", closeOnOutsideClick);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [displayMenu, forkMenu, modeMenu, permissionMenu, reasoningMenu, timezoneMenu]);
 
   function changeInput(value: string) {
     setInput(value);
@@ -464,9 +472,7 @@ export default function ChatPage({
     setInput("");
     setCommandMenuDismissedFor(null);
     setActiveCommandIndex(0);
-    setModeMenu(false);
-    setPermissionMenu(false);
-    setDisplayMenu(false);
+    setSettingsOpen(false);
     setTimezoneMenu(false);
     setForkMenu(false);
     if (name === "/agent" || name === "/plan") {
@@ -476,10 +482,14 @@ export default function ChatPage({
     if (name === "/help") return insert(HELP_TEXT);
     if (name === "/benchmark") return onNavigate("benchmark");
     if (name === "/new" || name === "/clear") return onNew(argument || undefined);
-    if (name === "/permission") return setPermissionMenu(true);
+    if (name === "/permission") {
+      setSettingsOpen(true);
+      return;
+    }
     if (name === "/display") {
       if (argument && DISPLAY_LEVELS.includes(argument as DisplayMode)) return setDisplay(argument as DisplayMode);
-      return setDisplayMenu(true);
+      setSettingsOpen(true);
+      return;
     }
     if (name === "/time") {
       const { sessionId } = await ensureSession();
@@ -492,12 +502,18 @@ export default function ChatPage({
         }
         return;
       }
+      setOpenSettingsSelect(null);
+      setForkMenu(false);
+      setTimezoneMenu(true);
+      setTimezoneLoading(true);
       try {
         const info = await getTimezone(sessionId);
         setTimezoneOptions(info.options);
-        setTimezoneMenu(true);
+        setTimezoneValue(info.timezone);
       } catch (error) {
         await insert(`⚠️ 获取时区失败：${String((error as Error).message ?? error)}`);
+      } finally {
+        setTimezoneLoading(false);
       }
       return;
     }
@@ -526,11 +542,17 @@ export default function ChatPage({
           await insert(`⚠️ 分叉失败：${String((error as Error).message ?? error)}`);
         }
       } else {
+        setOpenSettingsSelect(null);
+        setTimezoneMenu(false);
+        setForkMenu(true);
+        setForkLoading(true);
         try {
           setForkOptions(await listForkableRuns());
-          setForkMenu(true);
+          setForkValue(undefined);
         } catch (error) {
           await insert(`⚠️ 获取可分叉运行失败：${String((error as Error).message ?? error)}`);
+        } finally {
+          setForkLoading(false);
         }
       }
       return;
@@ -608,13 +630,6 @@ export default function ChatPage({
     setLocalBusy(false);
   }
 
-  async function openTimezoneMenu() {
-    const { sessionId } = await ensureSession();
-    const info = await getTimezone(sessionId);
-    setTimezoneOptions(info.options);
-    setTimezoneMenu(true);
-  }
-
   async function rewindMessage(messageId: string) {
     if (!conversation || !onRewind || busy) return;
     const result = await onRewind(conversation.id, messageId);
@@ -671,6 +686,125 @@ export default function ChatPage({
     void onFork(conversation.id, messageId);
   }
 
+  async function selectTimezone(value: string) {
+    setTimezoneLoading(true);
+    try {
+      const { sessionId } = await ensureSession();
+      await setTimezone(sessionId, value);
+      setTimezoneValue(value);
+      setTimezoneMenu(false);
+    } catch (error) {
+      await insert(`⚠️ 设置时区失败：${String((error as Error).message ?? error)}`);
+    } finally {
+      setTimezoneLoading(false);
+    }
+  }
+
+  async function selectFork(value: string) {
+    setForkValue(value);
+    setForkMenu(false);
+    try {
+      const session = await forkRun(value);
+      await onSelectSession(session.session_id);
+      await onRefresh();
+    } catch (error) {
+      await insert(`⚠️ 分叉失败：${String((error as Error).message ?? error)}`);
+    }
+  }
+
+  const settingsControls = (
+    <Space className="composer-settings-controls" size={[6, 6]} wrap>
+      <Select
+        className="mode-picker"
+        placement="topLeft"
+        open={openSettingsSelect === "mode"}
+        aria-label="运行模式"
+        disabled={busy}
+        value={mode}
+        options={[
+          { value: "agent", label: "⚙ Agent — 执行工具并修改工作区" },
+          { value: "plan", label: "📋 Plan — 只读规划和讨论" },
+        ]}
+        onChange={(value: ChatMode) => {
+          onModeChange(value);
+          setOpenSettingsSelect(null);
+        }}
+        onOpenChange={(open) => {
+          setOpenSettingsSelect(open ? "mode" : null);
+          if (open) {
+            setTimezoneMenu(false);
+            setForkMenu(false);
+          }
+        }}
+      />
+      <Select
+        className="composer-picker"
+        placement="topLeft"
+        open={openSettingsSelect === "permission"}
+        aria-label="权限模式"
+        disabled={busy}
+        value={permissionMode}
+        options={[
+          { value: "approval_for_me", label: "逐次审批 — 每个需要确认的工具都询问" },
+          { value: "full_access", label: "完全访问 — 工具自动批准，但 Plan Review 仍需确认" },
+        ]}
+        onChange={(value: PermissionMode) => {
+          setPermissionMode(value);
+          setOpenSettingsSelect(null);
+        }}
+        onOpenChange={(open) => {
+          setOpenSettingsSelect(open ? "permission" : null);
+          if (open) {
+            setTimezoneMenu(false);
+            setForkMenu(false);
+          }
+        }}
+      />
+      <Select
+        className="composer-picker"
+        placement="topLeft"
+        open={openSettingsSelect === "display"}
+        aria-label="显示级别"
+        value={display}
+        options={DISPLAY_LEVELS.map((level) => ({ value: level, label: `显示：${level}` }))}
+        onChange={(value: DisplayMode) => {
+          setDisplay(value);
+          setOpenSettingsSelect(null);
+        }}
+        onOpenChange={(open) => {
+          setOpenSettingsSelect(open ? "display" : null);
+          if (open) {
+            setTimezoneMenu(false);
+            setForkMenu(false);
+          }
+        }}
+      />
+      <Select
+        className="composer-picker"
+        placement="topLeft"
+        open={openSettingsSelect === "reasoning"}
+        aria-label="思考等级"
+        disabled={busy}
+        value={reasoningEffort}
+        options={(Object.keys(REASONING_LABELS) as ReasoningEffort[]).map((level) => ({
+          value: level,
+          label: `思考：${REASONING_LABELS[level]} (${level})`,
+        }))}
+        onChange={(value: ReasoningEffort) => {
+          setReasoningEffort(value);
+          setOpenSettingsSelect(null);
+        }}
+        onOpenChange={(open) => {
+          setOpenSettingsSelect(open ? "reasoning" : null);
+          if (open) {
+            setTimezoneMenu(false);
+            setForkMenu(false);
+          }
+        }}
+      />
+    </Space>
+  );
+
   return (
     <div className="chat-page">
       <div className="chat-scroll">
@@ -684,7 +818,8 @@ export default function ChatPage({
             <div className="message-content">
               {editingMessageId === message.id ? (
                 <div className="message-edit" aria-label="编辑用户消息">
-                  <textarea
+                  <Input.TextArea
+                    className="message-edit-input"
                     ref={editRef}
                     aria-label="编辑用户消息"
                     value={editingDraft}
@@ -698,11 +833,11 @@ export default function ChatPage({
                         void saveEdit(message);
                       }
                     }}
-                    rows={Math.min(8, Math.max(2, editingDraft.split("\n").length))}
+                    autoSize={{ minRows: 2, maxRows: 8 }}
                   />
                   <div className="message-edit-actions">
-                    <button type="button" onClick={cancelEdit}>取消</button>
-                    <button type="button" onClick={() => void saveEdit(message)} disabled={!editingDraft.trim()}>保存并重新生成</button>
+                    <Button type="text" onClick={cancelEdit}>取消</Button>
+                    <Button type="primary" onClick={() => void saveEdit(message)} disabled={!editingDraft.trim()}>保存并重新生成</Button>
                   </div>
                 </div>
               ) : (
@@ -752,19 +887,52 @@ export default function ChatPage({
           </div>
         ) : null}
         {timezoneMenu ? (
-          <div className="picker-menu timezone-menu">
-            <div className="picker-title">会话时区</div>
-            {timezoneOptions.map((option) => <button key={option.identifier} onClick={async () => { const { sessionId } = await ensureSession(); await setTimezone(sessionId, option.identifier); setTimezoneMenu(false); }}>{option.label} <small>{option.identifier}</small></button>)}
-          </div>
+          <Select
+            className="timezone-select"
+            placement="topLeft"
+            aria-label="会话时区"
+            open={timezoneMenu}
+            loading={timezoneLoading}
+            value={timezoneValue}
+            placeholder="会话时区"
+            showSearch
+            optionFilterProp="label"
+            options={timezoneOptions.map((option) => ({
+              value: option.identifier,
+              label: `${option.label} (${option.identifier})`,
+            }))}
+            onChange={(value: string) => void selectTimezone(value)}
+            onOpenChange={(open) => {
+              setTimezoneMenu(open);
+              if (open) setForkMenu(false);
+            }}
+            notFoundContent="暂无可用时区"
+          />
         ) : null}
         {forkMenu ? (
-          <div className="picker-menu fork-menu">
-            <div className="picker-title">选择要分叉的运行</div>
-            {forkOptions.length === 0 ? <div className="picker-empty">暂无可分叉运行</div> : forkOptions.map((run) => <button key={run.run_id} onClick={async () => { const session = await forkRun(run.run_id); setForkMenu(false); await onSelectSession(session.session_id); await onRefresh(); }}><b>{run.run_id.slice(0, 18)}…</b><small>{run.task} · {run.status}</small></button>)}
-          </div>
+          <Select
+            className="fork-select"
+            placement="topLeft"
+            aria-label="选择要分叉的运行"
+            open={forkMenu}
+            loading={forkLoading}
+            value={forkValue}
+            placeholder="选择要分叉的运行"
+            options={forkOptions.map((run) => ({
+              value: run.run_id,
+              label: `${run.run_id.slice(0, 18)}… — ${run.task} · ${run.status}`,
+            }))}
+            onChange={(value: string) => void selectFork(value)}
+             onOpenChange={(open) => {
+               setForkMenu(open);
+               if (open) setTimezoneMenu(false);
+             }}
+            notFoundContent="暂无可分叉运行"
+          />
         ) : null}
         <div className="composer-box">
-          <textarea
+          <Input.TextArea
+            className="composer-input"
             ref={taRef}
             value={input}
             onChange={(event) => changeInput(event.target.value)}
@@ -796,108 +964,38 @@ export default function ChatPage({
               }
             }}
             placeholder="输入任务，按 Enter 发送"
-            rows={1}
+            autoSize={{ minRows: 1, maxRows: 8 }}
           />
           <div className="composer-toolbar">
-            <div className="mode-picker">
-              <button
-                type="button"
-                className="mode-trigger"
+            {isMobile ? (
+              <IconAction
+                className="run-settings-trigger"
+                label="运行设置"
+                icon={<SettingOutlined />}
                 disabled={busy}
-                aria-expanded={modeMenu}
-                aria-haspopup="menu"
-                onClick={() => {
-                  setModeMenu((current) => !current);
-                  setPermissionMenu(false);
-                  setDisplayMenu(false);
-                  setReasoningMenu(false);
-                }}
-              >
-                {mode === "plan" ? "📋 Plan" : "⚙ Agent"} <span>⌃</span>
-              </button>
-              {modeMenu ? (
-                <div className="mode-menu composer-mode-menu">
-                  <button type="button" className={mode === "agent" ? "selected" : ""} onClick={() => { onModeChange("agent"); setModeMenu(false); }}>⚙ Agent<small>执行工具并修改工作区</small></button>
-                  <button type="button" className={mode === "plan" ? "selected" : ""} onClick={() => { onModeChange("plan"); setModeMenu(false); }}>📋 Plan<small>只读规划和讨论</small></button>
-                </div>
-              ) : null}
-            </div>
-            <div className="composer-picker">
-              <button
-                type="button"
-                className="picker-trigger"
-                disabled={busy}
-                aria-expanded={permissionMenu}
-                aria-haspopup="menu"
-                onClick={() => {
-                  setPermissionMenu((current) => !current);
-                  setModeMenu(false);
-                  setDisplayMenu(false);
-                  setReasoningMenu(false);
-                }}
-              >
-                {permissionMode === "full_access" ? "完全访问" : "逐次审批"} <span>⌃</span>
-              </button>
-              {permissionMenu ? (
-                <div className="picker-menu composer-picker-menu">
-                  <div className="picker-title">权限模式</div>
-                  <button type="button" className={permissionMode === "approval_for_me" ? "selected" : ""} onClick={() => { setPermissionMode("approval_for_me"); setPermissionMenu(false); }}>逐次审批<small>每个需要确认的工具都询问</small></button>
-                  <button type="button" className={permissionMode === "full_access" ? "selected" : ""} onClick={() => { setPermissionMode("full_access"); setPermissionMenu(false); }}>完全访问<small>工具自动批准，但 Plan Review 仍需确认</small></button>
-                </div>
-              ) : null}
-            </div>
-            <div className="composer-picker">
-              <button
-                type="button"
-                className="picker-trigger"
-                aria-expanded={displayMenu}
-                aria-haspopup="menu"
-                onClick={() => {
-                  setDisplayMenu((current) => !current);
-                  setModeMenu(false);
-                  setPermissionMenu(false);
-                  setReasoningMenu(false);
-                }}
-              >
-                显示：{display} <span>⌃</span>
-              </button>
-              {displayMenu ? (
-                <div className="picker-menu composer-picker-menu">
-                  <div className="picker-title">显示级别</div>
-                  {DISPLAY_LEVELS.map((level) => <button type="button" className={display === level ? "selected" : ""} key={level} onClick={() => { setDisplay(level); setDisplayMenu(false); }}>{level}</button>)}
-                </div>
-              ) : null}
-            </div>
-            <div className="composer-picker">
-              <button
-                type="button"
-                className="picker-trigger"
-                disabled={busy}
-                aria-expanded={reasoningMenu}
-                aria-haspopup="menu"
-                onClick={() => {
-                  setReasoningMenu((current) => !current);
-                  setModeMenu(false);
-                  setPermissionMenu(false);
-                  setDisplayMenu(false);
-                }}
-              >
-                思考：{REASONING_LABELS[reasoningEffort]} <span>⌃</span>
-              </button>
-              {reasoningMenu ? (
-                <div className="picker-menu composer-picker-menu reasoning-picker-menu">
-                  <div className="picker-title">思考等级</div>
-                  {(["low", "medium", "high", "xhigh", "max"] as ReasoningEffort[]).map((level) => (
-                    <button type="button" className={reasoningEffort === level ? "selected" : ""} key={level} onClick={() => { setReasoningEffort(level); setReasoningMenu(false); }}>
-                      {REASONING_LABELS[level]}<small>{level}</small>
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
+                onClick={() => setSettingsOpen(true)}
+              />
+            ) : settingsControls}
           </div>
-          {busy ? <button className="send-btn stop" onClick={stop}>停止</button> : <button className="send-btn" onClick={() => void send()} disabled={!input.trim()}>发送</button>}
+          {busy ? (
+            <Tooltip title="停止">
+              <Button className="send-btn stop" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={stop} />
+            </Tooltip>
+          ) : (
+            <Tooltip title="发送">
+              <Button className="send-btn" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送" onClick={() => void send()} disabled={!input.trim()} />
+            </Tooltip>
+          )}
         </div>
+        <Drawer
+          className="run-settings-drawer"
+          title="运行设置"
+          placement="bottom"
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+        >
+          {settingsControls}
+        </Drawer>
       </div>
     </div>
   );

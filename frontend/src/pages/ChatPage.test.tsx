@@ -217,22 +217,21 @@ describe("ChatPage run lifecycle", () => {
     );
   });
 
-  it("renders permission, display, and reasoning controls as upward pickers", async () => {
+  it("renders permission, display, and reasoning controls as Ant Design selectors", async () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    await user.click(screen.getByRole("button", { name: /逐次审批/ }));
-    expect(screen.getByText("完全访问")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /完全访问/ }));
-    expect(screen.getByRole("button", { name: /完全访问/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "权限模式" }));
+    await user.click(screen.getByRole("option", { name: /完全访问/ }));
+    expect(screen.getByText(/完全访问/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /显示：medium/ }));
-    await user.click(screen.getByRole("button", { name: "verbose" }));
-    expect(screen.getByRole("button", { name: /显示：verbose/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "显示级别" }));
+    await user.click(screen.getByRole("option", { name: "显示：verbose" }));
+    expect(screen.getByText("显示：verbose")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /思考：中/ }));
-    await user.click(screen.getByRole("button", { name: /^高 high$/ }));
-    expect(screen.getByRole("button", { name: /思考：高/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "思考等级" }));
+    await user.click(screen.getByRole("option", { name: /思考：高/ }));
+    expect(screen.getByText(/思考：高/)).toBeInTheDocument();
   });
 
   it("edits a user message in place, rewinds, and starts a replacement run", async () => {

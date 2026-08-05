@@ -1,4 +1,11 @@
 import { useState } from "react";
+import { Button, Card, Input, Radio, Space } from "antd";
+import {
+  FileTextOutlined,
+  QuestionCircleOutlined,
+  ReloadOutlined,
+  SafetyCertificateOutlined,
+} from "@ant-design/icons";
 import type { DecisionRequest } from "../types";
 import MarkdownContent from "./MarkdownContent";
 
@@ -7,6 +14,11 @@ interface Props {
   onSubmit: (choice: string, options?: { supplement?: string; answers?: Record<string, string[]> }) => Promise<void>;
 }
 
+/**
+ * Renders the four decision protocols emitted by the runtime. The choice
+ * strings intentionally stay identical to the backend contract; only the
+ * presentation controls are provided by Ant Design.
+ */
 export default function DecisionCard({ request, onSubmit }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [supplement, setSupplement] = useState("");
@@ -24,100 +36,103 @@ export default function DecisionCard({ request, onSubmit }: Props) {
   if (request.kind === "plan") {
     const proposal = request.plan || (request.steps ?? []).map((step, index) => `${index + 1}. ${step}`).join("\n");
     return (
-      <div className="decision-card plan-decision">
-        <div className="decision-title">📋 Plan Review</div>
+      <Card className="decision-card plan-decision" size="small" title={<><FileTextOutlined /> Plan Review</>}>
         {proposal ? <MarkdownContent text={proposal} /> : <p>{request.message || "Agent 请求审核一个计划。"}</p>}
-        <div className="decision-actions">
-          <button disabled={submitting} onClick={() => void submit("implement")}>实施</button>
-          <button disabled={submitting} onClick={() => void submit("implement_clear_session")}>实施并清空会话</button>
-          <button className="secondary" disabled={submitting} onClick={() => void submit("cancel")}>取消并留在 Plan</button>
-        </div>
-      </div>
+        <Space className="decision-actions" wrap>
+          <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("implement")}>实施</Button>
+          <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("implement_clear_session")}>实施并清空会话</Button>
+          <Button autoInsertSpace={false} loading={submitting} disabled={submitting} onClick={() => void submit("cancel")}>取消并留在 Plan</Button>
+        </Space>
+      </Card>
     );
   }
 
   if (request.kind === "question") {
     const questions = request.questions ?? [];
     return (
-      <div className="decision-card question-decision">
-        <div className="decision-title">❓ Agent 需要你的回答</div>
-        {questions.map((question) => (
-          <div className="question-block" key={question.id}>
-            <strong>{question.header || "问题"}</strong>
-            <p>{question.question}</p>
-            <div className="question-options">
-              {question.options.map((option) => (
-                <button
-                  className={answers[question.id]?.[0] === option.label ? "selected" : ""}
-                  disabled={submitting}
-                  key={option.label}
-                  onClick={() => setAnswers((current) => ({ ...current, [question.id]: [option.label] }))}
-                >
-                  {option.label}
-                  {option.description ? <small>{option.description}</small> : null}
-                </button>
-              ))}
-              <input
-                placeholder="其他回答（可选）"
-                value={
-                  answers[question.id]?.[0] && !question.options.some((option) => option.label === answers[question.id]?.[0])
-                    ? answers[question.id][0]
-                    : ""
-                }
+      <Card className="decision-card question-decision" size="small" title={<><QuestionCircleOutlined /> Agent 需要你的回答</>}>
+        {questions.map((question) => {
+          const answer = answers[question.id]?.[0] ?? "";
+          const knownOption = question.options.some((option) => option.label === answer);
+          return (
+            <div className="question-block" key={question.id}>
+              <strong>{question.header || "问题"}</strong>
+              <p>{question.question}</p>
+              <Radio.Group
+                className="question-options"
+                value={knownOption ? answer : undefined}
                 onChange={(event) => setAnswers((current) => ({ ...current, [question.id]: [event.target.value] }))}
+              >
+                <Space orientation="vertical" size={6}>
+                  {question.options.map((option) => (
+                    <Radio disabled={submitting} value={option.label} key={option.label}>
+                      <span>{option.label}</span>
+                      {option.description ? <small>{option.description}</small> : null}
+                    </Radio>
+                  ))}
+                </Space>
+              </Radio.Group>
+              <Input
+                className="question-other-input"
+                placeholder="其他回答（可选）"
+                value={knownOption ? "" : answer}
+                onChange={(event) => setAnswers((current) => ({ ...current, [question.id]: [event.target.value] }))}
+                disabled={submitting}
               />
             </div>
-          </div>
-        ))}
-        <div className="decision-actions">
-          <button
+          );
+        })}
+        <Space className="decision-actions" wrap>
+          <Button
+            autoInsertSpace={false}
+            type="primary"
+            loading={submitting}
             disabled={submitting || questions.some((question) => !(answers[question.id]?.[0] || "").trim())}
             onClick={() => void submit("answer", { answers })}
           >
             提交回答
-          </button>
-        </div>
-      </div>
+          </Button>
+        </Space>
+      </Card>
     );
   }
 
   if (request.kind === "resume") {
     return (
-      <div className="decision-card">
-        <div className="decision-title">↻ 恢复运行</div>
+      <Card className="decision-card" size="small" title={<><ReloadOutlined /> 恢复运行</>}>
         {request.details ? <pre>{request.details}</pre> : <p>{request.message || "是否继续这个持久运行？"}</p>}
-        <div className="decision-actions">
-          <button disabled={submitting} onClick={() => void submit("continue")}>继续</button>
-          <button className="secondary" disabled={submitting} onClick={() => void submit("back")}>返回</button>
-        </div>
-      </div>
+        <Space className="decision-actions" wrap>
+          <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("continue")}>继续</Button>
+          <Button autoInsertSpace={false} loading={submitting} disabled={submitting} onClick={() => void submit("back")}>返回</Button>
+        </Space>
+      </Card>
     );
   }
 
   const shownArguments =
     typeof request.arguments === "string" ? request.arguments : JSON.stringify(request.arguments ?? {}, null, 2);
   return (
-    <div className="decision-card tool-decision">
-      <div className="decision-title">🔐 工具审批</div>
+    <Card className="decision-card tool-decision" size="small" title={<><SafetyCertificateOutlined /> 工具审批</>}>
       <p>{request.message || `请求调用 ${request.tool || "工具"}`}</p>
       {request.tool ? <strong className="mono">{request.tool}</strong> : null}
       <pre>{shownArguments}</pre>
-      <input
+      <Input
         placeholder="补充说明（可选）"
         value={supplement}
         onChange={(event) => setSupplement(event.target.value)}
         disabled={submitting}
       />
-      <div className="decision-actions">
-        <button disabled={submitting} onClick={() => void submit("continue")}>继续</button>
-        <button
+      <Space className="decision-actions" wrap>
+        <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("continue")}>继续</Button>
+        <Button
+          autoInsertSpace={false}
           disabled={submitting || !supplement.trim()}
           onClick={() => void submit("supplement", { supplement: supplement.trim() })}
         >
           提交补充
-        </button>
-        <button className="secondary" disabled={submitting} onClick={() => void submit("cancel")}>取消</button>
-      </div>
-    </div>
+        </Button>
+        <Button autoInsertSpace={false} disabled={submitting} onClick={() => void submit("cancel")}>取消</Button>
+      </Space>
+    </Card>
   );
 }

@@ -1,26 +1,37 @@
-import { FormEvent, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { Alert, Button, Form, Input } from "antd";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ApiError, requestPasswordResetCode, resetPassword } from "../../api";
 import { useAuth } from "../../auth/AuthProvider";
 import AuthLayout from "./AuthLayout";
 
+interface ResetValues {
+  email: string;
+  code: string;
+  password: string;
+  confirm: string;
+}
+
 export default function ResetPasswordPage() {
   const { setUser } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  const [form] = Form.useForm<ResetValues>();
   const [email, setEmail] = useState("");
-  const [code, setCode] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
   const [sent, setSent] = useState(false);
   const [cooldown, setCooldown] = useState(0);
+  const [codeBusy, setCodeBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    const initial = new URLSearchParams(location.search).get("email");
-    if (initial) setEmail(initial);
-  }, [location.search]);
+    const initial = new URLSearchParams(location.search).get("email") ?? "";
+    setEmail(initial);
+    form.setFieldsValue({ email: initial, code: undefined, password: undefined, confirm: undefined });
+    setSent(false);
+    setCooldown(0);
+  }, [form, location.search]);
+
   useEffect(() => {
     if (!cooldown) return;
     const timer = window.setInterval(() => setCooldown((value) => Math.max(0, value - 1)), 1000);
@@ -28,33 +39,31 @@ export default function ResetPasswordPage() {
   }, [cooldown]);
 
   async function sendCode() {
+    if (codeBusy || cooldown > 0) return;
     setError(null);
     try {
-      await requestPasswordResetCode(email);
-      setSent(true);
-      setCooldown(60);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "验证码发送失败，请稍后再试。");
-    }
-  }
-
-  function updateEmail(value: string) {
-    setEmail(value);
-    setCode("");
-    setSent(false);
-    setCooldown(0);
-  }
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (password !== confirm) {
-      setError("两次输入的密码不一致。");
+      await form.validateFields(["email"]);
+    } catch {
       return;
     }
+    setCodeBusy(true);
+    try {
+      await requestPasswordResetCode(String(form.getFieldValue("email") ?? ""));
+      setSent(true);
+      setCooldown(60);
+      form.setFieldsValue({ code: undefined, password: undefined, confirm: undefined });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "验证码发送失败，请稍后再试。");
+    } finally {
+      setCodeBusy(false);
+    }
+  }
+
+  async function submit(values: ResetValues) {
     setError(null);
     setBusy(true);
     try {
-      const user = await resetPassword(email, code, password);
+      const user = await resetPassword(values.email, values.code, values.password);
       setUser(user);
       navigate("/app", { replace: true });
     } catch (err) {
@@ -66,14 +75,78 @@ export default function ResetPasswordPage() {
 
   return (
     <AuthLayout title="重设密码" subtitle="验证邮箱后设置一个新的安全密码。">
-      <form className="auth-form" onSubmit={submit}>
-        <label>邮箱<input type="email" autoComplete="email" value={email} onChange={(e) => updateEmail(e.target.value)} placeholder="you@example.com" required /></label>
-        <div className="code-row"><label>邮箱验证码<input inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="6 位验证码" required disabled={!sent} /></label><button className="code-button" type="button" onClick={() => void sendCode()} disabled={!email || cooldown > 0}>{cooldown ? `${cooldown}s 后重发` : sent ? "重新发送" : "发送验证码"}</button></div>
-        <label>新密码<input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="至少 12 个字符" minLength={12} required disabled={!sent} /></label>
-        <label>确认新密码<input type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="再次输入新密码" minLength={12} required disabled={!sent} /></label>
-        {error ? <p className="form-error" role="alert">{error}</p> : null}
-        <button className="primary-cta form-submit" type="submit" disabled={busy || !sent}>{busy ? "保存中…" : "保存新密码"}</button>
-      </form>
+      <Form<ResetValues>
+        form={form}
+        className="auth-form"
+        layout="vertical"
+        requiredMark={false}
+        onValuesChange={(changed, values) => {
+          if (!Object.prototype.hasOwnProperty.call(changed, "email")) return;
+          const nextEmail = String(values.email ?? "");
+          setEmail(nextEmail);
+          setSent(false);
+          setCooldown(0);
+          form.setFieldsValue({ code: undefined, password: undefined, confirm: undefined });
+        }}
+        onFinish={(values) => void submit(values)}
+      >
+        <Form.Item
+          label="邮箱"
+          name="email"
+          rules={[
+            { required: true, message: "请输入邮箱。" },
+            { type: "email", message: "请输入有效的邮箱地址。" },
+          ]}
+        >
+          <Input type="email" autoComplete="email" placeholder="you@example.com" required />
+        </Form.Item>
+        <div className="code-row">
+          <Form.Item
+            label="邮箱验证码"
+            name="code"
+            rules={[{ required: true, len: 6, message: "请输入 6 位验证码。" }]}
+          >
+            <Input.OTP
+              length={6}
+              type="number"
+              autoComplete="one-time-code"
+              formatter={(value) => value.replace(/\D/g, "").slice(0, 6)}
+              disabled={!sent}
+              aria-label="邮箱验证码"
+            />
+          </Form.Item>
+          <Button className="code-button" type="default" onClick={() => void sendCode()} loading={codeBusy} disabled={!email || cooldown > 0 || codeBusy}>
+            {cooldown ? `${cooldown}s 后重发` : sent ? "重新发送" : "发送验证码"}
+          </Button>
+        </div>
+        <Form.Item
+          label="新密码"
+          name="password"
+          rules={[{ required: true, min: 12, max: 128, message: "密码长度必须为 12–128 个字符。" }]}
+        >
+          <Input.Password autoComplete="new-password" placeholder="12–128 个字符" minLength={12} maxLength={128} required disabled={!sent} />
+        </Form.Item>
+        <Form.Item
+          label="确认新密码"
+          name="confirm"
+          dependencies={["password"]}
+          rules={[
+            { required: true, min: 12, max: 128, message: "请再次输入 12–128 个字符的密码。" },
+            ({ getFieldValue }) => ({
+              validator(_, value) {
+                if (!value || getFieldValue("password") === value) return Promise.resolve();
+                return Promise.reject(new Error("两次输入的密码不一致。"));
+              },
+            }),
+          ]}
+        >
+          <Input.Password autoComplete="new-password" placeholder="再次输入新密码" minLength={12} maxLength={128} required disabled={!sent} />
+        </Form.Item>
+        {error ? <Alert className="form-error" message={error} type="error" showIcon /> : null}
+        <Button className="primary-cta form-submit" type="primary" htmlType="submit" loading={busy} disabled={!sent} block>
+          保存新密码
+        </Button>
+      </Form>
       <div className="form-links"><Link to="/login">返回登录</Link></div>
     </AuthLayout>
   );

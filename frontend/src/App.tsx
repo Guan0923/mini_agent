@@ -1,3 +1,6 @@
+import { Alert, App as AntApp, Button, ConfigProvider, Drawer, Grid, Layout, Spin, Typography } from "antd";
+import { CloseOutlined, MenuOutlined } from "@ant-design/icons";
+import zhCN from "antd/locale/zh_CN";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import {
@@ -23,7 +26,10 @@ import LoginPage from "./pages/auth/LoginPage";
 import RegisterPage from "./pages/auth/RegisterPage";
 import ResetPasswordPage from "./pages/auth/ResetPasswordPage";
 import HomePage from "./pages/HomePage";
+import AppSidebar from "./components/AppSidebar";
+import IconAction from "./components/IconAction";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
+import { oceanTheme } from "./theme";
 import type {
   ChatMessage,
   ChatMode,
@@ -120,9 +126,9 @@ function AgentApp() {
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations(storageKey));
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [openHistoryId, setOpenHistoryId] = useState<string | null>(null);
   const [modeBySession, setModeBySession] = useState<Record<string, ChatMode>>(() => loadSessionModes(localStorage));
   const [draftMode, setDraftMode] = useState<ChatMode>("agent");
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const activeRunsRef = useRef<Map<string, ActiveRun>>(new Map());
 
   useEffect(() => {
@@ -460,7 +466,6 @@ function AgentApp() {
   }
 
   async function deleteConversation(id: string) {
-    if (!window.confirm("删除后将从界面隐藏，但后台仍保留审计数据。确定继续吗？")) return;
     setActionError(null);
     try {
       const sessionId = await ensureSession(id);
@@ -607,67 +612,103 @@ function AgentApp() {
     setModeBySession((currentModes) => ({ ...currentModes, [key]: mode }));
   }
 
+  const screens = Grid.useBreakpoint();
+  // `useBreakpoint` starts with an empty map while the browser evaluates media
+  // queries. Treat that first render as desktop so the sidebar remains usable
+  // in tests and during hydration; once `md` is false, the Drawer takes over.
+  const isMobile = screens.md === false;
+
+  useEffect(() => {
+    if (!isMobile) setMobileSidebarOpen(false);
+  }, [isMobile]);
+
+  function navigate(nextPage: Page) {
+    setPage(nextPage);
+    setMobileSidebarOpen(false);
+  }
+
+  function selectConversationAndClose(id: string) {
+    selectConversation(id);
+    setMobileSidebarOpen(false);
+  }
+
+  async function newConversationAndClose(title?: string): Promise<string> {
+    const id = await newConversation(title);
+    setMobileSidebarOpen(false);
+    return id;
+  }
+
+  async function useSessionAndClose(sessionId: string): Promise<string> {
+    const id = await useSession(sessionId);
+    setMobileSidebarOpen(false);
+    return id;
+  }
+
+  async function signOutAndClose(): Promise<void> {
+    setMobileSidebarOpen(false);
+    await signOut();
+  }
+
+  const sidebar = (
+    <AppSidebar
+      user={user}
+      conversations={activeConversations}
+      archivedCount={archivedConversations.length}
+      currentId={current?.id ?? null}
+      page={page}
+      onNew={newConversationAndClose}
+      onSelect={selectConversationAndClose}
+      onNavigate={navigate}
+      onRename={renameConversation}
+      onArchive={archiveConversation}
+      onDelete={deleteConversation}
+      onSignOut={signOutAndClose}
+    />
+  );
+
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <button className="new-chat-btn" onClick={() => void newConversation()}>
-          ＋ 新建对话
-        </button>
-        <div className="history">
-          {activeConversations.length > 0 && (
-            <>
-              <div className="history-label">对话</div>
-              {activeConversations.map((conversation) => (
-                <div className="history-row" key={conversation.id}>
-                  <button
-                    className={"history-item" + (conversation.id === current?.id && page === "chat" ? " active" : "")}
-                    onClick={() => selectConversation(conversation.id)}
-                    title={conversation.title}
-                  >
-                    {conversation.messages.some((message) => message.running) ? (
-                      <span className="history-running" aria-label="正在运行" title="正在运行" />
-                    ) : null}
-                    <span className="history-title">{conversation.title || "新对话"}</span>
-                  </button>
-                  <HistoryMenu
-                    conversation={conversation}
-                    open={openHistoryId === conversation.id}
-                    onOpenChange={(open) => setOpenHistoryId(open ? conversation.id : null)}
-                    onRename={renameConversation}
-                    onArchive={archiveConversation}
-                    onDelete={deleteConversation}
-                  />
-                </div>
-              ))}
-            </>
-          )}
-          {activeConversations.length === 0 && <div className="history-empty">暂无对话</div>}
-        </div>
-        <div className="sidebar-bottom">
-          <button className={"nav-item" + (page === "trash" ? " active" : "")} onClick={() => setPage("trash")}>
-            🗑 回收站{archivedConversations.length ? ` (${archivedConversations.length})` : ""}
-          </button>
-          <button
-            className={"nav-item" + (page === "benchmark" ? " active" : "")}
-            onClick={() => setPage("benchmark")}
-          >
-            📊 Benchmark 成绩单
-          </button>
-          <div className="app-name">Mini-Agent</div>
-          <div className="account-row">
-            <span className="account-email" title={user?.email}>{user?.email}</span>
-            <button className="logout-button" onClick={() => void signOut()}>退出</button>
+    <Layout className="app-shell" style={{ minHeight: "100vh", height: "100vh" }}>
+      {!isMobile && (
+        <Layout.Sider width={280} theme="light" style={{ background: "#fff" }}>
+          {sidebar}
+        </Layout.Sider>
+      )}
+      {isMobile && (
+        <Drawer
+          title="会话列表"
+          placement="left"
+          width={280}
+          open={mobileSidebarOpen}
+          onClose={() => setMobileSidebarOpen(false)}
+          styles={{ body: { padding: 0 } }}
+        >
+          {sidebar}
+        </Drawer>
+      )}
+      <Layout style={{ minWidth: 0, minHeight: 0 }}>
+        {isMobile && (
+          <div style={{ padding: "8px 12px", background: "#fff", borderBottom: "1px solid #e5e7eb" }}>
+            <Button
+              type="text"
+              icon={<MenuOutlined />}
+              onClick={() => setMobileSidebarOpen(true)}
+              aria-label="打开会话列表"
+            >
+              会话列表
+            </Button>
           </div>
-        </div>
-      </aside>
-      <main className="main">
+        )}
+        <Layout.Content className="main" style={{ minHeight: 0 }}>
         {actionError && (
-          <div className="global-error" role="alert">
-            {actionError}
-            <button type="button" onClick={() => setActionError(null)} aria-label="关闭错误">
-              ×
-            </button>
-          </div>
+          <Alert
+            className="global-error"
+            type="error"
+            showIcon
+            message={actionError}
+            action={
+              <IconAction label="关闭错误" icon={<CloseOutlined />} onClick={() => setActionError(null)} />
+            }
+          />
         )}
         {page === "chat" ? (
           <ChatPage
@@ -675,12 +716,12 @@ function AgentApp() {
             mode={current ? modeBySession[current.sessionId ?? current.id] ?? "agent" : draftMode}
             onModeChange={(mode) => setConversationMode(current, mode)}
             onUpdate={updateConversation}
-            onNew={newConversation}
-            onNavigate={setPage}
+            onNew={newConversationAndClose}
+            onNavigate={navigate}
             onEnsureSession={ensureSession}
             onFork={forkConversation}
             onRewind={rewindConversation}
-            onSelectSession={useSession}
+            onSelectSession={useSessionAndClose}
             onReload={reloadConversation}
             onRefresh={refreshSessions}
             running={Boolean(current?.messages.some((message) => message.running))}
@@ -692,118 +733,19 @@ function AgentApp() {
         ) : (
           <BenchmarkPage />
         )}
-      </main>
-    </div>
-  );
-}
-
-interface HistoryMenuProps {
-  conversation: Conversation;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onRename: (id: string, title: string) => Promise<void>;
-  onArchive: (id: string) => Promise<void>;
-  onDelete: (id: string) => Promise<void>;
-}
-
-function HistoryMenu({ conversation, open, onOpenChange, onRename, onArchive, onDelete }: HistoryMenuProps) {
-  const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(conversation.title);
-  const busy = conversation.messages.some((message) => message.running);
-
-  useEffect(() => setTitle(conversation.title), [conversation.title]);
-
-  useEffect(() => {
-    if (!open) return undefined;
-     function close(event: MouseEvent) {
-       if (!(event.target as HTMLElement).closest(".history-actions")) onOpenChange(false);
-     }
-     function escape(event: KeyboardEvent) {
-       if (event.key === "Escape") onOpenChange(false);
-     }
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", escape);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", escape);
-    };
-   }, [open, onOpenChange]);
-
-  async function saveTitle() {
-    const next = title.trim();
-    if (!next) return;
-    try {
-      await onRename(conversation.id, next);
-      setEditing(false);
-      onOpenChange(false);
-    } catch {
-      // App renders the mutation error; keep the editor open for correction.
-    }
-  }
-
-  return (
-    <div className="history-actions">
-      <button
-        type="button"
-        className="history-more"
-        aria-label={`更多操作：${conversation.title}`}
-        aria-expanded={open}
-         onClick={() => onOpenChange(!open)}
-      >
-        …
-      </button>
-      {open && (
-        <div className="history-card" role="menu">
-          {editing ? (
-            <div className="rename-editor">
-              <input value={title} onChange={(event) => setTitle(event.target.value)} autoFocus aria-label="新标题" />
-              <div>
-                <button type="button" onClick={() => void saveTitle()} disabled={!title.trim()}>
-                  保存
-                </button>
-                <button type="button" onClick={() => setEditing(false)}>
-                  取消
-                </button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <button type="button" role="menuitem" onClick={() => setEditing(true)}>
-                重命名
-              </button>
-               <button
-                 type="button"
-                 role="menuitem"
-                 disabled={busy}
-                 onClick={() => {
-                   onOpenChange(false);
-                   void onArchive(conversation.id);
-                 }}
-               >
-                归档
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="danger-text"
-                disabled={busy}
-                 onClick={() => {
-                   onOpenChange(false);
-                   void onDelete(conversation.id);
-                 }}
-              >
-                删除
-              </button>
-            </>
-          )}
-        </div>
-      )}
-    </div>
+        </Layout.Content>
+      </Layout>
+    </Layout>
   );
 }
 
 function LoadingScreen() {
-  return <div className="auth-loading" aria-live="polite"><span className="loading-orb" />正在确认登录状态…</div>;
+  return (
+    <div className="auth-loading" aria-live="polite">
+      <Spin size="small" />
+      <Typography.Text>正在确认登录状态…</Typography.Text>
+    </div>
+  );
 }
 
 function PublicRoute({ children }: { children: React.ReactNode }) {
@@ -835,5 +777,13 @@ function AppRoutes() {
 }
 
 export default function App() {
-  return <BrowserRouter><AuthProvider><AppRoutes /></AuthProvider></BrowserRouter>;
+  return (
+    <ConfigProvider locale={zhCN} theme={oceanTheme}>
+      <AntApp>
+        <BrowserRouter>
+          <AuthProvider><AppRoutes /></AuthProvider>
+        </BrowserRouter>
+      </AntApp>
+    </ConfigProvider>
+  );
 }

@@ -1,4 +1,13 @@
 import { useEffect, useState } from "react";
+import { Alert, Button, Card, Col, Collapse, Row, Spin, Statistic, Tag } from "antd";
+import {
+  ApiOutlined,
+  BarChartOutlined,
+  ClockCircleOutlined,
+  PlayCircleOutlined,
+  TeamOutlined,
+  ToolOutlined,
+} from "@ant-design/icons";
 import { listTasks, runAllBenchmark, runBenchmark } from "../api";
 import type { TaskInfo } from "../types";
 
@@ -23,59 +32,74 @@ function scoreColor(score: number | null | undefined): string {
 
 function ResultCard({ result }: { result: Record<string, unknown> }) {
   const metrics = (result.metrics ?? {}) as Record<string, unknown>;
-  const score = result.score as number | null;
+  const score = (result.score as number | null | undefined) ?? null;
   const verdicts = (result.verdicts ?? []) as Array<Record<string, unknown>>;
+  const passed = result.passed;
+  const statusLabel = passed === true ? "通过" : passed === false ? "未通过" : String(result.status ?? "?");
+  const statusColor = passed === true ? "success" : passed === false ? "error" : "processing";
+
   return (
-    <div className="result-card">
+    <Card className="result-card" size="small">
       <div className="result-top">
-        <span className="score" style={{ color: scoreColor(score) }}>
-          {score != null ? (score * 100).toFixed(0) + "分" : "未评分"}
-        </span>
-        <span className="result-status">
-          状态：{result.passed === true ? "通过" : result.passed === false ? "未通过" : String(result.status ?? "?")}
-          {result.error ? <span className="error-text"> · {String(result.error)}</span> : null}
-        </span>
+        <Statistic
+          className="score"
+          title="得分"
+          value={score != null ? score * 100 : "未评分"}
+          precision={score != null ? 0 : undefined}
+          suffix={score != null ? "分" : undefined}
+          valueStyle={{ color: scoreColor(score) }}
+        />
+        <Tag color={statusColor}>状态：{statusLabel}</Tag>
+        {result.error ? <Alert className="error-text" message={String(result.error)} type="error" showIcon /> : null}
       </div>
-      <div className="result-metrics">
-        <span>⏱ {(Number(metrics.duration_ms) / 1000).toFixed(1)}s</span>
-        <span>🔄 {String(metrics.model_calls ?? 0)} 次模型</span>
-        <span>🔧 {String(metrics.tool_calls ?? 0)} 次工具</span>
-        <span>👥 {String(metrics.subagent_completed ?? 0)} 个子代理完成</span>
-        <span>📊 {String(metrics.total_tokens ?? 0)} tokens</span>
-      </div>
-      {verdicts.length > 0 && (
+      <Row className="result-metrics" gutter={[12, 12]}>
+        <Col xs={12} sm={8}><Statistic prefix={<ClockCircleOutlined />} title="耗时" value={Number(metrics.duration_ms ?? 0) / 1000} precision={1} suffix="s" /></Col>
+        <Col xs={12} sm={8}><Statistic prefix={<ApiOutlined />} title="模型调用" value={Number(metrics.model_calls ?? 0)} suffix="次" /></Col>
+        <Col xs={12} sm={8}><Statistic prefix={<ToolOutlined />} title="工具调用" value={Number(metrics.tool_calls ?? 0)} suffix="次" /></Col>
+        <Col xs={12} sm={8}><Statistic prefix={<TeamOutlined />} title="子代理完成" value={Number(metrics.subagent_completed ?? 0)} suffix="个" /></Col>
+        <Col xs={12} sm={8}><Statistic prefix={<BarChartOutlined />} title="Tokens" value={Number(metrics.total_tokens ?? 0)} /></Col>
+      </Row>
+      {verdicts.length > 0 ? (
         <ul className="verdicts">
-          {verdicts.map((v, i) => (
-            <li key={i} className={Number(v.score) >= 1 ? "ok" : "no"}>
-              {Number(v.score) >= 1 ? "✓" : "✗"} {String(v.detail ?? "")}
-            </li>
-          ))}
+          {verdicts.map((verdict, index) => {
+            const ok = Number(verdict.score) >= 1;
+            return (
+              <li key={index} className={ok ? "ok" : "no"}>
+                <Tag color={ok ? "success" : "error"}>{ok ? "✓" : "✗"}</Tag> {String(verdict.detail ?? "")}
+              </li>
+            );
+          })}
         </ul>
-      )}
-      {result.final_answer ? (
-        <details className="final-answer">
-          <summary>最终答复</summary>
-          <pre>{String(result.final_answer)}</pre>
-        </details>
       ) : null}
-    </div>
+      {result.final_answer ? (
+        <Collapse
+          className="final-answer"
+          size="small"
+          items={[{ key: "answer", label: "最终答复", children: <pre>{String(result.final_answer)}</pre> }]}
+        />
+      ) : null}
+    </Card>
   );
 }
 
 export default function BenchmarkPage() {
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
+  const [tasksLoading, setTasksLoading] = useState(true);
   const planner = "llm" as const;
   const [runs, setRuns] = useState<Record<string, RunState>>({});
   const [allBusy, setAllBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
+    setTasksLoading(true);
     listTasks()
       .then(setTasks)
-      .catch((e) => setLoadError(String(e?.message ?? e)));
+      .catch((e) => setLoadError(String(e?.message ?? e)))
+      .finally(() => setTasksLoading(false));
   }, []);
 
   function runTask(name: string, p: string) {
+    setLoadError(null);
     setRuns((prev) => ({ ...prev, [name]: { busy: true, result: null, error: null } }));
     runBenchmark(name, p)
       .then((result) => setRuns((prev) => ({ ...prev, [name]: { busy: false, result, error: null } })))
@@ -85,12 +109,14 @@ export default function BenchmarkPage() {
   }
 
   function runAll() {
+    if (allBusy) return;
+    setLoadError(null);
     setAllBusy(true);
     runAllBenchmark(planner)
       .then((results) => {
         const map: Record<string, RunState> = {};
-        for (const r of results) {
-          map[String(r.task_name)] = { busy: false, result: r, error: null };
+        for (const result of results) {
+          map[String(result.task_name)] = { busy: false, result, error: null };
         }
         setRuns((prev) => ({ ...prev, ...map }));
       })
@@ -100,7 +126,7 @@ export default function BenchmarkPage() {
 
   return (
     <div className="benchmark-page">
-      <header className="page-header">
+      <Card className="page-header" variant="borderless">
         <h1>Benchmark 成绩单</h1>
         <p>让 agent 完成一批开源来源适配任务并自动判卷；成绩只代表 Mini-Agent adapted suite</p>
         <div className="bench-toolbar">
@@ -108,57 +134,67 @@ export default function BenchmarkPage() {
             <label>运行方式</label>
             <span className="muted">真实模型（llm）；无 rule 冒烟题</span>
           </div>
-          <button className="new-chat-btn run-all" onClick={runAll} disabled={allBusy}>
-            {allBusy ? "运行中…" : "全部运行"}
-          </button>
+          <Button className="run-all" type="primary" icon={<PlayCircleOutlined />} onClick={runAll} loading={allBusy}>
+            全部运行
+          </Button>
         </div>
-      </header>
+      </Card>
 
-      {loadError ? <div className="error-text">⚠️ {loadError}</div> : null}
+      {loadError ? <Alert className="error-text" message={loadError} type="error" showIcon /> : null}
 
-      <div className="task-grid">
-        {tasks.map((t) => {
-          const run = runs[t.name];
-          return (
-            <div className="task-card" key={t.name}>
-              <div className="task-head">
-                <span className="task-name">{t.name}</span>
-                <span className="task-badges">
-                  <span className="capability-badge">{CAPABILITY_LABEL[t.capability] ?? t.capability}</span>
-                  <span className="source-badge">{t.source.benchmark}</span>
-                </span>
-              </div>
-              <p className="task-desc">
-                {t.description} · 难度：{t.difficulty} · 来源：
-                <a href={t.source.url} target="_blank" rel="noreferrer">
-                  {t.source.benchmark} / {t.source.task_id}
-                </a>
-              </p>
-              <details className="task-source">
-                <summary>适配说明与许可证</summary>
-                <p>{t.source.adaptation_notes}</p>
-                <p>{t.source.license} · {t.source.source_revision}</p>
-              </details>
-              <div className="task-actions">
-                {t.planner_modes.includes(planner) ? (
-                  <button
-                    className="send-btn"
-                    onClick={() => runTask(t.name, planner)}
-                    disabled={run?.busy}
-                  >
-                    {run?.busy ? "运行中…" : "运行"}
-                  </button>
-                ) : (
-                  <span className="muted">该任务不支持 {planner} 模式</span>
-                )}
-              </div>
-              {run?.busy ? <div className="spinner" /> : null}
-              {run?.error ? <div className="error-text">⚠️ {run.error}</div> : null}
-              {run?.result ? <ResultCard result={run.result} /> : null}
-            </div>
-          );
-        })}
-      </div>
+      {tasksLoading ? (
+        <div className="benchmark-loading"><Spin tip="正在加载基准任务…" /></div>
+      ) : tasks.length === 0 ? (
+        <Alert type="info" showIcon message="暂无可运行的基准任务。" />
+      ) : (
+        <Row className="task-grid" gutter={[16, 16]}>
+          {tasks.map((task) => {
+            const run = runs[task.name];
+            return (
+              <Col xs={24} md={12} key={task.name}>
+                <Card className="task-card">
+                  <div className="task-head">
+                    <span className="task-name">{task.name}</span>
+                    <span className="task-badges">
+                      <Tag className="capability-badge" color="blue">{CAPABILITY_LABEL[task.capability] ?? task.capability}</Tag>
+                      <Tag className="source-badge">{task.source.benchmark}</Tag>
+                    </span>
+                  </div>
+                  <p className="task-desc">
+                    {task.description} · 难度：{task.difficulty} · 来源：
+                    <a href={task.source.url} target="_blank" rel="noreferrer">
+                      {task.source.benchmark} / {task.source.task_id}
+                    </a>
+                  </p>
+                  <Collapse
+                    className="task-source"
+                    size="small"
+                    items={[
+                      {
+                        key: "source",
+                        label: "适配说明与许可证",
+                        children: <><p>{task.source.adaptation_notes}</p><p>{task.source.license} · {task.source.source_revision}</p></>,
+                      },
+                    ]}
+                  />
+                  <div className="task-actions">
+                    {task.planner_modes.includes(planner) ? (
+                      <Button className="send-btn" type="primary" icon={<PlayCircleOutlined />} onClick={() => runTask(task.name, planner)} loading={run?.busy}>
+                        运行
+                      </Button>
+                    ) : (
+                      <span className="muted">该任务不支持 {planner} 模式</span>
+                    )}
+                  </div>
+                  {run?.busy ? <Spin className="spinner" size="small" /> : null}
+                  {run?.error ? <Alert className="error-text" message={run.error} type="error" showIcon /> : null}
+                  {run?.result ? <ResultCard result={run.result} /> : null}
+                </Card>
+              </Col>
+            );
+          })}
+        </Row>
+      )}
     </div>
   );
 }

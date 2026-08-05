@@ -1,3 +1,4 @@
+import { Card } from "antd";
 import { Link } from "react-router-dom";
 import OceanScene from "../../components/OceanScene";
 
@@ -7,12 +8,12 @@ export default function AuthLayout({ title, subtitle, children }: { title: strin
       <OceanScene />
       <div className="auth-overlay">
         <Link className="brand-mark auth-brand" to="/">MINI<span>·</span>AGENT</Link>
-        <section className="auth-card">
+        <Card className="auth-card" variant="borderless" styles={{ body: { padding: 0 } }}>
           <p className="eyebrow">MINI·AGENT</p>
           <h1>{title}</h1>
           <p className="auth-subtitle">{subtitle}</p>
           {children}
-        </section>
+        </Card>
         <p className="auth-back"><Link to="/">← 返回首页</Link></p>
       </div>
     </main>
