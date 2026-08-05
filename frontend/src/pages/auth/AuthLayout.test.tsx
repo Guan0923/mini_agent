@@ -1,12 +1,10 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import AuthLayout from "./AuthLayout";
 
-vi.mock("../../components/OceanScene", () => ({ default: () => <div data-testid="ocean-scene" /> }));
-
 describe("AuthLayout", () => {
-  it("shares the ocean background with authentication content", () => {
+  it("renders authentication content over the shared public background", () => {
     render(
       <MemoryRouter>
         <AuthLayout title="欢迎回来" subtitle="登录后继续你的智能体工作流。">
@@ -15,7 +13,7 @@ describe("AuthLayout", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByTestId("ocean-scene")).toBeTruthy();
+    expect(screen.queryByTestId("ocean-scene")).toBeNull();
     expect(screen.getByRole("heading", { name: "欢迎回来" })).toBeTruthy();
     expect(screen.getByText("登录后继续你的智能体工作流。")).toBeTruthy();
     expect(screen.getByRole("button", { name: "继续" })).toBeTruthy();

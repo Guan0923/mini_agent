@@ -217,7 +217,7 @@ describe("ChatPage run lifecycle", () => {
     );
   });
 
-  it("renders permission, display, and reasoning controls as Ant Design selectors", async () => {
+  it("renders permission and reasoning controls as Ant Design selectors", async () => {
     const user = userEvent.setup();
     render(<Harness />);
 
@@ -225,13 +225,9 @@ describe("ChatPage run lifecycle", () => {
     await user.click(screen.getByRole("option", { name: /完全访问/ }));
     expect(screen.getByText(/完全访问/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("combobox", { name: "显示级别" }));
-    await user.click(screen.getByRole("option", { name: "显示：verbose" }));
-    expect(screen.getByText("显示：verbose")).toBeInTheDocument();
-
     await user.click(screen.getByRole("combobox", { name: "思考等级" }));
-    await user.click(screen.getByRole("option", { name: /思考：高/ }));
-    expect(screen.getByText(/思考：高/)).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "high" }));
+    expect(screen.getAllByText("high", { exact: true }).length).toBeGreaterThan(0);
   });
 
   it("edits a user message in place, rewinds, and starts a replacement run", async () => {

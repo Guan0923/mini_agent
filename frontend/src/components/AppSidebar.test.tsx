@@ -36,7 +36,7 @@ describe("AppSidebar utility navigation", () => {
     expect(view.container.querySelector(".sidebar-utility-links")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "回收站 (2)" }));
-    await user.click(screen.getByRole("button", { name: "Benchmark 成绩单" }));
+    await user.click(screen.getByRole("button", { name: "Benchmark" }));
     expect(onNavigate).toHaveBeenNthCalledWith(1, "trash");
     expect(onNavigate).toHaveBeenNthCalledWith(2, "benchmark");
   });

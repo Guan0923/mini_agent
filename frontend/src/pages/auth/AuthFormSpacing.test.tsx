@@ -7,7 +7,6 @@ import RegisterPage from "./RegisterPage";
 import ResetPasswordPage from "./ResetPasswordPage";
 import "../../styles.css";
 
-vi.mock("../../components/OceanScene", () => ({ default: () => <div data-testid="ocean-scene" /> }));
 vi.mock("../../auth/AuthProvider", () => ({
   useAuth: () => ({ signIn: vi.fn(), setUser: vi.fn() }),
 }));
