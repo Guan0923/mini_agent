@@ -15,6 +15,7 @@ import {
   rewindSession,
   streamChat,
   streamResume,
+  updateProfile,
   type SessionInfo,
 } from "./api";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
@@ -157,7 +158,7 @@ function importableMessages(messages: ChatMessage[]): Array<Pick<ChatMessage, "r
 export { countUnreadArchived, loadArchiveReadState, loadConversations, markArchivedAsRead };
 
 function AgentApp() {
-  const { user, signOut } = useAuth();
+  const { user, setUser, signOut } = useAuth();
   const [page, setPage] = useState<Page>("chat");
   const storageKey = `${STORAGE_KEY}:${user?.id ?? "anonymous"}`;
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations(storageKey));
@@ -695,6 +696,10 @@ function AgentApp() {
     return id;
   }
 
+  async function saveProfile(profile: { display_name: string; agent_preferences: string }): Promise<void> {
+    const updated = await updateProfile(profile);
+    if (user) setUser({ ...user, ...updated });
+  }
   async function signOutAndClose(): Promise<void> {
     setMobileSidebarOpen(false);
     await signOut();
@@ -714,6 +719,7 @@ function AgentApp() {
       onArchive={archiveConversation}
       onDelete={deleteConversation}
       onSignOut={signOutAndClose}
+      onProfileUpdate={saveProfile}
     />
   );
 

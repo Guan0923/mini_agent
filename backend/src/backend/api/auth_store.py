@@ -16,6 +16,8 @@ from pwdlib import PasswordHash
 from .auth_schema import SCHEMA
 from .auth_types import UserIdentity
 
+DEFAULT_PROFILE: dict[str, str] = {"display_name": "", "agent_preferences": ""}
+
 
 class AuthStore:
     """Own all authentication mutations and never expose raw secrets to storage."""
@@ -67,6 +69,39 @@ class AuthStore:
                 (user_id,),
             ).fetchone()
         return self._identity(row) if row else None
+
+    def profile_for_user(self, user_id: str) -> dict[str, str]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT display_name, agent_preferences FROM user_profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return dict(DEFAULT_PROFILE)
+        return {
+            "display_name": str(row["display_name"] or ""),
+            "agent_preferences": str(row["agent_preferences"] or ""),
+        }
+
+    def update_profile(self, user_id: str, *, display_name: str, agent_preferences: str) -> dict[str, str]:
+        display_name = display_name.strip()
+        agent_preferences = agent_preferences.strip()
+        if len(display_name) > 80:
+            raise ValueError("display_name exceeds 80 characters")
+        if len(agent_preferences) > 4000:
+            raise ValueError("agent_preferences exceeds 4000 characters")
+        now = time.time()
+        with self._connection(immediate=True) as connection:
+            connection.execute(
+                """INSERT INTO user_profiles(user_id, display_name, agent_preferences, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    agent_preferences = excluded.agent_preferences,
+                    updated_at = excluded.updated_at""",
+                (user_id, display_name, agent_preferences, now),
+            )
+        return {"display_name": display_name, "agent_preferences": agent_preferences}
 
     @staticmethod
     def _identity(row: sqlite3.Row) -> UserIdentity:

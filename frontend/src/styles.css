@@ -343,6 +343,29 @@ body {
   display: block;
 }
 
+.markdown .math-source,
+.markdown mjx-container,
+.markdown mjx-container svg,
+.markdown mjx-container svg * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.markdown mjx-container {
+  cursor: text;
+}
+
+.markdown mjx-assistive-mml,
+.markdown mjx-help,
+.markdown mjx-container > mjx-help {
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+}
+
+.markdown mjx-help {
+  display: none !important;
+}
 .markdown a {
   color: var(--accent);
 }
@@ -1860,6 +1883,28 @@ body {
   min-width: 0;
 }
 
+.profile-trigger {
+  min-width: 0;
+  max-width: calc(100% - 56px);
+  padding: 0 6px;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.profile-trigger .ant-typography {
+  max-width: 160px;
+}
+
+.profile-popover-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(320px, calc(100vw - 48px));
+}
+
+.profile-popover-actions {
+  justify-content: flex-end;
+}
 .sidebar-utility-links {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1964,7 +2009,8 @@ body {
     padding: 20px 14px;
   }
 
-  .sidebar-utility-links {
+
+.sidebar-utility-links {
     grid-template-columns: 1fr;
   }
 

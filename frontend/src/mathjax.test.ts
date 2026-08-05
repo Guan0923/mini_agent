@@ -13,6 +13,9 @@ describe("MathJax browser integration", () => {
     expect(TEX_EXTENSIONS).toEqual(expect.arrayContaining(["ams", "mathtools", "mhchem", "physics", "cancel", "units"]));
     expect(config.loader?.load).toContain("[tex]/mhchem");
     expect(config.loader?.load).toContain("ui/safe");
+    expect(config.options?.enableMenu).toBe(false);
+    expect(config.options?.enableExplorer).toBe(false);
+    expect(config.options?.enableExplorerHelp).toBe(false);
     expect(config.tex?.processEnvironments).toBe(true);
     expect(config.svg?.fontCache).toBe("global");
   });

@@ -47,6 +47,21 @@ describe("LaTeX-aware transcript copying", () => {
     expect(result.preventDefault).toHaveBeenCalledOnce();
   });
 
+  it("copies the complete source from a MathJax-generated nested selection", () => {
+    const root = document.createElement("div");
+    root.innerHTML =
+      '<p>前文 <span data-latex-source="$x^2$"><mjx-container><svg><g><text>x^2</text></g></svg></mjx-container></span> 后文</p>';
+    document.body.appendChild(root);
+    const text = root.querySelector("svg text")?.firstChild;
+    expect(text).not.toBeNull();
+    select(root, text!, 1, text!, 2);
+    const result = clipboardEvent(root);
+
+    copySelectionWithLatex(result.event, root);
+
+    expect(result.setData).toHaveBeenCalledWith("text/plain", "$x^2$");
+    expect(result.preventDefault).toHaveBeenCalledOnce();
+  });
   it("preserves ordinary text while expanding every touched formula", () => {
     const root = rootFor("前文 $x^2$ 后文 $$\\frac{a}{b}$$ 结束");
     const start = root.querySelector("p")!.firstChild!;

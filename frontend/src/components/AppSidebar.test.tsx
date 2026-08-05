@@ -14,6 +14,7 @@ const conversation: Conversation = {
 
 function renderSidebar(archivedCount = 0, conversations: Conversation[] = [conversation]) {
   const onNavigate = vi.fn();
+  const onProfileUpdate = vi.fn().mockResolvedValue(undefined);
   const view = render(
     <AppSidebar
       user={{ id: "u1", email: "user@example.com", legacy_owner: false }}
@@ -28,9 +29,10 @@ function renderSidebar(archivedCount = 0, conversations: Conversation[] = [conve
       onArchive={vi.fn().mockResolvedValue(undefined)}
       onDelete={vi.fn()}
       onSignOut={vi.fn()}
+      onProfileUpdate={onProfileUpdate}
     />,
   );
-  return { onNavigate, view };
+  return { onNavigate, onProfileUpdate, view };
 }
 
 describe("AppSidebar utility navigation", () => {
@@ -51,6 +53,22 @@ describe("AppSidebar utility navigation", () => {
     renderSidebar();
     expect(screen.getByRole("button", { name: "回收站" })).toBeInTheDocument();
     expect(document.querySelector(".ant-badge-count")).not.toBeInTheDocument();
+  });
+  it("opens the profile card and saves the username and agent preferences", async () => {
+    const user = userEvent.setup();
+    const { onProfileUpdate } = renderSidebar();
+
+    await user.click(screen.getByRole("button", { name: "个人简介：user@example.com" }));
+    expect(screen.getByText("个人简介", { selector: ".ant-popover-title" })).toBeInTheDocument();
+    await user.clear(screen.getByRole("textbox", { name: "用户名" }));
+    await user.type(screen.getByRole("textbox", { name: "用户名" }), "小明");
+    await user.type(screen.getByRole("textbox", { name: "Agent 偏好" }), "先给结论，再给步骤");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(onProfileUpdate).toHaveBeenCalledWith({
+      display_name: "小明",
+      agent_preferences: "先给结论，再给步骤",
+    });
   });
   it("renders history metadata and scrolls only the hovered overflowing item", () => {
     const second: Conversation = { id: "c2", title: "第二个会话", messages: [] };

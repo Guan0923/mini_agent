@@ -122,3 +122,42 @@ def test_users_get_separate_storage_roots(tmp_path: Path) -> None:
         assert state.user_paths(alice["id"]).root != state.user_paths(bob["id"]).root
         assert first_cookie
         assert second.get("/api/sessions").json() == []
+
+def test_user_profile_is_persisted_and_isolated_between_accounts(tmp_path: Path) -> None:
+    state, mailer = _state(tmp_path)
+    app = create_app(state)
+    with TestClient(app) as alice_client, TestClient(app) as bob_client:
+        alice = _register(alice_client, mailer, "profile-alice@example.com", "a" * 12)
+        bob = _register(bob_client, mailer, "profile-bob@example.com", "b" * 12)
+
+        assert alice["display_name"] == ""
+        assert alice_client.get("/api/auth/profile").json() == {
+            "display_name": "",
+            "agent_preferences": "",
+        }
+        response = alice_client.put(
+            "/api/auth/profile",
+            json={"display_name": " Alice ", "agent_preferences": "  concise answers  "},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"display_name": "Alice", "agent_preferences": "concise answers"}
+        assert alice_client.get("/api/auth/me").json()["display_name"] == "Alice"
+        assert bob_client.get("/api/auth/profile").json() == {
+            "display_name": "",
+            "agent_preferences": "",
+        }
+        assert alice["id"] != bob["id"]
+
+
+def test_user_profile_rejects_oversized_fields_and_unauthenticated_access(tmp_path: Path) -> None:
+    state, mailer = _state(tmp_path)
+    with TestClient(create_app(state)) as client:
+        assert client.get("/api/auth/profile").status_code == 401
+        _register(client, mailer, "profile-validation@example.com", "v" * 12)
+        assert client.put(
+            "/api/auth/profile",
+            json={"display_name": "Cross-site"},
+            headers={"Origin": "https://evil.example"},
+        ).status_code == 403
+        assert client.put("/api/auth/profile", json={"display_name": "x" * 81}).status_code == 422
+        assert client.put("/api/auth/profile", json={"agent_preferences": "x" * 4001}).status_code == 422

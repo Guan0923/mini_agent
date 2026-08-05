@@ -8,6 +8,8 @@ export interface AuthUser {
   id: string;
   email: string;
   legacy_owner: boolean;
+  display_name?: string;
+  agent_preferences?: string;
 }
 
 export interface AuthResponse {

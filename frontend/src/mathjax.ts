@@ -51,6 +51,8 @@ export function mathJaxConfig(): MathJaxBrowserConfig {
     },
     options: {
       enableMenu: false,
+      enableExplorer: false,
+      enableExplorerHelp: false,
     },
     svg: {
       fontCache: "global",

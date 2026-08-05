@@ -51,6 +51,11 @@ class DeviceApproveRequest(BaseModel):
     approved: bool
 
 
+class ProfilePayload(BaseModel):
+    display_name: str = Field(default="", max_length=80)
+    agent_preferences: str = Field(default="", max_length=4000)
+
+
 def _error(exc: Exception) -> HTTPException:
     if isinstance(exc, RateLimitError):
         return HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(exc.retry_after)})
@@ -66,8 +71,13 @@ def _origin_guard(request: Request) -> None:
         raise HTTPException(status_code=403, detail="不允许的请求来源。")
 
 
-def _identity_payload(identity: UserIdentity) -> dict[str, object]:
-    return {"id": identity.id, "email": identity.email, "legacy_owner": identity.legacy_owner}
+def _identity_payload(request: Request, identity: UserIdentity) -> dict[str, object]:
+    return {
+        "id": identity.id,
+        "email": identity.email,
+        "legacy_owner": identity.legacy_owner,
+        **request.app.state.web.auth.profile_for_user(identity.id),
+    }
 
 
 def _prepare_user(request: Request, identity: UserIdentity) -> None:
@@ -121,7 +131,7 @@ def register(body: RegisterRequest, request: Request, response: Response) -> dic
     except Exception as exc:
         raise _error(exc) from exc
     _set_session(request, response, identity)
-    return {"user": _identity_payload(identity)}
+    return {"user": _identity_payload(request, identity)}
 
 
 @router.post("/login")
@@ -133,7 +143,7 @@ def login(body: LoginRequest, request: Request, response: Response) -> dict[str,
     except Exception as exc:
         raise _error(exc) from exc
     _set_session(request, response, identity)
-    return {"user": _identity_payload(identity)}
+    return {"user": _identity_payload(request, identity)}
 
 
 @router.post("/password-reset/code", status_code=202)
@@ -157,13 +167,32 @@ def reset_password(body: PasswordResetRequest, request: Request, response: Respo
     except Exception as exc:
         raise _error(exc) from exc
     _set_session(request, response, identity)
-    return {"user": _identity_payload(identity)}
+    return {"user": _identity_payload(request, identity)}
 
 
 @router.get("/me")
 def me(identity: Annotated[UserIdentity, Depends(require_user)], request: Request) -> dict[str, object]:
     _prepare_user(request, identity)
-    return _identity_payload(identity)
+    return _identity_payload(request, identity)
+
+
+@router.get("/profile")
+def profile(identity: Annotated[UserIdentity, Depends(require_user)], request: Request) -> dict[str, str]:
+    return request.app.state.web.auth.profile_for_user(identity.id)
+
+
+@router.put("/profile")
+def update_profile(
+    body: ProfilePayload,
+    request: Request,
+    identity: Annotated[UserIdentity, Depends(require_user)],
+) -> dict[str, str]:
+    _origin_guard(request)
+    return request.app.state.web.auth.update_profile(
+        identity.id,
+        display_name=body.display_name,
+        agent_preferences=body.agent_preferences,
+    )
 
 
 @router.post("/logout")

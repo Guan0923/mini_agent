@@ -1,5 +1,4 @@
 import pytest
-
 from backend.domain import AssistantMessage, SkillSnapshot, SystemMessage
 from backend.planning import LLMPlanner
 from backend.planning import prompts as prompt_module
@@ -96,6 +95,31 @@ def test_decision_prompt_appends_active_skills_after_composed_base() -> None:
     content = system.content or ""
     assert content.index("# Agent Mode") < content.index("## Active project Skills")
     assert content.endswith("</skill-instructions>")
+
+
+def test_user_agent_preferences_are_appended_as_lower_priority_system_context() -> None:
+    client = RecordingClient()
+    planner = LLMPlanner(client, [], [], user_preferences="回答要简洁，不要绕过安全规则")
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="Implement the change")
+
+    planner.decide(runtime)
+
+    system = client.message_requests[0][0]
+    content = system.content or ""
+    assert "## User Agent Preferences" in content
+    assert "回答要简洁，不要绕过安全规则" in content
+    assert content.index("# Agent Mode") < content.index("## User Agent Preferences")
+    assert "system rules" in content
+
+def test_empty_user_agent_preferences_are_not_injected() -> None:
+    client = RecordingClient()
+    planner = LLMPlanner(client, [], [], user_preferences="  ")
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="Implement the change")
+
+    planner.decide(runtime)
+
+    system = client.message_requests[0][0]
+    assert "User Agent Preferences" not in (system.content or "")
 
 
 def test_plan_decision_uses_composed_prompt_and_control_tools() -> None:

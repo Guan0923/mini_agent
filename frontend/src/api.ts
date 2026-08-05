@@ -66,6 +66,22 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
   return "user" in body ? body.user : body;
 }
 
+export interface UserProfile {
+  display_name: string;
+  agent_preferences: string;
+}
+
+export async function getProfile(): Promise<UserProfile> {
+  return requestJson<UserProfile>("/api/auth/profile");
+}
+
+export async function updateProfile(profile: UserProfile): Promise<UserProfile> {
+  return requestJson<UserProfile>("/api/auth/profile", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(profile),
+  });
+}
 export async function requestRegisterCode(email: string): Promise<void> {
   await requestJson("/api/auth/register/code", jsonBody({ email }));
 }

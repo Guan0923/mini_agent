@@ -45,6 +45,7 @@ def build_application(
     project_mcp_enabled: bool = True,
     *,
     paths: ClientPaths | None = None,
+    user_preferences: str = "",
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     config = initialize_config(resolved_paths, workspace)
@@ -61,6 +62,7 @@ def build_application(
         files,
         resolved_paths,
         project_mcp_enabled,
+        user_preferences,
     )
     try:
         sync_coordinator = _build_sync_coordinator(config, store)
@@ -76,6 +78,7 @@ def build_runner(
     settings: RunnerSettings | None = None,
     hooks: Iterable[AgentHook] = (),
     project_mcp_enabled: bool = True,
+    user_preferences: str = "",
 ) -> AgentRunner:
     paths = client_paths()
     config = initialize_config(paths, workspace)
@@ -87,6 +90,7 @@ def build_runner(
         config,
         paths=paths,
         project_mcp_enabled=project_mcp_enabled,
+        user_preferences=user_preferences,
     )
 
 
@@ -100,6 +104,7 @@ def _build_subagent_runner(
     files: WorkspaceFiles | None = None,
     paths: ClientPaths | None = None,
     project_mcp_enabled: bool = True,
+    user_preferences: str = "",
 ) -> AgentRunner:
     resolved_paths = paths or client_paths()
     skill_settings = SkillSettings.from_config(config)
@@ -115,6 +120,7 @@ def _build_subagent_runner(
             checkpoints,
             resolved_paths,
             skill_settings,
+            user_preferences=user_preferences,
         )
 
     coordinator = SubagentCoordinator(child_factory, workspace, subagent_settings)
@@ -144,6 +150,7 @@ def _build_subagent_runner(
             skill_settings,
             coordinator,
             resources=(external,),
+            user_preferences=user_preferences,
         )
     except Exception:
         external.close()
@@ -162,13 +169,15 @@ def _build_runner(
     subagents: object | None = None,
     *,
     resources: tuple[object, ...] = (),
+    user_preferences: str = "",
 ) -> AgentRunner:
     skills = SkillCatalog.discover(workspace, global_root=paths.skills_dir)
     if planner_name == "rule":
         planner = RuleBasedPlanner()
     else:
         planner = LLMPlanner(
-            LLMClient(ModelConfig.from_toml(paths.config_file)), tools.specs(), tools.read_only_specs()
+            LLMClient(ModelConfig.from_toml(paths.config_file)), tools.specs(), tools.read_only_specs(),
+            user_preferences=user_preferences,
         )
     return AgentRunner(
         planner=planner,

@@ -9,6 +9,7 @@ import {
   Input,
   List,
   Modal,
+  Popover,
   Space,
   Spin,
   Typography,
@@ -24,8 +25,9 @@ import {
   PlusOutlined,
   BarChartOutlined,
   MessageOutlined,
+  UserOutlined,
 } from "@ant-design/icons";
-import { useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { AuthUser, Conversation, Page } from "../types";
 import IconAction from "./IconAction";
 
@@ -42,6 +44,99 @@ interface AppSidebarProps {
   onArchive: (id: string) => Promise<void>;
   onDelete: (id: string) => void | Promise<void>;
   onSignOut: () => void | Promise<void>;
+  onProfileUpdate?: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
+}
+
+interface ProfilePopoverProps {
+  user: AuthUser | null;
+  onSave?: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
+}
+
+function ProfilePopover({ user, onSave }: ProfilePopoverProps) {
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [draft, setDraft] = useState({ display_name: "", agent_preferences: "" });
+  const label = user?.display_name?.trim() || user?.email || "用户";
+
+  useEffect(() => {
+    if (!open) return;
+    setDraft({
+      display_name: user?.display_name ?? "",
+      agent_preferences: user?.agent_preferences ?? "",
+    });
+    setError("");
+  }, [open, user?.display_name, user?.agent_preferences]);
+
+  async function save() {
+    if (!onSave) return;
+    const displayName = draft.display_name.trim();
+    if (displayName.length > 80) {
+      setError("用户名不能超过 80 个字符。");
+      return;
+    }
+    if (draft.agent_preferences.length > 4000) {
+      setError("Agent 偏好不能超过 4000 个字符。");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({ display_name: displayName, agent_preferences: draft.agent_preferences.trim() });
+      setOpen(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "保存失败，请稍后重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const content = (
+    <div className="profile-popover-content">
+      <Input
+        aria-label="用户名"
+        placeholder="设置一个显示名称"
+        maxLength={80}
+        value={draft.display_name}
+        onChange={(event) => setDraft((current) => ({ ...current, display_name: event.target.value }))}
+      />
+      <Input.TextArea
+        aria-label="Agent 偏好"
+        placeholder="例如：回答简洁，先给结论，再给关键步骤。"
+        maxLength={4000}
+        autoSize={{ minRows: 4, maxRows: 8 }}
+        value={draft.agent_preferences}
+        onChange={(event) => setDraft((current) => ({ ...current, agent_preferences: event.target.value }))}
+      />
+      {error ? <Typography.Text type="danger">{error}</Typography.Text> : null}
+      <Space className="profile-popover-actions">
+        <Button onClick={() => setOpen(false)} disabled={saving}>取消</Button>
+        <Button
+          type="primary"
+          aria-label="保存"
+          onClick={() => void save()}
+          loading={saving}
+        >
+          保存
+        </Button>
+      </Space>
+    </div>
+  );
+
+  return (
+    <Popover
+      title="个人简介"
+      content={content}
+      trigger="click"
+      open={open}
+      onOpenChange={setOpen}
+      placement="topLeft"
+    >
+      <Button className="profile-trigger" type="text" icon={<UserOutlined />} aria-label={`个人简介：${label}`}>
+        <Typography.Text ellipsis title={label}>{label}</Typography.Text>
+      </Button>
+    </Popover>
+  );
 }
 
 function confirmDelete(
@@ -251,6 +346,7 @@ export default function AppSidebar({
   onArchive,
   onDelete,
   onSignOut,
+  onProfileUpdate,
 }: AppSidebarProps) {
   return (
     <div
@@ -332,9 +428,7 @@ export default function AppSidebar({
           Mini-Agent
         </Typography.Text>
         <Space style={{ width: "100%", justifyContent: "space-between", marginTop: 8 }}>
-          <Typography.Text ellipsis title={user?.email} style={{ maxWidth: "calc(100% - 56px)" }}>
-            {user?.email}
-          </Typography.Text>
+          <ProfilePopover user={user} onSave={onProfileUpdate} />
           <Button
             type="text"
             size="small"

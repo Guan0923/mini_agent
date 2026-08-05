@@ -98,6 +98,7 @@ def _stream(
     mode: Literal["agent", "plan"] = "agent",
     permission_mode: Literal["approval_for_me", "full_access"] | None = None,
     reasoning_effort: ReasoningEffort = "medium",
+    user_preferences: str = "",
     operation: Callable[..., object] | None = None,
 ):
     q: queue.Queue = queue.Queue()
@@ -147,6 +148,7 @@ def _stream(
                 planner_name="llm",
                 settings=RunnerSettings(log_full_messages=True),
                 project_mcp_enabled=False,
+                user_preferences=user_preferences,
                 **path_options,
             )
             conversation = app.open_conversation(session_id) if session_id else app.open_conversation()
@@ -244,6 +246,7 @@ async def chat(
             interactive=body.interactive,
             permission_mode=body.permission_mode,
             reasoning_effort=body.reasoning_effort,
+            user_preferences=state.auth.profile_for_user(identity.id)["agent_preferences"],
         ),
         media_type="text/event-stream",
     )
@@ -283,6 +286,7 @@ async def resume(
             interactive=True,
             permission_mode=body.permission_mode,
             reasoning_effort=body.reasoning_effort,
+            user_preferences=state.auth.profile_for_user(identity.id)["agent_preferences"],
             operation=operation,
         ),
         media_type="text/event-stream",

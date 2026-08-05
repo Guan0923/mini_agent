@@ -13,6 +13,13 @@ CREATE TABLE IF NOT EXISTS users (
     legacy_owner INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL DEFAULT '',
+    agent_preferences TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS verification_challenges (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL,
