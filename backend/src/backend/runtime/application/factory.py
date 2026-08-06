@@ -46,13 +46,16 @@ def build_application(
     *,
     paths: ClientPaths | None = None,
     user_preferences: str = "",
+    model_config: ModelConfig | None = None,
+    config_override: dict[str, object] | None = None,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
-    config = initialize_config(resolved_paths, workspace)
-    resolved = _settings_for(resolved_paths, settings)
-    store = SQLiteSessionStore(resolved_paths, str(section(config, "sync")["device_id"]))
+    config = config_override if config_override is not None else initialize_config(resolved_paths, workspace)
+    resolved = _settings_for(resolved_paths, settings, config_override is not None)
+    device_id = str(section(config, "sync").get("device_id") or f"local_{resolved_paths.root.name}")
+    store = SQLiteSessionStore(resolved_paths, device_id)
     files = WorkspaceFiles(workspace)
-    runner = _build_subagent_runner(
+    runner_args = (
         workspace,
         planner_name,
         resolved,
@@ -64,6 +67,10 @@ def build_application(
         project_mcp_enabled,
         user_preferences,
     )
+    if model_config is None:
+        runner = _build_subagent_runner(*runner_args)
+    else:
+        runner = _build_subagent_runner(*runner_args, model_config=model_config)
     try:
         sync_coordinator = _build_sync_coordinator(config, store)
     except Exception:
@@ -79,6 +86,7 @@ def build_runner(
     hooks: Iterable[AgentHook] = (),
     project_mcp_enabled: bool = True,
     user_preferences: str = "",
+    model_config: ModelConfig | None = None,
 ) -> AgentRunner:
     paths = client_paths()
     config = initialize_config(paths, workspace)
@@ -91,6 +99,7 @@ def build_runner(
         paths=paths,
         project_mcp_enabled=project_mcp_enabled,
         user_preferences=user_preferences,
+        model_config=model_config,
     )
 
 
@@ -105,6 +114,8 @@ def _build_subagent_runner(
     paths: ClientPaths | None = None,
     project_mcp_enabled: bool = True,
     user_preferences: str = "",
+    *,
+    model_config: ModelConfig | None = None,
 ) -> AgentRunner:
     resolved_paths = paths or client_paths()
     skill_settings = SkillSettings.from_config(config)
@@ -121,6 +132,7 @@ def _build_subagent_runner(
             resolved_paths,
             skill_settings,
             user_preferences=user_preferences,
+            model_config=model_config,
         )
 
     coordinator = SubagentCoordinator(child_factory, workspace, subagent_settings)
@@ -151,6 +163,7 @@ def _build_subagent_runner(
             coordinator,
             resources=(external,),
             user_preferences=user_preferences,
+            model_config=model_config,
         )
     except Exception:
         external.close()
@@ -170,13 +183,16 @@ def _build_runner(
     *,
     resources: tuple[object, ...] = (),
     user_preferences: str = "",
+    model_config: ModelConfig | None = None,
 ) -> AgentRunner:
     skills = SkillCatalog.discover(workspace, global_root=paths.skills_dir)
     if planner_name == "rule":
         planner = RuleBasedPlanner()
     else:
         planner = LLMPlanner(
-            LLMClient(ModelConfig.from_toml(paths.config_file)), tools.specs(), tools.read_only_specs(),
+            LLMClient(model_config or ModelConfig.from_toml(paths.config_file)),
+            tools.specs(),
+            tools.read_only_specs(),
             user_preferences=user_preferences,
         )
     return AgentRunner(
@@ -221,8 +237,16 @@ def _external_resources(
     )
 
 
-def _settings_for(paths: ClientPaths, settings: RunnerSettings | None) -> RunnerSettings:
-    return settings or RunnerSettings(log_full_messages=log_full_messages_from_toml(paths.config_file))
+def _settings_for(
+    paths: ClientPaths,
+    settings: RunnerSettings | None,
+    config_override: bool = False,
+) -> RunnerSettings:
+    if settings is not None:
+        return settings
+    if config_override:
+        return RunnerSettings(log_full_messages=True)
+    return RunnerSettings(log_full_messages=log_full_messages_from_toml(paths.config_file))
 
 
 def _build_sync_coordinator(config: dict[str, object], store: SQLiteSessionStore) -> SyncCoordinator | None:

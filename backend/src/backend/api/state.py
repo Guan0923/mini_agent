@@ -1,12 +1,9 @@
-"""Shared API runtime state: config resolution, isolated client paths, chat workspace.
-
-This module deliberately does NOT import the benchmark harness; benchmark
-concerns live in the separately mounted benchmark sub-application.
-"""
+"""Shared API runtime state for the Web backend."""
 
 from __future__ import annotations
 
 import json
+import os
 import time
 import tomllib
 from pathlib import Path
@@ -17,11 +14,10 @@ from .auth_mail import NullMailer, SMTPMailer, SMTPSettings
 from .auth_store import AuthStore
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_DATA_ROOT = REPO_ROOT / "webapp-data"
+DEFAULT_DATA_ROOT = Path.home() / "mini_agent" / "runtime" / "web"
 
 
 def resolve_config_path() -> Path:
-    """Locate the server's client-owned TOML configuration."""
     return Path.home() / "mini_agent" / "config.toml"
 
 
@@ -47,7 +43,7 @@ def _to_toml(values: dict[str, dict]) -> str:
 
 
 def seed_client_config(paths: ClientPaths, source_config: Path | None, *, device_id: str | None = None) -> None:
-    """Seed only runtime/model settings; never copy mail, web or sync secrets."""
+    """Compatibility migration helper; Web no longer calls this per user."""
     values = _read_toml(source_config) if source_config is not None and source_config.exists() else {}
     allowed = {"model", "runtime", "mcp", "skills", "subagents"}
     normalized = {
@@ -63,11 +59,7 @@ def seed_client_config(paths: ClientPaths, source_config: Path | None, *, device
 
 
 class WebAppState:
-    """Shared runtime state for the main chat backend.
-
-    Keeps the server configuration in ``~/mini_agent`` while assigning every
-    authenticated web user a separate client/session/workspace root.
-    """
+    """Shared auth/settings/runtime state for the Web backend."""
 
     def __init__(self, data_root: Path = DEFAULT_DATA_ROOT, *, mailer=None) -> None:
         self.data_root = data_root
@@ -76,7 +68,17 @@ class WebAppState:
         self.config_path = self.paths.config_file
         self.chat_workspace = data_root / "chat-workspace"
         self.chat_workspace.mkdir(parents=True, exist_ok=True)
-        self.auth = AuthStore(data_root / "auth.sqlite3")
+        auth_root = Path.home() / "mini_agent" if data_root == DEFAULT_DATA_ROOT else data_root
+        self.auth = AuthStore(auth_root / "auth.sqlite3")
+        self.settings = self.auth
+        database_url = os.environ.get("DATABASE_URL", "").strip()
+        if database_url:
+            try:
+                from .settings_store import PostgresSettingsRepository
+
+                self.settings = PostgresSettingsRepository(database_url)
+            except Exception:
+                self.settings = self.auth
         if mailer is not None:
             self.mailer = mailer
         else:
@@ -84,10 +86,10 @@ class WebAppState:
 
             try:
                 config = load_config(self.config_path)
-                settings = SMTPSettings.from_config(dict(section(config, "email")))
+                mail_settings = SMTPSettings.from_config(dict(section(config, "email")))
             except Exception:
-                settings = None
-            self.mailer = SMTPMailer(settings) if settings is not None else NullMailer()
+                mail_settings = None
+            self.mailer = SMTPMailer(mail_settings) if mail_settings is not None else NullMailer()
         from .auth_service import AuthService
 
         self.auth_service = AuthService(self)
@@ -95,7 +97,7 @@ class WebAppState:
     def user_paths(self, user_id: str) -> ClientPaths:
         from .user_data import user_paths
 
-        return user_paths(self.data_root, user_id, self.config_path)
+        return user_paths(self.data_root, user_id)
 
     def user_workspace(self, user_id: str) -> Path:
         from .user_data import user_workspace
@@ -106,6 +108,20 @@ class WebAppState:
         from .user_data import user_benchmark_root
 
         return user_benchmark_root(self.data_root, user_id)
+
+    def settings_for_user(self, user_id: str) -> dict[str, object]:
+        identity = self.auth.user_by_id(user_id)
+        email = identity.email if identity is not None else ""
+        return self.settings.settings_for_user(user_id, email=email)
+
+    def model_config_for_user(self, user_id: str):
+        return self.settings.model_config_for_user(user_id)
+
+    def agent_preferences_for_user(self, user_id: str) -> str:
+        return self.settings.agent_preferences_for_user(user_id)
+
+    def runtime_config_for_user(self, user_id: str) -> dict[str, object]:
+        return self.settings.runtime_config_for_user(user_id)
 
     def close(self) -> None:
         close = getattr(self.mailer, "close", None)

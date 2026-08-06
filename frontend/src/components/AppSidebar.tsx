@@ -45,6 +45,7 @@ interface AppSidebarProps {
   onDelete: (id: string) => void | Promise<void>;
   onSignOut: () => void | Promise<void>;
   onProfileUpdate?: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
+  onOpenSettings?: () => void;
 }
 
 interface ProfilePopoverProps {
@@ -347,6 +348,7 @@ export default function AppSidebar({
   onDelete,
   onSignOut,
   onProfileUpdate,
+  onOpenSettings,
 }: AppSidebarProps) {
   return (
     <div
@@ -428,7 +430,21 @@ export default function AppSidebar({
           Mini-Agent
         </Typography.Text>
         <Space style={{ width: "100%", justifyContent: "space-between", marginTop: 8 }}>
-          <ProfilePopover user={user} onSave={onProfileUpdate} />
+          {onOpenSettings ? (
+            <Button
+              className="profile-trigger"
+              type="text"
+              icon={<UserOutlined />}
+              onClick={onOpenSettings}
+              aria-label={"个人简介：" + (user?.display_name?.trim() || user?.email || "用户")}
+            >
+              <Typography.Text ellipsis title={user?.display_name?.trim() || user?.email || "用户"}>
+                {user?.display_name?.trim() || user?.email || "用户"}
+              </Typography.Text>
+            </Button>
+          ) : (
+            <ProfilePopover user={user} onSave={onProfileUpdate} />
+          )}
           <Button
             type="text"
             size="small"

@@ -56,6 +56,23 @@ class ProfilePayload(BaseModel):
     agent_preferences: str = Field(default="", max_length=4000)
 
 
+class AgentConfigPayload(BaseModel):
+    tone: str = Field(default="balanced", max_length=40)
+    verbosity: str = Field(default="balanced", max_length=40)
+    initiative: str = Field(default="balanced", max_length=40)
+    custom_instructions: str = Field(default="", max_length=4000)
+
+
+class ProviderConfigPayload(BaseModel):
+    provider: str = Field(default="deepseek", min_length=1, max_length=80)
+    protocol: str = Field(default="chat_completions", min_length=1, max_length=40)
+    base_url: str = Field(default="", max_length=2000)
+    model: str = Field(default="", max_length=300)
+    max_tokens: int = Field(default=8192, ge=1, le=384000)
+    context_size: int = Field(default=1024000, ge=1)
+    tokenizer_model: str = Field(default="deepseek-ai/DeepSeek-V3", max_length=300)
+    api_key: str | None = Field(default=None, max_length=4096)
+
 def _error(exc: Exception) -> HTTPException:
     if isinstance(exc, RateLimitError):
         return HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(exc.retry_after)})
@@ -76,13 +93,17 @@ def _identity_payload(request: Request, identity: UserIdentity) -> dict[str, obj
         "id": identity.id,
         "email": identity.email,
         "legacy_owner": identity.legacy_owner,
-        **request.app.state.web.auth.profile_for_user(identity.id),
+        **request.app.state.web.settings.profile_for_user(identity.id),
     }
 
 
 def _prepare_user(request: Request, identity: UserIdentity) -> None:
     state = request.app.state.web
     state.user_paths(identity.id)
+    try:
+        state.settings.import_legacy_provider_config(identity.id, state.config_path)
+    except Exception:
+        pass
     if not identity.legacy_owner:
         return
     key = f"legacy_migration:{identity.id}"
@@ -178,7 +199,7 @@ def me(identity: Annotated[UserIdentity, Depends(require_user)], request: Reques
 
 @router.get("/profile")
 def profile(identity: Annotated[UserIdentity, Depends(require_user)], request: Request) -> dict[str, str]:
-    return request.app.state.web.auth.profile_for_user(identity.id)
+    return request.app.state.web.settings.profile_for_user(identity.id)
 
 
 @router.put("/profile")
@@ -188,12 +209,42 @@ def update_profile(
     identity: Annotated[UserIdentity, Depends(require_user)],
 ) -> dict[str, str]:
     _origin_guard(request)
-    return request.app.state.web.auth.update_profile(
+    return request.app.state.web.settings.update_profile(
         identity.id,
         display_name=body.display_name,
         agent_preferences=body.agent_preferences,
     )
 
+
+@router.get("/settings")
+def settings(identity: Annotated[UserIdentity, Depends(require_user)], request: Request) -> dict[str, object]:
+    return request.app.state.web.settings_for_user(identity.id)
+
+
+@router.put("/agent-config")
+def update_agent_config(
+    body: AgentConfigPayload,
+    request: Request,
+    identity: Annotated[UserIdentity, Depends(require_user)],
+) -> dict[str, str]:
+    _origin_guard(request)
+    try:
+        return request.app.state.web.settings.update_agent_config(identity.id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.put("/provider-config")
+def update_provider_config(
+    body: ProviderConfigPayload,
+    request: Request,
+    identity: Annotated[UserIdentity, Depends(require_user)],
+) -> dict[str, object]:
+    _origin_guard(request)
+    try:
+        return request.app.state.web.settings.update_provider_config(identity.id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 @router.post("/logout")
 def logout(

@@ -29,6 +29,7 @@ import ResetPasswordPage from "./pages/auth/ResetPasswordPage";
 import HomePage from "./pages/HomePage";
 import PublicLayout from "./pages/PublicLayout";
 import AppSidebar from "./components/AppSidebar";
+import UserSettingsModal from "./components/UserSettingsModal";
 import IconAction from "./components/IconAction";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
 import { oceanTheme } from "./theme";
@@ -168,6 +169,7 @@ function AgentApp() {
   const [modeBySession, setModeBySession] = useState<Record<string, ChatMode>>(() => loadSessionModes(localStorage));
   const [draftMode, setDraftMode] = useState<ChatMode>("agent");
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const activeRunsRef = useRef<Map<string, ActiveRun>>(new Map());
 
   useEffect(() => {
@@ -720,6 +722,7 @@ function AgentApp() {
       onDelete={deleteConversation}
       onSignOut={signOutAndClose}
       onProfileUpdate={saveProfile}
+      onOpenSettings={() => setSettingsOpen(true)}
     />
   );
 
@@ -792,7 +795,12 @@ function AgentApp() {
         )}
         </Layout.Content>
       </Layout>
-    </Layout>
+      <UserSettingsModal
+        open={settingsOpen}
+        user={user}
+        onClose={() => setSettingsOpen(false)}
+        onUserUpdate={(patch) => setUser(user ? { ...user, ...patch } : user)}
+      />    </Layout>
   );
 }
 

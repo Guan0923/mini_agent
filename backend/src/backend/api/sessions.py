@@ -44,14 +44,10 @@ class TimezoneBody(BaseModel):
 
 
 def _store(state: WebAppState, user_id: str):
-    from backend.configuration import load_config, section
     from backend.storage.sqlite import SQLiteSessionStore
 
     paths = state.user_paths(user_id)
-    config = load_config(paths.config_file)
-    device_id = str(section(config, "sync")["device_id"])
-    return SQLiteSessionStore(paths, device_id)
-
+    return SQLiteSessionStore(paths, state.auth.device_id_for_user(user_id))
 
 def _summary_payload(summary) -> dict:
     return {
@@ -386,6 +382,8 @@ def set_timezone(
             settings=RunnerSettings(log_full_messages=True),
             project_mcp_enabled=False,
             paths=state.user_paths(identity.id),
+            model_config=state.model_config_for_user(identity.id),
+            config_override=state.runtime_config_for_user(identity.id),
         )
         conversation = application.open_conversation(session_id)
         selected = conversation.set_timezone(body.timezone)
@@ -415,6 +413,8 @@ def compact_session(
             settings=RunnerSettings(log_full_messages=True),
             project_mcp_enabled=False,
             paths=state.user_paths(identity.id),
+            model_config=state.model_config_for_user(identity.id),
+            config_override=state.runtime_config_for_user(identity.id),
         )
         conversation = application.open_conversation(session_id)
         result = conversation.compact_context()

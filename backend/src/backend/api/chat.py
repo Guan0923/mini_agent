@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from backend.providers import ModelConfigurationError
+from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime import RunnerSettings, build_application
 from backend.runtime.core.events import RuntimeEvent
 
@@ -88,6 +88,12 @@ def _event_payload(event: RuntimeEvent) -> dict:
     return identifiers
 
 
+def _model_config_snapshot(state: WebAppState, user_id: str) -> ModelConfig | None:
+    try:
+        return state.model_config_for_user(user_id)
+    except Exception:
+        return None
+
 def _stream(
     state: WebAppState,
     prompt: str,
@@ -99,6 +105,8 @@ def _stream(
     permission_mode: Literal["approval_for_me", "full_access"] | None = None,
     reasoning_effort: ReasoningEffort = "medium",
     user_preferences: str = "",
+    model_config: ModelConfig | None = None,
+    runtime_config: dict[str, object] | None = None,
     operation: Callable[..., object] | None = None,
 ):
     q: queue.Queue = queue.Queue()
@@ -149,6 +157,8 @@ def _stream(
                 settings=RunnerSettings(log_full_messages=True),
                 project_mcp_enabled=False,
                 user_preferences=user_preferences,
+                model_config=model_config,
+                config_override=runtime_config,
                 **path_options,
             )
             conversation = app.open_conversation(session_id) if session_id else app.open_conversation()
@@ -246,7 +256,9 @@ async def chat(
             interactive=body.interactive,
             permission_mode=body.permission_mode,
             reasoning_effort=body.reasoning_effort,
-            user_preferences=state.auth.profile_for_user(identity.id)["agent_preferences"],
+            user_preferences=state.agent_preferences_for_user(identity.id),
+            model_config=_model_config_snapshot(state, identity.id),
+            runtime_config=state.runtime_config_for_user(identity.id),
         ),
         media_type="text/event-stream",
     )
@@ -286,7 +298,9 @@ async def resume(
             interactive=True,
             permission_mode=body.permission_mode,
             reasoning_effort=body.reasoning_effort,
-            user_preferences=state.auth.profile_for_user(identity.id)["agent_preferences"],
+            user_preferences=state.agent_preferences_for_user(identity.id),
+            model_config=_model_config_snapshot(state, identity.id),
+            runtime_config=state.runtime_config_for_user(identity.id),
             operation=operation,
         ),
         media_type="text/event-stream",

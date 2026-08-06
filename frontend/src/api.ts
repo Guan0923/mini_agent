@@ -82,6 +82,52 @@ export async function updateProfile(profile: UserProfile): Promise<UserProfile> 
     body: JSON.stringify(profile),
   });
 }
+export interface AgentConfig {
+  tone: string;
+  verbosity: string;
+  initiative: string;
+  custom_instructions: string;
+}
+
+export interface ProviderConfig {
+  provider: string;
+  protocol: "chat_completions" | "responses" | "messages";
+  base_url: string;
+  model: string;
+  max_tokens: number;
+  context_size: number;
+  tokenizer_model: string;
+  api_key_configured: boolean;
+}
+
+export interface UserSettings {
+  profile: UserProfile & { email: string };
+  agent_config: AgentConfig;
+  provider_config: ProviderConfig;
+  capability_config: Record<string, unknown>;
+}
+
+export async function getSettings(): Promise<UserSettings> {
+  return requestJson<UserSettings>("/api/auth/settings");
+}
+
+export async function updateAgentConfig(config: AgentConfig): Promise<AgentConfig> {
+  return requestJson<AgentConfig>("/api/auth/agent-config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+}
+
+export async function updateProviderConfig(
+  config: Omit<ProviderConfig, "api_key_configured"> & { api_key?: string },
+): Promise<ProviderConfig> {
+  return requestJson<ProviderConfig>("/api/auth/provider-config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+}
 export async function requestRegisterCode(email: string): Promise<void> {
   await requestJson("/api/auth/register/code", jsonBody({ email }));
 }
