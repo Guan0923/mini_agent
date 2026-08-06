@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import os
 import secrets
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -17,6 +19,23 @@ from .auth_schema import SCHEMA
 from .auth_types import UserIdentity
 
 DEFAULT_PROFILE: dict[str, str] = {"display_name": "", "agent_preferences": ""}
+DEFAULT_AGENT_CONFIG: dict[str, str] = {
+    "tone": "balanced",
+    "verbosity": "balanced",
+    "initiative": "balanced",
+    "custom_instructions": "",
+}
+DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
+    "provider": "deepseek",
+    "protocol": "chat_completions",
+    "base_url": "",
+    "model": "",
+    "max_tokens": 8192,
+    "context_size": 1024000,
+    "tokenizer_model": "deepseek-ai/DeepSeek-V3",
+    "api_key_configured": False,
+}
+DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {}
 
 
 class AuthStore:
@@ -48,7 +67,7 @@ class AuthStore:
 
     @staticmethod
     def _token_hash(value: str) -> str:
-        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+        return hashlib.sha256(value.encode()).hexdigest()
 
     @staticmethod
     def new_secret() -> str:
@@ -83,6 +102,178 @@ class AuthStore:
             "agent_preferences": str(row["agent_preferences"] or ""),
         }
 
+    def agent_config_for_user(self, user_id: str) -> dict[str, str]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT tone, verbosity, initiative, custom_instructions "
+                "FROM user_agent_settings WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return dict(DEFAULT_AGENT_CONFIG)
+        return {
+            "tone": str(row["tone"] or "balanced"),
+            "verbosity": str(row["verbosity"] or "balanced"),
+            "initiative": str(row["initiative"] or "balanced"),
+            "custom_instructions": str(row["custom_instructions"] or ""),
+        }
+
+    def update_agent_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, str]:
+        result = dict(DEFAULT_AGENT_CONFIG)
+        for key in result:
+            if key in values:
+                value = str(values[key] or "").strip()
+                limit = 4000 if key == "custom_instructions" else 40
+                if len(value) > limit:
+                    raise ValueError(f"{key} exceeds {limit} characters")
+                result[key] = value
+        with self._connection(immediate=True) as connection:
+            connection.execute(
+                """INSERT INTO user_agent_settings
+                (user_id, tone, verbosity, initiative, custom_instructions, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET tone = excluded.tone,
+                    verbosity = excluded.verbosity, initiative = excluded.initiative,
+                    custom_instructions = excluded.custom_instructions,
+                    updated_at = excluded.updated_at""",
+                (user_id, result["tone"], result["verbosity"], result["initiative"],
+                 result["custom_instructions"], time.time()),
+            )
+        return result
+
+    def provider_config_for_user(self, user_id: str) -> dict[str, object]:
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT provider, protocol, base_url, model, max_tokens, context_size,
+                          tokenizer_model, api_key_ciphertext
+                   FROM user_provider_settings WHERE user_id = ?""",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return dict(DEFAULT_PROVIDER_CONFIG)
+        return {
+            "provider": str(row["provider"] or "deepseek"),
+            "protocol": str(row["protocol"] or "chat_completions"),
+            "base_url": str(row["base_url"] or ""),
+            "model": str(row["model"] or ""),
+            "max_tokens": int(row["max_tokens"] or 8192),
+            "context_size": int(row["context_size"] or 1024000),
+            "tokenizer_model": str(row["tokenizer_model"] or "deepseek-ai/DeepSeek-V3"),
+            "api_key_configured": bool(row["api_key_ciphertext"]),
+        }
+
+    def update_provider_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, object]:
+        current = self.provider_config_for_user(user_id)
+        protocol = str(values.get("protocol", current.get("protocol", "chat_completions")) or "").strip().lower()
+        if protocol not in {"chat_completions", "responses", "messages"}:
+            raise ValueError("protocol must be chat_completions, responses, or messages")
+        provider = str(values.get("provider", current.get("provider", "deepseek")) or "deepseek").strip().lower()
+        base_url = str(values.get("base_url", current.get("base_url", "")) or "").strip()
+        model = str(values.get("model", current.get("model", "")) or "").strip()
+        tokenizer_model = str(
+            values.get("tokenizer_model", current.get("tokenizer_model", "deepseek-ai/DeepSeek-V3"))
+            or ""
+        ).strip()
+        if len(base_url) > 2000 or len(model) > 300 or len(tokenizer_model) > 300:
+            raise ValueError("provider fields exceed their length limits")
+        try:
+            max_tokens = int(values.get("max_tokens", current.get("max_tokens", 8192)))
+            context_size = int(values.get("context_size", current.get("context_size", 1024000)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("token limits must be integers") from exc
+        if not 1 <= max_tokens <= 384000 or context_size <= max_tokens:
+            raise ValueError("invalid token limits")
+        if not base_url or not model:
+            raise ValueError("base_url and model are required")
+        key_value = values.get("api_key")
+        with self._connection(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT api_key_ciphertext FROM user_provider_settings WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            ciphertext = str(existing["api_key_ciphertext"] or "") if existing else ""
+            if isinstance(key_value, str) and key_value.strip():
+                ciphertext = _encrypt_secret(key_value.strip())
+            connection.execute(
+                """INSERT INTO user_provider_settings
+                (user_id, provider, protocol, base_url, model, max_tokens, context_size,
+                 tokenizer_model, api_key_ciphertext, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET provider = excluded.provider,
+                    protocol = excluded.protocol, base_url = excluded.base_url,
+                    model = excluded.model, max_tokens = excluded.max_tokens,
+                    context_size = excluded.context_size, tokenizer_model = excluded.tokenizer_model,
+                    api_key_ciphertext = excluded.api_key_ciphertext,
+                    updated_at = excluded.updated_at""",
+                (user_id, provider, protocol, base_url, model, max_tokens, context_size,
+                 tokenizer_model, ciphertext, time.time()),
+            )
+        return {
+            "provider": provider,
+            "protocol": protocol,
+            "base_url": base_url,
+            "model": model,
+            "max_tokens": max_tokens,
+            "context_size": context_size,
+            "tokenizer_model": tokenizer_model,
+            "api_key_configured": bool(ciphertext),
+        }
+
+    def import_legacy_provider_config(self, user_id: str, config_path: Path) -> bool:
+        """Import the old TOML model table once without copying it to a user root."""
+        with self._connection() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM user_provider_settings WHERE user_id = ? AND base_url <> '' AND model <> ''",
+                (user_id,),
+            ).fetchone()
+        if exists or not config_path.exists():
+            return False
+        try:
+            from backend.configuration import load_config, section
+
+            values = dict(section(load_config(config_path), "model"))
+            if not values.get("base_url") or not values.get("model") or not values.get("api_key"):
+                return False
+            self.update_provider_config(user_id, values)
+            self.set_metadata(f"provider_migration:{user_id}", "complete")
+            return True
+        except (OSError, ValueError, KeyError):
+            return False
+    def model_config_for_user(self, user_id: str):
+        from backend.providers import ModelConfig
+
+        values = self.provider_config_for_user(user_id)
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT api_key_ciphertext FROM user_provider_settings WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        api_key = _decrypt_secret(str(row["api_key_ciphertext"])) if row and row["api_key_ciphertext"] else ""
+        return ModelConfig.from_mapping({**values, "api_key": api_key})
+    def settings_for_user(self, user_id: str, *, email: str = "") -> dict[str, object]:
+        return {
+            "profile": {"email": email, **self.profile_for_user(user_id)},
+            "agent_config": self.agent_config_for_user(user_id),
+            "provider_config": self.provider_config_for_user(user_id),
+            "capability_config": dict(DEFAULT_CAPABILITY_CONFIG),
+        }
+
+    def agent_preferences_for_user(self, user_id: str) -> str:
+        agent = self.agent_config_for_user(user_id)
+        legacy = self.profile_for_user(user_id).get("agent_preferences", "")
+        parts = [
+            f"Preferred tone: {agent['tone']}" if agent["tone"] != "balanced" else "",
+            f"Preferred verbosity: {agent['verbosity']}" if agent["verbosity"] != "balanced" else "",
+            f"Preferred initiative: {agent['initiative']}" if agent["initiative"] != "balanced" else "",
+            agent["custom_instructions"],
+            legacy,
+        ]
+        return "\n".join(item for item in parts if item).strip()
+
+    def runtime_config_for_user(self, user_id: str) -> dict[str, object]:
+        del user_id
+        return {"runtime": {"log_full_messages": True}}
+
+    def device_id_for_user(self, user_id: str) -> str:
+        return f"web_{user_id}"
     def update_profile(self, user_id: str, *, display_name: str, agent_preferences: str) -> dict[str, str]:
         display_name = display_name.strip()
         agent_preferences = agent_preferences.strip()
@@ -412,3 +603,36 @@ class AuthStore:
                 "INSERT INTO app_metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+
+def _key_material() -> bytes:
+    configured = os.environ.get("MINI_AGENT_SECRET_KEY", "")
+    if configured:
+        return hashlib.sha256(configured.encode()).digest()
+    try:
+        login = os.getlogin()
+    except OSError:
+        login = ""
+    return hashlib.sha256(f"{Path.home()}:{login}".encode()).digest()
+
+
+def _encrypt_secret(value: str) -> str:
+    if not value:
+        return ""
+    nonce = secrets.token_bytes(16)
+    key = _key_material()
+    raw = value.encode("utf-8")
+    stream = bytes(byte ^ key[index % len(key)] for index, byte in enumerate(raw))
+    return base64.urlsafe_b64encode(nonce + stream).decode("ascii")
+
+
+def _decrypt_secret(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        raw = base64.urlsafe_b64decode(value.encode("ascii"))
+    except (ValueError, UnicodeError):
+        return ""
+    key = _key_material()
+    payload = raw[16:]
+    decoded = bytes(byte ^ key[index % len(key)] for index, byte in enumerate(payload))
+    return decoded.decode("utf-8", errors="replace")

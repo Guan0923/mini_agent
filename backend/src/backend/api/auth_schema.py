@@ -20,6 +20,39 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     updated_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS user_agent_settings (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    tone TEXT NOT NULL DEFAULT 'balanced',
+    verbosity TEXT NOT NULL DEFAULT 'balanced',
+    initiative TEXT NOT NULL DEFAULT 'balanced',
+    custom_instructions TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_provider_settings (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL DEFAULT 'deepseek',
+    protocol TEXT NOT NULL DEFAULT 'chat_completions',
+    base_url TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    max_tokens INTEGER NOT NULL DEFAULT 8192,
+    context_size INTEGER NOT NULL DEFAULT 1024000,
+    tokenizer_model TEXT NOT NULL DEFAULT 'deepseek-ai/DeepSeek-V3',
+    api_key_ciphertext TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_capability_settings (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS server_defaults (
+    name TEXT PRIMARY KEY,
+    settings_json TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS verification_challenges (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL,

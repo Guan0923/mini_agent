@@ -19,8 +19,8 @@ from backend.runtime.persistence.recording import model_error_data, model_reques
 
 from .adapters import ProviderAdapter
 from .config import ModelConfig
-from .deepseek import DeepSeek
 from .errors import ModelConfigurationError, ModelRequestError, ModelTransportError
+from .protocols import ChatCompletionsAdapter, MessagesAdapter, ResponsesAdapter
 from .token_usage import TokenUsageTracker
 from .transport import JsonHttpTransport, _RecordedStream
 
@@ -259,13 +259,31 @@ class LLMClient:
 
     @staticmethod
     def _create_llm(config: ModelConfig) -> ProviderAdapter:
-        if config.provider == "deepseek":
-            return DeepSeek(config)
-        raise ModelConfigurationError(f"Unsupported model provider: {config.provider!r}.")
+        supported_providers = {
+            "anthropic",
+            "azure",
+            "azure_openai",
+            "deepseek",
+            "gemini",
+            "google",
+            "openai",
+        }
+        if config.provider not in supported_providers:
+            raise ModelConfigurationError(f"Unsupported model provider: {config.provider!r}.")
+        adapters = {
+            "chat_completions": ChatCompletionsAdapter,
+            "responses": ResponsesAdapter,
+            "messages": MessagesAdapter,
+        }
+        adapter = adapters.get(config.protocol or "chat_completions")
+        if adapter is None:
+            raise ModelConfigurationError(f"Unsupported model protocol: {config.protocol!r}.")
+        return adapter(config)
 
     def _request_diagnostics(self, stream: bool) -> dict[str, Any]:
         return {
             "provider": self.config.provider,
+            "protocol": self.config.protocol,
             "operation": self.llm.operation,
             "model": self.config.model,
             "endpoint": self._safe_endpoint(self.llm.endpoint),
