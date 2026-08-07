@@ -1,4 +1,4 @@
-import type { ChatMessage } from "../types";
+import type { ChatMessage, RuntimeStateNode } from "../types";
 import { jsonBody, requestJson } from "./request";
 
 export interface SessionInfo {
@@ -12,6 +12,7 @@ export interface SessionInfo {
   client_id?: string | null;
   archived_at?: string | null;
   deleted_at?: string | null;
+  last_node_id?: string | null;
 }
 
 export interface SessionMessage {
@@ -80,11 +81,18 @@ export async function forkSession(
   title: string,
   clientId: string,
   fallbackMessages: Array<Pick<ChatMessage, "role" | "content">>,
+  sourceNodeId?: string,
 ): Promise<SessionInfo> {
   return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ run_id: runId, title, client_id: clientId, fallback_messages: fallbackMessages }),
+    body: JSON.stringify({
+      run_id: runId,
+      title,
+      client_id: clientId,
+      fallback_messages: fallbackMessages,
+      source_node_id: sourceNodeId,
+    }),
   });
 }
 
@@ -94,16 +102,31 @@ export async function rewindSession(
   title: string,
   clientId: string,
   fallbackMessages: Array<Pick<ChatMessage, "role" | "content">>,
+  sourceNodeId?: string,
 ): Promise<SessionInfo> {
   return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/rewind`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ run_id: runId, title, client_id: clientId, fallback_messages: fallbackMessages }),
+    body: JSON.stringify({
+      run_id: runId,
+      title,
+      client_id: clientId,
+      fallback_messages: fallbackMessages,
+      source_node_id: sourceNodeId,
+    }),
   });
 }
 
 export async function getSessionMessages(sessionId: string): Promise<SessionMessage[]> {
   return requestJson<SessionMessage[]>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`);
+}
+
+export async function getSessionNodes(sessionId: string): Promise<RuntimeStateNode[]> {
+  return requestJson<RuntimeStateNode[]>(`/api/sessions/${encodeURIComponent(sessionId)}/nodes`);
+}
+
+export async function getSessionLeaves(sessionId: string): Promise<RuntimeStateNode[]> {
+  return requestJson<RuntimeStateNode[]>(`/api/sessions/${encodeURIComponent(sessionId)}/leaves`);
 }
 
 export async function getSessionTranscript(sessionId: string): Promise<SessionMessage[]> {

@@ -73,6 +73,7 @@ class SessionSummary:
     client_id: str | None = None
     archived_at: str | None = None
     deleted_at: str | None = None
+    last_node_id: str | None = None
 
     @property
     def is_active(self) -> bool:

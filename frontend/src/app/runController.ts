@@ -1,12 +1,15 @@
 import { streamChat, streamResume } from "../api";
-import type { ChatMessage, StreamMessage } from "../types";
+import type { ChatMessage, RuntimeNodeFrame, RuntimeStateNode, StreamMessage } from "../types";
 import type { ActiveRun, ChatRunRequest } from "./types";
+import { applyRuntimeNodeFrame } from "./runtimeNodeReducer";
 
 export interface RunControllerCallbacks {
   activeRuns: Map<string, ActiveRun>;
   updateLastMessage: (conversationId: string, updater: (message: ChatMessage) => ChatMessage) => void;
   rebindRunSession: (conversationId: string, sessionId: string) => Promise<void>;
   refreshSessions: () => Promise<void>;
+  applyRuntimeNodeFrame?: (frame: RuntimeNodeFrame) => void;
+  updateConversation?: (conversationId: string, updater: (conversation: import("../types").Conversation) => import("../types").Conversation) => void;
 }
 
 /** Build the streaming runner while keeping transport concerns outside the UI. */
@@ -23,11 +26,29 @@ export function createRunController(callbacks: RunControllerCallbacks) {
     }
     const controller = new AbortController();
     callbacks.activeRuns.set(request.conversationId, { controller, sessionId: request.sessionId });
+    let finalNode: RuntimeNodeFrame["node"] | undefined;
 
     const onMessage = (message: StreamMessage) => {
       const active = callbacks.activeRuns.get(request.conversationId);
       if (active?.controller !== controller || controller.signal.aborted) return;
-      if (message.type === "event") {
+      if ((message.type === "node.create" || message.type === "node.update" || message.type === "node.delete") && message.node) {
+        const frame: RuntimeNodeFrame = { type: message.type, node: message.node };
+        callbacks.applyRuntimeNodeFrame?.(frame);
+        callbacks.updateConversation?.(request.conversationId, (conversation) => {
+          const current = new Map<string, RuntimeStateNode>(
+            (conversation.runtimeNodes ?? []).map((node) => [`${node.session_id}:${node.id}`, node] as const),
+          );
+          const next = applyRuntimeNodeFrame(current, frame);
+          return { ...conversation, runtimeNodes: [...next.values()] };
+        });
+        if (message.type === "node.delete") {
+          finalNode = message.node;
+          callbacks.updateConversation?.(request.conversationId, (conversation) => ({
+            ...conversation,
+            lastNodeId: message.node?.id,
+          }));
+        }
+      } else if (message.type === "event") {
         const kind = message.kind ?? "";
         if (kind === "response_delta") {
           const content = (message.data?.content as string | undefined) ?? message.message ?? "";
@@ -73,9 +94,17 @@ export function createRunController(callbacks: RunControllerCallbacks) {
 
     try {
       const result = request.resume
-        ? await streamResume(request.sessionId, onMessage, controller.signal, request.permissionMode, request.reasoningEffort)
+        ? await streamResume(
+            request.sessionId,
+            onMessage,
+            controller.signal,
+            request.permissionMode,
+            request.reasoningEffort,
+            request.sourceNodeId,
+          )
         : await streamChat(request.prompt ?? "", onMessage, controller.signal, {
             sessionId: request.sessionId,
+            sourceNodeId: request.sourceNodeId,
             mode: request.mode,
             permissionMode: request.permissionMode,
             reasoningEffort: request.reasoningEffort,
@@ -87,6 +116,18 @@ export function createRunController(callbacks: RunControllerCallbacks) {
           status: "已停止",
           decision: undefined,
         }));
+      } else if (finalNode) {
+        const content = (finalNode.data.message as { content?: Array<{ text?: string }> } | undefined)?.content
+          ?.map((part) => part.text ?? "")
+          .join("");
+        callbacks.updateLastMessage(request.conversationId, (item) => ({
+          ...item,
+          status: finalNode?.status,
+          content: content || item.content,
+          running: false,
+          decision: undefined,
+        }));
+        void callbacks.refreshSessions().catch(() => undefined);
       }
     } catch (error) {
       if (!controller.signal.aborted) {

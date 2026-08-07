@@ -156,3 +156,44 @@ class PostgresSchemaMixin:
                 ):
                     connection.execute(statement)
                 connection.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (4, CURRENT_TIMESTAMP)")
+            if 5 not in applied:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS runtime_nodes (
+                        session_id TEXT NOT NULL REFERENCES sessions(session_id),
+                        parent_session_id TEXT NOT NULL DEFAULT '',
+                        id TEXT NOT NULL,
+                        parent_id TEXT NOT NULL DEFAULT '',
+                        version TEXT NOT NULL,
+                        first_kept_entry_id TEXT NOT NULL,
+                        compaction_idx TEXT NOT NULL,
+                        "user" TEXT NOT NULL DEFAULT '',
+                        provider TEXT NOT NULL DEFAULT '',
+                        cwd TEXT NOT NULL DEFAULT '',
+                        timestamp TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (status IN ('failed', 'success', 'abort')),
+                        data JSONB NOT NULL,
+                        PRIMARY KEY (session_id, id)
+                    )
+                    """
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS runtime_nodes_parent_idx ON runtime_nodes (parent_session_id, parent_id, timestamp, id)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS runtime_nodes_session_timestamp_idx ON runtime_nodes (session_id, timestamp, id)"
+                )
+                # Runtime tables from schema <=4 have no lossless mapping to
+                # canonical nodes.  Preserve session metadata and discard
+                # only execution/history rows during this one-way upgrade.
+                for table in (
+                    "session_messages",
+                    "session_runtime_messages",
+                    "run_runtime_messages",
+                    "checkpoints",
+                    "session_runs",
+                    "session_runtime",
+                    "runs",
+                ):
+                    connection.execute(f"DELETE FROM {table}")
+                connection.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (5, CURRENT_TIMESTAMP)")

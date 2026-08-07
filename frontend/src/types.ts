@@ -22,6 +22,33 @@ export interface ToolEvent {
   data?: Record<string, unknown>;
 }
 
+export type RuntimeNodeStatus = "failed" | "success" | "abort";
+export type RuntimeNodeDataType = "message" | "thinking_level_change" | "model_change" | "compaction";
+
+/** Canonical persisted node shared by API, TUI and the web reducer. */
+export interface RuntimeStateNode {
+  session_id: string;
+  parent_session_id: string;
+  id: string;
+  parent_id: string;
+  version: string;
+  firstKeptEntryId: string;
+  compactionIdx: string;
+  user: string;
+  provider: string;
+  cwd: string;
+  timestamp: string;
+  status: RuntimeNodeStatus;
+  data: Record<string, unknown> & { type?: RuntimeNodeDataType };
+}
+
+export type NodeFrameType = "node.create" | "node.update" | "node.delete";
+
+export interface RuntimeNodeFrame {
+  type: NodeFrameType;
+  node: RuntimeStateNode;
+}
+
 export interface Metrics {
   duration_ms?: number;
   model_calls?: number;
@@ -53,6 +80,8 @@ export interface Conversation {
   archivedAt?: string;
   deletedAt?: string;
   messagesLoaded?: boolean;
+  lastNodeId?: string;
+  runtimeNodes?: RuntimeStateNode[];
 }
 
 export interface DecisionOption {
@@ -107,7 +136,7 @@ export interface SkillInfo {
 }
 
 export interface StreamMessage {
-  type: "event" | "done" | "error";
+  type: "event" | "done" | "error" | NodeFrameType;
   kind?: string;
   message?: string;
   data?: Record<string, unknown>;
@@ -118,4 +147,5 @@ export interface StreamMessage {
   session_id?: string;
   run_id?: string;
   mode?: ChatMode;
+  node?: RuntimeStateNode;
 }

@@ -3,6 +3,7 @@ import { ApiError, errorFrom, notifyUnauthorized } from "./request";
 
 export interface StreamOptions {
   sessionId?: string;
+  sourceNodeId?: string;
   mode?: ChatMode;
   permissionMode?: PermissionMode;
   reasoningEffort?: ReasoningEffort;
@@ -35,6 +36,7 @@ async function streamEndpoint(
   const decoder = new TextDecoder();
   let buffer = "";
   let terminal = false;
+  let sawNodeDelete = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -49,6 +51,7 @@ async function streamEndpoint(
           try {
             const message = JSON.parse(line.slice(6)) as StreamMessage;
             if (message.type === "done" || message.type === "error") terminal = true;
+            if (message.type === "node.delete") sawNodeDelete = true;
             onMessage(message);
           } catch {
             /* ignore malformed frames */
@@ -63,7 +66,7 @@ async function streamEndpoint(
     reader.releaseLock();
   }
   if (signal.aborted) return "aborted";
-  if (!terminal) throw new Error("SSE stream unexpectedly ended before completion");
+  if (!terminal && !sawNodeDelete) throw new Error("SSE stream unexpectedly ended before completion");
   return "completed";
 }
 
@@ -79,6 +82,7 @@ export async function streamChat(
     {
       prompt,
       session_id: normalized.sessionId,
+      source_node_id: normalized.sourceNodeId,
       mode: normalized.mode ?? "agent",
       permission_mode: normalized.permissionMode,
       reasoning_effort: normalized.reasoningEffort,
@@ -95,10 +99,11 @@ export async function streamResume(
   signal: AbortSignal,
   permissionMode: PermissionMode,
   reasoningEffort: ReasoningEffort = "medium",
+  sourceNodeId?: string,
 ): Promise<"completed" | "aborted"> {
   return streamEndpoint(
     `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
-    { permission_mode: permissionMode, reasoning_effort: reasoningEffort },
+    { permission_mode: permissionMode, reasoning_effort: reasoningEffort, source_node_id: sourceNodeId },
     onMessage,
     signal,
   );

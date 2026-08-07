@@ -804,7 +804,7 @@ wheels = [
 
 [[package]]
 name = "mini-agent-backend"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "backend" }
 dependencies = [
     { name = "email-validator" },
@@ -852,7 +852,7 @@ provides-extras = ["sync"]
 
 [[package]]
 name = "mini-agent-tui"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "tui" }
 dependencies = [
     { name = "keyring" },

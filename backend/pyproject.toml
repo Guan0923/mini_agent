@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-agent-backend"
-version = "0.1.0"
+version = "0.2.0"
 description = "Mini-Agent core runtime and FastAPI service (server tier)."
 keywords = ["agent", "mcp", "skills", "subagents"]
 requires-python = ">=3.11"

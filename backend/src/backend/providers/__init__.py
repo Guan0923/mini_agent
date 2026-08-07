@@ -1,5 +1,15 @@
 """Provider strategies and the high-level LLM client."""
 
+from .canonical import (
+    CanonicalProviderAdapter,
+    from_chat_completion,
+    from_messages,
+    from_responses,
+    normalize_provider_response,
+    to_chat_completions,
+    to_messages,
+    to_responses,
+)
 from .client import LLMClient, ProviderAdapter
 from .config import ModelConfig
 from .deepseek import (
@@ -15,6 +25,7 @@ from .transport import JsonHttpTransport
 
 __all__ = [
     "ChatCompletionsAdapter",
+    "CanonicalProviderAdapter",
     "DeepSeek",
     "DeepSeekCompletion",
     "DeepSeekStreamDelta",
@@ -29,4 +40,11 @@ __all__ = [
     "ModelRequestError",
     "ModelTransportError",
     "ProviderAdapter",
+    "from_chat_completion",
+    "from_messages",
+    "from_responses",
+    "normalize_provider_response",
+    "to_chat_completions",
+    "to_messages",
+    "to_responses",
 ]

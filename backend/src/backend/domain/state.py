@@ -199,3 +199,11 @@ class RunState:
         from .state_codec import run_state_from_dict
 
         return run_state_from_dict(data)
+
+
+# New message-tree state is intentionally kept in its own dependency-free
+# module.  Re-export it here for callers that historically imported all state
+# values from ``backend.domain.state``.
+from .runtime_state import RuntimeState  # noqa: E402  (compatibility export)
+
+RuntimeStateNode = RuntimeState

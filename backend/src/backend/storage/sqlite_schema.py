@@ -1,16 +1,16 @@
-"""SQLite schema creation and in-place compatibility migrations."""
+"""SQLite schema creation and the one-way RuntimeState node migration."""
 
 from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_meta (
     session_id TEXT PRIMARY KEY, title TEXT NOT NULL, owner_device_id TEXT NOT NULL,
     remote_revision INTEGER NOT NULL DEFAULT 0, read_only INTEGER NOT NULL DEFAULT 0,
-    schema_version INTEGER NOT NULL DEFAULT 2, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 3, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     client_id TEXT, archived_at TEXT, deleted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS session_runs (
@@ -36,6 +36,26 @@ CREATE TABLE IF NOT EXISTS runtime_messages (
     run_id TEXT NOT NULL, sequence INTEGER NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL,
     data_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (run_id, sequence)
 );
+CREATE TABLE IF NOT EXISTS runtime_nodes (
+    session_id TEXT NOT NULL,
+    parent_session_id TEXT NOT NULL DEFAULT '',
+    id TEXT NOT NULL,
+    parent_id TEXT NOT NULL DEFAULT '',
+    version TEXT NOT NULL,
+    first_kept_entry_id TEXT NOT NULL,
+    compaction_idx TEXT NOT NULL,
+    user TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    cwd TEXT NOT NULL DEFAULT '',
+    timestamp TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('failed', 'success', 'abort')),
+    data_json TEXT NOT NULL,
+    PRIMARY KEY (session_id, id)
+);
+CREATE INDEX IF NOT EXISTS runtime_nodes_session_timestamp_idx
+    ON runtime_nodes (session_id, timestamp, id);
+CREATE INDEX IF NOT EXISTS runtime_nodes_parent_idx
+    ON runtime_nodes (parent_session_id, parent_id, timestamp, id);
 CREATE TABLE IF NOT EXISTS sync_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT UNIQUE, base_revision INTEGER NOT NULL DEFAULT 0,
     kind TEXT NOT NULL DEFAULT 'snapshot', payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -51,6 +71,14 @@ class SQLiteSchemaMixin:
 
     def _migrate_schema(self, connection: sqlite3.Connection) -> None:
         meta_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(session_meta)")}
+        prior_version_row = (
+            connection.execute("SELECT schema_version FROM session_meta LIMIT 1").fetchone()
+            if "schema_version" in meta_columns
+            else None
+        )
+        prior_version = (
+            int(prior_version_row[0]) if prior_version_row is not None and prior_version_row[0] is not None else 1
+        )
         if "owner_device_id" not in meta_columns:
             connection.execute("ALTER TABLE session_meta ADD COLUMN owner_device_id TEXT NOT NULL DEFAULT ''")
         for name, definition in (
@@ -70,6 +98,21 @@ class SQLiteSchemaMixin:
             "UPDATE session_meta SET owner_device_id=? WHERE owner_device_id IS NULL OR owner_device_id=''",
             (self.device_id,),
         )
+        if prior_version < SCHEMA_VERSION:
+            # Runtime/history tables have no compatible representation in the
+            # node tree.  Keep session metadata and authentication-owned data,
+            # but intentionally discard old execution rows and sync outbox.
+            for table in (
+                "session_runs",
+                "session_messages",
+                "session_runtime",
+                "runs",
+                "checkpoints",
+                "runtime_messages",
+                "runtime_nodes",
+                "sync_outbox",
+            ):
+                connection.execute(f"DELETE FROM {table}")
         outbox_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(sync_outbox)")}
         for name, definition in (
             ("operation_id", "TEXT"),

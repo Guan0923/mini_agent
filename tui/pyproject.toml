@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-agent-tui"
-version = "0.1.0"
+version = "0.2.0"
 description = "Mini-Agent terminal client (client tier)."
 requires-python = ">=3.11"
 dependencies = [

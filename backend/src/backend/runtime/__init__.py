@@ -47,6 +47,18 @@ _EXPORTS = {
     "build_application": ("application.factory", "build_application"),
     "build_runner": ("application.factory", "build_runner"),
     "build_session_store": ("application.factory", "build_session_store"),
+    "AgentExecutor": ("executor", "AgentExecutor"),
+    "ExecutorDependencies": ("executor", "ExecutorDependencies"),
+    "RuntimeStateNode": ("state_tree", "RuntimeState"),
+    "CanonicalRuntimeState": ("state_tree", "RuntimeState"),
+    "RuntimeStateTree": ("state_tree", "RuntimeStateTree"),
+    "NodeFrame": ("state_tree", "NodeFrame"),
+    "NodeWriter": ("state_tree", "NodeWriter"),
+    "RuntimeNodeStore": ("state_tree", "RuntimeNodeStore"),
+    "change_payload": ("state_tree", "change_payload"),
+    "compaction_payload": ("state_tree", "compaction_payload"),
+    "message_payload": ("state_tree", "message_payload"),
+    "recoverable": ("state_tree", "recoverable"),
 }
 
 __all__ = list(_EXPORTS)

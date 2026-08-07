@@ -5,6 +5,7 @@ import {
   deleteSession,
   forkSession,
   getSettings,
+  getSessionNodes,
   getSessionTranscript,
   listSessions,
   renameSession,
@@ -179,14 +180,18 @@ function AgentApp() {
   const current = activeConversations.find((conversation) => conversation.id === currentId) ?? activeConversations[0] ?? null;
 
   useEffect(() => {
-    if (current && current.sessionId && !current.messagesLoaded) {
+    if (current && current.sessionId && (!current.messagesLoaded || !current.runtimeNodes)) {
       let disposed = false;
-      void getSessionTranscript(current.sessionId)
-        .then((transcript) => {
+      void Promise.all([
+        getSessionTranscript(current.sessionId),
+        getSessionNodes(current.sessionId).catch(() => []),
+      ])
+        .then(([transcript, nodes]) => {
           if (disposed) return;
           updateConversation(current.id, (conversation) => ({
             ...conversation,
             messages: transcriptToMessages(transcript),
+            runtimeNodes: nodes,
             messagesLoaded: true,
           }));
         })
@@ -198,7 +203,7 @@ function AgentApp() {
       };
     }
     return undefined;
-  }, [current?.id, current?.sessionId, current?.messagesLoaded]);
+  }, [current?.id, current?.sessionId, current?.messagesLoaded, current?.runtimeNodes]);
 
   function updateConversation(id: string, updater: (conversation: Conversation) => Conversation) {
     setConversations((previous) => previous.map((conversation) => (conversation.id === id ? updater(conversation) : conversation)));
@@ -230,6 +235,7 @@ function AgentApp() {
     updateLastMessage,
     rebindRunSession,
     refreshSessions: () => refreshSessions(),
+    updateConversation,
   });
 
   async function ensureSession(id: string): Promise<string> {
@@ -353,6 +359,7 @@ function AgentApp() {
         `${source.title || "新对话"}（分支）`,
         branchId,
         importableMessages(prefix),
+        source.lastNodeId,
       );
       const branch = summaryToConversation(summary, {
         id: branchId,
@@ -384,6 +391,7 @@ function AgentApp() {
         source.title,
         source.clientId ?? source.id,
         importableMessages(source.messages.slice(0, index)),
+        source.lastNodeId,
       );
       updateConversation(id, (conversation) => ({
         ...summaryToConversation(summary, conversation),
