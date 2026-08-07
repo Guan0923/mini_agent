@@ -27,7 +27,8 @@ class LLMPlanner(DecisionMixin, SelectionMixin, PlanMixin, RepairMixin, RequestM
         client: RuntimeCompletionClient,
         tool_specs: list[ToolSpec] | list[str],
         read_only_tool_specs: list[ToolSpec] | list[str],
-        *, user_preferences: str = "",
+        *,
+        user_preferences: str = "",
     ) -> None:
         self.client = client
         self._model_requests = ModelRequestExecutor(client)

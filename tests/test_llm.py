@@ -2,7 +2,6 @@ import json
 
 import pytest
 import requests
-
 from backend.domain import (
     AssistantMessage,
     ModelOutputError,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadSessionModes, MODE_STORAGE_KEY, saveSessionModes, type SimpleStorage } from "./sessionModes";
+import { loadSessionModes, MODE_STORAGE_KEY, saveSessionModes, type SimpleStorage } from "./app/sessionModes";
 
 function storage(initial: string | null = null): SimpleStorage {
   let value = initial;

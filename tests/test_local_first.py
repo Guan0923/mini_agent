@@ -6,7 +6,6 @@ import threading
 from pathlib import Path
 
 import pytest
-
 from backend.configuration import ClientPaths, initialize_config, load_config, section
 from backend.domain import AssistantMessage, RunState, UserMessage
 from backend.planning import RuleBasedPlanner

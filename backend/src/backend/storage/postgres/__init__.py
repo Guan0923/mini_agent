@@ -3,5 +3,6 @@
 from .checkpoints import PostgresCheckpointStore
 from .database import PostgresDatabase
 from .sessions import PostgresSessionStore
+from .settings import PostgresSettingsRepository
 
-__all__ = ["PostgresDatabase", "PostgresCheckpointStore", "PostgresSessionStore"]
+__all__ = ["PostgresDatabase", "PostgresCheckpointStore", "PostgresSessionStore", "PostgresSettingsRepository"]

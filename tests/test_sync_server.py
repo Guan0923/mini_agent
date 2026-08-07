@@ -5,7 +5,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-
 from backend.sync.server import (
     PostgresSyncRepository,
     RevisionConflict,

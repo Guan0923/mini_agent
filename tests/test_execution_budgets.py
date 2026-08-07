@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from backend.domain import (
     AssistantMessage,
     ExecutionPlan,
@@ -16,6 +15,7 @@ from backend.planning import LLMPlanner
 from backend.runtime import LegacyAgentRunner as AgentRunner
 from backend.runtime import PreparedResponse, RunnerSettings, RuntimeState
 from backend.tools import Tool, ToolRegistry
+
 from tui import cli
 
 

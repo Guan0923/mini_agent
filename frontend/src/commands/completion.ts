@@ -1,4 +1,4 @@
-import { COMMANDS, type CommandDefinition } from "./commands";
+import { COMMANDS, type CommandDefinition } from "./index";
 
 export function commandSuggestions(input: string): CommandDefinition[] {
   if (!/^\/[^\s]*$/.test(input)) return [];

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "./commandCompletion";
+import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "./commands/completion";
 
 describe("slash command completion", () => {
   it("does not expose removed commands", () => {

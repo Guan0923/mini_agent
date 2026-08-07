@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from backend.domain import AssistantMessage, ToolMessage
 from backend.providers.config import ModelConfig, load_env_file
 from backend.runtime import AgentRunner

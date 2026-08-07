@@ -4,7 +4,6 @@ from pathlib import Path
 
 import psycopg
 import pytest
-
 from backend.domain import AssistantMessage, PlanningError, ToolMessage
 from backend.observability import EventFanout, JsonlRunLogger
 from backend.planning import LLMPlanner, RuleBasedPlanner

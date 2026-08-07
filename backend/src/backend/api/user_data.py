@@ -7,7 +7,7 @@ from pathlib import Path
 
 from backend.configuration import ClientPaths
 
-from .auth_types import UserIdentity
+from .auth.types import UserIdentity
 
 
 def user_root(data_root: Path, user_id: str) -> Path:

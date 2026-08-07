@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from backend.domain import AssistantMessage, StrategySelection, ToolMessage, UserMessage
 from backend.runtime import AgentRunner, ConversationService
 from backend.runtime.conversation.user_input import (

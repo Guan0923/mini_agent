@@ -4,11 +4,10 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from mcp import types
-
 from backend.mcp import McpToolAdapter, create_server
 from backend.mcp.cli import parse_args
 from backend.tools import ToolRegistry, build_tool_registry
+from mcp import types
 
 
 def test_mcp_definitions_match_the_safe_registry_specs(tmp_path: Path) -> None:

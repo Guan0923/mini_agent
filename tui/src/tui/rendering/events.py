@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 
-from textual.widgets import Static
-
 from backend.runtime.core.events import RuntimeEvent
+from textual.widgets import Static
 
 from .state import ToolTranscript
 from .transcript import TranscriptNode

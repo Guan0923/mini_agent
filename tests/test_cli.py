@@ -4,10 +4,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from backend.domain import RunState
-from tui import cli
 from tui.components.approval import TerminalApproval
+
+from tui import cli
 
 
 class StubConversation:

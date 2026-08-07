@@ -4,7 +4,6 @@ from pathlib import Path
 
 import psycopg
 import pytest
-
 from backend.domain import (
     AgentAction,
     AssistantMessage,

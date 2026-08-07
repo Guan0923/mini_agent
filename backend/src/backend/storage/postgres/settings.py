@@ -2,23 +2,28 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import os
-import secrets
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS, validate_time_zone
-
-from .auth_store import (
+from backend.domain import DEFAULT_TIME_ZONE, validate_time_zone
+from backend.storage.auth.crypto import _decrypt_secret, _encrypt_secret, _key_material
+from backend.storage.settings_contract import (
     DEFAULT_AGENT_CONFIG,
     DEFAULT_CAPABILITY_CONFIG,
     DEFAULT_PROFILE,
     DEFAULT_PROVIDER_CONFIG,
+    normalize_agent_config,
+    normalize_provider_config,
+    timezone_options,
 )
+
+# Historical private names remain available to integrations that imported the
+# old ``backend.api.settings_store`` module directly.
+_encrypt = _encrypt_secret
+_decrypt = _decrypt_secret
+_key = _key_material
 
 
 class PostgresSettingsRepository:
@@ -132,26 +137,7 @@ class PostgresSettingsRepository:
 
     def update_agent_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, object]:
         current = self.agent_config_for_user(user_id)
-        result = dict(DEFAULT_AGENT_CONFIG)
-        result.update(current)
-        for key in result:
-            if key not in values:
-                continue
-            raw = values[key]
-            if key == "location_enabled":
-                if not isinstance(raw, bool):
-                    raise ValueError("location_enabled must be a boolean")
-                result[key] = raw
-                continue
-            value = str(raw or "").strip()
-            limit = 4000 if key == "custom_instructions" else 40
-            if len(value) > limit:
-                raise ValueError(f"{key} exceeds its length limit")
-            if key == "display_mode" and value not in {"minimal", "medium", "verbose"}:
-                raise ValueError("display_mode must be minimal, medium, or verbose")
-            if key == "timezone":
-                value = validate_time_zone(value)
-            result[key] = value
+        result = normalize_agent_config(current, values)
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO user_agent_settings
@@ -196,28 +182,21 @@ class PostgresSettingsRepository:
 
     def update_provider_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, Any]:
         current = self.provider_config_for_user(user_id)
-        protocol = str(values.get("protocol", current.get("protocol", "chat_completions")) or "").strip().lower()
-        if protocol not in {"chat_completions", "responses", "messages"}:
-            raise ValueError("protocol must be chat_completions, responses, or messages")
-        base_url = str(values.get("base_url", current.get("base_url", "")) or "").strip()
-        model = str(values.get("model", current.get("model", "")) or "").strip()
-        if not base_url or not model:
-            raise ValueError("base_url and model are required")
-        max_tokens = int(values.get("max_tokens", current.get("max_tokens", 8192)))
-        context_size = int(values.get("context_size", current.get("context_size", 1024000)))
-        if not 1 <= max_tokens <= 384000 or context_size <= max_tokens:
-            raise ValueError("invalid token limits")
-        provider = str(values.get("provider", current.get("provider", "deepseek")) or "deepseek").strip().lower()
-        tokenizer = str(
-            values.get("tokenizer_model", current.get("tokenizer_model", "deepseek-ai/DeepSeek-V3")) or ""
-        ).strip()
+        normalized = normalize_provider_config(current, values)
+        provider = str(normalized["provider"])
+        protocol = str(normalized["protocol"])
+        base_url = str(normalized["base_url"])
+        model = str(normalized["model"])
+        max_tokens = int(normalized["max_tokens"])
+        context_size = int(normalized["context_size"])
+        tokenizer = str(normalized["tokenizer_model"])
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT api_key_ciphertext FROM user_provider_settings WHERE user_id=%s", (user_id,)
             ).fetchone()
             ciphertext = str(row[0] or "") if row else ""
             if isinstance(values.get("api_key"), str) and str(values["api_key"]).strip():
-                ciphertext = _encrypt(str(values["api_key"]).strip())
+                ciphertext = _encrypt_secret(str(values["api_key"]).strip())
             connection.execute(
                 """INSERT INTO user_provider_settings(user_id,provider,protocol,base_url,model,max_tokens,
                    context_size,tokenizer_model,api_key_ciphertext,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -273,9 +252,7 @@ class PostgresSettingsRepository:
             "agent_config": self.agent_config_for_user(user_id),
             "provider_config": self.provider_config_for_user(user_id),
             "capability_config": dict(DEFAULT_CAPABILITY_CONFIG),
-            "timezone_options": [
-                {"identifier": option.identifier, "label": option.label} for option in TIME_ZONE_OPTIONS
-            ],
+            "timezone_options": timezone_options(),
         }
 
     def agent_preferences_for_user(self, user_id: str) -> str:
@@ -305,26 +282,4 @@ class PostgresSettingsRepository:
             row = connection.execute(
                 "SELECT api_key_ciphertext FROM user_provider_settings WHERE user_id=%s", (user_id,)
             ).fetchone()
-        return ModelConfig.from_mapping({**values, "api_key": _decrypt(str(row[0])) if row and row[0] else ""})
-
-
-def _key() -> bytes:
-    value = os.environ.get("MINI_AGENT_SECRET_KEY", "")
-    return hashlib.sha256((value or str(Path.home())).encode("utf-8")).digest()
-
-
-def _encrypt(value: str) -> str:
-    raw = value.encode("utf-8")
-    key = _key()
-    return base64.urlsafe_b64encode(
-        secrets.token_bytes(16) + bytes(v ^ key[i % len(key)] for i, v in enumerate(raw))
-    ).decode("ascii")
-
-
-def _decrypt(value: str) -> str:
-    try:
-        raw = base64.urlsafe_b64decode(value)
-    except (ValueError, UnicodeError):
-        return ""
-    key = _key()
-    return bytes(v ^ key[i % len(key)] for i, v in enumerate(raw[16:])).decode("utf-8", errors="replace")
+        return ModelConfig.from_mapping({**values, "api_key": _decrypt_secret(str(row[0])) if row and row[0] else ""})

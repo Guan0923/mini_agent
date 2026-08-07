@@ -1,0 +1,99 @@
+@media (max-width: 767px) {
+  .chat-scroll {
+    padding-top: 20px;
+  }
+
+  .composer {
+    padding: 0 12px 14px;
+  }
+
+  .composer-toolbar {
+    left: 12px;
+    right: 58px;
+  }
+
+  .message-content {
+    max-width: 88%;
+  }
+
+  .trash-page,
+  .benchmark-page {
+    padding: 20px 14px;
+  }
+
+
+.sidebar-utility-links {
+    grid-template-columns: 1fr;
+  }
+
+  .form-links {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+.user-settings-modal .ant-modal-content {
+  min-height: 560px;
+}
+
+.user-settings-layout {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  min-height: 470px;
+  margin: -8px -4px 0;
+}
+
+.user-settings-nav {
+  border-right: 1px solid #e5e7eb;
+  padding: 12px 8px 12px 0;
+}
+
+.user-settings-nav .ant-menu {
+  border-inline-end: 0;
+  background: transparent;
+}
+
+.user-settings-detail {
+  min-width: 0;
+  padding: 12px 24px 12px 28px;
+}
+
+.user-settings-detail .ant-form-item {
+  margin-bottom: 18px;
+}
+
+.user-settings-loading {
+  display: grid;
+  min-height: 470px;
+  place-items: center;
+}
+
+@media (max-width: 640px) {
+  .user-settings-modal .ant-modal-content {
+    min-height: 0;
+  }
+
+  .user-settings-layout {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .user-settings-nav {
+    border-right: 0;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0 0 8px;
+  }
+
+  .user-settings-nav .ant-menu {
+    display: flex;
+    overflow-x: auto;
+  }
+
+  .user-settings-detail {
+    padding: 18px 4px 4px;
+  }
+
+  .user-settings-loading {
+    min-height: 240px;
+  }
+}

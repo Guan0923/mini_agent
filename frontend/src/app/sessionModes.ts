@@ -1,4 +1,4 @@
-import type { ChatMode } from "./types";
+import type { ChatMode } from "../types";
 
 export const MODE_STORAGE_KEY = "mini-agent-session-modes";
 

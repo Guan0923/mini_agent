@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, type RefObject } from "react";
 import MarkdownIt from "markdown-it";
 import type { Token } from "markdown-it";
 import texmath from "markdown-it-texmath";
-import { loadMathJax } from "../mathjax";
+import { loadMathJax } from "../math";
 import { copySelectionWithLatex } from "./latexClipboard";
 
 const MATH_SOURCE_ATTRIBUTE = "data-latex-source";

@@ -12,10 +12,15 @@ import requests
 
 from .errors import ModelTransportError
 
-_TERMINAL_EVENTS = frozenset({
-    "response.completed", "response.failed", "response.incomplete",
-    "message_stop", "error",
-})
+_TERMINAL_EVENTS = frozenset(
+    {
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+        "message_stop",
+        "error",
+    }
+)
 
 
 class JsonHttpTransport:
@@ -23,7 +28,9 @@ class JsonHttpTransport:
         self.session = session or requests.Session()
         self.last_metadata: dict[str, Any] = {}
 
-    def post_json(self, endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+    def post_json(
+        self, endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeout_seconds: int
+    ) -> dict[str, Any]:
         started = perf_counter()
         response: requests.Response | None = None
         try:
@@ -162,7 +169,9 @@ def _response_detail(response: Any) -> str:
     return detail[:500].replace("\n", " ").strip()
 
 
-def _transport_error(error: requests.RequestException, label: str, *, stream_started: bool = False) -> ModelTransportError:
+def _transport_error(
+    error: requests.RequestException, label: str, *, stream_started: bool = False
+) -> ModelTransportError:
     response = getattr(error, "response", None)
     status_code = getattr(response, "status_code", None)
     headers = getattr(response, "headers", None)

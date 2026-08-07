@@ -8,7 +8,6 @@ from time import sleep
 from types import SimpleNamespace
 
 import pytest
-
 from backend.configuration import ClientPaths, ConfigurationError
 from backend.domain import RunState
 from backend.mcp import client as mcp_client
@@ -22,6 +21,7 @@ from backend.runtime.subagent_bridge import ParentRuntimeBridge
 from backend.runtime.subagents import SubagentCoordinator
 from backend.tools import ToolError, ToolRegistry
 from backend.tools.filesystem import normalized_workspace_path
+
 from tui import cli as tui_cli
 
 

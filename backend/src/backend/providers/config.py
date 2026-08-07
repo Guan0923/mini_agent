@@ -82,7 +82,9 @@ class ModelConfig:
         except ValueError as exc:
             raise ModelConfigurationError("MAX_TOKENS and CONTEXT_SIZE must be integers.") from exc
         return cls(
-            values["API_KEY"], values["BASE_URL"], values["MODEL"],
+            values["API_KEY"],
+            values["BASE_URL"],
+            values["MODEL"],
             max_tokens=max_tokens,
             provider=values.get("PROVIDER", "deepseek").strip().lower(),
             context_size=context_size,
@@ -100,7 +102,9 @@ class ModelConfig:
             raise ModelConfigurationError(f"Missing {', '.join(missing)} in [model].")
         try:
             return cls(
-                str(values["api_key"]), str(values["base_url"]), str(values["model"]),
+                str(values["api_key"]),
+                str(values["base_url"]),
+                str(values["model"]),
                 max_tokens=int(values.get("max_tokens", 8192)),
                 provider=str(values.get("provider", "deepseek")).strip().lower(),
                 context_size=int(values.get("context_size", 1_024_000)),

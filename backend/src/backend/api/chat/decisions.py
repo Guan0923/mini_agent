@@ -7,8 +7,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from .auth_dependencies import require_user
-from .auth_types import UserIdentity
+from ..auth.dependencies import require_user
+from ..auth.types import UserIdentity
 from .interrupts import registry
 
 # Included under the chat router's /api prefix, so it carries no prefix itself.

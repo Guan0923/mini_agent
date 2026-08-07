@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Request, status
 
-from .auth_types import UserIdentity
+from .types import UserIdentity
 
 
 def current_identity(request: Request) -> tuple[UserIdentity, str, str] | None:

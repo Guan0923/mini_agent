@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from .auth_dependencies import require_user  # noqa: E402
+from .auth.dependencies import require_user  # noqa: E402
 from .state import DEFAULT_DATA_ROOT, WebAppState  # noqa: E402
 
 
@@ -32,11 +32,11 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
         allow_credentials=True,
     )
 
-    from .auth_router import router as auth_router
-    from .benchmark_app import create_benchmark_app
+    from .auth import router as auth_router
     from .chat import router as chat_router
-    from .info import router as info_router
     from .sessions import router as sessions_router
+    from .shared.benchmark import create_benchmark_app
+    from .shared.info import router as info_router
 
     app.include_router(auth_router)
     app.include_router(chat_router, dependencies=[Depends(require_user)])

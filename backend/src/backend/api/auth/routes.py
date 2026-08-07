@@ -10,10 +10,10 @@ from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from backend.domain import DEFAULT_TIME_ZONE, validate_time_zone
 
-from .auth_dependencies import require_browser_user, require_user
-from .auth_mail import MailDeliveryError
-from .auth_types import AuthError, RateLimitError, UserIdentity
-from .user_data import migrate_legacy_for_owner
+from ..user_data import migrate_legacy_for_owner
+from .dependencies import require_browser_user, require_user
+from .mail import MailDeliveryError
+from .types import AuthError, RateLimitError, UserIdentity
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 

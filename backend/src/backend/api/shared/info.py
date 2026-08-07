@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends, Request
 from backend.skills import SkillCatalog
 from backend.tools import build_tool_registry
 
-from .auth_dependencies import require_user
-from .auth_types import UserIdentity
-from .state import WebAppState
+from ..auth.dependencies import require_user
+from ..auth.types import UserIdentity
+from ..state import WebAppState
 
 router = APIRouter(prefix="/api")
 

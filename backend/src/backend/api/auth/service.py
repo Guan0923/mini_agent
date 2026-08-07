@@ -11,11 +11,11 @@ from fastapi import Request, Response
 
 from backend.configuration import load_config, section
 
-from .auth_mail import MailDeliveryError
-from .auth_types import AuthError, RateLimitError, UserIdentity
+from .mail import MailDeliveryError
+from .types import AuthError, RateLimitError, UserIdentity
 
 if TYPE_CHECKING:
-    from .state import WebAppState
+    from ..state import WebAppState
 
 
 COOKIE_NAME = "mini_agent_session"

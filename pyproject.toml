@@ -36,6 +36,7 @@ exclude_also = [
 [tool.ruff]
 target-version = "py311"
 line-length = 120
+extend-exclude = [".pip-tmp", ".pytest-tmp-*", ".pytest-local-*", "pytest-cache-files-*", "tmp*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]

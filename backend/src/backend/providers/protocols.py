@@ -90,15 +90,23 @@ class ResponsesAdapter:
                     items.append({"role": "assistant", "content": message.content})
                 for tool in message.tool_messages:
                     if tool.status == "pending":
-                        items.append({
-                            "type": "function_call", "id": tool.call_id, "call_id": tool.call_id,
-                            "name": tool.name,
-                            "arguments": json.dumps(tool.arguments, ensure_ascii=False, separators=(",", ":")),
-                        })
+                        items.append(
+                            {
+                                "type": "function_call",
+                                "id": tool.call_id,
+                                "call_id": tool.call_id,
+                                "name": tool.name,
+                                "arguments": json.dumps(tool.arguments, ensure_ascii=False, separators=(",", ":")),
+                            }
+                        )
                     elif tool.content is not None:
-                        items.append({
-                            "type": "function_call_output", "call_id": tool.call_id, "output": tool.content,
-                        })
+                        items.append(
+                            {
+                                "type": "function_call_output",
+                                "call_id": tool.call_id,
+                                "output": tool.content,
+                            }
+                        )
         payload: dict[str, Any] = {
             "model": runtime.state.model or self.config.model,
             "input": items,
@@ -147,15 +155,23 @@ class ResponsesAdapter:
                     parsed_arguments = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
                 except (TypeError, ValueError) as exc:
                     raise ModelRequestError("Responses function call arguments are invalid JSON.") from exc
-                tools.append(ToolMessage(
-                    name=str(item.get("name") or ""), call_id=str(item.get("call_id") or item.get("id") or ""),
-                    arguments=parsed_arguments, status="pending",
-                ))
+                tools.append(
+                    ToolMessage(
+                        name=str(item.get("name") or ""),
+                        call_id=str(item.get("call_id") or item.get("id") or ""),
+                        arguments=parsed_arguments,
+                        status="pending",
+                    )
+                )
         usage = data.get("usage")
         usage = dict(usage) if isinstance(usage, Mapping) else None
         return PreparedResponse(
-            AssistantMessage(content=content or None, reasoning=reasoning or None, tool_messages=tools,
-                             provider_options={"responses": {"response": copy.deepcopy(dict(data))}}),
+            AssistantMessage(
+                content=content or None,
+                reasoning=reasoning or None,
+                tool_messages=tools,
+                provider_options={"responses": {"response": copy.deepcopy(dict(data))}},
+            ),
             usage=usage,
             response_id=str(data.get("id")) if data.get("id") else None,
             model=str(data.get("model")) if data.get("model") else None,
@@ -188,7 +204,8 @@ class ResponsesAdapter:
                 if isinstance(item, Mapping) and item.get("type") == "function_call":
                     key = str(item.get("call_id") or item.get("id") or len(calls))
                     calls[key] = {
-                        "name": str(item.get("name") or ""), "call_id": key,
+                        "name": str(item.get("name") or ""),
+                        "call_id": key,
                         "arguments": str(item.get("arguments") or ""),
                     }
             elif kind == "response.function_call_arguments.delta":
@@ -216,7 +233,9 @@ class ResponsesAdapter:
                 arguments = json.loads(value["arguments"] or "{}")
             except ValueError as exc:
                 raise ModelRequestError("Responses streamed function arguments are invalid JSON.") from exc
-            tools.append(ToolMessage(name=value["name"], call_id=value["call_id"], arguments=arguments, status="pending"))
+            tools.append(
+                ToolMessage(name=value["name"], call_id=value["call_id"], arguments=arguments, status="pending")
+            )
         return PreparedResponse(
             AssistantMessage(content="".join(text) or None, reasoning="".join(reasoning) or None, tool_messages=tools),
             usage=usage,
@@ -274,12 +293,18 @@ class MessagesAdapter:
                     blocks.append({"type": "text", "text": message.content})
                 for tool in message.tool_messages:
                     if tool.status == "pending":
-                        blocks.append({"type": "tool_use", "id": tool.call_id, "name": tool.name, "input": tool.arguments})
+                        blocks.append(
+                            {"type": "tool_use", "id": tool.call_id, "name": tool.name, "input": tool.arguments}
+                        )
                     elif tool.content is not None:
-                        messages.append({
-                            "role": "user",
-                            "content": [{"type": "tool_result", "tool_use_id": tool.call_id, "content": tool.content}],
-                        })
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "tool_result", "tool_use_id": tool.call_id, "content": tool.content}
+                                ],
+                            }
+                        )
                 if blocks:
                     messages.append({"role": "assistant", "content": blocks})
         payload: dict[str, Any] = {
@@ -324,15 +349,23 @@ class MessagesAdapter:
             elif kind in {"thinking", "redacted_thinking"}:
                 reasoning.append(str(block.get("thinking") or block.get("text") or ""))
             elif kind == "tool_use":
-                tools.append(ToolMessage(
-                    name=str(block.get("name") or ""), call_id=str(block.get("id") or ""),
-                    arguments=dict(block.get("input") or {}), status="pending",
-                ))
+                tools.append(
+                    ToolMessage(
+                        name=str(block.get("name") or ""),
+                        call_id=str(block.get("id") or ""),
+                        arguments=dict(block.get("input") or {}),
+                        status="pending",
+                    )
+                )
         usage = data.get("usage")
         usage = dict(usage) if isinstance(usage, Mapping) else None
         return PreparedResponse(
-            AssistantMessage(content="".join(text) or None, reasoning="".join(reasoning) or None, tool_messages=tools,
-                             provider_options={"messages": {"response": copy.deepcopy(dict(data))}}),
+            AssistantMessage(
+                content="".join(text) or None,
+                reasoning="".join(reasoning) or None,
+                tool_messages=tools,
+                provider_options={"messages": {"response": copy.deepcopy(dict(data))}},
+            ),
             usage=usage,
             response_id=str(data.get("id")) if data.get("id") else None,
             model=str(data.get("model")) if data.get("model") else None,

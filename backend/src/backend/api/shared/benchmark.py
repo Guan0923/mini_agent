@@ -9,8 +9,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from .auth_dependencies import require_user
-from .state import WebAppState
+from ..auth.dependencies import require_user
+from ..state import WebAppState
 
 
 class RunRequest(BaseModel):

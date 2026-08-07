@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pytest
-
 from backend.domain import (
     AssistantMessage,
     StrategySelection,

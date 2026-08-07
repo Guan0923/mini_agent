@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import pytest
-
 from backend.tools import ToolError, WorkspaceFiles
 from backend.tools.filesystem import io as filesystem_io
 

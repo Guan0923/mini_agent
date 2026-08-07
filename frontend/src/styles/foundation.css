@@ -1,0 +1,48 @@
+:root {
+  --accent: #087f8d;
+  --accent-dark: #066874;
+  --bg: #f4f7f8;
+  --sidebar-bg: #ffffff;
+  --border: #e5e7eb;
+  --text: #1f2329;
+  --muted: #8a919f;
+  --user-bubble: #e6f7f5;
+  --radius: 12px;
+}
+* {
+  box-sizing: border-box;
+}
+
+:focus-visible {
+  outline: 2px solid #8af3ed;
+  outline-offset: 3px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  font-size: 15px;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---------- Main ---------- */
+.main {
+  flex: 1;
+  display: flex;
+  position: relative;
+  overflow: hidden;
+}

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadMathJax, mathJaxConfig, resetMathJaxLoaderForTests, TEX_EXTENSIONS } from "./mathjax";
+import { loadMathJax, mathJaxConfig, resetMathJaxLoaderForTests, TEX_EXTENSIONS } from "./math";
 
 afterEach(() => {
   resetMathJaxLoaderForTests();

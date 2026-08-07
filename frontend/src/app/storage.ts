@@ -1,0 +1,99 @@
+import type { SessionInfo, SessionMessage } from "../api";
+import type { ChatMessage, Conversation } from "../types";
+
+export const STORAGE_KEY = "mini-agent-conversations";
+export const ARCHIVE_READ_KEY = "mini-agent-archive-read";
+export type ArchiveReadState = Record<string, string>;
+
+export function loadConversations(key: string): Conversation[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((value): value is Conversation => {
+        if (!value || typeof value !== "object") return false;
+        const candidate = value as Partial<Conversation>;
+        return typeof candidate.id === "string" && Array.isArray(candidate.messages);
+      })
+      .map((conversation) => ({
+        ...conversation,
+        clientId: conversation.clientId ?? conversation.id,
+        messageCount: conversation.messageCount ?? conversation.messages.length,
+        messagesLoaded: conversation.messagesLoaded ?? conversation.messages.length > 0,
+        messages: conversation.messages.map((message) =>
+          message.running
+            ? { ...message, running: false, status: message.status ?? "上次运行已中断" }
+            : message,
+        ),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export function loadArchiveReadState(userId: string | undefined): ArchiveReadState {
+  if (!userId) return {};
+  try {
+    const raw = localStorage.getItem(`${ARCHIVE_READ_KEY}:${userId}`);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+  } catch {
+    return {};
+  }
+}
+
+export function markArchivedAsRead(state: ArchiveReadState, conversations: Conversation[]): ArchiveReadState {
+  let changed = false;
+  const next = { ...state };
+  for (const conversation of conversations) {
+    if (!conversation.archivedAt || next[conversation.id] === conversation.archivedAt) continue;
+    next[conversation.id] = conversation.archivedAt;
+    changed = true;
+  }
+  return changed ? next : state;
+}
+
+export function countUnreadArchived(conversations: Conversation[], state: ArchiveReadState): number {
+  return conversations.filter((conversation) => state[conversation.id] !== conversation.archivedAt).length;
+}
+
+export function summaryToConversation(summary: SessionInfo, existing?: Conversation): Conversation {
+  return {
+    id: existing?.id ?? summary.client_id ?? summary.session_id,
+    title: summary.title || existing?.title || "新对话",
+    messages: existing?.messages ?? [],
+    messageCount: summary.message_count ?? existing?.messageCount ?? existing?.messages.length ?? 0,
+    updatedAt: summary.updated_at ?? existing?.updatedAt,
+    sessionId: summary.session_id,
+    clientId: summary.client_id ?? existing?.clientId ?? existing?.id ?? summary.session_id,
+    archivedAt: summary.archived_at ?? undefined,
+    deletedAt: summary.deleted_at ?? undefined,
+    messagesLoaded: existing?.messagesLoaded ?? false,
+  };
+}
+
+export function transcriptToMessages(transcript: SessionMessage[]): ChatMessage[] {
+  return transcript.map((message, index) => ({
+    id: message.id ?? `transcript-${index}`,
+    role: message.role,
+    content: message.content,
+    events: message.events ?? [],
+    status: message.status,
+    metrics: message.metrics,
+    error: message.error,
+    running: message.running ? false : undefined,
+    runId: message.run_id ?? undefined,
+  }));
+}
+
+export function importableMessages(messages: ChatMessage[]): Array<Pick<ChatMessage, "role" | "content">> {
+  return messages
+    .filter((message) => message.content.trim() || message.role === "user")
+    .map(({ role, content }) => ({ role, content }));
+}

@@ -15,9 +15,7 @@ TASKS = (
             "organize them under Added and Fixed headings, and follow every instruction in the Skill."
         ),
         seed=Seed(
-            files=(
-                SeedFile("changes.md", "- Added offline benchmark reports\n- Fixed stale chat spinners\n"),
-            ),
+            files=(SeedFile("changes.md", "- Added offline benchmark reports\n- Fixed stale chat spinners\n"),),
             skills=(
                 SeedSkill(
                     name="release-notes",

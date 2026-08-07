@@ -5,10 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Literal
 
-from textual.widgets import Input, ListView
-
 from backend.runtime.conversation.user_input import OTHER_OPTION_LABEL
 from backend.runtime.core.contracts import UserQuestion
+from textual.widgets import Input, ListView
 
 from ..widgets import ChoiceItem, ChoiceRow, InlineChoiceList
 

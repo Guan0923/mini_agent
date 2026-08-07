@@ -111,6 +111,7 @@ def test_user_agent_preferences_are_appended_as_lower_priority_system_context() 
     assert content.index("# Agent Mode") < content.index("## User Agent Preferences")
     assert "system rules" in content
 
+
 def test_empty_user_agent_preferences_are_not_injected() -> None:
     client = RecordingClient()
     planner = LLMPlanner(client, [], [], user_preferences="  ")

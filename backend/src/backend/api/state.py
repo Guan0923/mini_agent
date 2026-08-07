@@ -10,7 +10,7 @@ from pathlib import Path
 
 from backend.configuration import ClientPaths, atomic_write_text
 
-from .auth_mail import NullMailer, SMTPMailer, SMTPSettings
+from .auth.mail import NullMailer, SMTPMailer, SMTPSettings
 from .auth_store import AuthStore
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -74,7 +74,7 @@ class WebAppState:
         database_url = os.environ.get("DATABASE_URL", "").strip()
         if database_url:
             try:
-                from .settings_store import PostgresSettingsRepository
+                from backend.storage.postgres.settings import PostgresSettingsRepository
 
                 self.settings = PostgresSettingsRepository(database_url)
             except Exception:
@@ -90,7 +90,7 @@ class WebAppState:
             except Exception:
                 mail_settings = None
             self.mailer = SMTPMailer(mail_settings) if mail_settings is not None else NullMailer()
-        from .auth_service import AuthService
+        from .auth.service import AuthService
 
         self.auth_service = AuthService(self)
 
