@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from backend.domain import DEFAULT_TIME_ZONE
+
 from ..conversation.ports import SessionStore, TaskPreprocessor
 from ..conversation.service import ConversationService
 from ..execution import RuntimeRunner
@@ -15,6 +17,7 @@ class AgentApplication:
     session_store: SessionStore
     task_preprocessor: TaskPreprocessor
     sync_coordinator: object | None = None
+    default_timezone: str = DEFAULT_TIME_ZONE
 
     def close(self) -> None:
         try:
@@ -27,4 +30,6 @@ class AgentApplication:
                 runner_close()
 
     def open_conversation(self, session_id: str | None = None) -> ConversationService:
-        return ConversationService(self.runner, self.session_store, self.task_preprocessor, session_id)
+        return ConversationService(
+            self.runner, self.session_store, self.task_preprocessor, session_id, self.default_timezone
+        )

@@ -161,3 +161,34 @@ def test_user_profile_rejects_oversized_fields_and_unauthenticated_access(tmp_pa
         ).status_code == 403
         assert client.put("/api/auth/profile", json={"display_name": "x" * 81}).status_code == 422
         assert client.put("/api/auth/profile", json={"agent_preferences": "x" * 4001}).status_code == 422
+
+
+def test_agent_config_preserves_new_fields_for_partial_legacy_updates(tmp_path: Path) -> None:
+    state, mailer = _state(tmp_path)
+    with TestClient(create_app(state)) as client:
+        _register(client, mailer, "agent-config@example.com", "c" * 12)
+        configured = client.put(
+            "/api/auth/agent-config",
+            json={
+                "tone": "direct",
+                "verbosity": "concise",
+                "initiative": "proactive",
+                "custom_instructions": "Use concise bullets",
+                "display_mode": "verbose",
+                "timezone": "UTC",
+                "location_enabled": True,
+            },
+        )
+        assert configured.status_code == 200, configured.text
+
+        legacy_update = client.put("/api/auth/agent-config", json={"tone": "balanced"})
+        assert legacy_update.status_code == 200, legacy_update.text
+        assert legacy_update.json() == {
+            "tone": "balanced",
+            "verbosity": "concise",
+            "initiative": "proactive",
+            "custom_instructions": "Use concise bullets",
+            "display_mode": "verbose",
+            "timezone": "UTC",
+            "location_enabled": True,
+        }

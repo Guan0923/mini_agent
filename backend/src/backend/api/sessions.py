@@ -49,6 +49,7 @@ def _store(state: WebAppState, user_id: str):
     paths = state.user_paths(user_id)
     return SQLiteSessionStore(paths, state.auth.device_id_for_user(user_id))
 
+
 def _summary_payload(summary) -> dict:
     return {
         "session_id": summary.session_id,
@@ -384,6 +385,7 @@ def set_timezone(
             paths=state.user_paths(identity.id),
             model_config=state.model_config_for_user(identity.id),
             config_override=state.runtime_config_for_user(identity.id),
+            default_timezone=str(state.agent_config_for_user(identity.id).get("timezone", DEFAULT_TIME_ZONE)),
         )
         conversation = application.open_conversation(session_id)
         selected = conversation.set_timezone(body.timezone)
@@ -415,6 +417,7 @@ def compact_session(
             paths=state.user_paths(identity.id),
             model_config=state.model_config_for_user(identity.id),
             config_override=state.runtime_config_for_user(identity.id),
+            default_timezone=str(state.agent_config_for_user(identity.id).get("timezone", DEFAULT_TIME_ZONE)),
         )
         conversation = application.open_conversation(session_id)
         result = conversation.compact_context()

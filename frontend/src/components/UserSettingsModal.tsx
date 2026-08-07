@@ -8,11 +8,13 @@ import {
   Select,
   Space,
   Spin,
+  Switch,
   Typography,
 } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import {
   getSettings,
+  setTimezone,
   updateAgentConfig,
   updateProfile,
   updateProviderConfig,
@@ -28,6 +30,8 @@ interface UserSettingsModalProps {
   open: boolean;
   user: AuthUser | null;
   onClose: () => void;
+  activeSessionId?: string;
+  onAgentConfigUpdate?: (config: AgentConfig) => void;
   onUserUpdate: (user: Partial<AuthUser>) => void;
 }
 
@@ -35,6 +39,9 @@ const defaultAgent: AgentConfig = {
   tone: "balanced",
   verbosity: "balanced",
   initiative: "balanced",
+  display_mode: "medium",
+  timezone: "Asia/Shanghai",
+  location_enabled: false,
   custom_instructions: "",
 };
 
@@ -53,7 +60,7 @@ function snapshot(settings: UserSettings | null): string {
   return JSON.stringify(settings ?? null);
 }
 
-export default function UserSettingsModal({ open, user, onClose, onUserUpdate }: UserSettingsModalProps) {
+export default function UserSettingsModal({ open, user, onClose, onUserUpdate, activeSessionId, onAgentConfigUpdate }: UserSettingsModalProps) {
   const { modal } = AntApp.useApp();
   const [section, setSection] = useState<SettingsSection>("profile");
   const [settings, setSettings] = useState<UserSettings | null>(null);
@@ -61,6 +68,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate }:
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [locationError, setLocationError] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -84,6 +92,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate }:
           agent_config: defaultAgent,
           provider_config: defaultProvider,
           capability_config: {},
+          timezone_options: [],
         });
         setSaved(null);
         setError(cause instanceof Error ? cause.message : "设置加载失败。");
@@ -115,6 +124,41 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate }:
   function updateSettings(patch: Partial<UserSettings>) {
     setSettings((current) => (current ? { ...current, ...patch } : current));
   }
+  async function toggleLocation(enabled: boolean): Promise<void> {
+    if (!settings) return;
+    setLocationError("");
+    if (!enabled) {
+      updateSettings({ agent_config: { ...settings.agent_config, location_enabled: false } });
+      return;
+    }
+    if (!navigator.geolocation) {
+      updateSettings({ agent_config: { ...settings.agent_config, location_enabled: false } });
+      setLocationError("当前浏览器不支持定位，请手动选择时区。");
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        () => {
+          const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+          const supported = (settings.timezone_options ?? []).some((option) => option.identifier === timezone);
+          if (!timezone || !supported) {
+            updateSettings({ agent_config: { ...settings.agent_config, location_enabled: false } });
+            setLocationError("浏览器时区暂不受支持，请手动选择时区。");
+          } else {
+            updateSettings({ agent_config: { ...settings.agent_config, timezone, location_enabled: true } });
+          }
+          resolve();
+        },
+        (cause) => {
+          updateSettings({ agent_config: { ...settings.agent_config, location_enabled: false } });
+          setLocationError(cause.code === 1 ? "定位权限被拒绝，请手动选择时区。" : "无法获取定位，请手动选择时区。");
+          resolve();
+        },
+        { maximumAge: 0, timeout: 10000 },
+      );
+    });
+  }
 
   async function saveCurrent() {
     if (!settings) return;
@@ -131,8 +175,12 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate }:
         onUserUpdate(profile);
       } else if (section === "agent") {
         const agent = await updateAgentConfig(settings.agent_config);
+        if (activeSessionId && saved?.agent_config.timezone !== settings.agent_config.timezone) {
+          await setTimezone(activeSessionId, settings.agent_config.timezone);
+        }
         updateSettings({ agent_config: agent });
         setSaved((current) => (current ? { ...current, agent_config: agent } : current));
+        onAgentConfigUpdate?.(agent);
       } else {
         const provider = await updateProviderConfig(settings.provider_config);
         updateSettings({ provider_config: provider });
@@ -208,7 +256,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate }:
                 onChange={(tone) => updateSettings({ agent_config: { ...settings.agent_config, tone } })}
               />
             </Form.Item>
-            <Form.Item label="详略">
+            <Form.Item label="回答风格">
               <Select
                 value={settings.agent_config.verbosity}
                 options={[
@@ -219,6 +267,42 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate }:
                 onChange={(verbosity) => updateSettings({ agent_config: { ...settings.agent_config, verbosity } })}
               />
             </Form.Item>
+            <Form.Item label="运行信息详略">
+              <Select
+                aria-label="运行信息详略"
+                value={settings.agent_config.display_mode}
+                options={[
+                  { value: "minimal", label: "最少" },
+                  { value: "medium", label: "标准" },
+                  { value: "verbose", label: "详细" },
+                ]}
+                onChange={(display_mode) => updateSettings({ agent_config: { ...settings.agent_config, display_mode } })}
+              />
+            </Form.Item>
+            <Form.Item label="时区">
+              <Select
+                aria-label="Agent 默认时区"
+                showSearch
+                optionFilterProp="label"
+                value={settings.agent_config.timezone}
+                options={(settings.timezone_options ?? []).map((option) => ({
+                  value: option.identifier,
+                  label: `${option.label} (${option.identifier})`,
+                }))}
+                onChange={(timezone) => {
+                  setLocationError("");
+                  updateSettings({ agent_config: { ...settings.agent_config, timezone, location_enabled: false } });
+                }}
+                notFoundContent="暂无可用时区"
+              />
+            </Form.Item>
+            <Form.Item label="允许获取定位以自动设置时区">
+              <Switch
+                checked={settings.agent_config.location_enabled}
+                onChange={(checked) => void toggleLocation(checked)}
+              />
+            </Form.Item>
+            {locationError ? <Typography.Text type="danger">{locationError}</Typography.Text> : null}
             <Form.Item label="主动性">
               <Select
                 value={settings.agent_config.initiative}

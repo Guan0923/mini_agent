@@ -8,6 +8,7 @@ import {
   createSession,
   deleteSession,
   forkSession,
+  getSettings,
   getSessionTranscript,
   listSessions,
   renameSession,
@@ -16,6 +17,7 @@ import {
   streamChat,
   streamResume,
   updateProfile,
+  type AgentConfig,
   type SessionInfo,
 } from "./api";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
@@ -39,6 +41,7 @@ import type {
   Conversation,
   Page,
   PermissionMode,
+  DisplayMode,
   ReasoningEffort,
   StreamMessage,
 } from "./types";
@@ -169,8 +172,25 @@ function AgentApp() {
   const [modeBySession, setModeBySession] = useState<Record<string, ChatMode>>(() => loadSessionModes(localStorage));
   const [draftMode, setDraftMode] = useState<ChatMode>("agent");
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("medium");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const activeRunsRef = useRef<Map<string, ActiveRun>>(new Map());
+
+  useEffect(() => {
+    if (!user?.id) {
+      setDisplayMode("medium");
+      return undefined;
+    }
+    let active = true;
+    void getSettings()
+      .then((settings) => {
+        if (active) setDisplayMode(settings.agent_config.display_mode);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [user?.id]);
 
   useEffect(() => {
     localStorage.setItem(storageKey, JSON.stringify(conversations));
@@ -774,6 +794,7 @@ function AgentApp() {
           <ChatPage
             conversation={current}
             mode={current ? modeBySession[current.sessionId ?? current.id] ?? "agent" : draftMode}
+            displayMode={displayMode}
             onModeChange={(mode) => setConversationMode(current, mode)}
             onUpdate={updateConversation}
             onNew={newConversationAndClose}
@@ -800,7 +821,10 @@ function AgentApp() {
         user={user}
         onClose={() => setSettingsOpen(false)}
         onUserUpdate={(patch) => setUser(user ? { ...user, ...patch } : user)}
-      />    </Layout>
+        activeSessionId={current?.sessionId}
+        onAgentConfigUpdate={(config: AgentConfig) => setDisplayMode(config.display_mode)}
+      />
+    </Layout>
   );
 }
 

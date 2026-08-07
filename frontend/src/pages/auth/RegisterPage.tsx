@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Form, Input } from "antd";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ApiError, register as registerRequest, requestRegisterCode } from "../../api";
 import { useAuth } from "../../auth/AuthProvider";
-import AuthLayout from "./AuthLayout";
+import AuthLayout, { AuthTransitionLink } from "./AuthLayout";
 
 interface RegisterValues {
   email: string;
@@ -149,7 +149,7 @@ export default function RegisterPage() {
           创建账号
         </Button>
       </Form>
-      <div className="form-links"><span>已有账号？ <Link to="/login">立即登录</Link></span></div>
+      <div className="form-links"><span>已有账号？ <AuthTransitionLink target="login">立即登录</AuthTransitionLink></span></div>
     </AuthLayout>
   );
 }

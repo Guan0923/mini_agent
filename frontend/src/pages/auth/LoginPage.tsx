@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { Alert, Button, Form, Input } from "antd";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ApiError } from "../../api";
 import { useAuth } from "../../auth/AuthProvider";
-import AuthLayout from "./AuthLayout";
+import AuthLayout, { AuthTransitionLink } from "./AuthLayout";
 
 function safeNext(value: string | null): string {
   if (!value || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return "/app";
@@ -67,7 +67,7 @@ export default function LoginPage() {
           登录
         </Button>
       </Form>
-      <div className="form-links"><Link to={`/forgot-password${email ? `?email=${encodeURIComponent(email)}` : ""}`}>忘记密码？</Link><span>还没有账号？ <Link to="/register">立即注册</Link></span></div>
+      <div className="form-links"><AuthTransitionLink target="forgot-password" search={email ? `email=${encodeURIComponent(email)}` : ""}>忘记密码？</AuthTransitionLink><span>还没有账号？ <AuthTransitionLink target="register">立即注册</AuthTransitionLink></span></div>
     </AuthLayout>
   );
 }

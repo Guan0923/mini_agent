@@ -87,6 +87,9 @@ export interface AgentConfig {
   verbosity: string;
   initiative: string;
   custom_instructions: string;
+  display_mode: "minimal" | "medium" | "verbose";
+  timezone: string;
+  location_enabled: boolean;
 }
 
 export interface ProviderConfig {
@@ -105,6 +108,7 @@ export interface UserSettings {
   agent_config: AgentConfig;
   provider_config: ProviderConfig;
   capability_config: Record<string, unknown>;
+  timezone_options: TimezoneOption[];
 }
 
 export async function getSettings(): Promise<UserSettings> {

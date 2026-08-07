@@ -1280,6 +1280,87 @@ body {
   box-shadow: 0 24px 90px rgba(3, 82, 101, 0.18), inset 0 1px rgba(255, 255, 255, 0.72);
   backdrop-filter: blur(22px);
 }
+@keyframes auth-card-emerge {
+  0% {
+    opacity: 0;
+    transform: perspective(1000px) translateY(145px) scale(0.84) rotateX(12deg);
+  }
+  42% {
+    opacity: 1;
+    transform: perspective(1000px) translateY(-18px) scale(1.025) rotateX(-1.5deg);
+  }
+  68% {
+    transform: perspective(1000px) translateY(7px) scale(0.992) rotateX(0.5deg);
+  }
+  100% {
+    opacity: 1;
+    transform: perspective(1000px) translateY(0) scale(1) rotateX(0deg);
+  }
+}
+
+@keyframes auth-card-switch-out {
+  from { opacity: 1; transform: perspective(900px) translateY(0) scale(1) rotateX(0deg); }
+  to { opacity: 0; transform: perspective(900px) translateY(105px) scale(0.9) rotateX(9deg); }
+}
+
+@keyframes auth-card-sink {
+  0% { opacity: 1; transform: perspective(1000px) translateY(0) scale(1) rotateX(0deg); }
+  28% { transform: perspective(1000px) translateY(-8px) scale(1.01) rotateX(-1deg); }
+  100% { opacity: 0; transform: perspective(1000px) translateY(175px) scale(0.78) rotateX(14deg); }
+}
+
+.auth-card--emerge {
+  animation: auth-card-emerge 1050ms cubic-bezier(0.16, 0.78, 0.2, 1) both;
+  transform-origin: 50% 100%;
+}
+
+.auth-card--switch-out {
+  animation: auth-card-switch-out 320ms cubic-bezier(0.55, 0.02, 0.82, 0.42) both;
+  transform-origin: 50% 100%;
+  pointer-events: none;
+}
+
+.auth-card--sink {
+  animation: auth-card-sink 900ms cubic-bezier(0.55, 0.02, 0.76, 0.26) both;
+  transform-origin: 50% 100%;
+  pointer-events: none;
+}
+
+.auth-exit-snapshot {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  pointer-events: none;
+}
+
+.auth-exit-snapshot .auth-card {
+  min-height: 168px;
+}
+
+.auth-effects-toggle {
+  position: fixed;
+  z-index: 8;
+  left: max(18px, env(safe-area-inset-left));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  border-radius: 8px;
+  color: rgba(5, 55, 72, 0.76);
+  background: rgba(235, 253, 248, 0.74);
+  box-shadow: 0 8px 28px rgba(3, 82, 101, 0.14);
+  backdrop-filter: blur(14px);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.auth-effects-toggle .ant-switch {
+  flex: 0 0 auto;
+}
+
 
 .auth-card h1 {
   margin: 0;
@@ -1549,6 +1630,14 @@ body {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .auth-card--emerge,
+  .auth-card--switch-out,
+  .auth-card--sink {
+    animation: none !important;
+    transform: none !important;
+    opacity: 1 !important;
   }
 }
 

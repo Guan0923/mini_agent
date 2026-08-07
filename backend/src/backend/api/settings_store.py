@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS, validate_time_zone
+
 from .auth_store import (
     DEFAULT_AGENT_CONFIG,
     DEFAULT_CAPABILITY_CONFIG,
@@ -42,7 +44,18 @@ class PostgresSettingsRepository:
                 """CREATE TABLE IF NOT EXISTS user_agent_settings (
                     user_id TEXT PRIMARY KEY, tone TEXT NOT NULL DEFAULT 'balanced',
                     verbosity TEXT NOT NULL DEFAULT 'balanced', initiative TEXT NOT NULL DEFAULT 'balanced',
-                    custom_instructions TEXT NOT NULL DEFAULT '', updated_at DOUBLE PRECISION NOT NULL)"""
+                    custom_instructions TEXT NOT NULL DEFAULT '', display_mode TEXT NOT NULL DEFAULT 'medium',
+                    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai', location_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    updated_at DOUBLE PRECISION NOT NULL)"""
+            )
+            connection.execute(
+                "ALTER TABLE user_agent_settings ADD COLUMN IF NOT EXISTS display_mode TEXT NOT NULL DEFAULT 'medium'"
+            )
+            connection.execute(
+                "ALTER TABLE user_agent_settings ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'"
+            )
+            connection.execute(
+                "ALTER TABLE user_agent_settings ADD COLUMN IF NOT EXISTS location_enabled BOOLEAN NOT NULL DEFAULT FALSE"
             )
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS user_provider_settings (
@@ -69,9 +82,11 @@ class PostgresSettingsRepository:
             row = connection.execute(
                 "SELECT display_name, agent_preferences FROM user_profiles WHERE user_id=%s", (user_id,)
             ).fetchone()
-        return dict(DEFAULT_PROFILE) if row is None else {
-            "display_name": str(row[0] or ""), "agent_preferences": str(row[1] or "")
-        }
+        return (
+            dict(DEFAULT_PROFILE)
+            if row is None
+            else {"display_name": str(row[0] or ""), "agent_preferences": str(row[1] or "")}
+        )
 
     def update_profile(self, user_id: str, *, display_name: str, agent_preferences: str) -> dict[str, str]:
         display_name = str(display_name or "").strip()
@@ -88,32 +103,74 @@ class PostgresSettingsRepository:
             )
         return {"display_name": display_name, "agent_preferences": agent_preferences}
 
-    def agent_config_for_user(self, user_id: str) -> dict[str, str]:
+    def agent_config_for_user(self, user_id: str) -> dict[str, object]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT tone,verbosity,initiative,custom_instructions FROM user_agent_settings WHERE user_id=%s",
+                "SELECT tone,verbosity,initiative,custom_instructions,display_mode,timezone,location_enabled "
+                "FROM user_agent_settings WHERE user_id=%s",
                 (user_id,),
             ).fetchone()
         if row is None:
             return dict(DEFAULT_AGENT_CONFIG)
-        return {"tone": str(row[0] or "balanced"), "verbosity": str(row[1] or "balanced"),
-                "initiative": str(row[2] or "balanced"), "custom_instructions": str(row[3] or "")}
+        display_mode = str(row[4] or "medium")
+        if display_mode not in {"minimal", "medium", "verbose"}:
+            display_mode = "medium"
+        timezone = str(row[5] or DEFAULT_TIME_ZONE)
+        try:
+            timezone = validate_time_zone(timezone)
+        except ValueError:
+            timezone = DEFAULT_TIME_ZONE
+        return {
+            "tone": str(row[0] or "balanced"),
+            "verbosity": str(row[1] or "balanced"),
+            "initiative": str(row[2] or "balanced"),
+            "custom_instructions": str(row[3] or ""),
+            "display_mode": display_mode,
+            "timezone": timezone,
+            "location_enabled": bool(row[6]),
+        }
 
-    def update_agent_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, str]:
+    def update_agent_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, object]:
+        current = self.agent_config_for_user(user_id)
         result = dict(DEFAULT_AGENT_CONFIG)
+        result.update(current)
         for key in result:
-            if key in values:
-                result[key] = str(values[key] or "").strip()
-                if len(result[key]) > (4000 if key == "custom_instructions" else 40):
-                    raise ValueError(f"{key} exceeds its length limit")
+            if key not in values:
+                continue
+            raw = values[key]
+            if key == "location_enabled":
+                if not isinstance(raw, bool):
+                    raise ValueError("location_enabled must be a boolean")
+                result[key] = raw
+                continue
+            value = str(raw or "").strip()
+            limit = 4000 if key == "custom_instructions" else 40
+            if len(value) > limit:
+                raise ValueError(f"{key} exceeds its length limit")
+            if key == "display_mode" and value not in {"minimal", "medium", "verbose"}:
+                raise ValueError("display_mode must be minimal, medium, or verbose")
+            if key == "timezone":
+                value = validate_time_zone(value)
+            result[key] = value
         with self._connect() as connection:
             connection.execute(
-                """INSERT INTO user_agent_settings(user_id,tone,verbosity,initiative,custom_instructions,updated_at)
-                   VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(user_id) DO UPDATE SET
+                """INSERT INTO user_agent_settings
+                   (user_id,tone,verbosity,initiative,custom_instructions,display_mode,timezone,location_enabled,updated_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(user_id) DO UPDATE SET
                    tone=EXCLUDED.tone,verbosity=EXCLUDED.verbosity,initiative=EXCLUDED.initiative,
-                   custom_instructions=EXCLUDED.custom_instructions,updated_at=EXCLUDED.updated_at""",
-                (user_id, result["tone"], result["verbosity"], result["initiative"],
-                 result["custom_instructions"], time.time()),
+                   custom_instructions=EXCLUDED.custom_instructions,display_mode=EXCLUDED.display_mode,
+                   timezone=EXCLUDED.timezone,location_enabled=EXCLUDED.location_enabled,updated_at=EXCLUDED.updated_at""",
+                (
+                    user_id,
+                    result["tone"],
+                    result["verbosity"],
+                    result["initiative"],
+                    result["custom_instructions"],
+                    result["display_mode"],
+                    result["timezone"],
+                    bool(result["location_enabled"]),
+                    time.time(),
+                ),
             )
         return result
 
@@ -126,10 +183,16 @@ class PostgresSettingsRepository:
             ).fetchone()
         if row is None:
             return dict(DEFAULT_PROVIDER_CONFIG)
-        return {"provider": str(row[0] or "deepseek"), "protocol": str(row[1] or "chat_completions"),
-                "base_url": str(row[2] or ""), "model": str(row[3] or ""), "max_tokens": int(row[4] or 8192),
-                "context_size": int(row[5] or 1024000), "tokenizer_model": str(row[6] or "deepseek-ai/DeepSeek-V3"),
-                "api_key_configured": bool(row[7])}
+        return {
+            "provider": str(row[0] or "deepseek"),
+            "protocol": str(row[1] or "chat_completions"),
+            "base_url": str(row[2] or ""),
+            "model": str(row[3] or ""),
+            "max_tokens": int(row[4] or 8192),
+            "context_size": int(row[5] or 1024000),
+            "tokenizer_model": str(row[6] or "deepseek-ai/DeepSeek-V3"),
+            "api_key_configured": bool(row[7]),
+        }
 
     def update_provider_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, Any]:
         current = self.provider_config_for_user(user_id)
@@ -145,7 +208,9 @@ class PostgresSettingsRepository:
         if not 1 <= max_tokens <= 384000 or context_size <= max_tokens:
             raise ValueError("invalid token limits")
         provider = str(values.get("provider", current.get("provider", "deepseek")) or "deepseek").strip().lower()
-        tokenizer = str(values.get("tokenizer_model", current.get("tokenizer_model", "deepseek-ai/DeepSeek-V3")) or "").strip()
+        tokenizer = str(
+            values.get("tokenizer_model", current.get("tokenizer_model", "deepseek-ai/DeepSeek-V3")) or ""
+        ).strip()
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT api_key_ciphertext FROM user_provider_settings WHERE user_id=%s", (user_id,)
@@ -160,11 +225,29 @@ class PostgresSettingsRepository:
                    base_url=EXCLUDED.base_url,model=EXCLUDED.model,max_tokens=EXCLUDED.max_tokens,
                    context_size=EXCLUDED.context_size,tokenizer_model=EXCLUDED.tokenizer_model,
                    api_key_ciphertext=EXCLUDED.api_key_ciphertext,updated_at=EXCLUDED.updated_at""",
-                (user_id, provider, protocol, base_url, model, max_tokens, context_size, tokenizer, ciphertext, time.time()),
+                (
+                    user_id,
+                    provider,
+                    protocol,
+                    base_url,
+                    model,
+                    max_tokens,
+                    context_size,
+                    tokenizer,
+                    ciphertext,
+                    time.time(),
+                ),
             )
-        return {"provider": provider, "protocol": protocol, "base_url": base_url, "model": model,
-                "max_tokens": max_tokens, "context_size": context_size, "tokenizer_model": tokenizer,
-                "api_key_configured": bool(ciphertext)}
+        return {
+            "provider": provider,
+            "protocol": protocol,
+            "base_url": base_url,
+            "model": model,
+            "max_tokens": max_tokens,
+            "context_size": context_size,
+            "tokenizer_model": tokenizer,
+            "api_key_configured": bool(ciphertext),
+        }
 
     def import_legacy_provider_config(self, user_id: str, config_path: Path) -> bool:
         """Import the legacy TOML model section once into PostgreSQL."""
@@ -183,21 +266,32 @@ class PostgresSettingsRepository:
             return False
         self.update_provider_config(user_id, values)
         return True
+
     def settings_for_user(self, user_id: str, *, email: str = "") -> dict[str, Any]:
-        return {"profile": {"email": email, **self.profile_for_user(user_id)},
-                "agent_config": self.agent_config_for_user(user_id),
-                "provider_config": self.provider_config_for_user(user_id),
-                "capability_config": dict(DEFAULT_CAPABILITY_CONFIG)}
+        return {
+            "profile": {"email": email, **self.profile_for_user(user_id)},
+            "agent_config": self.agent_config_for_user(user_id),
+            "provider_config": self.provider_config_for_user(user_id),
+            "capability_config": dict(DEFAULT_CAPABILITY_CONFIG),
+            "timezone_options": [
+                {"identifier": option.identifier, "label": option.label} for option in TIME_ZONE_OPTIONS
+            ],
+        }
 
     def agent_preferences_for_user(self, user_id: str) -> str:
         agent = self.agent_config_for_user(user_id)
         legacy = self.profile_for_user(user_id).get("agent_preferences", "")
-        return "\n".join(item for item in (
-            "" if agent["tone"] == "balanced" else f"Preferred tone: {agent['tone']}",
-            "" if agent["verbosity"] == "balanced" else f"Preferred verbosity: {agent['verbosity']}",
-            "" if agent["initiative"] == "balanced" else f"Preferred initiative: {agent['initiative']}",
-            agent["custom_instructions"], legacy,
-        ) if item).strip()
+        return "\n".join(
+            item
+            for item in (
+                "" if agent["tone"] == "balanced" else f"Preferred tone: {agent['tone']}",
+                "" if agent["verbosity"] == "balanced" else f"Preferred verbosity: {agent['verbosity']}",
+                "" if agent["initiative"] == "balanced" else f"Preferred initiative: {agent['initiative']}",
+                agent["custom_instructions"],
+                legacy,
+            )
+            if item
+        ).strip()
 
     def runtime_config_for_user(self, user_id: str) -> dict[str, object]:
         del user_id
@@ -205,6 +299,7 @@ class PostgresSettingsRepository:
 
     def model_config_for_user(self, user_id: str):
         from backend.providers import ModelConfig
+
         values = self.provider_config_for_user(user_id)
         with self._connect() as connection:
             row = connection.execute(
@@ -221,7 +316,9 @@ def _key() -> bytes:
 def _encrypt(value: str) -> str:
     raw = value.encode("utf-8")
     key = _key()
-    return base64.urlsafe_b64encode(secrets.token_bytes(16) + bytes(v ^ key[i % len(key)] for i, v in enumerate(raw))).decode("ascii")
+    return base64.urlsafe_b64encode(
+        secrets.token_bytes(16) + bytes(v ^ key[i % len(key)] for i, v in enumerate(raw))
+    ).decode("ascii")
 
 
 def _decrypt(value: str) -> str:

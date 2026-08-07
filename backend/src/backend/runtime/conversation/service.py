@@ -41,8 +41,9 @@ class ConversationService(ConversationSessionController):
         session_store: SessionStore | None = None,
         task_preprocessor: TaskPreprocessor | None = None,
         session_id: str | None = None,
+        default_timezone: str = "Asia/Shanghai",
     ) -> None:
-        super().__init__(runner, session_store, session_id)
+        super().__init__(runner, session_store, session_id, default_timezone=default_timezone)
         self._task_preprocessor = task_preprocessor
 
     def run_task(
@@ -110,6 +111,7 @@ class ConversationService(ConversationSessionController):
                 session_id=new_session_id(),
                 messages=[plan_message],
             )
+            self.runtime.state.timezone = self.default_timezone
             self.conversation = text_messages(self.runtime.state.messages)
             return
 
@@ -122,6 +124,7 @@ class ConversationService(ConversationSessionController):
             messages=[plan_message],
             runtime_store=self.session_store,
         )
+        isolated_runtime.state.timezone = self.default_timezone
         isolated_runtime.save()
 
         self.active_session = isolated_session
@@ -162,6 +165,7 @@ class ConversationService(ConversationSessionController):
         else:
             if self.runtime is None:
                 self.runtime = self.runner.empty_runtime(session_id=new_session_id())
+                self.runtime.state.timezone = self.default_timezone
             if self.runtime.state.status == "running":
                 raise RuntimeError("The active session already has a running turn; resume or terminate it first.")
             run_id = new_run_id()

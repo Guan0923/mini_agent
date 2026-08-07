@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Form, Input } from "antd";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ApiError, requestPasswordResetCode, resetPassword } from "../../api";
 import { useAuth } from "../../auth/AuthProvider";
-import AuthLayout from "./AuthLayout";
+import AuthLayout, { AuthTransitionLink } from "./AuthLayout";
 
 interface ResetValues {
   email: string;
@@ -149,7 +149,7 @@ export default function ResetPasswordPage() {
           保存新密码
         </Button>
       </Form>
-      <div className="form-links"><Link to="/login">返回登录</Link></div>
+      <div className="form-links"><AuthTransitionLink target="login">返回登录</AuthTransitionLink></div>
     </AuthLayout>
   );
 }

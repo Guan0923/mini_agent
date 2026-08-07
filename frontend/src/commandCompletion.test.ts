@@ -2,17 +2,18 @@ import { describe, expect, it } from "vitest";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "./commandCompletion";
 
 describe("slash command completion", () => {
-  it("matches prefixes without exposing compatibility aliases", () => {
-    expect(commandSuggestions("/per").map((command) => command.name)).toEqual(["/permission"]);
+  it("does not expose removed commands", () => {
+    expect(commandSuggestions("/per")).toEqual([]);
     expect(commandSuggestions("/ag")).toEqual([]);
     expect(commandSuggestions("/permission ")).toEqual([]);
+    expect(commandSuggestions("/display")).toEqual([]);
   });
 
-  it("cycles the highlighted command and preserves argument input", () => {
+  it("cycles retained commands and preserves argument input", () => {
     const matches = commandSuggestions("/h");
-    expect(matches.map((command) => command.name)).toEqual(["/history", "/help"]);
-    expect(nextCommandIndex(0, 1, matches.length)).toBe(1);
-    expect(nextCommandIndex(0, -1, matches.length)).toBe(1);
+    expect(matches.map((command) => command.name)).toEqual(["/help"]);
+    expect(nextCommandIndex(0, 1, matches.length)).toBe(0);
+    expect(nextCommandIndex(0, -1, matches.length)).toBe(0);
     expect(completionText(commandSuggestions("/new")[0])).toBe("/new ");
     expect(completionText(commandSuggestions("/help")[0])).toBe("/help");
   });

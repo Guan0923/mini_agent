@@ -28,20 +28,12 @@ import {
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
   compactSession,
-  forkRun,
-  getTimezone,
-  getTrace,
-  listForkableRuns,
-  listSessions,
   listSkills,
-  listTools,
-  setTimezone,
   streamChat,
   streamResume,
   submitDecision,
-  type ForkableRun,
 } from "../api";
-import { DISPLAY_LEVELS, HELP_TEXT, parseCommand } from "../commands";
+import { HELP_TEXT, parseCommand } from "../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../commandCompletion";
 import DecisionCard from "../components/DecisionCard";
 import IconAction from "../components/IconAction";
@@ -61,6 +53,7 @@ import type {
 
 interface Props {
   conversation: Conversation | null;
+  displayMode?: DisplayMode;
   mode?: ChatMode;
   onModeChange?: (mode: ChatMode) => void;
   onUpdate: (id: string, updater: (conversation: Conversation) => Conversation) => void;
@@ -117,7 +110,7 @@ async function copyText(value: string): Promise<void> {
   if (!copied) throw new Error("浏览器拒绝了复制操作");
 }
 
-type SettingsSelectKey = "mode" | "permission" | "display" | "reasoning";
+type SettingsSelectKey = "mode" | "permission" | "reasoning";
 
 function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
   const native = ref?.nativeElement;
@@ -219,10 +212,10 @@ function AssistantMessage({
         {msg.decision ? (
           <DecisionCard request={msg.decision} onSubmit={(choice, options) => onDecision(msg.decision!, choice, options)} />
         ) : null}
-        {msg.error ? <Alert className="error-text" type="error" showIcon title={`⚠️ ${msg.error}`} /> : msg.content ? <MarkdownContent text={msg.content} /> : msg.running && !msg.decision ? (
+        {msg.error ? <Alert className="error-text" type="error" showIcon title={`⚠️ ${msg.error}`} /> : msg.content ? <MarkdownContent text={msg.content} /> : msg.running && !msg.decision && display !== "minimal" ? (
           <div className="thinking" role="status" aria-label="思考中" data-state="thinking" aria-live="polite"><span className="dot" /><span className="dot" /><span className="dot" /></div>
         ) : null}
-        {msg.status || (msg.metrics && msg.metrics.duration_ms != null) ? (
+        {display !== "minimal" && (msg.status || (msg.metrics && msg.metrics.duration_ms != null)) ? (
           <div className="meta">
             {msg.status ?? ""}
             {msg.status && msg.metrics && msg.metrics.duration_ms != null ? " · " : ""}
@@ -237,6 +230,7 @@ function AssistantMessage({
 
 export default function ChatPage({
   conversation,
+  displayMode: configuredDisplayMode,
   mode: selectedMode,
   onModeChange = () => undefined,
   onUpdate,
@@ -259,16 +253,7 @@ export default function ChatPage({
   const [input, setInput] = useState("");
   const [localBusy, setLocalBusy] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("approval_for_me");
-  const [display, setDisplay] = useState<DisplayMode>("medium");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
-  const [timezoneOptions, setTimezoneOptions] = useState<Array<{ identifier: string; label: string }>>([]);
-  const [timezoneValue, setTimezoneValue] = useState<string>();
-  const [timezoneMenu, setTimezoneMenu] = useState(false);
-  const [timezoneLoading, setTimezoneLoading] = useState(false);
-  const [forkOptions, setForkOptions] = useState<ForkableRun[]>([]);
-  const [forkValue, setForkValue] = useState<string>();
-  const [forkMenu, setForkMenu] = useState(false);
-  const [forkLoading, setForkLoading] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [openSettingsSelect, setOpenSettingsSelect] = useState<SettingsSelectKey | null>(null);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
@@ -284,6 +269,7 @@ export default function ChatPage({
   const busy = runningProp ?? localBusy;
   const filteredCommands = commandSuggestions(input);
   const commandMenuVisible = !busy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
+  const display = configuredDisplayMode ?? "medium";
 
   useEffect(() => {
     if (busy) setOpenSettingsSelect(null);
@@ -450,120 +436,18 @@ export default function ChatPage({
     await dispatchRun(conversationId, sessionId, prompt);
   }
 
-  async function resumeSession(sessionId?: string) {
-    let targetSessionId = sessionId ?? conversation?.sessionId;
-    if (!targetSessionId) {
-      const sessions = await listSessions();
-      if (!sessions[0]) return insert("没有可恢复的服务端会话。");
-      return resumeSession(sessions[0].session_id);
-    }
-    let conversationId = conversation?.id;
-    if (!conversationId || conversation?.sessionId !== targetSessionId) {
-      conversationId = await onSelectSession(targetSessionId);
-    } else {
-      targetSessionId = await onEnsureSession(conversationId);
-    }
-    const assistant: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", events: [], running: true };
-    onUpdate(conversationId, (current) => ({ ...current, messages: [...current.messages, assistant] }));
-    await dispatchRun(conversationId, targetSessionId, null, true);
-  }
 
   async function executeCommand(name: string, argument: string) {
     setInput("");
     setCommandMenuDismissedFor(null);
     setActiveCommandIndex(0);
     setSettingsOpen(false);
-    setTimezoneMenu(false);
-    setForkMenu(false);
-    if (name === "/agent" || name === "/plan") {
-      onModeChange(name.slice(1) as ChatMode);
+    if (name === "/help") {
+      await insert(HELP_TEXT);
       return;
     }
-    if (name === "/help") return insert(HELP_TEXT);
-    if (name === "/benchmark") return onNavigate("benchmark");
-    if (name === "/new" || name === "/clear") return onNew(argument || undefined);
-    if (name === "/permission") {
-      setSettingsOpen(true);
-      return;
-    }
-    if (name === "/display") {
-      if (argument && DISPLAY_LEVELS.includes(argument as DisplayMode)) return setDisplay(argument as DisplayMode);
-      setSettingsOpen(true);
-      return;
-    }
-    if (name === "/time") {
-      const { sessionId } = await ensureSession();
-      if (argument) {
-        try {
-          await setTimezone(sessionId, argument);
-          await insert(`当前会话时区已设置为 **${argument}**。`);
-        } catch (error) {
-          await insert(`⚠️ 设置时区失败：${String((error as Error).message ?? error)}`);
-        }
-        return;
-      }
-      setOpenSettingsSelect(null);
-      setForkMenu(false);
-      setTimezoneMenu(true);
-      setTimezoneLoading(true);
-      try {
-        const info = await getTimezone(sessionId);
-        setTimezoneOptions(info.options);
-        setTimezoneValue(info.timezone);
-      } catch (error) {
-        await insert(`⚠️ 获取时区失败：${String((error as Error).message ?? error)}`);
-      } finally {
-        setTimezoneLoading(false);
-      }
-      return;
-    }
-    if (name === "/sessions") {
-      try {
-        const sessions = await listSessions();
-        const lines = sessions.map((session) => `- \`${session.session_id.slice(0, 20)}…\` — ${session.title || "（无标题）"} · ${session.message_count} 条消息 · ${session.last_run_status ?? "?"}`).join("\n");
-        await insert(`# 后端会话（${sessions.length} 个）\n\n${lines || "（暂无）"}`);
-      } catch (error) {
-        await insert(`⚠️ 获取会话列表失败：${String((error as Error).message ?? error)}`);
-      }
-      return;
-    }
-    if (name === "/history") {
-      if (conversation) await onReload(conversation.id);
-      return;
-    }
-    if (name === "/resume") return resumeSession(argument || undefined);
-    if (name === "/fork") {
-      if (argument) {
-        try {
-          const session = await forkRun(argument);
-          await onSelectSession(session.session_id);
-          await onRefresh();
-        } catch (error) {
-          await insert(`⚠️ 分叉失败：${String((error as Error).message ?? error)}`);
-        }
-      } else {
-        setOpenSettingsSelect(null);
-        setTimezoneMenu(false);
-        setForkMenu(true);
-        setForkLoading(true);
-        try {
-          setForkOptions(await listForkableRuns());
-          setForkValue(undefined);
-        } catch (error) {
-          await insert(`⚠️ 获取可分叉运行失败：${String((error as Error).message ?? error)}`);
-        } finally {
-          setForkLoading(false);
-        }
-      }
-      return;
-    }
-    if (name === "/tools") {
-      try {
-        const tools = await listTools();
-        await insert(`# 可用工具（${tools.length} 个）\n\n${tools.map((tool) => `- \`${tool.name}\` — ${tool.description}`).join("\n") || "（无）"}`);
-      } catch (error) {
-        await insert(`⚠️ 获取工具列表失败：${String((error as Error).message ?? error)}`);
-      }
+    if (name === "/new") {
+      await onNew(argument || undefined);
       return;
     }
     if (name === "/skills") {
@@ -571,7 +455,7 @@ export default function ChatPage({
         const skills = await listSkills();
         await insert(`# 已发现技能（${skills.length} 个）\n\n${skills.map((skill) => `- \`${skill.name}\` — ${skill.description}`).join("\n") || "（无）"}`);
       } catch (error) {
-        await insert(`⚠️ 获取技能列表失败：${String((error as Error).message ?? error)}`);
+        await insert(`⚠️ 获取技能失败：${String((error as Error).message ?? error)}`);
       }
       return;
     }
@@ -584,17 +468,6 @@ export default function ChatPage({
         await onReload(conversation.id);
       } catch (error) {
         await insert(`⚠️ 压缩失败：${String((error as Error).message ?? error)}`);
-      }
-      return;
-    }
-    if (name === "/trace") {
-      if (!conversation) return insert("还没有当前会话运行记录。");
-      try {
-        const { sessionId } = await ensureSession();
-        const trace = await getTrace(sessionId);
-        await insert(`\`\`\`json\n${JSON.stringify(trace, null, 2)}\n\`\`\``);
-      } catch (error) {
-        await insert(`⚠️ 获取追踪失败：${String((error as Error).message ?? error)}`);
       }
     }
   }
@@ -686,31 +559,6 @@ export default function ChatPage({
     void onFork(conversation.id, messageId);
   }
 
-  async function selectTimezone(value: string) {
-    setTimezoneLoading(true);
-    try {
-      const { sessionId } = await ensureSession();
-      await setTimezone(sessionId, value);
-      setTimezoneValue(value);
-      setTimezoneMenu(false);
-    } catch (error) {
-      await insert(`⚠️ 设置时区失败：${String((error as Error).message ?? error)}`);
-    } finally {
-      setTimezoneLoading(false);
-    }
-  }
-
-  async function selectFork(value: string) {
-    setForkValue(value);
-    setForkMenu(false);
-    try {
-      const session = await forkRun(value);
-      await onSelectSession(session.session_id);
-      await onRefresh();
-    } catch (error) {
-      await insert(`⚠️ 分叉失败：${String((error as Error).message ?? error)}`);
-    }
-  }
 
   const settingsControls = (
     <Space className="composer-settings-controls" size={[6, 6]} wrap>
@@ -732,8 +580,6 @@ export default function ChatPage({
         onOpenChange={(open) => {
           setOpenSettingsSelect(open ? "mode" : null);
           if (open) {
-            setTimezoneMenu(false);
-            setForkMenu(false);
           }
         }}
       />
@@ -755,8 +601,6 @@ export default function ChatPage({
         onOpenChange={(open) => {
           setOpenSettingsSelect(open ? "permission" : null);
           if (open) {
-            setTimezoneMenu(false);
-            setForkMenu(false);
           }
         }}
       />
@@ -778,8 +622,6 @@ export default function ChatPage({
         onOpenChange={(open) => {
           setOpenSettingsSelect(open ? "reasoning" : null);
           if (open) {
-            setTimezoneMenu(false);
-            setForkMenu(false);
           }
         }}
       />
@@ -866,50 +708,6 @@ export default function ChatPage({
               </button>
             ))}
           </div>
-        ) : null}
-        {timezoneMenu ? (
-          <Select
-            className="timezone-select"
-            placement="topLeft"
-            aria-label="会话时区"
-            open={timezoneMenu}
-            loading={timezoneLoading}
-            value={timezoneValue}
-            placeholder="会话时区"
-            showSearch
-            optionFilterProp="label"
-            options={timezoneOptions.map((option) => ({
-              value: option.identifier,
-              label: `${option.label} (${option.identifier})`,
-            }))}
-            onChange={(value: string) => void selectTimezone(value)}
-            onOpenChange={(open) => {
-              setTimezoneMenu(open);
-              if (open) setForkMenu(false);
-            }}
-            notFoundContent="暂无可用时区"
-          />
-        ) : null}
-        {forkMenu ? (
-          <Select
-            className="fork-select"
-            placement="topLeft"
-            aria-label="选择要分叉的运行"
-            open={forkMenu}
-            loading={forkLoading}
-            value={forkValue}
-            placeholder="选择要分叉的运行"
-            options={forkOptions.map((run) => ({
-              value: run.run_id,
-              label: `${run.run_id.slice(0, 18)}… — ${run.task} · ${run.status}`,
-            }))}
-            onChange={(value: string) => void selectFork(value)}
-             onOpenChange={(open) => {
-               setForkMenu(open);
-               if (open) setTimezoneMenu(false);
-             }}
-            notFoundContent="暂无可分叉运行"
-          />
         ) : null}
         <div className="composer-box">
           <Input.TextArea

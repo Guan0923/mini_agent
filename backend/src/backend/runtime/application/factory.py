@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from backend.configuration import ClientPaths, initialize_config, section
+from backend.domain import DEFAULT_TIME_ZONE
 from backend.mcp.client import ExternalMcpResources, start_external_tools
 from backend.mcp.config import McpSettings, McpTrustStore, prepare_mcp_plan
 from backend.planning import LLMPlanner, RuleBasedPlanner
@@ -48,6 +49,7 @@ def build_application(
     user_preferences: str = "",
     model_config: ModelConfig | None = None,
     config_override: dict[str, object] | None = None,
+    default_timezone: str = DEFAULT_TIME_ZONE,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     config = config_override if config_override is not None else initialize_config(resolved_paths, workspace)
@@ -76,7 +78,7 @@ def build_application(
     except Exception:
         runner.close()
         raise
-    return AgentApplication(runner, store, FileReferenceExpander(files), sync_coordinator)
+    return AgentApplication(runner, store, FileReferenceExpander(files), sync_coordinator, default_timezone)
 
 
 def build_runner(

@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS user_agent_settings (
     verbosity TEXT NOT NULL DEFAULT 'balanced',
     initiative TEXT NOT NULL DEFAULT 'balanced',
     custom_instructions TEXT NOT NULL DEFAULT '',
+    display_mode TEXT NOT NULL DEFAULT 'medium',
+    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+    location_enabled INTEGER NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL
 );
 

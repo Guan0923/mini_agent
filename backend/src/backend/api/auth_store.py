@@ -15,16 +15,23 @@ from uuid import uuid4
 
 from pwdlib import PasswordHash
 
+from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS, validate_time_zone
+
 from .auth_schema import SCHEMA
 from .auth_types import UserIdentity
 
 DEFAULT_PROFILE: dict[str, str] = {"display_name": "", "agent_preferences": ""}
-DEFAULT_AGENT_CONFIG: dict[str, str] = {
+DEFAULT_AGENT_CONFIG: dict[str, object] = {
     "tone": "balanced",
     "verbosity": "balanced",
     "initiative": "balanced",
     "custom_instructions": "",
+    "display_mode": "medium",
+    "timezone": DEFAULT_TIME_ZONE,
+    "location_enabled": False,
 }
+SUPPORTED_DISPLAY_MODES = frozenset({"minimal", "medium", "verbose"})
+
 DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
     "provider": "deepseek",
     "protocol": "chat_completions",
@@ -47,6 +54,22 @@ class AuthStore:
         self.passwords = PasswordHash.recommended()
         with self._connection() as connection:
             connection.executescript(SCHEMA)
+            self._migrate_schema(connection)
+
+    @staticmethod
+    def _migrate_schema(connection: sqlite3.Connection) -> None:
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(user_agent_settings)")}
+        migrations = (
+            ("display_mode", "ALTER TABLE user_agent_settings ADD COLUMN display_mode TEXT NOT NULL DEFAULT 'medium'"),
+            ("timezone", "ALTER TABLE user_agent_settings ADD COLUMN timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'"),
+            (
+                "location_enabled",
+                "ALTER TABLE user_agent_settings ADD COLUMN location_enabled INTEGER NOT NULL DEFAULT 0",
+            ),
+        )
+        for name, statement in migrations:
+            if name not in columns:
+                connection.execute(statement)
 
     @contextmanager
     def _connection(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
@@ -102,42 +125,76 @@ class AuthStore:
             "agent_preferences": str(row["agent_preferences"] or ""),
         }
 
-    def agent_config_for_user(self, user_id: str) -> dict[str, str]:
+    def agent_config_for_user(self, user_id: str) -> dict[str, object]:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT tone, verbosity, initiative, custom_instructions "
+                "SELECT tone, verbosity, initiative, custom_instructions, display_mode, timezone, location_enabled "
                 "FROM user_agent_settings WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
         if row is None:
             return dict(DEFAULT_AGENT_CONFIG)
+        display_mode = str(row["display_mode"] or DEFAULT_AGENT_CONFIG["display_mode"])
+        if display_mode not in SUPPORTED_DISPLAY_MODES:
+            display_mode = str(DEFAULT_AGENT_CONFIG["display_mode"])
+        timezone = str(row["timezone"] or DEFAULT_TIME_ZONE)
+        try:
+            timezone = validate_time_zone(timezone)
+        except ValueError:
+            timezone = DEFAULT_TIME_ZONE
         return {
             "tone": str(row["tone"] or "balanced"),
             "verbosity": str(row["verbosity"] or "balanced"),
             "initiative": str(row["initiative"] or "balanced"),
             "custom_instructions": str(row["custom_instructions"] or ""),
+            "display_mode": display_mode,
+            "timezone": timezone,
+            "location_enabled": bool(row["location_enabled"]),
         }
 
-    def update_agent_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, str]:
+    def update_agent_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, object]:
+        current = self.agent_config_for_user(user_id)
         result = dict(DEFAULT_AGENT_CONFIG)
+        result.update(current)
         for key in result:
-            if key in values:
-                value = str(values[key] or "").strip()
-                limit = 4000 if key == "custom_instructions" else 40
-                if len(value) > limit:
-                    raise ValueError(f"{key} exceeds {limit} characters")
-                result[key] = value
+            if key not in values:
+                continue
+            raw = values[key]
+            if key == "location_enabled":
+                if not isinstance(raw, bool):
+                    raise ValueError("location_enabled must be a boolean")
+                result[key] = raw
+                continue
+            value = str(raw or "").strip()
+            limit = 4000 if key == "custom_instructions" else 40
+            if len(value) > limit:
+                raise ValueError(f"{key} exceeds {limit} characters")
+            if key == "display_mode" and value not in SUPPORTED_DISPLAY_MODES:
+                raise ValueError("display_mode must be minimal, medium, or verbose")
+            if key == "timezone":
+                value = validate_time_zone(value)
+            result[key] = value
         with self._connection(immediate=True) as connection:
             connection.execute(
                 """INSERT INTO user_agent_settings
-                (user_id, tone, verbosity, initiative, custom_instructions, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (user_id, tone, verbosity, initiative, custom_instructions, display_mode, timezone, location_enabled, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET tone = excluded.tone,
                     verbosity = excluded.verbosity, initiative = excluded.initiative,
                     custom_instructions = excluded.custom_instructions,
-                    updated_at = excluded.updated_at""",
-                (user_id, result["tone"], result["verbosity"], result["initiative"],
-                 result["custom_instructions"], time.time()),
+                    display_mode = excluded.display_mode, timezone = excluded.timezone,
+                    location_enabled = excluded.location_enabled, updated_at = excluded.updated_at""",
+                (
+                    user_id,
+                    result["tone"],
+                    result["verbosity"],
+                    result["initiative"],
+                    result["custom_instructions"],
+                    result["display_mode"],
+                    result["timezone"],
+                    int(bool(result["location_enabled"])),
+                    time.time(),
+                ),
             )
         return result
 
@@ -171,8 +228,7 @@ class AuthStore:
         base_url = str(values.get("base_url", current.get("base_url", "")) or "").strip()
         model = str(values.get("model", current.get("model", "")) or "").strip()
         tokenizer_model = str(
-            values.get("tokenizer_model", current.get("tokenizer_model", "deepseek-ai/DeepSeek-V3"))
-            or ""
+            values.get("tokenizer_model", current.get("tokenizer_model", "deepseek-ai/DeepSeek-V3")) or ""
         ).strip()
         if len(base_url) > 2000 or len(model) > 300 or len(tokenizer_model) > 300:
             raise ValueError("provider fields exceed their length limits")
@@ -204,8 +260,18 @@ class AuthStore:
                     context_size = excluded.context_size, tokenizer_model = excluded.tokenizer_model,
                     api_key_ciphertext = excluded.api_key_ciphertext,
                     updated_at = excluded.updated_at""",
-                (user_id, provider, protocol, base_url, model, max_tokens, context_size,
-                 tokenizer_model, ciphertext, time.time()),
+                (
+                    user_id,
+                    provider,
+                    protocol,
+                    base_url,
+                    model,
+                    max_tokens,
+                    context_size,
+                    tokenizer_model,
+                    ciphertext,
+                    time.time(),
+                ),
             )
         return {
             "provider": provider,
@@ -238,6 +304,7 @@ class AuthStore:
             return True
         except (OSError, ValueError, KeyError):
             return False
+
     def model_config_for_user(self, user_id: str):
         from backend.providers import ModelConfig
 
@@ -248,12 +315,16 @@ class AuthStore:
             ).fetchone()
         api_key = _decrypt_secret(str(row["api_key_ciphertext"])) if row and row["api_key_ciphertext"] else ""
         return ModelConfig.from_mapping({**values, "api_key": api_key})
+
     def settings_for_user(self, user_id: str, *, email: str = "") -> dict[str, object]:
         return {
             "profile": {"email": email, **self.profile_for_user(user_id)},
             "agent_config": self.agent_config_for_user(user_id),
             "provider_config": self.provider_config_for_user(user_id),
             "capability_config": dict(DEFAULT_CAPABILITY_CONFIG),
+            "timezone_options": [
+                {"identifier": option.identifier, "label": option.label} for option in TIME_ZONE_OPTIONS
+            ],
         }
 
     def agent_preferences_for_user(self, user_id: str) -> str:
@@ -274,6 +345,7 @@ class AuthStore:
 
     def device_id_for_user(self, user_id: str) -> str:
         return f"web_{user_id}"
+
     def update_profile(self, user_id: str, *, display_name: str, agent_preferences: str) -> dict[str, str]:
         display_name = display_name.strip()
         agent_preferences = agent_preferences.strip()
@@ -603,6 +675,7 @@ class AuthStore:
                 "INSERT INTO app_metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+
 
 def _key_material() -> bytes:
     configured = os.environ.get("MINI_AGENT_SECRET_KEY", "")

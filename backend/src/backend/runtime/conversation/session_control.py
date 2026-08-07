@@ -29,9 +29,11 @@ class ConversationSessionController:
         runner: RuntimeRunner,
         session_store: SessionStore | None = None,
         session_id: str | None = None,
+        default_timezone: str = DEFAULT_TIME_ZONE,
     ) -> None:
         self.runner = runner
         self.session_store = session_store
+        self.default_timezone = default_timezone
         self._pending_session = False
         self._pending_title: str | None = None
         self.active_session: Session | None = None
@@ -76,7 +78,7 @@ class ConversationSessionController:
         """Return the selected zone, including the default before a session exists."""
 
         if self.runtime is None:
-            return DEFAULT_TIME_ZONE
+            return self.default_timezone
         return self.runtime.state.timezone
 
     def set_timezone(self, timezone: str) -> str:
@@ -155,6 +157,7 @@ class ConversationSessionController:
                 messages=legacy,
                 runtime_store=self.session_store,
             )
+            self.runtime.state.timezone = self.default_timezone
             self.runtime.save()
             return
         runtime = self.runner.empty_runtime(session_id=session_id, runtime_store=self.session_store)
@@ -166,6 +169,7 @@ class ConversationSessionController:
             raise RuntimeError("Session storage is not configured.")
         session = self.session_store.create_session(title)
         runtime = self.runner.empty_runtime(session_id=session.session_id, runtime_store=self.session_store)
+        runtime.state.timezone = self.default_timezone
         runtime.save()
         self.active_session = session
         self.runtime = runtime

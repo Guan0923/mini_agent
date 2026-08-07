@@ -117,6 +117,9 @@ class WebAppState:
     def model_config_for_user(self, user_id: str):
         return self.settings.model_config_for_user(user_id)
 
+    def agent_config_for_user(self, user_id: str) -> dict[str, object]:
+        return self.settings.agent_config_for_user(user_id)
+
     def agent_preferences_for_user(self, user_id: str) -> str:
         return self.settings.agent_preferences_for_user(user_id)
 

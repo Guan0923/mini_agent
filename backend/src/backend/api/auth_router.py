@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, field_validator
+
+from backend.domain import DEFAULT_TIME_ZONE, validate_time_zone
 
 from .auth_dependencies import require_browser_user, require_user
 from .auth_mail import MailDeliveryError
@@ -61,6 +63,14 @@ class AgentConfigPayload(BaseModel):
     verbosity: str = Field(default="balanced", max_length=40)
     initiative: str = Field(default="balanced", max_length=40)
     custom_instructions: str = Field(default="", max_length=4000)
+    display_mode: Literal["minimal", "medium", "verbose"] = "medium"
+    timezone: str = Field(default=DEFAULT_TIME_ZONE, max_length=80)
+    location_enabled: StrictBool = False
+
+    @field_validator("timezone")
+    @classmethod
+    def supported_timezone(cls, value: str) -> str:
+        return validate_time_zone(value)
 
 
 class ProviderConfigPayload(BaseModel):
@@ -72,6 +82,7 @@ class ProviderConfigPayload(BaseModel):
     context_size: int = Field(default=1024000, ge=1)
     tokenizer_model: str = Field(default="deepseek-ai/DeepSeek-V3", max_length=300)
     api_key: str | None = Field(default=None, max_length=4096)
+
 
 def _error(exc: Exception) -> HTTPException:
     if isinstance(exc, RateLimitError):
@@ -226,10 +237,10 @@ def update_agent_config(
     body: AgentConfigPayload,
     request: Request,
     identity: Annotated[UserIdentity, Depends(require_user)],
-) -> dict[str, str]:
+) -> dict[str, object]:
     _origin_guard(request)
     try:
-        return request.app.state.web.settings.update_agent_config(identity.id, body.model_dump())
+        return request.app.state.web.settings.update_agent_config(identity.id, body.model_dump(exclude_unset=True))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -245,6 +256,7 @@ def update_provider_config(
         return request.app.state.web.settings.update_provider_config(identity.id, body.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
 
 @router.post("/logout")
 def logout(

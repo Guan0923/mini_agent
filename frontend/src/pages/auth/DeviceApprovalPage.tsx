@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Descriptions, Result, Spin } from "antd";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ApiError, approveDevice, deviceInfo } from "../../api";
 import { useAuth } from "../../auth/AuthProvider";
-import AuthLayout from "./AuthLayout";
+import AuthLayout, { AuthTransitionLink } from "./AuthLayout";
 
 type DeviceStatus = "loading" | "ready" | "done" | "error";
 
@@ -59,7 +59,7 @@ export default function DeviceApprovalPage() {
       <AuthLayout title="授权你的终端" subtitle="请先登录，再批准这次设备访问。">
         <div className="device-message">
           <p>登录后即可返回此页确认授权。</p>
-          <Link className="primary-cta form-submit" to={`/login?next=${encodeURIComponent(next)}`}>前往登录</Link>
+          <AuthTransitionLink className="primary-cta form-submit" target="login" search={`next=${encodeURIComponent(next)}`}>前往登录</AuthTransitionLink>
         </div>
       </AuthLayout>
     );

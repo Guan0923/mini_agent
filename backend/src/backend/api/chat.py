@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from backend.domain import DEFAULT_TIME_ZONE
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime import RunnerSettings, build_application
 from backend.runtime.core.events import RuntimeEvent
@@ -94,6 +95,7 @@ def _model_config_snapshot(state: WebAppState, user_id: str) -> ModelConfig | No
     except Exception:
         return None
 
+
 def _stream(
     state: WebAppState,
     prompt: str,
@@ -105,6 +107,7 @@ def _stream(
     permission_mode: Literal["approval_for_me", "full_access"] | None = None,
     reasoning_effort: ReasoningEffort = "medium",
     user_preferences: str = "",
+    default_timezone: str = DEFAULT_TIME_ZONE,
     model_config: ModelConfig | None = None,
     runtime_config: dict[str, object] | None = None,
     operation: Callable[..., object] | None = None,
@@ -159,6 +162,7 @@ def _stream(
                 user_preferences=user_preferences,
                 model_config=model_config,
                 config_override=runtime_config,
+                default_timezone=default_timezone,
                 **path_options,
             )
             conversation = app.open_conversation(session_id) if session_id else app.open_conversation()
@@ -257,6 +261,7 @@ async def chat(
             permission_mode=body.permission_mode,
             reasoning_effort=body.reasoning_effort,
             user_preferences=state.agent_preferences_for_user(identity.id),
+            default_timezone=str(state.agent_config_for_user(identity.id).get("timezone", DEFAULT_TIME_ZONE)),
             model_config=_model_config_snapshot(state, identity.id),
             runtime_config=state.runtime_config_for_user(identity.id),
         ),
@@ -301,6 +306,7 @@ async def resume(
             user_preferences=state.agent_preferences_for_user(identity.id),
             model_config=_model_config_snapshot(state, identity.id),
             runtime_config=state.runtime_config_for_user(identity.id),
+            default_timezone=str(state.agent_config_for_user(identity.id).get("timezone", DEFAULT_TIME_ZONE)),
             operation=operation,
         ),
         media_type="text/event-stream",
