@@ -13,6 +13,7 @@ import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex 
 import MarkdownContent from "../../components/MarkdownContent";
 import { AssistantMessage, MessageActions } from "./messageParts";
 import Composer, { type SettingsSelectKey } from "./Composer";
+import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import type {
   ChatMessage,
   ChatMode,
@@ -99,6 +100,7 @@ export default function ChatPage({
   const abortRef = useRef<AbortController | null>(null);
   const taRef = useRef<TextAreaRef>(null);
   const editRef = useRef<TextAreaRef>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingCaretRef = useRef<number | null>(null);
 
   const messages = conversation?.messages ?? [];
@@ -406,68 +408,71 @@ export default function ChatPage({
 
   return (
     <div className="chat-page">
-      <div className="chat-scroll">
-        {messages.length === 0 ? (
-          <div className="welcome">
-            <div className="logo">Mini-Agent</div>
-            <p className="welcome-sub">向你的智能体提问，它会调用文件、Shell、Web 等工具完成任务</p>
-          </div>
-        ) : messages.map((message) => message.role === "user" ? (
-          <div className="message user" key={message.id}>
-            <div className="message-content">
-              {editingMessageId === message.id ? (
-                <div className="message-edit" aria-label="编辑用户消息">
-                  <Input.TextArea
-                    className="message-edit-input"
-                    ref={editRef}
-                    aria-label="编辑用户消息"
-                    value={editingDraft}
-                    onChange={(event) => setEditingDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") {
-                        event.preventDefault();
-                        cancelEdit();
-                      } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                        event.preventDefault();
-                        void saveEdit(message);
-                      }
-                    }}
-                    autoSize={{ minRows: 2, maxRows: 8 }}
-                  />
-                  <div className="message-edit-actions">
-                    <Button type="text" onClick={cancelEdit}>取消</Button>
-                    <Button type="primary" onClick={() => void saveEdit(message)} disabled={!editingDraft.trim()}>保存并重新生成</Button>
-                  </div>
-                </div>
-              ) : (
-                <div
-                  className="bubble user-bubble"
-                  onClick={(event) => handleUserBubbleClick(event, message)}
-                  title={onRewind && !busy ? "点击编辑此消息" : undefined}
-                >
-                  <MarkdownContent text={message.content} />
-                </div>
-              )}
-              {editingMessageId !== message.id ? (
-                <MessageActions
-                  msg={message}
-                  busy={busy}
-                  onRewind={onRewind ? () => void rewindMessage(message.id) : undefined}
-                  onEdit={onRewind ? () => beginEdit(message) : undefined}
-                />
-              ) : null}
+      <div className="chat-content">
+        <div className="chat-scroll" ref={chatScrollRef}>
+          {messages.length === 0 ? (
+            <div className="welcome">
+              <div className="logo">Mini-Agent</div>
+              <p className="welcome-sub">向你的智能体提问，它会调用文件、Shell、Web 等工具完成任务</p>
             </div>
-          </div>
-        ) : (
-          <AssistantMessage
-            key={message.id}
-            msg={message}
-            display={display}
-            onDecision={chooseDecision}
-            busy={busy}
-            onFork={onFork ? () => forkMessage(message.id) : undefined}
-          />
-        ))}
+          ) : messages.map((message) => message.role === "user" ? (
+            <div className="message user" id={conversationTurnId(message.id)} key={message.id}>
+              <div className="message-content">
+                {editingMessageId === message.id ? (
+                  <div className="message-edit" aria-label="编辑用户消息">
+                    <Input.TextArea
+                      className="message-edit-input"
+                      ref={editRef}
+                      aria-label="编辑用户消息"
+                      value={editingDraft}
+                      onChange={(event) => setEditingDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelEdit();
+                        } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                          event.preventDefault();
+                          void saveEdit(message);
+                        }
+                      }}
+                      autoSize={{ minRows: 2, maxRows: 8 }}
+                    />
+                    <div className="message-edit-actions">
+                      <Button type="text" onClick={cancelEdit}>取消</Button>
+                      <Button type="primary" onClick={() => void saveEdit(message)} disabled={!editingDraft.trim()}>保存并重新生成</Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    className="bubble user-bubble"
+                    onClick={(event) => handleUserBubbleClick(event, message)}
+                    title={onRewind && !busy ? "点击编辑此消息" : undefined}
+                  >
+                    <MarkdownContent text={message.content} />
+                  </div>
+                )}
+                {editingMessageId !== message.id ? (
+                  <MessageActions
+                    msg={message}
+                    busy={busy}
+                    onRewind={onRewind ? () => void rewindMessage(message.id) : undefined}
+                    onEdit={onRewind ? () => beginEdit(message) : undefined}
+                  />
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <AssistantMessage
+              key={message.id}
+              msg={message}
+              display={display}
+              onDecision={chooseDecision}
+              busy={busy}
+              onFork={onFork ? () => forkMessage(message.id) : undefined}
+            />
+          ))}
+        </div>
+        {!isMobile ? <ConversationTimeline messages={messages} scrollContainerRef={chatScrollRef} /> : null}
       </div>
       <Composer
         input={input}
