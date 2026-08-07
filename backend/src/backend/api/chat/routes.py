@@ -23,6 +23,7 @@ from backend.domain import DEFAULT_TIME_ZONE
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime import RunnerSettings, build_application
 from backend.runtime.core.events import RuntimeEvent
+from backend.runtime.node_bridge import RuntimeEventNodeBridge
 
 from ..auth.dependencies import require_user
 from ..auth.types import UserIdentity
@@ -45,11 +46,13 @@ class ChatRequest(BaseModel):
     mode: Literal["agent", "plan"] = "agent"
     permission_mode: Literal["approval_for_me", "full_access"] | None = None
     reasoning_effort: ReasoningEffort = "medium"
+    source_node_id: str | None = None
 
 
 class ResumeRequest(BaseModel):
     permission_mode: Literal["approval_for_me", "full_access"] = "approval_for_me"
     reasoning_effort: ReasoningEffort = "medium"
+    source_node_id: str | None = None
 
 
 def _reasoning_parameters(effort: ReasoningEffort) -> dict[str, object]:
@@ -97,6 +100,21 @@ def _model_config_snapshot(state: WebAppState, user_id: str) -> ModelConfig | No
         return None
 
 
+def _validate_source_node(store, session_id: str, source_node_id: str | None, *, resume: bool = False) -> None:
+    """Validate the optimistic-concurrency source before opening an SSE stream."""
+
+    if not source_node_id or not callable(getattr(store, "get_node", None)):
+        return
+    source = store.get_node(session_id, source_node_id)
+    if source is None:
+        raise HTTPException(status_code=400, detail="source_node_id 不属于当前会话")
+    children = getattr(store, "list_children", lambda *_: [])(source.session_id, source.id)
+    if children:
+        raise HTTPException(status_code=409, detail="source_node_id 必须是当前会话的叶子节点")
+    if resume and source.status not in {"failed", "abort"}:
+        raise HTTPException(status_code=409, detail="只能从 failed 或 abort 节点恢复")
+
+
 def _stream(
     state: WebAppState,
     prompt: str,
@@ -104,6 +122,7 @@ def _stream(
     *,
     identity: UserIdentity | None = None,
     session_id: str | None = None,
+    source_node_id: str | None = None,
     mode: Literal["agent", "plan"] = "agent",
     permission_mode: Literal["approval_for_me", "full_access"] | None = None,
     reasoning_effort: ReasoningEffort = "medium",
@@ -117,12 +136,22 @@ def _stream(
     done = threading.Event()
     cancel_requested = threading.Event()
     finished: dict = {}
+    bridge_ref: dict[str, RuntimeEventNodeBridge | None] = {"bridge": None}
 
     def sink(item) -> None:
         if cancel_requested.is_set():
             return
+        bridge = bridge_ref["bridge"]
         if isinstance(item, dict):
+            if bridge is not None:
+                bridge.handle_input(item)
+            # Decision requests remain an input-channel envelope: the node
+            # update carries the durable approval/question block, while this
+            # small request lets the client submit its response immediately.
             q.put(item)
+            return
+        if bridge is not None:
+            bridge.handle(item)
             return
         payload = _event_payload(item)
         if item.kind == "run_finished":
@@ -176,6 +205,28 @@ def _stream(
                     **path_options,
                 )
             conversation = app.open_conversation(session_id) if session_id else app.open_conversation()
+            # The node id is the optimistic-concurrency boundary for the new
+            # tree protocol.  Legacy conversations do not expose nodes yet,
+            # so validation is delegated to the node store when available.
+            node_store = getattr(app, "session_store", None) or getattr(app, "store", None)
+            if source_node_id and node_store is not None and session_id:
+                _validate_source_node(node_store, session_id, source_node_id)
+            if callable(getattr(node_store, "create_node", None)):
+                if getattr(conversation, "active_session", None) is None:
+                    conversation.ensure_session(prompt or None)
+                active_session = getattr(conversation, "active_session", None)
+                if active_session is not None:
+                    bridge_ref["bridge"] = RuntimeEventNodeBridge(
+                        node_store,
+                        session_id=active_session.session_id,
+                        prompt=prompt,
+                        source_node_id=source_node_id,
+                        provider=getattr(model_config, "provider", "unknown") if model_config else "unknown",
+                        model=getattr(model_config, "model", "unknown") if model_config else "unknown",
+                        cwd=str(workspace),
+                        emit=lambda frame: q.put(frame.to_dict()) if not cancel_requested.is_set() else None,
+                    )
+                    bridge_ref["bridge"].start()
             if operation is None:
                 run_state = conversation.run_task(
                     prompt,
@@ -196,28 +247,46 @@ def _stream(
             active_session = getattr(conversation, "active_session", None)
             runtime = getattr(conversation, "runtime", None)
             current_run = runtime.state.current_run if runtime is not None else None
-            enqueue_terminal(
-                {
-                    "type": "done",
-                    "status": run_state.status if run_state is not None else "idle",
-                    "final_answer": (run_state.final_answer if run_state is not None else "") or "",
-                    "session_id": active_session.session_id if active_session is not None else session_id,
-                    "run_id": run_state.run_id
-                    if run_state is not None
-                    else (current_run.run_id if current_run else None),
-                    "mode": getattr(run_state, "mode", None) or (current_run.mode if current_run is not None else mode),
-                    "metrics": {
-                        "duration_ms": finished.get("duration_ms"),
-                        "model_calls": finished.get("model_calls"),
-                        "tool_calls": finished.get("tool_calls"),
-                        "active_skills": finished.get("active_skills", []),
-                    },
-                }
-            )
+            bridge = bridge_ref["bridge"]
+            if bridge is not None:
+                old_status = str(run_state.status if run_state is not None else "failed")
+                stop_reason = str(getattr(run_state, "stop_reason", "") or "")
+                terminal_status = (
+                    "abort"
+                    if old_status == "cancelled" and stop_reason == "user_paused"
+                    else ("success" if old_status in {"completed", "success"} else "failed")
+                )
+                bridge.finish(terminal_status, (run_state.final_answer if run_state is not None else "") or "")
+            else:
+                enqueue_terminal(
+                    {
+                        "type": "done",
+                        "status": run_state.status if run_state is not None else "idle",
+                        "final_answer": (run_state.final_answer if run_state is not None else "") or "",
+                        "session_id": active_session.session_id if active_session is not None else session_id,
+                        "run_id": run_state.run_id
+                        if run_state is not None
+                        else (current_run.run_id if current_run else None),
+                        "mode": getattr(run_state, "mode", None)
+                        or (current_run.mode if current_run is not None else mode),
+                        "metrics": {
+                            "duration_ms": finished.get("duration_ms"),
+                            "model_calls": finished.get("model_calls"),
+                            "tool_calls": finished.get("tool_calls"),
+                            "active_skills": finished.get("active_skills", []),
+                        },
+                    }
+                )
         except ModelConfigurationError as exc:
-            enqueue_terminal({"type": "error", "message": f"模型未配置：{exc}"})
+            if bridge_ref["bridge"] is not None:
+                bridge_ref["bridge"].finish("failed", f"模型未配置：{exc}")
+            else:
+                enqueue_terminal({"type": "error", "message": f"模型未配置：{exc}"})
         except Exception as exc:
-            enqueue_terminal({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+            if bridge_ref["bridge"] is not None:
+                bridge_ref["bridge"].finish("failed", f"{type(exc).__name__}: {exc}")
+            else:
+                enqueue_terminal({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         finally:
             if app is not None:
                 try:
@@ -257,15 +326,21 @@ async def chat(
     if not body.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt 不能为空")
     if body.session_id:
-        summary = _require_active(_store(state, identity.id), body.session_id)
+        store = _store(state, identity.id)
+        summary = _require_active(store, body.session_id)
         if summary.last_run_status == "running":
             raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
+        nodes = getattr(store, "load_nodes", lambda _session_id: [])(body.session_id)
+        if nodes and not body.source_node_id:
+            raise HTTPException(status_code=409, detail="续聊请求必须提交当前最后节点 ID。")
+        _validate_source_node(store, body.session_id, body.source_node_id)
     return StreamingResponse(
         _stream(
             state,
             body.prompt.strip(),
             identity=identity,
             session_id=body.session_id,
+            source_node_id=body.source_node_id,
             mode=body.mode,
             interactive=body.interactive,
             permission_mode=body.permission_mode,
@@ -290,9 +365,14 @@ async def resume(
 
     state: WebAppState = request.app.state.web
 
-    summary = _require_active(_store(state, identity.id), session_id)
+    store = _store(state, identity.id)
+    summary = _require_active(store, session_id)
     if summary.last_run_status == "running":
         raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
+    nodes = getattr(store, "load_nodes", lambda _session_id: [])(session_id)
+    if nodes and not body.source_node_id:
+        raise HTTPException(status_code=409, detail="恢复请求必须提交当前节点 ID。")
+    _validate_source_node(store, session_id, body.source_node_id, resume=True)
 
     def operation(conversation, interrupt, sink, cancel_requested, request_parameters):
         return conversation.resume_session(
@@ -309,6 +389,7 @@ async def resume(
             "",
             identity=identity,
             session_id=session_id,
+            source_node_id=body.source_node_id,
             mode="agent",
             interactive=True,
             permission_mode=body.permission_mode,

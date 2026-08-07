@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS
+from backend.domain.runtime_state import NodeWriter
 from backend.runtime import build_application as _default_build_application
 
 from ..auth.dependencies import require_user
@@ -49,6 +50,7 @@ class BranchRequest(BaseModel):
     title: str | None = Field(default=None, max_length=120)
     client_id: str | None = Field(default=None, max_length=200)
     fallback_messages: list[SessionMessageInput] = Field(default_factory=list, max_length=500)
+    source_node_id: str | None = Field(default=None, max_length=200)
 
 
 class TimezoneBody(BaseModel):
@@ -69,12 +71,17 @@ def _summary_payload(summary) -> dict:
         "created_at": summary.created_at,
         "updated_at": summary.updated_at,
         "message_count": summary.message_count,
+        "last_node_id": summary.last_node_id,
         "last_run_id": summary.last_run_id,
         "last_run_status": summary.last_run_status,
         "client_id": summary.client_id,
         "archived_at": summary.archived_at,
         "deleted_at": summary.deleted_at,
     }
+
+
+def _node_payload(node) -> dict:
+    return node.to_dict() if hasattr(node, "to_dict") else dict(node)
 
 
 def _require_summary(store, session_id: str):
@@ -245,6 +252,38 @@ def get_session_messages(
     return store.load_conversation(session_id)
 
 
+@router.get("/sessions/{session_id}/nodes")
+def get_session_nodes(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> list[dict]:
+    """Return canonical static nodes; dynamic update frames are stream-only."""
+
+    state: WebAppState = request.app.state.web
+    store = _store(state, identity.id)
+    _require_summary(store, session_id)
+    return [_node_payload(node) for node in store.load_nodes(session_id)]
+
+
+@router.get("/sessions/{session_id}/leaves")
+def get_session_leaves(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> list[dict]:
+    state: WebAppState = request.app.state.web
+    store = _store(state, identity.id)
+    _require_summary(store, session_id)
+    nodes = store.load_nodes(session_id)
+    parent_keys = {(node.parent_session_id, node.parent_id) for node in nodes if node.parent_id}
+    return [
+        _node_payload(node)
+        for node in nodes
+        if node.session_id == session_id and (node.session_id, node.id) not in parent_keys
+    ]
+
+
 @router.get("/sessions/{session_id}/transcript")
 def get_session_transcript(
     session_id: str,
@@ -299,7 +338,25 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
     client_id = body.client_id
     target = None
     try:
-        if body.run_id:
+        if body.source_node_id:
+            source_node = store.get_node(source.session_id, body.source_node_id)
+            if source_node is None:
+                raise ValueError("指定的 source_node_id 不属于当前会话。")
+            if store.list_children(source_node.session_id, source_node.id):
+                raise ValueError("fork 的 source_node_id 必须是叶子节点。")
+            target = store.create_session(title, client_id=client_id)
+            writer = NodeWriter(store)
+            root = writer.create(
+                session_id=target.session_id,
+                parent=(source_node.session_id, source_node.id),
+                provider=source_node.provider,
+                user=source_node.user,
+                cwd=source_node.cwd,
+                first_kept_entry_id=source_node.firstKeptEntryId,
+                compaction_idx=source_node.compactionIdx,
+            )
+            writer.delete(root.session_id, root.id)
+        elif body.run_id:
             records = store.load_conversation_records(source.session_id)
             if not any(str(record["run_id"]) == body.run_id for record in records):
                 raise ValueError("指定的 run 不属于当前会话。")

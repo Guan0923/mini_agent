@@ -17,6 +17,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import keyring
 
+from .runtime_nodes import RuntimeNodeReducer
+
 EventSink = Callable[[dict], None]
 DecisionResponder = Callable[[dict], dict]
 
@@ -59,6 +61,7 @@ class MiniAgentClient:
         self.base_url = _normalize_server_url(base_url)
         self.timeout = timeout
         self._token = token
+        self.runtime_nodes = RuntimeNodeReducer()
 
     @property
     def _keyring_key(self) -> str:
@@ -200,15 +203,26 @@ class MiniAgentClient:
         on_event: EventSink,
         on_decision_requested: DecisionResponder | None = None,
         interactive: bool = False,
+        session_id: str | None = None,
+        source_node_id: str | None = None,
         timeout: float = 600.0,
     ) -> dict:
-        """Stream one agent run over SSE and return the final ``done`` payload.
+        """Stream one agent run over node lifecycle SSE frames.
 
         ``on_decision_requested`` (if interactive) returns the decision dict to
-        post back, e.g. ``{"choice": "continue"}``.
+        post back, e.g. ``{"choice": "continue"}``.  The returned object is
+        the final ``node.delete`` frame for compatibility with callers that
+        need the terminal node.
         """
         self.ensure_authenticated()
-        body = json.dumps({"prompt": prompt, "interactive": interactive}).encode()
+        body = json.dumps(
+            {
+                "prompt": prompt,
+                "interactive": interactive,
+                "session_id": session_id,
+                "source_node_id": source_node_id,
+            }
+        ).encode()
         headers = {"Content-Type": "application/json"}
         token = self._load_token()
         if token:
@@ -243,7 +257,15 @@ class MiniAgentClient:
                         except ValueError:
                             continue
                         kind = message.get("type")
-                        if kind == "event":
+                        if kind in {"node.create", "node.update", "node.delete"}:
+                            # A node frame is already presentation-neutral;
+                            # hand the complete replacement to the reducer.
+                            self.runtime_nodes.apply(message)
+                            on_event(message)
+                            if kind == "node.delete":
+                                node = message.get("node")
+                                done = self._completion_from_node(node)
+                        elif kind == "event":
                             if message.get("kind") == "decision_requested" and on_decision_requested is not None:
                                 decision = on_decision_requested(message.get("data", {}))
                                 if decision:
@@ -258,3 +280,34 @@ class MiniAgentClient:
             if callable(close):
                 close()
         return done
+
+    @staticmethod
+    def _completion_from_node(node: Any) -> dict:
+        """Project the terminal node into the small CLI result shape.
+
+        The node lifecycle stream intentionally has no SSE-level ``done``
+        frame.  Keep the network client's historical return value useful for
+        callers such as ``mini-agent-net`` by deriving status and final text
+        from the last deleted assistant node.
+        """
+
+        if not isinstance(node, dict):
+            return {"type": "node.delete", "node": node}
+        data = node.get("data")
+        final_answer = ""
+        if isinstance(data, dict) and data.get("type") == "message":
+            message = data.get("message")
+            blocks = message.get("content", []) if isinstance(message, dict) else []
+            if isinstance(blocks, list):
+                final_answer = "".join(
+                    str(block.get("text") or "")
+                    for block in blocks
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+        return {
+            "type": "node.delete",
+            "node": node,
+            "status": node.get("status", "failed"),
+            "final_answer": final_answer,
+            "session_id": node.get("session_id"),
+        }

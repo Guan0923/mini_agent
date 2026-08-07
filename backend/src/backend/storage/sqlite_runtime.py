@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from backend.domain import DEFAULT_SESSION_TITLE, RunProvenance, RunStatus, RuntimeMessage, Session
+from backend.domain.runtime_state import RuntimeState as TreeRuntimeState
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState
 
@@ -19,6 +21,198 @@ from .codec import (
 
 
 class SQLiteRuntimeMixin:
+    """Legacy turn persistence plus the canonical ``runtime_nodes`` store."""
+
+    def create_node(self, node: TreeRuntimeState) -> None:
+        """Insert a failed placeholder node.
+
+        Dynamic updates are intentionally not represented here; callers use
+        :class:`backend.domain.runtime_state.NodeWriter` and invoke
+        :meth:`finalize_node` only for the terminal delete frame.
+        """
+
+        if node.status != "failed":
+            raise ValueError("A runtime node must be created with status='failed'.")
+        if node.parent_id and self.get_node(node.parent_session_id, node.parent_id) is None:
+            raise ValueError("A runtime node parent must be present in the store.")
+        with self._connection(node.session_id) as connection:
+            self._assert_writable(connection)
+            if connection.execute("SELECT 1 FROM session_meta").fetchone() is None:
+                raise ValueError(f"Unknown session: {node.session_id}")
+            connection.execute(
+                """INSERT INTO runtime_nodes (
+                    session_id, parent_session_id, id, parent_id, version,
+                    first_kept_entry_id, compaction_idx, user, provider, cwd,
+                    timestamp, status, data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                self._node_values(node),
+            )
+            connection.execute("UPDATE session_meta SET updated_at=?", (node.timestamp,))
+            self._queue(connection, node.session_id)
+
+    def get_node(self, session_id: str, node_id: str) -> TreeRuntimeState | None:
+        with self._connection(session_id) as connection:
+            row = connection.execute(
+                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider,cwd,timestamp,status,data_json "
+                "FROM runtime_nodes WHERE session_id=? AND id=?",
+                (session_id, node_id),
+            ).fetchone()
+        return self._node_from_row(row) if row is not None else None
+
+    def list_children(self, parent_session_id: str, parent_id: str) -> list[TreeRuntimeState]:
+        """Query children using the cross-session parent reference."""
+
+        path = self.paths.session_db(parent_session_id)
+        if not path.exists():
+            return []
+        with self._connection(parent_session_id) as connection:
+            rows = connection.execute(
+                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider,cwd,timestamp,status,data_json "
+                "FROM runtime_nodes WHERE parent_session_id=? AND parent_id=? ORDER BY timestamp,id",
+                (parent_session_id, parent_id),
+            ).fetchall()
+        # The query above finds same-session children.  Fork roots live in a
+        # different database, so scan the local session directories as well;
+        # this remains bounded by the user's local session set.
+        result = [self._node_from_row(row) for row in rows]
+        for directory in self.paths.root.iterdir():
+            if (
+                not directory.is_dir()
+                or not directory.name.startswith("session_")
+                or directory.name == parent_session_id
+            ):
+                continue
+            if not (directory / "state.db").exists():
+                continue
+            with self._connection(directory.name) as connection:
+                rows = connection.execute(
+                    "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider,cwd,timestamp,status,data_json "
+                    "FROM runtime_nodes WHERE parent_session_id=? AND parent_id=? ORDER BY timestamp,id",
+                    (parent_session_id, parent_id),
+                ).fetchall()
+            result.extend(self._node_from_row(row) for row in rows)
+        return result
+
+    def load_nodes(self, session_id: str) -> list[TreeRuntimeState]:
+        with self._connection(session_id) as connection:
+            rows = connection.execute(
+                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider,cwd,timestamp,status,data_json "
+                "FROM runtime_nodes ORDER BY timestamp,id"
+            ).fetchall()
+        result = {node.key: node for node in (self._node_from_row(row) for row in rows)}
+        pending = list(result.values())
+        while pending:
+            node = pending.pop()
+            if not node.parent_id:
+                continue
+            key = (node.parent_session_id, node.parent_id)
+            if key in result:
+                continue
+            parent = self.get_node(*key)
+            if parent is not None:
+                result[key] = parent
+                pending.append(parent)
+        return sorted(result.values(), key=lambda item: (item.timestamp, item.id))
+
+    def finalize_node(self, node: TreeRuntimeState) -> None:
+        """Atomically replace a failed leaf with its final node."""
+
+        if self.list_children(node.session_id, node.id):
+            raise ValueError("Only a leaf runtime node can be finalized.")
+        with self._connection(node.session_id) as connection:
+            self._assert_writable(connection)
+            existing = connection.execute(
+                "SELECT status FROM runtime_nodes WHERE session_id=? AND id=?", (node.session_id, node.id)
+            ).fetchone()
+            if existing is None:
+                raise ValueError(f"Unknown runtime node: {node.session_id}/{node.id}")
+            if str(existing[0]) != "failed":
+                raise ValueError("Sealed runtime nodes are read-only.")
+            child = connection.execute(
+                "SELECT 1 FROM runtime_nodes WHERE parent_session_id=? AND parent_id=? LIMIT 1",
+                (node.session_id, node.id),
+            ).fetchone()
+            if child is not None:
+                raise ValueError("Only a leaf runtime node can be finalized.")
+            connection.execute(
+                """UPDATE runtime_nodes SET parent_session_id=?, parent_id=?, version=?,
+                    first_kept_entry_id=?, compaction_idx=?, user=?, provider=?, cwd=?,
+                    timestamp=?, status=?, data_json=? WHERE session_id=? AND id=?""",
+                (
+                    node.parent_session_id,
+                    node.parent_id,
+                    node.version,
+                    node.firstKeptEntryId,
+                    node.compactionIdx,
+                    node.user,
+                    node.provider,
+                    node.cwd,
+                    node.timestamp,
+                    node.status,
+                    json.dumps(node.data, ensure_ascii=False, separators=(",", ":")),
+                    node.session_id,
+                    node.id,
+                ),
+            )
+            connection.execute("UPDATE session_meta SET updated_at=?", (node.timestamp,))
+            self._queue(connection, node.session_id)
+
+    def runtime_node_snapshot(self, session_id: str) -> dict[str, object]:
+        """Return the new sync shape; no legacy runtime tables are included."""
+
+        session = self.get_session(session_id)
+        if session is None:
+            raise ValueError(f"Unknown session: {session_id}")
+        return {
+            "schema_version": 3,
+            "session": {
+                "session_id": session.session_id,
+                "title": session.title,
+                "created_at": session.created_at,
+                "updated_at": session.updated_at,
+                "client_id": session.client_id,
+            },
+            "nodes": [node.to_dict() for node in self.load_nodes(session_id) if node.session_id == session_id],
+        }
+
+    @staticmethod
+    def _node_values(node: TreeRuntimeState) -> tuple[object, ...]:
+        return (
+            node.session_id,
+            node.parent_session_id,
+            node.id,
+            node.parent_id,
+            node.version,
+            node.firstKeptEntryId,
+            node.compactionIdx,
+            node.user,
+            node.provider,
+            node.cwd,
+            node.timestamp,
+            node.status,
+            json.dumps(node.data, ensure_ascii=False, separators=(",", ":")),
+        )
+
+    @staticmethod
+    def _node_from_row(row: sqlite3.Row | tuple[object, ...]) -> TreeRuntimeState:
+        return TreeRuntimeState.from_dict(
+            {
+                "session_id": row[0],
+                "parent_session_id": row[1],
+                "id": row[2],
+                "parent_id": row[3],
+                "version": row[4],
+                "firstKeptEntryId": row[5],
+                "compactionIdx": row[6],
+                "user": row[7],
+                "provider": row[8],
+                "cwd": row[9],
+                "timestamp": row[10],
+                "status": row[11],
+                "data": json.loads(str(row[12])),
+            }
+        )
+
     def start_turn(
         self,
         session_id: str,

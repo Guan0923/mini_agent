@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from backend.domain.runtime_state import NodeFrame
 from backend.domain.state import utc_now
 
 RuntimeEventKind = Literal[
@@ -115,3 +116,7 @@ class RuntimeEvent:
     message: str = ""
     data: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=utc_now, compare=False)
+
+
+# Compatibility import for presentation code migrating from RuntimeEvent.
+NodeLifecycleFrame = NodeFrame

@@ -8,6 +8,7 @@ export interface ChatRunRequest {
   mode: ChatMode;
   permissionMode: PermissionMode;
   reasoningEffort: ReasoningEffort;
+  sourceNodeId?: string;
 }
 
 export interface ActiveRun {

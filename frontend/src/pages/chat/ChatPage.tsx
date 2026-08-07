@@ -14,6 +14,7 @@ import MarkdownContent from "../../components/MarkdownContent";
 import { AssistantMessage, MessageActions } from "./messageParts";
 import Composer, { type SettingsSelectKey } from "./Composer";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
+import { applyRuntimeNodeFrame } from "../../app/runtimeNodeReducer";
 import type {
   ChatMessage,
   ChatMode,
@@ -23,6 +24,7 @@ import type {
   Page,
   PermissionMode,
   ReasoningEffort,
+  RuntimeStateNode,
   StreamMessage,
   ToolEvent,
 } from "../../types";
@@ -59,6 +61,7 @@ interface ChatRunRequest {
   mode: ChatMode;
   permissionMode: PermissionMode;
   reasoningEffort: ReasoningEffort;
+  sourceNodeId?: string;
 }
 
 function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
@@ -191,6 +194,7 @@ export default function ChatPage({
     abortRef.current = controller;
     setLocalBusy(true);
     try {
+      let finalNode: import("../../types").RuntimeStateNode | undefined;
       const onMessage = (message: StreamMessage) => {
         if (message.type === "event") {
           const kind = message.kind ?? "";
@@ -220,21 +224,67 @@ export default function ChatPage({
             void onSelectSession(message.session_id);
           }
           void onRefresh();
+        } else if ((message.type === "node.create" || message.type === "node.update" || message.type === "node.delete") && message.node) {
+          const frame = { type: message.type, node: message.node } as const;
+          onUpdate(conversationId, (current) => {
+            const nodes = new Map<string, RuntimeStateNode>(
+              (current.runtimeNodes ?? []).map((node) => [`${node.session_id}:${node.id}`, node] as const),
+            );
+            return {
+              ...current,
+              runtimeNodes: [...applyRuntimeNodeFrame(nodes, frame).values()],
+              lastNodeId: message.node?.id,
+            };
+          });
+          if (message.type === "node.delete") {
+            finalNode = message.node;
+          }
         } else if (message.type === "error") {
           setLast({ error: message.error ?? message.message ?? "发生错误", running: false, decision: undefined }, conversationId);
         }
       };
       if (resume) {
-        const result = await streamResume(sessionId, onMessage, controller.signal, permissionMode, reasoningEffort);
+        const result = conversation?.lastNodeId
+          ? await streamResume(
+              sessionId,
+              onMessage,
+              controller.signal,
+              permissionMode,
+              reasoningEffort,
+              conversation.lastNodeId,
+            )
+          : await streamResume(sessionId, onMessage, controller.signal, permissionMode, reasoningEffort);
         if (result === "aborted") setLast({ running: false, status: "已停止", decision: undefined }, conversationId);
+        else if (finalNode) {
+          const content = (finalNode.data.message as { content?: Array<{ text?: string }> } | undefined)?.content
+            ?.map((part) => part.text ?? "")
+            .join("");
+          setLast({ content: content || "", status: finalNode.status, running: false, decision: undefined }, conversationId);
+          void onRefresh();
+        }
       } else {
+        // Keep the historical positional session-id call for an empty tree.
+        // Once a node exists, use the object form so the optimistic source
+        // node travels with the request and the backend can validate it.
+        const options = conversation?.lastNodeId
+          ? (enhancedChatOptions
+            ? { sessionId, mode, permissionMode, reasoningEffort, sourceNodeId: conversation.lastNodeId }
+            : { sessionId, sourceNodeId: conversation.lastNodeId })
+          : (enhancedChatOptions ? { sessionId, mode, permissionMode, reasoningEffort } : sessionId);
         const result = await streamChat(
           prompt ?? "",
           onMessage,
           controller.signal,
-          enhancedChatOptions ? { sessionId, mode, permissionMode, reasoningEffort } : sessionId,
+          options,
         );
         if (result === "aborted") setLast({ running: false, status: "已停止", decision: undefined }, conversationId);
+        else if (finalNode) {
+          const content = (finalNode.data.message as { content?: Array<{ text?: string }> } | undefined)?.content
+            ?.map((part) => part.text ?? "")
+            .join("");
+          setLast({ content: content || "", status: finalNode.status, running: false, decision: undefined }, conversationId);
+          void onRefresh();
+        }
       }
     } catch (error) {
       if (!controller.signal.aborted) {
@@ -256,6 +306,7 @@ export default function ChatPage({
         mode,
         permissionMode,
         reasoningEffort,
+        sourceNodeId: conversation?.lastNodeId,
       });
       return;
     }

@@ -7,6 +7,8 @@ import secrets
 from collections.abc import Mapping
 from typing import Any
 
+from backend.domain.runtime_state import RuntimeState
+
 
 class RevisionConflict(ValueError):
     pass
@@ -57,6 +59,14 @@ class PostgresSyncRepository:
                 session_meta = snapshot.get("session")
                 if not isinstance(session_meta, dict) or session_meta.get("session_id") != session_id:
                     raise ValueError("snapshot session id must match the operation")
+                if int(snapshot.get("schema_version", -1)) != 3 or not isinstance(snapshot.get("nodes"), list):
+                    raise ValueError("only schema_version=3 RuntimeState node snapshots are supported")
+                nodes = snapshot["nodes"]
+                if not all(isinstance(node, Mapping) for node in nodes):
+                    raise ValueError("snapshot nodes must be objects")
+                parsed_nodes = [RuntimeState.from_dict(node) for node in nodes]
+                if any(node.session_id != session_id for node in parsed_nodes):
+                    raise ValueError("snapshot node session does not match the operation")
                 connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     (session_id,),
@@ -125,7 +135,7 @@ class PostgresSyncRepository:
 def create_sync_app(repository: PostgresSyncRepository, bearer_token: str):
     from fastapi import FastAPI, Header, HTTPException
 
-    app = FastAPI(title="Mini-Agent Sync", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Mini-Agent Sync", version="0.2.0", docs_url=None, redoc_url=None)
     if not bearer_token:
         raise ValueError("bearer_token is required")
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from uuid import uuid4
 
@@ -55,7 +55,16 @@ class SQLiteSessionMixin:
         with self._connection(session_id) as connection:
             row = connection.execute(
                 """SELECT m.session_id, m.title, m.created_at, m.updated_at,
-                (SELECT COUNT(*) FROM session_messages),
+                (SELECT CASE WHEN EXISTS (SELECT 1 FROM runtime_nodes)
+                    THEN (SELECT COUNT(*) FROM runtime_nodes)
+                    ELSE (SELECT COUNT(*) FROM session_messages) END),
+                (SELECT n.id FROM runtime_nodes AS n
+                    WHERE n.session_id = m.session_id
+                    AND NOT EXISTS (
+                        SELECT 1 FROM runtime_nodes AS child
+                        WHERE child.parent_session_id = n.session_id AND child.parent_id = n.id
+                    )
+                    ORDER BY n.timestamp DESC, n.id DESC LIMIT 1),
                 (SELECT run_id FROM session_runs ORDER BY updated_at DESC, run_id DESC LIMIT 1),
                 (SELECT status FROM session_runs ORDER BY updated_at DESC, run_id DESC LIMIT 1),
                 m.client_id, m.archived_at, m.deleted_at
@@ -64,16 +73,17 @@ class SQLiteSessionMixin:
         if row is None:
             return None
         return SessionSummary(
-            str(row[0]),
-            str(row[1]),
-            str(row[2]),
-            str(row[3]),
-            int(row[4]),
-            str(row[5]) if row[5] is not None else None,
-            str(row[6]) if row[6] is not None else None,
-            str(row[7]) if row[7] is not None else None,
-            str(row[8]) if row[8] is not None else None,
-            str(row[9]) if row[9] is not None else None,
+            session_id=str(row[0]),
+            title=str(row[1]),
+            created_at=str(row[2]),
+            updated_at=str(row[3]),
+            message_count=int(row[4]),
+            last_node_id=str(row[5]) if row[5] is not None else None,
+            last_run_id=str(row[6]) if row[6] is not None else None,
+            last_run_status=str(row[7]) if row[7] is not None else None,
+            client_id=str(row[8]) if row[8] is not None else None,
+            archived_at=str(row[9]) if row[9] is not None else None,
+            deleted_at=str(row[10]) if row[10] is not None else None,
         )
 
     def list_sessions(self, *, state: str = "active") -> list[SessionSummary]:
@@ -96,6 +106,10 @@ class SQLiteSessionMixin:
         return self.get_session(summaries[0].session_id) if summaries else None
 
     def load_conversation(self, session_id: str) -> list[dict[str, str]]:
+        nodes = getattr(self, "load_nodes", lambda _session_id: [])(session_id)
+        projected = self._node_messages(nodes)
+        if projected:
+            return projected
         with self._connection(session_id) as connection:
             rows = connection.execute("SELECT role, content FROM session_messages ORDER BY id").fetchall()
         return [{"role": str(row[0]), "content": str(row[1])} for row in rows]
@@ -103,6 +117,10 @@ class SQLiteSessionMixin:
     def load_conversation_records(self, session_id: str) -> list[dict[str, str | int | None]]:
         """Return the durable transcript with stable row and run identifiers."""
 
+        nodes = getattr(self, "load_nodes", lambda _session_id: [])(session_id)
+        projected = self._node_records(nodes)
+        if projected:
+            return projected
         with self._connection(session_id) as connection:
             rows = connection.execute(
                 "SELECT id, run_id, role, content, created_at FROM session_messages ORDER BY id"
@@ -272,6 +290,58 @@ class SQLiteSessionMixin:
     @staticmethod
     def _empty_import_runtime(session_id: str, messages: list) -> RuntimeState:
         return RuntimeState(session_id=session_id, messages=list(messages))
+
+    @staticmethod
+    def _node_messages(nodes: list) -> list[dict[str, str]]:
+        result: list[dict[str, str]] = []
+        for node in nodes:
+            data = getattr(node, "data", {})
+            if not isinstance(data, Mapping) or data.get("type") != "message":
+                continue
+            message = data.get("message")
+            if not isinstance(message, Mapping):
+                continue
+            role = str(message.get("role") or "")
+            if role not in {"user", "assistant", "tool_result", "bash"}:
+                continue
+            content = message.get("content", [])
+            text = "".join(
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, Mapping) and block.get("type") in {"text", "reasoning", "bash"}
+            )
+            result.append({"role": "assistant" if role == "tool_result" else role, "content": text})
+        return result
+
+    @classmethod
+    def _node_records(cls, nodes: list) -> list[dict[str, str | int | None]]:
+        result: list[dict[str, str | int | None]] = []
+        for node in nodes:
+            data = getattr(node, "data", {})
+            if not isinstance(data, Mapping) or data.get("type") != "message":
+                continue
+            message = data.get("message")
+            if not isinstance(message, Mapping):
+                continue
+            role = str(message.get("role") or "")
+            if role not in {"user", "assistant", "tool_result", "bash"}:
+                continue
+            content = message.get("content", [])
+            text = "".join(
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, Mapping) and block.get("type") in {"text", "reasoning", "bash"}
+            )
+            result.append(
+                {
+                    "id": f"{node.session_id}:{node.id}",
+                    "run_id": None,
+                    "role": "assistant" if role == "tool_result" else role,
+                    "content": text,
+                    "created_at": node.timestamp,
+                }
+            )
+        return result
 
     def load_conversation_page(
         self, session_id: str, *, before_id: int | None = None, limit: int = 100

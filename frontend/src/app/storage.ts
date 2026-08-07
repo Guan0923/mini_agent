@@ -75,6 +75,8 @@ export function summaryToConversation(summary: SessionInfo, existing?: Conversat
     archivedAt: summary.archived_at ?? undefined,
     deletedAt: summary.deleted_at ?? undefined,
     messagesLoaded: existing?.messagesLoaded ?? false,
+    lastNodeId: summary.last_node_id ?? existing?.lastNodeId,
+    runtimeNodes: existing?.runtimeNodes,
   };
 }
 

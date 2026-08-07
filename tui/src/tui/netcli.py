@@ -100,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             f"status: {done.get('status')} | duration: {metrics.get('duration_ms')}ms | "
             f"model_calls: {metrics.get('model_calls')} | tool_calls: {metrics.get('tool_calls')}"
         )
-        return 0 if done.get("status") == "completed" else 1
+        return 0 if done.get("status") in {"completed", "success"} else 1
     except ApiError as exc:
         print(f"[client] error: {exc}")
         return 1

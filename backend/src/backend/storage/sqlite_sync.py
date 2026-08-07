@@ -7,6 +7,7 @@ import sqlite3
 from uuid import uuid4
 
 from backend.domain import DEFAULT_SESSION_TITLE
+from backend.domain.runtime_state import RuntimeState as TreeRuntimeState
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState, text_messages
 
@@ -15,6 +16,78 @@ from .sqlite_schema import SCHEMA_VERSION
 
 class SQLiteSyncMixin:
     """Add remote snapshot import/export to a per-session SQLite store."""
+
+    def export_runtime_node_snapshot(self, session_id: str) -> dict[str, object]:
+        """Export only session metadata and canonical nodes (schema 3)."""
+
+        session = self.get_session(session_id)
+        if session is None:
+            raise ValueError(f"Unknown session: {session_id}")
+        with self._connection(session_id) as connection:
+            row = connection.execute(
+                "SELECT owner_device_id,title,created_at,updated_at,client_id,archived_at,deleted_at FROM session_meta"
+            ).fetchone()
+            nodes = connection.execute("SELECT * FROM runtime_nodes ORDER BY timestamp,id").fetchall()
+        if row is None:
+            raise ValueError(f"Unknown session: {session_id}")
+        return {
+            "schema_version": 3,
+            "session": {
+                "session_id": session_id,
+                "owner_device_id": str(row[0]),
+                "title": str(row[1]),
+                "created_at": str(row[2]),
+                "updated_at": str(row[3]),
+                "client_id": str(row[4]) if row[4] is not None else None,
+                "archived_at": str(row[5]) if row[5] is not None else None,
+                "deleted_at": str(row[6]) if row[6] is not None else None,
+            },
+            "nodes": [self._node_from_row(row_item).to_dict() for row_item in nodes],
+        }
+
+    def apply_runtime_node_snapshot(self, snapshot: dict[str, object], *, local_device_id: str) -> None:
+        """Import a schema-3 node snapshot; legacy runtime snapshots are rejected."""
+
+        if int(snapshot.get("schema_version", -1)) != 3:
+            raise ValueError("Only RuntimeState node snapshots (schema_version=3) are supported.")
+        meta = snapshot.get("session")
+        raw_nodes = snapshot.get("nodes")
+        if not isinstance(meta, dict) or not isinstance(raw_nodes, list):
+            raise ValueError("Node snapshot must contain session metadata and nodes.")
+        if not all(isinstance(item, dict) for item in raw_nodes):
+            raise ValueError("Node snapshot nodes must be objects.")
+        session_id = str(meta.get("session_id") or "")
+        owner = str(meta.get("owner_device_id") or "")
+        if not session_id or not owner:
+            raise ValueError("Node snapshot is missing session ownership metadata.")
+        nodes = [TreeRuntimeState.from_dict(item) for item in raw_nodes]
+        if any(node.session_id != session_id for node in nodes):
+            raise ValueError("Node snapshot contains a node from another session.")
+        with self._connection(session_id) as connection:
+            self._clear_snapshot_tables(connection)
+            connection.execute(
+                """INSERT INTO session_meta(session_id,title,owner_device_id,remote_revision,read_only,
+                    schema_version,created_at,updated_at,client_id,archived_at,deleted_at)
+                    VALUES (?,?,?,0,1,3,?,?,?,?,?)""",
+                (
+                    session_id,
+                    str(meta.get("title") or DEFAULT_SESSION_TITLE),
+                    owner,
+                    str(meta.get("created_at") or utc_now()),
+                    str(meta.get("updated_at") or utc_now()),
+                    str(meta["client_id"]) if meta.get("client_id") is not None else None,
+                    str(meta["archived_at"]) if meta.get("archived_at") is not None else None,
+                    str(meta["deleted_at"]) if meta.get("deleted_at") is not None else None,
+                ),
+            )
+            for node in nodes:
+                connection.execute(
+                    """INSERT INTO runtime_nodes(
+                        session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,
+                        compaction_idx,user,provider,cwd,timestamp,status,data_json
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    self._node_values(node),
+                )
 
     def pending_sync_operations(self) -> list[dict[str, object]]:
         operations: list[dict[str, object]] = []
@@ -89,11 +162,17 @@ class SQLiteSyncMixin:
                 if revision <= current_revision:
                     return
         meta = snapshot.get("session")
-        runtime = snapshot.get("runtime")
         if not isinstance(meta, dict):
             raise ValueError("Remote snapshot is missing session metadata.")
         if meta.get("session_id") not in {None, session_id}:
             raise ValueError("Remote snapshot session id does not match its envelope.")
+        if int(snapshot.get("schema_version", -1)) != 3 or not isinstance(snapshot.get("nodes"), list):
+            raise ValueError("Legacy runtime snapshots are no longer supported; expected schema_version=3 nodes.")
+        if not all(isinstance(item, dict) for item in snapshot["nodes"]):
+            raise ValueError("Remote snapshot nodes must be objects.")
+        nodes = [TreeRuntimeState.from_dict(item) for item in snapshot["nodes"]]
+        if any(node.session_id != session_id for node in nodes):
+            raise ValueError("Remote snapshot contains a node from another session.")
         with self._connection(session_id) as connection:
             self._clear_snapshot_tables(connection)
             connection.execute(
@@ -113,14 +192,14 @@ class SQLiteSyncMixin:
                     str(meta["deleted_at"]) if meta.get("deleted_at") is not None else None,
                 ),
             )
-            if isinstance(runtime, dict):
-                restored_runtime = dict(runtime)
-                restored_runtime["session_id"] = session_id
+            for node in nodes:
                 connection.execute(
-                    "INSERT INTO session_runtime(session_id,state_json,updated_at) VALUES (?,?,?)",
-                    (session_id, json.dumps(restored_runtime, ensure_ascii=False), utc_now()),
+                    """INSERT INTO runtime_nodes(
+                        session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,
+                        compaction_idx,user,provider,cwd,timestamp,status,data_json
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    self._node_values(node),
                 )
-            self._restore_snapshot_tables(connection, snapshot, runtime)
 
     @staticmethod
     def _clear_snapshot_tables(connection: sqlite3.Connection) -> None:
@@ -132,6 +211,7 @@ class SQLiteSyncMixin:
             "runs",
             "checkpoints",
             "runtime_messages",
+            "runtime_nodes",
             "sync_outbox",
         ):
             connection.execute(f"DELETE FROM {table}")
@@ -224,7 +304,6 @@ class SQLiteSyncMixin:
         ).fetchone()
         if meta is None:
             raise ValueError(f"Unknown session: {session_id}")
-        runtime = connection.execute("SELECT state_json FROM session_runtime").fetchone()
         snapshot: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "session": {
@@ -237,8 +316,25 @@ class SQLiteSyncMixin:
                 "archived_at": str(meta[5]) if meta[5] is not None else None,
                 "deleted_at": str(meta[6]) if meta[6] is not None else None,
             },
-            "runtime": json.loads(str(runtime[0])) if runtime is not None else None,
+            "nodes": [],
         }
-        for table in ("session_runs", "session_messages", "runs", "checkpoints", "runtime_messages"):
-            snapshot[table] = [dict(row) for row in connection.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+        rows = connection.execute("SELECT * FROM runtime_nodes ORDER BY timestamp,id").fetchall()
+        snapshot["nodes"] = [
+            {
+                "session_id": row[0],
+                "parent_session_id": row[1],
+                "id": row[2],
+                "parent_id": row[3],
+                "version": row[4],
+                "firstKeptEntryId": row[5],
+                "compactionIdx": row[6],
+                "user": row[7],
+                "provider": row[8],
+                "cwd": row[9],
+                "timestamp": row[10],
+                "status": row[11],
+                "data": json.loads(str(row[12])),
+            }
+            for row in rows
+        ]
         return snapshot
