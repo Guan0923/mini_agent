@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { getCurrentUser, login as loginRequest, logout as logoutRequest, setUnauthorizedHandler } from "../api";
+import { resetLegacyBrowserState } from "../app/storage";
 import type { AuthUser } from "../types";
 
 interface AuthContextValue {
@@ -11,22 +12,13 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
-const LEGACY_STORAGE_KEY = "mini-agent-conversations";
-
-function migrateBrowserConversations(user: AuthUser): void {
-  if (!user.legacy_owner) return;
-  const scopedKey = `${LEGACY_STORAGE_KEY}:${user.id}`;
-  if (localStorage.getItem(scopedKey) || !localStorage.getItem(LEGACY_STORAGE_KEY)) return;
-  localStorage.setItem(scopedKey, localStorage.getItem(LEGACY_STORAGE_KEY) ?? "[]");
-}
-
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  resetLegacyBrowserState();
   const [user, setUserState] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
 
   const setUser = useCallback((next: AuthUser | null) => {
     setUserState(next);
-    if (next) migrateBrowserConversations(next);
   }, []);
 
   useEffect(() => {

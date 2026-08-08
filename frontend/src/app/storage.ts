@@ -3,7 +3,34 @@ import type { ChatMessage, Conversation } from "../types";
 
 export const STORAGE_KEY = "mini-agent-conversations";
 export const ARCHIVE_READ_KEY = "mini-agent-archive-read";
+export const BROWSER_STATE_VERSION_KEY = "mini-agent-browser-state-version";
+export const BROWSER_STATE_VERSION = "runtime-state-tree-1";
 export type ArchiveReadState = Record<string, string>;
+
+const LEGACY_BROWSER_PREFIXES = [STORAGE_KEY, ARCHIVE_READ_KEY, "mini-agent-session-modes"];
+
+/**
+ * Drop browser-only state written by the pre-RuntimeState message flow.
+ *
+ * The backend cannot remove this cache because it lives in the browser.  Run
+ * this once per browser profile during the protocol migration; subsequent
+ * conversations continue using the same keys and are persisted normally.
+ */
+export function resetLegacyBrowserState(storage?: Storage): void {
+  if (typeof window === "undefined" && !storage) return;
+  const target = storage ?? window.localStorage;
+  if (target.getItem(BROWSER_STATE_VERSION_KEY) === BROWSER_STATE_VERSION) return;
+
+  const keysToRemove: string[] = [];
+  for (let index = 0; index < target.length; index += 1) {
+    const key = target.key(index);
+    if (key && LEGACY_BROWSER_PREFIXES.some((prefix) => key === prefix || key.startsWith(`${prefix}:`))) {
+      keysToRemove.push(key);
+    }
+  }
+  for (const key of keysToRemove) target.removeItem(key);
+  target.setItem(BROWSER_STATE_VERSION_KEY, BROWSER_STATE_VERSION);
+}
 
 export function loadConversations(key: string): Conversation[] {
   try {

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { countUnreadArchived, loadArchiveReadState, loadConversations, markArchivedAsRead } from "./App";
+import { BROWSER_STATE_VERSION, BROWSER_STATE_VERSION_KEY, resetLegacyBrowserState } from "./app/storage";
 import type { Conversation } from "./types";
 
 beforeEach(() => localStorage.clear());
@@ -38,5 +39,22 @@ describe("conversation recovery", () => {
     localStorage.setItem("mini-agent-archive-read:user-1", JSON.stringify(read));
     expect(loadArchiveReadState("user-1")).toEqual(read);
     expect(countUnreadArchived([...archived, { ...archived[0], id: "archived-2" }], read)).toBe(1);
+  });
+
+  it("clears pre-RuntimeState browser history once", () => {
+    localStorage.setItem("mini-agent-conversations:user-1", "old history");
+    localStorage.setItem("mini-agent-archive-read:user-1", "old archive state");
+    localStorage.setItem("mini-agent-session-modes", "old modes");
+
+    resetLegacyBrowserState();
+
+    expect(localStorage.getItem("mini-agent-conversations:user-1")).toBeNull();
+    expect(localStorage.getItem("mini-agent-archive-read:user-1")).toBeNull();
+    expect(localStorage.getItem("mini-agent-session-modes")).toBeNull();
+    expect(localStorage.getItem(BROWSER_STATE_VERSION_KEY)).toBe(BROWSER_STATE_VERSION);
+
+    localStorage.setItem("mini-agent-conversations:user-1", "new history");
+    resetLegacyBrowserState();
+    expect(localStorage.getItem("mini-agent-conversations:user-1")).toBe("new history");
   });
 });
