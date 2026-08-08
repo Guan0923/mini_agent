@@ -4,7 +4,7 @@ import type { ChatMessage, Conversation } from "../types";
 export const STORAGE_KEY = "mini-agent-conversations";
 export const ARCHIVE_READ_KEY = "mini-agent-archive-read";
 export const BROWSER_STATE_VERSION_KEY = "mini-agent-browser-state-version";
-export const BROWSER_STATE_VERSION = "runtime-state-tree-1";
+export const BROWSER_STATE_VERSION = "runtime-state-tree-2";
 export type ArchiveReadState = Record<string, string>;
 
 const LEGACY_BROWSER_PREFIXES = [STORAGE_KEY, ARCHIVE_READ_KEY, "mini-agent-session-modes"];
