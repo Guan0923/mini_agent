@@ -36,7 +36,7 @@ async function streamEndpoint(
   const decoder = new TextDecoder();
   let buffer = "";
   let terminal = false;
-  let sawNodeDelete = false;
+  let sawAssistantDelete = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -51,7 +51,20 @@ async function streamEndpoint(
           try {
             const message = JSON.parse(line.slice(6)) as StreamMessage;
             if (message.type === "done" || message.type === "error") terminal = true;
-            if (message.type === "node.delete") sawNodeDelete = true;
+            if (message.type === "node.delete") {
+              const raw = message.node?.data?.message;
+              if (raw && typeof raw === "object" && !Array.isArray(raw) && (raw as { role?: unknown }).role === "assistant") {
+                const blocks = (raw as { content?: unknown }).content;
+                const content = Array.isArray(blocks) ? blocks : [];
+                const hasToolCall = content.some(
+                  (block) => Boolean(block && typeof block === "object" && !Array.isArray(block) && (block as { type?: unknown }).type === "tool_call"),
+                );
+                const hasAnswer = content.some(
+                  (block) => Boolean(block && typeof block === "object" && !Array.isArray(block) && ["text", "bash"].includes(String((block as { type?: unknown }).type))),
+                );
+                sawAssistantDelete = sawAssistantDelete || (hasAnswer && !hasToolCall);
+              }
+            }
             onMessage(message);
           } catch {
             /* ignore malformed frames */
@@ -66,7 +79,7 @@ async function streamEndpoint(
     reader.releaseLock();
   }
   if (signal.aborted) return "aborted";
-  if (!terminal && !sawNodeDelete) throw new Error("SSE stream unexpectedly ended before completion");
+  if (!terminal && !sawAssistantDelete) throw new Error("SSE stream unexpectedly ended before completion");
   return "completed";
 }
 

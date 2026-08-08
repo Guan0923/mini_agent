@@ -25,6 +25,7 @@ export interface SessionMessage {
   metrics?: ChatMessage["metrics"];
   error?: string;
   running?: boolean;
+  source_node_id?: string | null;
 }
 
 export interface TimezoneInfo {

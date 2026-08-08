@@ -118,6 +118,7 @@ export function transcriptToMessages(transcript: SessionMessage[]): ChatMessage[
     error: message.error,
     running: message.running ? false : undefined,
     runId: message.run_id ?? undefined,
+    sourceNodeId: message.source_node_id ?? undefined,
   }));
 }
 

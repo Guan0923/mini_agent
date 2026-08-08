@@ -20,6 +20,7 @@ import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnrea
 import type { ArchiveReadState } from "./storage";
 import AgentShell from "./AgentShell";
 import { createRunController } from "./runController";
+import { effectiveDisplayMode } from "./displayMode";
 import type {
   ChatMessage,
   ChatMode,
@@ -50,7 +51,7 @@ function AgentApp() {
     let active = true;
     void getSettings()
       .then((settings) => {
-        if (active) setDisplayMode(settings.agent_config.display_mode);
+        if (active) setDisplayMode(effectiveDisplayMode(settings.agent_config.display_mode));
       })
       .catch(() => undefined);
     return () => {
@@ -243,10 +244,14 @@ function AgentApp() {
     if (!conversation) throw new Error("会话不存在");
     if (conversation.sessionId) {
       if (!conversation.messagesLoaded) {
-        const transcript = await getSessionTranscript(conversation.sessionId);
+        const [transcript, nodes] = await Promise.all([
+          getSessionTranscript(conversation.sessionId),
+          getSessionNodes(conversation.sessionId).catch(() => []),
+        ]);
         updateConversation(id, (currentConversation) => ({
           ...currentConversation,
           messages: transcriptToMessages(transcript),
+          runtimeNodes: nodes,
           messagesLoaded: true,
         }));
       }
@@ -359,7 +364,7 @@ function AgentApp() {
         `${source.title || "新对话"}（分支）`,
         branchId,
         importableMessages(prefix),
-        source.lastNodeId,
+        source.messages[index].sourceNodeId,
       );
       const branch = summaryToConversation(summary, {
         id: branchId,
@@ -368,6 +373,7 @@ function AgentApp() {
         messages: prefix,
         messagesLoaded: true,
       });
+      branch.runtimeNodes = undefined;
       setConversations((previous) => [branch, ...previous]);
       setCurrentId(branch.id);
       setPage("chat");
@@ -376,7 +382,7 @@ function AgentApp() {
     }
   }
 
-  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string } | undefined> {
+  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string; sourceNodeId?: string } | undefined> {
     setActionError(null);
     const source = conversations.find((conversation) => conversation.id === id);
     if (!source) return undefined;
@@ -391,16 +397,21 @@ function AgentApp() {
         source.title,
         source.clientId ?? source.id,
         importableMessages(source.messages.slice(0, index)),
-        source.lastNodeId,
+        source.messages[index].sourceNodeId,
       );
       updateConversation(id, (conversation) => ({
         ...summaryToConversation(summary, conversation),
         messages: conversation.messages.slice(0, index),
         messagesLoaded: true,
+        runtimeNodes: undefined,
       }));
       setCurrentId(id);
       setPage("chat");
-      return { content: source.messages[index].content, sessionId: summary.session_id };
+      return {
+        content: source.messages[index].content,
+        sessionId: summary.session_id,
+        sourceNodeId: summary.last_node_id ?? undefined,
+      };
     } catch (error) {
       setActionError(String((error as Error).message ?? error));
       return undefined;
@@ -411,10 +422,14 @@ function AgentApp() {
     const conversation = conversations.find((item) => item.id === id);
     if (!conversation) throw new Error("会话不存在");
     const sessionId = await ensureSession(id);
-    const transcript = await getSessionTranscript(sessionId);
+    const [transcript, nodes] = await Promise.all([
+      getSessionTranscript(sessionId),
+      getSessionNodes(sessionId).catch(() => []),
+    ]);
     updateConversation(id, (currentConversation) => ({
       ...currentConversation,
       messages: transcriptToMessages(transcript),
+      runtimeNodes: nodes,
       messagesLoaded: true,
     }));
   }
@@ -444,10 +459,13 @@ function AgentApp() {
     setCurrentId(target.id);
     setPage("chat");
     if (!target.messagesLoaded) {
-      const transcript = await getSessionTranscript(sessionId);
+      const [transcript, nodes] = await Promise.all([
+        getSessionTranscript(sessionId),
+        getSessionNodes(sessionId).catch(() => []),
+      ]);
       const messages = transcriptToMessages(transcript);
       setConversations((previous) => previous.map((item) => (
-        item.id === target!.id ? { ...item, messages, messagesLoaded: true } : item
+        item.id === target!.id ? { ...item, messages, runtimeNodes: nodes, messagesLoaded: true } : item
       )));
     }
     return target.id;
@@ -500,7 +518,7 @@ function AgentApp() {
       onRun={runConversation}
       onStopRun={stopConversation}
       onClearError={() => setActionError(null)}
-      onDisplayModeUpdate={(config) => setDisplayMode(config.display_mode)}
+      onDisplayModeUpdate={(config) => setDisplayMode(effectiveDisplayMode(config.display_mode))}
     />
   );
 }

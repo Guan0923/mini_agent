@@ -70,11 +70,26 @@ def _event_payload(event: RuntimeEvent) -> dict:
     data = event.data
     identifiers = {key: data[key] for key in ("session_id", "run_id") if data.get(key) is not None}
     if event.kind == "tool_call":
-        return {**identifiers, "arguments": _truncate(json.dumps(data.get("arguments", {}), ensure_ascii=False), 600)}
+        return {
+            **identifiers,
+            "tool": data.get("tool") or data.get("name"),
+            "call_id": data.get("call_id"),
+            "arguments": data.get("arguments", {}),
+        }
     if event.kind == "tool_result":
-        return {**identifiers, "tool": data.get("tool"), "result": _truncate(event.message, 800)}
+        return {
+            **identifiers,
+            "tool": data.get("tool"),
+            "call_id": data.get("call_id"),
+            "result": data.get("result", event.message),
+        }
     if event.kind == "tool_failed":
-        return {**identifiers, "tool": data.get("tool")}
+        return {
+            **identifiers,
+            "tool": data.get("tool"),
+            "call_id": data.get("call_id"),
+            "result": data.get("error", data.get("result", event.message)),
+        }
     if event.kind in {"plan", "plan_progress", "run_suspended", "run_resumed", "error"}:
         details = {key: data[key] for key in ("plan", "goal", "steps", "status", "reason") if key in data}
         return {**identifiers, **details}
@@ -89,7 +104,7 @@ def _event_payload(event: RuntimeEvent) -> dict:
             "active_skills": data.get("active_skills", []),
         }
     if event.kind in {"response_delta", "response_start", "thinking_delta"}:
-        return {**identifiers, "content": _truncate(event.message, 4000)}
+        return {**identifiers, "content": event.message}
     return identifiers
 
 
@@ -256,7 +271,43 @@ def _stream(
                     if old_status == "cancelled" and stop_reason == "user_paused"
                     else ("success" if old_status in {"completed", "success"} else "failed")
                 )
-                bridge.finish(terminal_status, (run_state.final_answer if run_state is not None else "") or "")
+                final_answer = (run_state.final_answer if run_state is not None else "") or ""
+                bridge.finish(terminal_status, final_answer)
+                runtime_finish = next(
+                    (
+                        item
+                        for item in reversed(getattr(run_state, "runtime_messages", []) or [])
+                        if getattr(item, "kind", "") == "run_finished"
+                    ),
+                    None,
+                )
+                finish_data = getattr(runtime_finish, "data", {}) if runtime_finish is not None else {}
+                if not isinstance(finish_data, dict):
+                    finish_data = {}
+                # RuntimeState frames carry the detailed projection, but the
+                # stream still needs the normal top-level terminal envelope so
+                # clients can apply one consistent lifecycle transition.  The
+                # delete frame is intentionally queued first by ``finish``.
+                enqueue_terminal(
+                    {
+                        "type": "done" if terminal_status == "success" else "error",
+                        "status": run_state.status if run_state is not None else terminal_status,
+                        "final_answer": final_answer,
+                        "session_id": active_session.session_id if active_session is not None else session_id,
+                        "run_id": run_state.run_id
+                        if run_state is not None
+                        else (current_run.run_id if current_run else None),
+                        "mode": getattr(run_state, "mode", None)
+                        or (current_run.mode if current_run is not None else mode),
+                        "metrics": {
+                            "duration_ms": finished.get("duration_ms", finish_data.get("duration_ms")),
+                            "model_calls": finished.get("model_calls", finish_data.get("model_calls")),
+                            "tool_calls": finished.get("tool_calls", finish_data.get("tool_calls")),
+                            "active_skills": finished.get("active_skills", finish_data.get("active_skills", [])),
+                        },
+                        **({"error": final_answer} if terminal_status != "success" else {}),
+                    }
+                )
             else:
                 enqueue_terminal(
                     {
@@ -279,12 +330,20 @@ def _stream(
                 )
         except ModelConfigurationError as exc:
             if bridge_ref["bridge"] is not None:
-                bridge_ref["bridge"].finish("failed", f"模型未配置：{exc}")
+                error_message = f"模型未配置：{exc}"
+                bridge_ref["bridge"].finish("failed", error_message)
+                enqueue_terminal(
+                    {"type": "error", "status": "failed", "error": error_message, "message": error_message}
+                )
             else:
                 enqueue_terminal({"type": "error", "message": f"模型未配置：{exc}"})
         except Exception as exc:
             if bridge_ref["bridge"] is not None:
-                bridge_ref["bridge"].finish("failed", f"{type(exc).__name__}: {exc}")
+                error_message = f"{type(exc).__name__}: {exc}"
+                bridge_ref["bridge"].finish("failed", error_message)
+                enqueue_terminal(
+                    {"type": "error", "status": "failed", "error": error_message, "message": error_message}
+                )
             else:
                 enqueue_terminal({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         finally:

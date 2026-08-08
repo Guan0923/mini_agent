@@ -14,7 +14,7 @@ import MarkdownContent from "../../components/MarkdownContent";
 import { AssistantMessage, MessageActions } from "./messageParts";
 import Composer, { type SettingsSelectKey } from "./Composer";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
-import { applyRuntimeNodeFrame } from "../../app/runtimeNodeReducer";
+import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "../../app/runtimeDetailProjection";
 import type {
   ChatMessage,
   ChatMode,
@@ -24,9 +24,7 @@ import type {
   Page,
   PermissionMode,
   ReasoningEffort,
-  RuntimeStateNode,
   StreamMessage,
-  ToolEvent,
 } from "../../types";
 
 interface Props {
@@ -51,6 +49,7 @@ interface Props {
 interface RewindResult {
   content: string;
   sessionId: string;
+  sourceNodeId?: string;
 }
 
 interface ChatRunRequest {
@@ -165,10 +164,6 @@ export default function ChatPage({
     updateLast((message) => ({ ...message, content: message.content + content }), conversationId);
   }
 
-  function appendEvent(event: ToolEvent, conversationId?: string) {
-    updateLast((message) => ({ ...message, events: [...message.events, event] }), conversationId);
-  }
-
   function setLast(fields: Partial<ChatMessage>, conversationId?: string) {
     updateLast((message) => ({ ...message, ...fields }), conversationId);
   }
@@ -189,20 +184,32 @@ export default function ChatPage({
     onUpdate(conversationId, (current) => ({ ...current, messages: [...current.messages, message] }));
   }
 
-  async function runStream(conversationId: string, sessionId: string, prompt: string | null, resume = false) {
+  async function runStream(
+    conversationId: string,
+    sessionId: string,
+    prompt: string | null,
+    resume = false,
+    sourceNodeId?: string | null,
+  ) {
     const controller = new AbortController();
     abortRef.current = controller;
     setLocalBusy(true);
     try {
+      let nodeProtocol = false;
+      let sawDone = false;
       let finalNode: import("../../types").RuntimeStateNode | undefined;
       const onMessage = (message: StreamMessage) => {
         if (message.type === "event") {
           const kind = message.kind ?? "";
-          if (kind === "response_delta") {
+          if (kind === "response_delta" && !nodeProtocol) {
             const content = (message.data?.content as string | undefined) ?? message.message ?? "";
             if (content) appendDelta(content, conversationId);
-          } else if (kind === "tool_call" || kind === "tool_result" || kind === "tool_failed") {
-            appendEvent({ kind, message: message.message ?? "", data: message.data }, conversationId);
+          } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result" || kind === "tool_failed") {
+            updateLast((item) => appendLegacyRuntimeEvent(item, {
+              kind,
+              message: message.message ?? "",
+              data: message.data,
+            }), conversationId);
           } else if (kind === "decision_requested" && message.data) {
             setLast({ decision: { ...message.data, message: message.message } as DecisionRequest }, conversationId);
           } else if (kind === "run_finished") {
@@ -211,13 +218,14 @@ export default function ChatPage({
           const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
           if (runId) setLast({ runId }, conversationId);
         } else if (message.type === "done") {
+          sawDone = true;
           setLast({
             content: message.final_answer ?? "",
             status: message.status,
             metrics: message.metrics,
             running: false,
             decision: undefined,
-            runId: message.run_id,
+            ...(message.run_id ? { runId: message.run_id } : {}),
           }, conversationId);
           if (message.mode) onModeChange(message.mode);
           if (message.session_id && message.session_id !== sessionId) {
@@ -225,17 +233,9 @@ export default function ChatPage({
           }
           void onRefresh();
         } else if ((message.type === "node.create" || message.type === "node.update" || message.type === "node.delete") && message.node) {
+          nodeProtocol = true;
           const frame = { type: message.type, node: message.node } as const;
-          onUpdate(conversationId, (current) => {
-            const nodes = new Map<string, RuntimeStateNode>(
-              (current.runtimeNodes ?? []).map((node) => [`${node.session_id}:${node.id}`, node] as const),
-            );
-            return {
-              ...current,
-              runtimeNodes: [...applyRuntimeNodeFrame(nodes, frame).values()],
-              lastNodeId: message.node?.id,
-            };
-          });
+          onUpdate(conversationId, (current) => integrateRuntimeNodeFrame(current, frame));
           if (message.type === "node.delete") {
             finalNode = message.node;
           }
@@ -244,21 +244,20 @@ export default function ChatPage({
         }
       };
       if (resume) {
-        const result = conversation?.lastNodeId
+        const resumeSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
+        const result = resumeSourceNodeId
           ? await streamResume(
               sessionId,
               onMessage,
               controller.signal,
               permissionMode,
               reasoningEffort,
-              conversation.lastNodeId,
+              resumeSourceNodeId,
             )
           : await streamResume(sessionId, onMessage, controller.signal, permissionMode, reasoningEffort);
         if (result === "aborted") setLast({ running: false, status: "已停止", decision: undefined }, conversationId);
-        else if (finalNode) {
-          const content = (finalNode.data.message as { content?: Array<{ text?: string }> } | undefined)?.content
-            ?.map((part) => part.text ?? "")
-            .join("");
+        else if (!sawDone && finalNode) {
+          const content = projectRuntimeNode(finalNode)?.content ?? "";
           setLast({ content: content || "", status: finalNode.status, running: false, decision: undefined }, conversationId);
           void onRefresh();
         }
@@ -266,10 +265,11 @@ export default function ChatPage({
         // Keep the historical positional session-id call for an empty tree.
         // Once a node exists, use the object form so the optimistic source
         // node travels with the request and the backend can validate it.
-        const options = conversation?.lastNodeId
+        const chatSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
+        const options = chatSourceNodeId
           ? (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, reasoningEffort, sourceNodeId: conversation.lastNodeId }
-            : { sessionId, sourceNodeId: conversation.lastNodeId })
+            ? { sessionId, mode, permissionMode, reasoningEffort, sourceNodeId: chatSourceNodeId }
+            : { sessionId, sourceNodeId: chatSourceNodeId })
           : (enhancedChatOptions ? { sessionId, mode, permissionMode, reasoningEffort } : sessionId);
         const result = await streamChat(
           prompt ?? "",
@@ -278,10 +278,8 @@ export default function ChatPage({
           options,
         );
         if (result === "aborted") setLast({ running: false, status: "已停止", decision: undefined }, conversationId);
-        else if (finalNode) {
-          const content = (finalNode.data.message as { content?: Array<{ text?: string }> } | undefined)?.content
-            ?.map((part) => part.text ?? "")
-            .join("");
+        else if (!sawDone && finalNode) {
+          const content = projectRuntimeNode(finalNode)?.content ?? "";
           setLast({ content: content || "", status: finalNode.status, running: false, decision: undefined }, conversationId);
           void onRefresh();
         }
@@ -296,7 +294,13 @@ export default function ChatPage({
     }
   }
 
-  async function dispatchRun(conversationId: string, sessionId: string, prompt: string | null, resume = false) {
+  async function dispatchRun(
+    conversationId: string,
+    sessionId: string,
+    prompt: string | null,
+    resume = false,
+    sourceNodeId: string | null = conversation?.lastNodeId ?? null,
+  ) {
     if (onRun) {
       await onRun({
         conversationId,
@@ -306,14 +310,14 @@ export default function ChatPage({
         mode,
         permissionMode,
         reasoningEffort,
-        sourceNodeId: conversation?.lastNodeId,
+        sourceNodeId: sourceNodeId ?? undefined,
       });
       return;
     }
-    await runStream(conversationId, sessionId, prompt, resume);
+    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId);
   }
 
-  async function runPrompt(prompt: string, target?: { conversationId: string; sessionId: string }) {
+  async function runPrompt(prompt: string, target?: { conversationId: string; sessionId: string; sourceNodeId?: string }) {
     const { conversationId, sessionId } = target ?? await ensureSession();
     const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [] };
     const assistantMessage: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", events: [], running: true };
@@ -322,7 +326,13 @@ export default function ChatPage({
       title: current.title === "新对话" ? prompt.slice(0, 18) + (prompt.length > 18 ? "…" : "") : current.title,
       messages: [...current.messages, userMessage, assistantMessage],
     }));
-    await dispatchRun(conversationId, sessionId, prompt);
+    await dispatchRun(
+      conversationId,
+      sessionId,
+      prompt,
+      false,
+      target ? target.sourceNodeId ?? null : conversation?.lastNodeId ?? null,
+    );
   }
 
 
@@ -422,7 +432,11 @@ export default function ChatPage({
     const sessionId = typeof result === "string" ? conversation.sessionId : result.sessionId;
     if (!sessionId) return;
     cancelEdit();
-    await runPrompt(nextPrompt, { conversationId: conversation.id, sessionId });
+    await runPrompt(nextPrompt, {
+      conversationId: conversation.id,
+      sessionId,
+      sourceNodeId: typeof result === "string" ? undefined : result.sourceNodeId,
+    });
   }
 
   function handleUserBubbleClick(event: ReactMouseEvent<HTMLDivElement>, message: ChatMessage) {
@@ -468,7 +482,7 @@ export default function ChatPage({
             </div>
           ) : messages.map((message) => message.role === "user" ? (
             <div className="message user" id={conversationTurnId(message.id)} key={message.id}>
-              <div className="message-content">
+              <div className={editingMessageId === message.id ? "message-content is-editing" : "message-content"}>
                 {editingMessageId === message.id ? (
                   <div className="message-edit" aria-label="编辑用户消息">
                     <Input.TextArea

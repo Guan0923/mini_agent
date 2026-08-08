@@ -14,6 +14,7 @@ from backend.storage.settings_contract import (
     DEFAULT_CAPABILITY_CONFIG,
     DEFAULT_PROFILE,
     DEFAULT_PROVIDER_CONFIG,
+    SUPPORTED_DISPLAY_MODES,
     normalize_agent_config,
     normalize_provider_config,
     timezone_options,
@@ -118,7 +119,7 @@ class PostgresSettingsRepository:
         if row is None:
             return dict(DEFAULT_AGENT_CONFIG)
         display_mode = str(row[4] or "medium")
-        if display_mode not in {"minimal", "medium", "verbose"}:
+        if display_mode not in SUPPORTED_DISPLAY_MODES:
             display_mode = "medium"
         timezone = str(row[5] or DEFAULT_TIME_ZONE)
         try:

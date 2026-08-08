@@ -207,12 +207,19 @@
 }
 
 .message-edit {
-  width: min(100%, 560px);
+  width: min(560px, calc(100vw - 40px));
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 10px;
   border: 1px solid var(--accent);
   border-radius: 14px 4px 14px 14px;
   background: var(--user-bubble);
   box-shadow: 0 2px 8px rgba(79, 107, 255, 0.12);
+}
+
+.message.user .message-content.is-editing {
+  width: min(560px, calc(100vw - 40px));
+  max-width: 100%;
 }
 
 .message-edit textarea {
@@ -272,6 +279,19 @@
   line-height: 1.7;
 }
 
+.assistant-run-frame {
+  position: relative;
+  min-width: 0;
+  padding: 12px 14px 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.assistant-run-frame.is-running {
+  border-color: rgba(79, 107, 255, 0.4);
+}
+
 .avatar {
   width: 32px;
   height: 32px;
@@ -294,6 +314,55 @@
   gap: 4px;
 }
 
+.runtime-details {
+  margin-bottom: 12px;
+  background: rgba(247, 248, 250, 0.75);
+}
+
+.runtime-details .ant-collapse-header {
+  align-items: center !important;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.runtime-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.thinking-content {
+  color: var(--text);
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.shimmer-text {
+  color: var(--text);
+}
+
+.shimmer-text.is-active {
+  color: transparent;
+  background: linear-gradient(90deg, var(--muted) 20%, var(--accent) 48%, var(--text) 55%, var(--muted) 80%);
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: runtime-summary-shimmer 1.8s linear infinite;
+}
+
+@keyframes runtime-summary-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -120% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-text.is-active {
+    animation: none;
+    background-position: 50% 0;
+  }
+}
+
 .tool-line {
   font-size: 12.5px;
   color: #6b7280;
@@ -302,6 +371,7 @@
   border-radius: 8px;
   padding: 5px 10px;
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 6px;
   overflow: hidden;
@@ -311,6 +381,38 @@
   color: #dc2626;
   background: #fef2f2;
   border-color: #fecaca;
+}
+
+.tool-line.is-active {
+  color: var(--accent);
+  border-color: rgba(79, 107, 255, 0.3);
+}
+
+.tool-call-id {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.tool-payload {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.tool-result {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f7f8fa;
+}
+
+.tool-result-label {
+  color: #6b7280;
+  font-size: 12.5px;
+  font-weight: 600;
 }
 
 .mono {
@@ -333,7 +435,8 @@
   font-size: 12px;
   background: #f7f8fa;
   border-radius: 8px;
-  padding: 10px;
+  padding: 10px 0 0;
+  margin: 0;
   overflow-x: auto;
   max-height: 220px;
   overflow-y: auto;

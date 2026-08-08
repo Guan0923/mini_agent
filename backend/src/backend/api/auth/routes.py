@@ -63,7 +63,10 @@ class AgentConfigPayload(BaseModel):
     verbosity: str = Field(default="balanced", max_length=40)
     initiative: str = Field(default="balanced", max_length=40)
     custom_instructions: str = Field(default="", max_length=4000)
-    display_mode: Literal["minimal", "medium", "verbose"] = "medium"
+    # ``minimal`` is retained as the persisted value for the UI's
+    # ``简洁`` label.  ``developer`` is accepted by the settings contract but
+    # hidden by production builds on the client.
+    display_mode: Literal["minimal", "medium", "verbose", "developer"] = "medium"
     timezone: str = Field(default=DEFAULT_TIME_ZONE, max_length=80)
     location_enabled: StrictBool = False
 

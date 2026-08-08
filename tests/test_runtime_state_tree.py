@@ -197,6 +197,29 @@ def test_legacy_execution_bridge_emits_only_node_lifecycle_frames(tmp_path: Path
     assert store.load_nodes(session.session_id)[-1].data["message"]["content"][0]["text"] == "AB"
 
 
+def test_bridge_switches_to_handoff_session_without_mixing_nodes() -> None:
+    store = InMemoryNodeStore()
+    frames: list[NodeFrame] = []
+    bridge = RuntimeEventNodeBridge(store, session_id="source", prompt="plan", emit=frames.append)
+    bridge.start()
+    bridge.handle(RuntimeEvent("response_start", data={"session_id": "source", "run_id": "run-source"}))
+    bridge.handle(RuntimeEvent("response_delta", "proposal", {"session_id": "source", "run_id": "run-source"}))
+    bridge.handle(
+        RuntimeEvent(
+            "response_start",
+            data={"session_id": "handoff", "run_id": "run-handoff", "task": "implement"},
+        )
+    )
+    bridge.handle(RuntimeEvent("response_delta", "done", {"session_id": "handoff", "run_id": "run-handoff"}))
+    bridge.finish("success", "done")
+
+    source_answers = [node for node in store.all_nodes("source") if node.role == "assistant"]
+    handoff_answers = [node for node in store.all_nodes("handoff") if node.role == "assistant"]
+    assert source_answers[-1].content[0]["text"] == "proposal"
+    assert handoff_answers[-1].content[0]["text"] == "done"
+    assert all(frame.node.session_id in {"source", "handoff"} for frame in frames)
+
+
 def test_bridge_projects_control_events_into_canonical_content_blocks() -> None:
     store = InMemoryNodeStore()
     frames: list[NodeFrame] = []

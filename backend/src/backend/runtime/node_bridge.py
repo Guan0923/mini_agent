@@ -57,6 +57,7 @@ class RuntimeEventNodeBridge:
         self.last_node: RuntimeState | None = None
         self.assistant_blocks: list[dict[str, Any]] = []
         self.response_text = ""
+        self.run_id = ""
         self.started = False
         self.closed = False
 
@@ -125,7 +126,7 @@ class RuntimeEventNodeBridge:
             self.assistant = self.writer.create(
                 session_id=self.session_id,
                 parent=self.last_node,
-                data=message_payload("assistant", []),
+                data=message_payload("assistant", [], **({"run_id": self.run_id} if self.run_id else {})),
                 user=self.user,
                 provider=self.provider,
                 cwd=self.cwd,
@@ -136,7 +137,10 @@ class RuntimeEventNodeBridge:
 
     def _update_assistant(self) -> None:
         if self.assistant is not None:
-            self.writer.update_data(self.assistant, message_payload("assistant", self.assistant_blocks))
+            self.writer.update_data(
+                self.assistant,
+                message_payload("assistant", self.assistant_blocks, **({"run_id": self.run_id} if self.run_id else {})),
+            )
 
     @staticmethod
     def _json_value(value: Any) -> Any:
@@ -216,6 +220,34 @@ class RuntimeEventNodeBridge:
         path.reverse()
         return path
 
+    def _switch_session(self, session_id: str, prompt: str) -> None:
+        """Start projecting into a handoff session without ending the stream.
+
+        A plan handoff can finish one run and immediately start a follow-up in
+        an isolated session while reusing the same event callback.  The node
+        writer is session-bound, so carry the transport emitter forward but
+        reset the mutable projection state before creating the new turn.
+        """
+
+        if session_id == self.session_id:
+            return
+        if self.assistant is not None:
+            self._seal_assistant("success")
+        emit = self.writer.emit
+        self.session_id = session_id
+        self.prompt = prompt
+        self.source_node_id = None
+        self.writer = NodeWriter(self.store, emit=emit)
+        self.parent = None
+        self.assistant = None
+        self.last_node = None
+        self.assistant_blocks = []
+        self.response_text = ""
+        self.run_id = ""
+        self.started = False
+        self.closed = False
+        self.start()
+
     def handle(self, event: Any) -> None:
         if self.closed or not self.started:
             return
@@ -224,6 +256,11 @@ class RuntimeEventNodeBridge:
         data = getattr(event, "data", {})
         if not isinstance(data, Mapping):
             data = {}
+        event_session_id = data.get("session_id")
+        if isinstance(event_session_id, str) and event_session_id and event_session_id != self.session_id:
+            self._switch_session(event_session_id, str(data.get("task") or self.prompt))
+        if isinstance(data.get("run_id"), str) and data["run_id"]:
+            self.run_id = str(data["run_id"])
         if kind in {"response_start", "thinking_start"}:
             self._ensure_assistant()
         elif kind in {"response_delta", "response"} and message:
@@ -299,7 +336,7 @@ class RuntimeEventNodeBridge:
             result = self.writer.create(
                 session_id=self.session_id,
                 parent=self.last_node,
-                data=message_payload("tool_result", result_block),
+                data=message_payload("tool_result", result_block, **({"run_id": self.run_id} if self.run_id else {})),
                 provider=self.provider,
                 cwd=self.cwd,
             )

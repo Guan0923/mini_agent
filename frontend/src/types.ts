@@ -1,7 +1,7 @@
 export type Page = "chat" | "trash" | "benchmark";
 export type ChatMode = "agent" | "plan";
 export type PermissionMode = "approval_for_me" | "full_access";
-export type DisplayMode = "minimal" | "medium" | "verbose";
+export type DisplayMode = "minimal" | "medium" | "verbose" | "developer";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface AuthUser {
@@ -66,6 +66,8 @@ export interface ChatMessage {
   error?: string;
   running?: boolean;
   runId?: string;
+  sourceNodeId?: string;
+  runtimeNodeIds?: string[];
   decision?: DecisionRequest;
 }
 

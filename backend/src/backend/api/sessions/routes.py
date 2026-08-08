@@ -15,6 +15,7 @@ from ..auth.dependencies import require_user
 from ..auth.types import UserIdentity
 from ..shared.runtime import build_user_application
 from ..state import WebAppState
+from .projection import project_node_transcript
 
 router = APIRouter(prefix="/api")
 build_application = _default_build_application
@@ -295,6 +296,44 @@ def get_session_transcript(
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     _require_summary(store, session_id)
+    nodes = list(getattr(store, "load_nodes", lambda _session_id: [])(session_id))
+    projected = project_node_transcript(nodes)
+    if projected:
+        for payload in projected:
+            run_id = payload.get("run_id")
+            if payload["role"] != "assistant" or not run_id:
+                continue
+            events = store.load_runtime_messages(session_id, run_id=str(run_id))
+            for event in events:
+                event_data = dict(event.data)
+                if event.kind in {"thinking", "thinking_start", "thinking_delta"}:
+                    if not any(item.get("kind") == "thinking" for item in payload["events"]):
+                        payload["events"].append({"kind": "thinking", "message": event.message, "data": event_data})
+                elif event.kind in {"tool_call", "tool_result", "tool_failed"}:
+                    call_id = str(event_data.get("call_id") or "")
+                    already_present = any(
+                        item.get("kind") == event.kind
+                        and (call_id == "" or str((item.get("data") or {}).get("call_id") or "") == call_id)
+                        for item in payload["events"]
+                    )
+                    if not already_present:
+                        payload["events"].append({"kind": event.kind, "message": event.message, "data": event_data})
+                elif event.kind == "error":
+                    payload["error"] = event.message
+                elif event.kind == "run_finished":
+                    payload["status"] = str(event.data.get("status") or event.message)
+                    payload["metrics"] = {
+                        key: event.data.get(key)
+                        for key in ("duration_ms", "model_calls", "tool_calls", "active_skills")
+                        if event.data.get(key) is not None
+                    }
+                elif event.kind == "cancelled" and "status" not in payload:
+                    payload["status"] = str(event.data.get("status") or event.message or "cancelled")
+            if any(event.kind == "run_started" for event in events) and not any(
+                event.kind == "run_finished" for event in events
+            ):
+                payload["running"] = True
+        return projected
     records = store.load_conversation_records(session_id)
 
     result: list[dict] = []
@@ -312,7 +351,15 @@ def get_session_transcript(
         events = store.load_runtime_messages(session_id, run_id=run_id) if run_id else []
         if record["role"] == "assistant":
             for event in events:
-                if event.kind in {"tool_call", "tool_result", "tool_failed"}:
+                if event.kind in {
+                    "thinking",
+                    "thinking_start",
+                    "thinking_delta",
+                    "thinking_end",
+                    "tool_call",
+                    "tool_result",
+                    "tool_failed",
+                }:
                     payload["events"].append({"kind": event.kind, "message": event.message, "data": dict(event.data)})
                 elif event.kind == "error":
                     payload["error"] = event.message
@@ -339,11 +386,25 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
     target = None
     try:
         if body.source_node_id:
-            source_node = store.get_node(source.session_id, body.source_node_id)
+            # ``load_nodes`` includes the cross-session ancestors of a fork,
+            # while ``get_node(session_id, id)`` only searches one database.
+            # Resolve the message's own source node from that bounded tree so
+            # historical branches work without accepting an arbitrary node
+            # from another conversation.
+            source_node = None
+            loader = getattr(store, "load_nodes", None)
+            if callable(loader):
+                candidates = [
+                    node for node in loader(source.session_id) if str(getattr(node, "id", "")) == body.source_node_id
+                ]
+                source_node = next(
+                    (node for node in candidates if str(getattr(node, "session_id", "")) == source.session_id),
+                    candidates[0] if candidates else None,
+                )
+            if source_node is None:
+                source_node = store.get_node(source.session_id, body.source_node_id)
             if source_node is None:
                 raise ValueError("指定的 source_node_id 不属于当前会话。")
-            if store.list_children(source_node.session_id, source_node.id):
-                raise ValueError("fork 的 source_node_id 必须是叶子节点。")
             target = store.create_session(title, client_id=client_id)
             writer = NodeWriter(store)
             root = writer.create(
