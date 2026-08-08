@@ -12,5 +12,6 @@ describe("HomePage", () => {
     expect(screen.queryByText("左右移动鼠标，感受波浪")).toBeNull();
     expect(screen.getAllByRole("link", { name: "登录" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: /注册/ }).length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: /开始探索/ })).toHaveAttribute("href", "/login");
   });
 });

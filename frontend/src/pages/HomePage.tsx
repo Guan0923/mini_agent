@@ -30,7 +30,7 @@ export default function HomePage() {
           <h1><span className="hero-title-lead">让想法像潮汐一样，</span><span>自然地流动。</span></h1>
           <p className="hero-description">Mini-Agent 将规划、工具和执行编织在一起。把复杂任务交给智能体，把注意力留给真正重要的创造。</p>
           <div className="hero-actions">
-            <Link className="primary-cta" to="/register" onClick={authLink("register")}>开始探索 <ArrowRightOutlined aria-hidden="true" /></Link>
+            <Link className="primary-cta" to="/login" onClick={authLink("login")}>开始探索 <ArrowRightOutlined aria-hidden="true" /></Link>
             <Link className="secondary-cta" to="/register" onClick={authLink("register")}>没有账号，注册</Link>
           </div>
         </section>
