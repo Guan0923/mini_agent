@@ -11,6 +11,9 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from backend.storage.auth.types import AuthStorageUnavailable
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
@@ -24,6 +27,11 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
     app = FastAPI(title="Mini-Agent Web", version="0.2.0")
     resolved = state or WebAppState(DEFAULT_DATA_ROOT)
     app.state.web = resolved
+
+    @app.exception_handler(AuthStorageUnavailable)
+    async def storage_unavailable(_request, _exc: AuthStorageUnavailable) -> JSONResponse:
+        return JSONResponse({"detail": "认证与用户设置服务暂不可用。"}, status_code=503)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(resolved.auth_service.settings.allowed_origins),
@@ -47,6 +55,14 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
     @app.get("/api/health")
     def health() -> dict:
         return {"status": "ok", "service": "mini-agent-backend"}
+
+    @app.get("/api/ready")
+    def ready() -> dict:
+        resolved.auth.ping()
+        ping_settings = getattr(resolved.settings, "ping", None)
+        if callable(ping_settings):
+            ping_settings()
+        return {"status": "ready", "service": "mini-agent-backend", "database": "ok"}
 
     @app.on_event("shutdown")
     def close_state() -> None:

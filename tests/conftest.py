@@ -24,6 +24,7 @@ _POSTGRES_TEST_MODULES = {
     "test_steering",
     "test_time_tools",
     "test_sync_server",
+    "test_web_auth_postgres",
 }
 
 

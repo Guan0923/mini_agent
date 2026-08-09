@@ -2,7 +2,7 @@
 
 Mini-Agent 是一个面向学习与实验的 Python Agent Harness。它用可观察的终端界面展示模型决策、工具调用、规划、审批、上下文压缩、持久化恢复、项目级 Skills、MCP 工具服务和并发 Subagents。
 
-当前版本以 Textual TUI 为主要界面，要求 Python 3.11+。客户端以每会话 SQLite 为唯一运行时存储；PostgreSQL 只用于可选的远端同步服务，客户端不会直连数据库。
+当前版本要求 Python 3.11+。TUI 客户端以每会话 SQLite 为运行时存储且不直连数据库；Web 后端则强制使用 PostgreSQL 保存账户与用户设置，聊天历史和 RuntimeState 暂时仍保存在服务器本地 SQLite。
 
 ## 已实现能力
 
@@ -182,6 +182,7 @@ MCP stdio -> McpToolAdapter -> safe ToolRegistry subset
 LLMClient -> JsonHttpTransport <-> DeepSeek adapter
 SQLite     <-> local sessions / RuntimeState / audit / checkpoints / outbox
 HTTPS sync <-> optional PostgreSQL remote snapshots and idempotent operations
+Web auth/settings <-> mandatory PostgreSQL identities, sessions and encrypted provider settings
 JSONL      <-> ~/mini_agent/logs redacted diagnostics
 ```
 
@@ -207,4 +208,4 @@ python -m pytest -q
 python -m pytest --cov=backend --cov-report=term-missing
 ```
 
-客户端与大多数测试不需要 PostgreSQL；服务端/旧适配器集成测试会重置 `mini_agent_test` 的 `public` schema，绝不能把 `TEST_DATABASE_URL` 指向开发或生产数据库。开发约定详见 [docs/development.md](docs/development.md)。
+TUI 客户端与大多数测试不需要 PostgreSQL；Web 后端和服务端集成测试需要它。Web 启动、跨子域配置及 SQLite 账户迁移见 [frontend/README.md](frontend/README.md)；测试会重置 `mini_agent_test` 的 `public` schema，绝不能把 `TEST_DATABASE_URL` 指向开发或生产数据库。开发约定详见 [docs/development.md](docs/development.md)。

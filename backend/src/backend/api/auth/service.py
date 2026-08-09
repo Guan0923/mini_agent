@@ -10,6 +10,7 @@ from email_validator import EmailNotValidError, validate_email
 from fastapi import Request, Response
 
 from backend.configuration import load_config, section
+from backend.storage.auth.types import AuthRepository
 
 from .mail import MailDeliveryError
 from .types import AuthError, RateLimitError, UserIdentity
@@ -69,7 +70,7 @@ def validate_password(password: str) -> str:
 class AuthService:
     def __init__(self, state: WebAppState) -> None:
         self.state = state
-        self.store = state.auth
+        self.store: AuthRepository = state.auth
         self.mailer = state.mailer
         self.settings = WebAuthSettings.from_state(state)
         self._dummy_hash = self.store.password_hash("mini-agent-invalid-password")

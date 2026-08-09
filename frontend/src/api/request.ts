@@ -1,5 +1,7 @@
 /** Shared browser request helpers used by all API domains. */
 
+import { apiUrl } from "./base";
+
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string) {
     super(message);
@@ -29,7 +31,7 @@ export async function errorFrom(res: Response): Promise<string> {
 }
 
 export async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(url, { credentials: "include", ...init });
+  const res = await fetch(apiUrl(url), { credentials: "include", ...init });
   if (!res.ok) {
     if (res.status === 401) notifyUnauthorized();
     throw new ApiError(res.status, await errorFrom(res));

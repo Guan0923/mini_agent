@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from backend.domain import DEFAULT_TIME_ZONE, validate_time_zone
-from backend.storage.auth.crypto import _decrypt_secret, _encrypt_secret, _key_material
+from backend.storage.auth.crypto import ServerSecretCipher
+from backend.storage.auth.types import AuthStorageUnavailable
 from backend.storage.settings_contract import (
     DEFAULT_AGENT_CONFIG,
     DEFAULT_CAPABILITY_CONFIG,
@@ -20,35 +22,44 @@ from backend.storage.settings_contract import (
     timezone_options,
 )
 
-# Historical private names remain available to integrations that imported the
-# old ``backend.api.settings_store`` module directly.
-_encrypt = _encrypt_secret
-_decrypt = _decrypt_secret
-_key = _key_material
-
 
 class PostgresSettingsRepository:
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, secret_key: str) -> None:
         self.database_url = database_url
+        self._cipher = ServerSecretCipher(secret_key)
         self.initialize()
 
+    @contextmanager
     def _connect(self):
         try:
             import psycopg
         except ImportError as exc:
             raise RuntimeError("psycopg is required for DATABASE_URL") from exc
-        return psycopg.connect(self.database_url, connect_timeout=10)
+        try:
+            with psycopg.connect(self.database_url, connect_timeout=10) as connection:
+                yield connection
+        except psycopg.Error as exc:
+            raise AuthStorageUnavailable("用户设置数据库暂不可用。") from exc
+
+    def close(self) -> None:
+        """Connections are scoped to individual operations."""
+
+    def ping(self) -> None:
+        with self._connect() as connection:
+            connection.execute("SELECT 1")
 
     def initialize(self) -> None:
         with self._connect() as connection:
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS user_profiles (
-                    user_id TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '',
+                    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    display_name TEXT NOT NULL DEFAULT '',
                     agent_preferences TEXT NOT NULL DEFAULT '', updated_at DOUBLE PRECISION NOT NULL)"""
             )
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS user_agent_settings (
-                    user_id TEXT PRIMARY KEY, tone TEXT NOT NULL DEFAULT 'balanced',
+                    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    tone TEXT NOT NULL DEFAULT 'balanced',
                     verbosity TEXT NOT NULL DEFAULT 'balanced', initiative TEXT NOT NULL DEFAULT 'balanced',
                     custom_instructions TEXT NOT NULL DEFAULT '', display_mode TEXT NOT NULL DEFAULT 'medium',
                     timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai', location_enabled BOOLEAN NOT NULL DEFAULT FALSE,
@@ -65,7 +76,8 @@ class PostgresSettingsRepository:
             )
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS user_provider_settings (
-                    user_id TEXT PRIMARY KEY, provider TEXT NOT NULL DEFAULT 'deepseek',
+                    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    provider TEXT NOT NULL DEFAULT 'deepseek',
                     protocol TEXT NOT NULL DEFAULT 'chat_completions', base_url TEXT NOT NULL DEFAULT '',
                     model TEXT NOT NULL DEFAULT '', max_tokens INTEGER NOT NULL DEFAULT 8192,
                     context_size INTEGER NOT NULL DEFAULT 1024000,
@@ -74,7 +86,8 @@ class PostgresSettingsRepository:
             )
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS user_capability_settings (
-                    user_id TEXT PRIMARY KEY, settings_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    settings_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                     updated_at DOUBLE PRECISION NOT NULL)"""
             )
             connection.execute(
@@ -82,6 +95,29 @@ class PostgresSettingsRepository:
                     name TEXT PRIMARY KEY, settings_json JSONB NOT NULL,
                     updated_at DOUBLE PRECISION NOT NULL)"""
             )
+            for table in (
+                "user_profiles",
+                "user_agent_settings",
+                "user_provider_settings",
+                "user_capability_settings",
+            ):
+                orphan = connection.execute(
+                    f"SELECT 1 FROM {table} AS setting LEFT JOIN users ON users.id=setting.user_id "
+                    "WHERE users.id IS NULL LIMIT 1"
+                ).fetchone()
+                if orphan is not None:
+                    raise RuntimeError(f"PostgreSQL contains orphaned rows in {table}.")
+                connection.execute(
+                    f"""DO $$ BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conname='{table}_user_id_fkey' AND conrelid='{table}'::regclass
+                        ) THEN
+                            ALTER TABLE {table} ADD CONSTRAINT {table}_user_id_fkey
+                            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE;
+                        END IF;
+                    END $$"""
+                )
 
     def profile_for_user(self, user_id: str) -> dict[str, str]:
         with self._connect() as connection:
@@ -197,7 +233,7 @@ class PostgresSettingsRepository:
             ).fetchone()
             ciphertext = str(row[0] or "") if row else ""
             if isinstance(values.get("api_key"), str) and str(values["api_key"]).strip():
-                ciphertext = _encrypt_secret(str(values["api_key"]).strip())
+                ciphertext = self._cipher.encrypt(str(values["api_key"]).strip())
             connection.execute(
                 """INSERT INTO user_provider_settings(user_id,provider,protocol,base_url,model,max_tokens,
                    context_size,tokenizer_model,api_key_ciphertext,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -230,29 +266,25 @@ class PostgresSettingsRepository:
         }
 
     def import_legacy_provider_config(self, user_id: str, config_path: Path) -> bool:
-        """Import the legacy TOML model section once into PostgreSQL."""
-        current = self.provider_config_for_user(user_id)
-        if current.get("base_url") and current.get("model"):
-            return False
-        if not config_path.exists():
-            return False
-        try:
-            from backend.configuration import load_config, section
+        """Server accounts never inherit a machine-local provider credential."""
+        del user_id, config_path
+        return False
 
-            values = dict(section(load_config(config_path), "model"))
-        except (OSError, ValueError, KeyError):
-            return False
-        if not values.get("base_url") or not values.get("model") or not values.get("api_key"):
-            return False
-        self.update_provider_config(user_id, values)
-        return True
+    def capability_config_for_user(self, user_id: str) -> dict[str, object]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT settings_json FROM user_capability_settings WHERE user_id=%s", (user_id,)
+            ).fetchone()
+        if row is None or not isinstance(row[0], dict):
+            return dict(DEFAULT_CAPABILITY_CONFIG)
+        return dict(row[0])
 
     def settings_for_user(self, user_id: str, *, email: str = "") -> dict[str, Any]:
         return {
             "profile": {"email": email, **self.profile_for_user(user_id)},
             "agent_config": self.agent_config_for_user(user_id),
             "provider_config": self.provider_config_for_user(user_id),
-            "capability_config": dict(DEFAULT_CAPABILITY_CONFIG),
+            "capability_config": self.capability_config_for_user(user_id),
             "timezone_options": timezone_options(),
         }
 
@@ -283,4 +315,6 @@ class PostgresSettingsRepository:
             row = connection.execute(
                 "SELECT api_key_ciphertext FROM user_provider_settings WHERE user_id=%s", (user_id,)
             ).fetchone()
-        return ModelConfig.from_mapping({**values, "api_key": _decrypt_secret(str(row[0])) if row and row[0] else ""})
+        return ModelConfig.from_mapping(
+            {**values, "api_key": self._cipher.decrypt(str(row[0])) if row and row[0] else ""}
+        )

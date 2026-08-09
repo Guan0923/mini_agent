@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 from backend.api.app import create_app
 from backend.api.chat import ChatRequest, ResumeRequest, _reasoning_parameters
 from backend.api.interrupts import make_interactive_interrupt, registry
+from backend.api.state import WebAppState
 from backend.runtime.core.contracts import InterruptRequest, QuestionOption, UserQuestion
+from backend.storage.auth import AuthStore
 
 
 def resolve_once(request: InterruptRequest, choice: str, **values):
@@ -95,11 +98,14 @@ def test_full_access_interrupt_auto_approves_tools_but_still_requests_plan() -> 
     assert events == []
 
 
-def test_web_app_registers_session_and_chat_routes() -> None:
-    routes = set(create_app().openapi()["paths"])
+def test_web_app_registers_session_and_chat_routes(tmp_path: Path) -> None:
+    auth = AuthStore(tmp_path / "auth.sqlite3")
+    state = WebAppState(tmp_path / "web", auth_repository=auth, settings_repository=auth)
+    routes = set(create_app(state).openapi()["paths"])
 
     assert "/api/chat" in routes
     assert "/api/sessions" in routes
     assert "/api/sessions/{session_id}/compact" in routes
     assert "/api/sessions/{session_id}/trace" in routes
     assert "/api/forkable-runs" in routes
+    assert "/api/ready" in routes

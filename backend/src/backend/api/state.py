@@ -7,11 +7,11 @@ import os
 import time
 import tomllib
 from pathlib import Path
+from typing import Any
 
 from backend.configuration import ClientPaths, atomic_write_text
 
 from .auth.mail import NullMailer, SMTPMailer, SMTPSettings
-from .auth_store import AuthStore
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_DATA_ROOT = Path.home() / "mini_agent" / "runtime" / "web"
@@ -61,24 +61,37 @@ def seed_client_config(paths: ClientPaths, source_config: Path | None, *, device
 class WebAppState:
     """Shared auth/settings/runtime state for the Web backend."""
 
-    def __init__(self, data_root: Path = DEFAULT_DATA_ROOT, *, mailer=None) -> None:
+    def __init__(
+        self,
+        data_root: Path = DEFAULT_DATA_ROOT,
+        *,
+        mailer=None,
+        auth_repository: Any | None = None,
+        settings_repository: Any | None = None,
+        database_url: str | None = None,
+        secret_key: str | None = None,
+    ) -> None:
         self.data_root = data_root
         self.paths = ClientPaths.from_home()
         self.paths.ensure()
         self.config_path = self.paths.config_file
         self.chat_workspace = data_root / "chat-workspace"
         self.chat_workspace.mkdir(parents=True, exist_ok=True)
-        auth_root = Path.home() / "mini_agent" if data_root == DEFAULT_DATA_ROOT else data_root
-        self.auth = AuthStore(auth_root / "auth.sqlite3")
-        self.settings = self.auth
-        database_url = os.environ.get("DATABASE_URL", "").strip()
-        if database_url:
-            try:
-                from backend.storage.postgres.settings import PostgresSettingsRepository
+        if auth_repository is not None:
+            self.auth = auth_repository
+            self.settings = settings_repository or auth_repository
+        else:
+            configured_database = (database_url or os.environ.get("DATABASE_URL", "")).strip()
+            configured_secret = secret_key or os.environ.get("MINI_AGENT_SECRET_KEY", "")
+            if not configured_database:
+                raise RuntimeError("DATABASE_URL is required for the Web backend.")
+            if not configured_secret:
+                raise RuntimeError("MINI_AGENT_SECRET_KEY is required for the Web backend.")
+            from backend.storage.postgres.auth import PostgresAuthRepository
+            from backend.storage.postgres.settings import PostgresSettingsRepository
 
-                self.settings = PostgresSettingsRepository(database_url)
-            except Exception:
-                self.settings = self.auth
+            self.auth = PostgresAuthRepository(configured_database)
+            self.settings = PostgresSettingsRepository(configured_database, secret_key=configured_secret)
         if mailer is not None:
             self.mailer = mailer
         else:
@@ -127,6 +140,11 @@ class WebAppState:
         return self.settings.runtime_config_for_user(user_id)
 
     def close(self) -> None:
-        close = getattr(self.mailer, "close", None)
-        if callable(close):
-            close()
+        closed: set[int] = set()
+        for resource in (self.mailer, self.settings, self.auth):
+            if id(resource) in closed:
+                continue
+            closed.add(id(resource))
+            close = getattr(resource, "close", None)
+            if callable(close):
+                close()

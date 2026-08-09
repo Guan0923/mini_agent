@@ -62,7 +62,7 @@ def _store(state: WebAppState, user_id: str):
     from backend.storage.sqlite import SQLiteSessionStore
 
     paths = state.user_paths(user_id)
-    return SQLiteSessionStore(paths, state.auth.device_id_for_user(user_id))
+    return SQLiteSessionStore(paths, f"web_{user_id}")
 
 
 def _summary_payload(summary) -> dict:

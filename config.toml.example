@@ -20,6 +20,8 @@ public_url = "http://localhost:5173"
 allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 # Set true when the web app is served over HTTPS.
 cookie_secure = false
+# Web auth/settings additionally require DATABASE_URL and a random
+# MINI_AGENT_SECRET_KEY of at least 32 UTF-8 bytes in the server environment.
 
 [email]
 # Configure a real SMTP relay to enable registration and password recovery.

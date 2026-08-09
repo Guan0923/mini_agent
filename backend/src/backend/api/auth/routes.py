@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from backend.domain import DEFAULT_TIME_ZONE, validate_time_zone
+from backend.storage.auth.types import AuthStorageUnavailable
 
 from ..user_data import migrate_legacy_for_owner
 from .dependencies import require_browser_user, require_user
@@ -88,6 +89,8 @@ class ProviderConfigPayload(BaseModel):
 
 
 def _error(exc: Exception) -> HTTPException:
+    if isinstance(exc, AuthStorageUnavailable):
+        return HTTPException(status_code=503, detail="认证与用户设置服务暂不可用。")
     if isinstance(exc, RateLimitError):
         return HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(exc.retry_after)})
     if isinstance(exc, MailDeliveryError):

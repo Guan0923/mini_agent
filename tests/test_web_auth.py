@@ -3,9 +3,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
 from backend.api.app import create_app
+from backend.api.auth.service import WebAuthSettings
 from backend.api.state import WebAppState
 from backend.configuration import ClientPaths
+from backend.storage.auth import AuthStore
+from backend.storage.auth.types import AuthStorageUnavailable
 from fastapi.testclient import TestClient
 
 
@@ -17,9 +21,55 @@ class FakeMailer:
         self.messages.append((recipient, code, purpose))
 
 
+def test_default_web_state_requires_server_database_and_secret(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("MINI_AGENT_SECRET_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+        WebAppState(tmp_path / "missing-database")
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused")
+    with pytest.raises(RuntimeError, match="MINI_AGENT_SECRET_KEY"):
+        WebAppState(tmp_path / "missing-secret")
+    assert not list(tmp_path.rglob("auth.sqlite3"))
+
+
+def test_default_web_state_does_not_fall_back_when_postgres_connection_fails(tmp_path: Path, monkeypatch) -> None:
+    from backend.storage.postgres import auth as postgres_auth
+
+    def unavailable(*_args, **_kwargs):
+        raise AuthStorageUnavailable("offline")
+
+    monkeypatch.setattr(postgres_auth, "PostgresAuthRepository", unavailable)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unavailable")
+    monkeypatch.setenv("MINI_AGENT_SECRET_KEY", "x" * 32)
+
+    with pytest.raises(AuthStorageUnavailable, match="offline"):
+        WebAppState(tmp_path / "unavailable-database")
+    assert not list(tmp_path.rglob("auth.sqlite3"))
+
+
+def test_readiness_returns_503_without_falling_back_to_sqlite(tmp_path: Path) -> None:
+    class UnavailableAuth(AuthStore):
+        def ping(self) -> None:
+            raise AuthStorageUnavailable("offline")
+
+    auth = UnavailableAuth(tmp_path / "injected.sqlite3")
+    state = WebAppState(tmp_path / "web", auth_repository=auth, settings_repository=auth)
+    with TestClient(create_app(state)) as client:
+        response = client.get("/api/ready")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "认证与用户设置服务暂不可用。"}
+
+
 def _state(tmp_path: Path) -> tuple[WebAppState, FakeMailer]:
     mailer = FakeMailer()
-    state = WebAppState(tmp_path / "web", mailer=mailer)
+    auth = AuthStore(tmp_path / "web" / "auth.sqlite3")
+    state = WebAppState(
+        tmp_path / "web",
+        mailer=mailer,
+        auth_repository=auth,
+        settings_repository=auth,
+    )
     state.paths = ClientPaths(tmp_path / "legacy-client")
     state.paths.ensure()
     state.config_path = state.paths.config_file
@@ -64,6 +114,53 @@ def test_auth_cookie_protects_api_and_logout_revokes_it(tmp_path: Path) -> None:
         )
         assert client.post("/api/auth/logout", json={}).status_code == 200
         assert client.get("/api/auth/me").status_code == 401
+
+
+def test_production_cookie_and_cors_are_scoped_to_the_frontend_origin(tmp_path: Path) -> None:
+    state, mailer = _state(tmp_path)
+    state.auth_service.settings = WebAuthSettings(
+        public_url="https://app.example.com",
+        allowed_origins=("https://app.example.com",),
+        cookie_secure=True,
+    )
+    with TestClient(create_app(state), base_url="https://api.example.com") as client:
+        preflight = client.options(
+            "/api/auth/login",
+            headers={
+                "Origin": "https://app.example.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers["access-control-allow-origin"] == "https://app.example.com"
+        assert preflight.headers["access-control-allow-credentials"] == "true"
+
+        assert (
+            client.post(
+                "/api/auth/register/code",
+                json={"email": "secure@example.com"},
+                headers={"Origin": "https://app.example.com"},
+            ).status_code
+            == 202
+        )
+        registration = client.post(
+            "/api/auth/register",
+            json={"email": "secure@example.com", "code": mailer.messages[-1][1], "password": "s" * 12},
+            headers={"Origin": "https://app.example.com"},
+        )
+        cookie = registration.headers["set-cookie"].lower()
+        assert "secure" in cookie
+        assert "httponly" in cookie
+        assert "samesite=lax" in cookie
+        assert "domain=" not in cookie
+
+        rejected = client.post(
+            "/api/auth/login",
+            json={"email": "secure@example.com", "password": "s" * 12},
+            headers={"Origin": "https://evil.example"},
+        )
+        assert rejected.status_code == 403
+        assert "access-control-allow-origin" not in rejected.headers
 
 
 def test_password_reset_revokes_old_browser_session(tmp_path: Path) -> None:

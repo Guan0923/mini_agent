@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getCurrentUser, login, streamChat, streamResume } from "./api";
 import type { StreamMessage } from "./types";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
 
 function responseWithChunks(...chunks: string[]) {
   const encoder = new TextEncoder();
@@ -76,6 +79,16 @@ describe("streamChat", () => {
       reasoning_effort: "high",
     });
   });
+
+  it("streams through the configured API subdomain", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(responseWithChunks('data: {"type":"done"}\n\n')));
+
+    await streamChat("task", () => undefined, new AbortController().signal);
+
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("https://api.example.com/api/chat");
+    expect((vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit).credentials).toBe("include");
+  });
 });
 
 describe("web auth API", () => {
@@ -100,5 +113,16 @@ describe("web auth API", () => {
     expect(options.credentials).toBe("include");
     expect(options.method).toBe("POST");
     expect(options.body).toBe(JSON.stringify({ email: "a@example.com", password: "a".repeat(12) }));
+  });
+
+  it("targets a configured API subdomain while retaining browser credentials", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ user: { id: "u1", email: "a@example.com", legacy_owner: false } }), { status: 200 })));
+
+    await login("a@example.com", "a".repeat(12));
+
+    const fetchMock = vi.mocked(fetch);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.example.com/api/auth/login");
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).credentials).toBe("include");
   });
 });

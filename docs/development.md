@@ -18,13 +18,21 @@ The client runs without PostgreSQL. Its sole runtime configuration is `~/mini_ag
 
 Each session is stored in `~/mini_agent/<session_id>/state.db`. Optional synchronization pushes SQLite snapshot operations over HTTPS at startup, checkpoint notification, and normal shutdown, then pulls remote revisions. It does not poll periodically, and failures leave the local outbox intact.
 
-PostgreSQL is required only for sync-server and legacy-adapter integration tests:
+The Web backend, sync server, and PostgreSQL integration tests require PostgreSQL. Web auth and user settings never fall back to SQLite:
 
 ```powershell
-docker compose up -d
+docker compose up -d postgres
+$env:DATABASE_URL = "postgresql://mini_agent:mini_agent@127.0.0.1:5432/mini_agent"
+$env:MINI_AGENT_SECRET_KEY = "replace-with-at-least-32-random-bytes"
+uv sync --extra web
+uv run python -m backend.api
 ```
 
 Tests use the separate `TEST_DATABASE_URL` database, reset its `public` schema, and must never point at development or production data. The deployable sync server reads `MINI_AGENT_DATABASE_URL` and `MINI_AGENT_SYNC_TOKEN`; clients receive only an HTTPS endpoint and bearer token.
+
+The browser build uses same-origin paths by default. Set `VITE_API_BASE_URL=https://api.example.com` when the frontend and API are on different HTTPS subdomains. Configure `[web]` with the exact frontend `public_url` and `allowed_origins`, plus `cookie_secure=true`. All API, SSE, and Benchmark requests retain `credentials: "include"`.
+
+To move a legacy Web `auth.sqlite3`, stop the old server and run `uv run --extra web mini-agent-migrate-web-auth check --source <path>` before `apply`. The target is read only from `DATABASE_URL`; the source stays unchanged. Sessions and provider API keys are intentionally excluded, so users sign in and enter their keys again after migration.
 
 Tasks can reference workspace files with `@relative/path`, for example `summarize @README.md`. References are expanded before planning, remain workspace-confined, and are bounded to avoid unintentional oversized prompts.
 
@@ -107,7 +115,7 @@ Set `runtime.log_full_messages = false` to write summaries instead of complete r
 - Provider adapters own wire conversion only and accept active chat messages. Keep reusable HTTP and SSE mechanics in `providers/transport.py`.
 - MCP reuses the tool registry but exposes only read-only, approval-free tools; do not add a second filesystem implementation.
 - Subagent coordination belongs at the runtime composition boundary. Preserve single-level delegation, parent cancellation/approval routing, persisted batch summaries, and write coordination.
-- The client composition root selects SQLite. PostgreSQL belongs only to the deployable sync server (legacy adapters remain isolated for compatibility tests).
+- The TUI client composition root selects SQLite. The Web composition root requires PostgreSQL for auth/settings, while chat RuntimeState remains local SQLite; legacy SQLite auth is restricted to tests and explicit migration.
 - TUI renders runtime events and owns terminal commands/approval prompts; keep application loops, components, screens, rendering state, and view behavior in their focused subpackages. Keep the Plan Review and Tool Review decision sets separate, and do not implement tool behavior or session persistence in the TUI.
 
 When adding behavior, add or update focused tests in `tests/`, then run the complete validation commands before opening a pull request.

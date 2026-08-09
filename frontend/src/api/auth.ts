@@ -1,8 +1,9 @@
 import type { AuthResponse, AuthUser } from "../types";
+import { apiUrl } from "./base";
 import { ApiError, errorFrom, jsonBody, requestJson } from "./request";
 
 export async function getCurrentUser(): Promise<AuthUser | null> {
-  const res = await fetch("/api/auth/me", { credentials: "include" });
+  const res = await fetch(apiUrl("/api/auth/me"), { credentials: "include" });
   if (res.status === 401) return null;
   if (!res.ok) throw new ApiError(res.status, await errorFrom(res));
   const body = (await res.json()) as AuthResponse | AuthUser;

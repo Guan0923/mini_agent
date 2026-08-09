@@ -1,4 +1,5 @@
 import type { ChatMode, PermissionMode, ReasoningEffort, StreamMessage } from "../types";
+import { apiUrl } from "./base";
 import { ApiError, errorFrom, notifyUnauthorized } from "./request";
 
 export interface StreamOptions {
@@ -17,7 +18,7 @@ async function streamEndpoint(
 ): Promise<"completed" | "aborted"> {
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetch(apiUrl(url), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

@@ -828,9 +828,15 @@ sync = [
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
 ]
+web = [
+    { name = "cryptography" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "psycopg-pool" },
+]
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", marker = "extra == 'web'", specifier = ">=44,<50" },
     { name = "email-validator", specifier = ">=2.2,<3" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "huggingface-hub", specifier = ">=0.30,<2" },
@@ -838,7 +844,9 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.28,<2" },
     { name = "mdit-py-plugins", specifier = ">=0.6,<1" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'sync'", specifier = ">=3.2,<4" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'web'", specifier = ">=3.2,<4" },
     { name = "psycopg-pool", marker = "extra == 'sync'", specifier = ">=3.2,<4" },
+    { name = "psycopg-pool", marker = "extra == 'web'", specifier = ">=3.2,<4" },
     { name = "pwdlib", extras = ["argon2"], specifier = ">=0.2,<1" },
     { name = "pylatexenc", specifier = ">=2.10,<3" },
     { name = "pyyaml", specifier = ">=6,<7" },
@@ -848,7 +856,7 @@ requires-dist = [
     { name = "urllib3", specifier = ">=2.2,<3" },
     { name = "uvicorn", specifier = ">=0.34,<1" },
 ]
-provides-extras = ["sync"]
+provides-extras = ["web", "sync"]
 
 [[package]]
 name = "mini-agent-tui"
