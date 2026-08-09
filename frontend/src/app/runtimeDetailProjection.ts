@@ -150,7 +150,7 @@ export function integrateRuntimeNodeFrame(conversation: Conversation, frame: Run
     ...conversation,
     messages,
     runtimeNodes: [...next.values()],
-    lastNodeId: frame.type === "node.delete" ? frame.node.id : conversation.lastNodeId,
+    lastNodeId: frame.node.id,
   };
 }
 

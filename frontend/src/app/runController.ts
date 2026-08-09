@@ -110,10 +110,11 @@ export function createRunController(callbacks: RunControllerCallbacks) {
           decision: undefined,
         }));
       } else if (!sawDone && finalNode) {
-        const content = projectRuntimeNode(finalNode)?.content ?? "";
+        const terminalNode = finalNode;
+        const content = projectRuntimeNode(terminalNode)?.content ?? "";
         callbacks.updateLastMessage(request.conversationId, (item) => ({
           ...item,
-          status: finalNode?.status,
+          status: terminalNode.status,
           content: content || item.content,
           running: false,
           decision: undefined,
