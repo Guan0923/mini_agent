@@ -3,12 +3,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from backend.api.app import create_app
 from backend.api.auth.service import WebAuthSettings
 from backend.api.state import WebAppState
 from backend.cloud import CloudUnavailable
+from backend.storage.auth.types import UserIdentity
+from fastapi.testclient import TestClient
 
 
 def _state(tmp_path: Path, *, cloud_client=None) -> WebAppState:
@@ -29,8 +29,10 @@ def test_guest_login_is_fully_offline_and_reuses_cookie(tmp_path: Path) -> None:
         assert first.status_code == 200, first.text
         user = first.json()["user"]
         assert user["kind"] == "guest"
+        assert user["display_name"] == "游客用户"
         assert state.user_paths(user["id"]).user_db.is_file()
         assert client.get("/api/auth/me").json()["id"] == user["id"]
+        assert client.get("/api/auth/me").json()["display_name"] == "游客用户"
 
         second = client.post("/api/auth/guest")
         assert second.status_code == 200
@@ -92,6 +94,20 @@ def test_legacy_multiple_guests_choose_the_oldest_canonical_identity(tmp_path: P
     assert created is False
     with sqlite3.connect(state.auth.path) as connection:
         assert connection.execute("SELECT guest_id FROM local_device_state WHERE id=1").fetchone()[0] == older
+
+
+def test_account_profile_defaults_to_email_and_blank_name_is_rejected(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    identity = UserIdentity("11111111-1111-4111-8111-111111111111", "user@example.com", "account")
+    state.auth.upsert_identity(identity)
+    token = state.auth.create_session(identity.id, "browser")
+    with TestClient(create_app(state)) as client:
+        client.cookies.set("mini_agent_session", token)
+        response = client.get("/api/auth/me")
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "user@example.com"
+        blank = client.put("/api/auth/profile", json={"display_name": "  ", "agent_preferences": ""})
+        assert blank.status_code == 422
 
 
 def test_account_operations_report_cloud_unavailable_without_clearing_local_state(tmp_path: Path) -> None:

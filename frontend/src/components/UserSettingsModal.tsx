@@ -498,9 +498,9 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
             <Form.Item label="邮箱">
               <Input value={settings.profile.email} disabled />
             </Form.Item>
-            <Form.Item label="显示名称">
+            <Form.Item label="用户名">
               <Input
-                aria-label="显示名称"
+                aria-label="用户名"
                 maxLength={80}
                 value={settings.profile.display_name}
                 onChange={(event) => updateSettings({

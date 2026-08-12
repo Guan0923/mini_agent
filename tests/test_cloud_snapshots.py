@@ -152,5 +152,6 @@ def test_snapshot_round_trip_restores_session_workspace(tmp_path: Path, monkeypa
         restored = _wait_for_job(manager, USER_ID, str(restore["id"]))
         assert restored["status"] == "complete", restored.get("error")
         assert note.read_text(encoding="utf-8") == "snapshot content"
+        assert settings.profile_for_user(USER_ID)["display_name"] == "User"
     finally:
         manager.close()

@@ -146,12 +146,16 @@ def _origin_guard(request: Request) -> None:
 def _identity_payload(request: Request, identity: UserIdentity) -> dict[str, object]:
     pending_reader = getattr(request.app.state.web.auth, "pending_guest_import", None)
     pending = pending_reader(identity.id) if callable(pending_reader) else None
+    profile = request.app.state.web.settings.ensure_profile(
+        identity.id,
+        display_name_default="游客用户" if identity.is_guest else (identity.email or "用户"),
+    )
     return {
         "id": identity.id,
         "email": identity.email,
         "kind": identity.kind,
         "guest_import": pending,
-        **request.app.state.web.settings.profile_for_user(identity.id),
+        **profile,
     }
 
 
@@ -204,12 +208,7 @@ def guest(request: Request, response: Response) -> dict[str, object]:
     try:
         existing = service.identity_from_request(request)
         identity, created_guest = service.get_or_create_guest()
-        if (
-            existing is not None
-            and existing[0].is_guest
-            and existing[0].id == identity.id
-            and existing[1] == "browser"
-        ):
+        if existing is not None and existing[0].is_guest and existing[0].id == identity.id and existing[1] == "browser":
             identity, token = identity, existing[2]
         else:
             ip_address = request.client.host if request.client else "unknown"
@@ -304,7 +303,10 @@ def me(identity: Annotated[UserIdentity, Depends(require_user)], request: Reques
 
 @router.get("/profile")
 def profile(identity: Annotated[UserIdentity, Depends(require_user)], request: Request) -> dict[str, str]:
-    return request.app.state.web.settings.profile_for_user(identity.id)
+    return request.app.state.web.settings.ensure_profile(
+        identity.id,
+        display_name_default="游客用户" if identity.is_guest else (identity.email or "用户"),
+    )
 
 
 @router.put("/profile")
@@ -314,11 +316,14 @@ def update_profile(
     identity: Annotated[UserIdentity, Depends(require_user)],
 ) -> dict[str, str]:
     _origin_guard(request)
-    return request.app.state.web.settings.update_profile(
-        identity.id,
-        display_name=body.display_name,
-        agent_preferences=body.agent_preferences,
-    )
+    try:
+        return request.app.state.web.settings.update_profile(
+            identity.id,
+            display_name=body.display_name,
+            agent_preferences=body.agent_preferences,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/settings")

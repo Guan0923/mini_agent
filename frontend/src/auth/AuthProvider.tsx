@@ -60,7 +60,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [setUser]);
 
   useEffect(() => {
-    if (!user || user.kind === "guest" || !user.guest_import) return;
+    if (!user || user.kind === "guest") return;
     let active = true;
     async function resolveWhenRestoreSettled(): Promise<void> {
       // A first account login can start an automatic cloud restore before the
@@ -80,6 +80,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await new Promise<void>((resolve) => window.setTimeout(resolve, 1000));
       }
       if (!active) return;
+      const latest = await getCurrentUser();
+      if (latest && active) setUserState(latest);
+      if (!active || !latest?.guest_import) return;
       const status = await getGuestImportStatus();
       if (!active || !status.available) return;
       const accepted = typeof window !== "undefined" && window.confirm(
@@ -90,7 +93,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     void resolveWhenRestoreSettled().catch(() => undefined);
     return () => { active = false; };
-  }, [user?.id, user?.kind, user?.guest_import]);
+  }, [user?.id, user?.kind]);
 
   const signOut = useCallback(async () => {
     try {

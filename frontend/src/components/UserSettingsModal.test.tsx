@@ -70,7 +70,7 @@ function renderModal(onClose = vi.fn(), onUserUpdate = vi.fn()) {
     <AntApp>
       <UserSettingsModal
         open
-        user={{ id: "u1", email: "user@example.com", kind: "account" }}
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "user@example.com" }}
         onClose={onClose}
         onUserUpdate={onUserUpdate}
       />
@@ -110,6 +110,7 @@ describe("UserSettingsModal", () => {
   it("switches among profile, agent, and provider sections", async () => {
     renderModal();
     expect(await screen.findByDisplayValue("user@example.com")).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "用户名" })).toHaveValue("旧名字");
 
     await userEvent.click(screen.getByRole("menuitem", { name: "Agent 配置" }));
     expect(screen.getByRole("textbox", { name: "自由文本偏好" })).toBeInTheDocument();

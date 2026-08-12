@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS cloud_credentials (
     expires_at REAL NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    agent_preferences TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL
+);
 """
 
 AUTO_SAVE_RULES = frozenset({"idle_5m", "after_run", "hourly"})
@@ -93,6 +100,7 @@ class UserSettingsStore(AuthSettingsMixin):
         )
         with self._connection() as connection:
             connection.executescript(USER_SETTINGS_SCHEMA)
+        self._migrate_legacy_profile()
 
     @contextmanager
     def _connection(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:

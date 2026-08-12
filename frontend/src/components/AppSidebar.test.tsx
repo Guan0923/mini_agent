@@ -17,7 +17,7 @@ function renderSidebar(archivedCount = 0, conversations: Conversation[] = [conve
   const onProfileUpdate = vi.fn().mockResolvedValue(undefined);
   const view = render(
     <AppSidebar
-      user={{ id: "u1", email: "user@example.com", kind: "account" }}
+      user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
       conversations={conversations}
       archivedCount={archivedCount}
       currentId={conversation.id}
@@ -68,7 +68,7 @@ describe("AppSidebar utility navigation", () => {
     const user = userEvent.setup();
     const { onProfileUpdate } = renderSidebar();
 
-    await user.click(screen.getByRole("button", { name: "个人简介：user@example.com" }));
+    await user.click(screen.getByRole("button", { name: "个人简介：账户名称" }));
     expect(screen.getByText("个人简介", { selector: ".ant-popover-title" })).toBeInTheDocument();
     await user.clear(screen.getByRole("textbox", { name: "用户名" }));
     await user.type(screen.getByRole("textbox", { name: "用户名" }), "小明");
@@ -79,6 +79,26 @@ describe("AppSidebar utility navigation", () => {
       display_name: "小明",
       agent_preferences: "先给结论，再给步骤",
     });
+  });
+  it("uses the guest username instead of an email fallback", () => {
+    render(
+      <AppSidebar
+        user={{ id: "guest", email: null, kind: "guest", display_name: "游客用户" }}
+        conversations={[conversation]}
+        archivedCount={0}
+        currentId={conversation.id}
+        page="chat"
+        onNew={vi.fn()}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onSignOut={vi.fn()}
+        onProfileUpdate={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "个人简介：游客用户" })).toBeInTheDocument();
   });
   it("renders history metadata and scrolls only the hovered overflowing item", () => {
     const second: Conversation = { id: "c2", title: "第二个会话", messages: [] };

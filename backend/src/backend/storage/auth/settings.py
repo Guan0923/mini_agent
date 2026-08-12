@@ -32,6 +32,79 @@ class AuthSettingsMixin:
         store = self._config_store(user_id)
         return store.read() if store is not None else {}
 
+    def _migrate_legacy_profile(self) -> None:
+        """Move the legacy TOML profile into the durable user database once."""
+
+        config_store = getattr(self, "config_store", None)
+        if not isinstance(config_store, UserConfigStore):
+            return
+        legacy = self._config("").get("profile")
+        if not isinstance(legacy, Mapping):
+            legacy = {}
+        legacy_name = str(legacy.get("display_name") or "").strip()
+        legacy_preferences = str(legacy.get("agent_preferences") or "").strip()
+        with self._connection(immediate=True) as connection:
+            marker = connection.execute("SELECT value FROM app_metadata WHERE key = 'profile_migrated_v1'").fetchone()
+            if marker is not None:
+                return
+            row = connection.execute(
+                "SELECT display_name, agent_preferences FROM user_profiles WHERE user_id = ?",
+                (self._profile_user_id(),),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """INSERT INTO user_profiles(user_id, display_name, agent_preferences, updated_at)
+                    VALUES (?, ?, ?, ?)""",
+                    (self._profile_user_id(), legacy_name, legacy_preferences, time.time()),
+                )
+            else:
+                current_name = str(row["display_name"] or "").strip()
+                current_preferences = str(row["agent_preferences"] or "").strip()
+                migrated_name = current_name or legacy_name
+                migrated_preferences = current_preferences or legacy_preferences
+                if migrated_name != current_name or migrated_preferences != current_preferences:
+                    connection.execute(
+                        """UPDATE user_profiles SET display_name = ?, agent_preferences = ?, updated_at = ?
+                        WHERE user_id = ?""",
+                        (migrated_name, migrated_preferences, time.time(), self._profile_user_id()),
+                    )
+            connection.execute("INSERT INTO app_metadata(key, value) VALUES ('profile_migrated_v1', '1')")
+
+    def _profile_user_id(self) -> str:
+        """Return the UUID owning this settings database."""
+
+        return str(self.path.parent.name)
+
+    def ensure_profile(self, user_id: str, *, display_name_default: str) -> dict[str, str]:
+        """Ensure a non-empty profile exists without overwriting custom data."""
+
+        default = str(display_name_default or "").strip()
+        if not default:
+            raise ValueError("display_name_default must not be empty")
+        with self._connection(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT display_name, agent_preferences FROM user_profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                result = {"display_name": default, "agent_preferences": ""}
+                connection.execute(
+                    """INSERT INTO user_profiles(user_id, display_name, agent_preferences, updated_at)
+                    VALUES (?, ?, ?, ?)""",
+                    (user_id, default, "", time.time()),
+                )
+                return result
+            raw_name = str(row["display_name"] or "").strip()
+            name = raw_name or default
+            preferences = str(row["agent_preferences"] or "").strip()
+            if name != raw_name:
+                connection.execute(
+                    """UPDATE user_profiles SET display_name = ?, updated_at = ?
+                    WHERE user_id = ?""",
+                    (name, time.time(), user_id),
+                )
+            return {"display_name": name, "agent_preferences": preferences}
+
     def cloud_token_for_user(self, user_id: str) -> dict[str, object] | None:
         """Read the locally encrypted cloud token for one account."""
 
@@ -64,13 +137,6 @@ class AuthSettingsMixin:
             connection.execute("DELETE FROM cloud_credentials WHERE user_id = ?", (user_id,))
 
     def profile_for_user(self, user_id: str) -> dict[str, str]:
-        config = self._config(user_id)
-        profile = config.get("profile")
-        if isinstance(profile, Mapping):
-            return {
-                "display_name": str(profile.get("display_name") or ""),
-                "agent_preferences": str(profile.get("agent_preferences") or ""),
-            }
         with self._connection() as connection:
             row = connection.execute(
                 "SELECT display_name, agent_preferences FROM user_profiles WHERE user_id = ?",
@@ -394,15 +460,12 @@ class AuthSettingsMixin:
     def update_profile(self, user_id: str, *, display_name: str, agent_preferences: str) -> dict[str, str]:
         display_name = display_name.strip()
         agent_preferences = agent_preferences.strip()
+        if not display_name:
+            raise ValueError("display_name must not be empty")
         if len(display_name) > 80:
             raise ValueError("display_name exceeds 80 characters")
         if len(agent_preferences) > 4000:
             raise ValueError("agent_preferences exceeds 4000 characters")
-        config_store = self._config_store(user_id)
-        if config_store is not None:
-            result = {"display_name": display_name, "agent_preferences": agent_preferences}
-            config_store.update({"profile": result})
-            return result
         now = time.time()
         with self._connection(immediate=True) as connection:
             connection.execute(

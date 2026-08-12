@@ -9,7 +9,7 @@ export interface AuthUser {
   email: string | null;
   kind?: "account" | "guest";
   guest_import?: { guest_id: string; status: "pending"; created_at: number; updated_at: number } | null;
-  display_name?: string;
+  display_name: string;
   agent_preferences?: string;
 }
 

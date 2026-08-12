@@ -58,7 +58,7 @@ function ProfilePopover({ user, onSave }: ProfilePopoverProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [draft, setDraft] = useState({ display_name: "", agent_preferences: "" });
-  const label = user?.display_name?.trim() || user?.email || "用户";
+  const label = user?.display_name?.trim() || "用户";
 
   useEffect(() => {
     if (!open) return;
@@ -72,6 +72,10 @@ function ProfilePopover({ user, onSave }: ProfilePopoverProps) {
   async function save() {
     if (!onSave) return;
     const displayName = draft.display_name.trim();
+    if (!displayName) {
+      setError("用户名不能为空。");
+      return;
+    }
     if (displayName.length > 80) {
       setError("用户名不能超过 80 个字符。");
       return;
@@ -96,7 +100,7 @@ function ProfilePopover({ user, onSave }: ProfilePopoverProps) {
     <div className="profile-popover-content">
       <Input
         aria-label="用户名"
-        placeholder="设置一个显示名称"
+        placeholder="设置一个用户名"
         maxLength={80}
         value={draft.display_name}
         onChange={(event) => setDraft((current) => ({ ...current, display_name: event.target.value }))}
@@ -435,10 +439,10 @@ export default function AppSidebar({
               type="text"
               icon={<UserOutlined />}
               onClick={onOpenSettings}
-              aria-label={"个人简介：" + (user?.display_name?.trim() || user?.email || "用户")}
+              aria-label={"个人简介：" + (user?.display_name?.trim() || "用户")}
             >
-              <Typography.Text ellipsis title={user?.display_name?.trim() || user?.email || "用户"}>
-                {user?.display_name?.trim() || user?.email || "用户"}
+              <Typography.Text ellipsis title={user?.display_name?.trim() || "用户"}>
+                {user?.display_name?.trim() || "用户"}
               </Typography.Text>
             </Button>
           ) : (

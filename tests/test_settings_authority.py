@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from uuid import uuid4
 
-from backend.storage.user_settings import UserSettingsStore
+from backend.configuration import UserConfigStore
 from backend.domain import SystemMessage, ToolSpec, UserMessage
 from backend.providers import (
     ChatCompletionsAdapter,
@@ -13,6 +14,7 @@ from backend.providers import (
     ResponsesAdapter,
 )
 from backend.runtime.core.context import AgentRuntime
+from backend.storage.user_settings import UserSettingsStore
 
 
 def runtime_for(*messages, stream: bool = False) -> AgentRuntime:
@@ -161,3 +163,35 @@ def test_user_settings_are_isolated_and_api_keys_are_not_returned(tmp_path) -> N
         ).fetchone()[0]
     assert raw and "secret-key" not in raw
     assert first.model_config_for_user(first_id).api_key == "secret-key"
+
+
+def test_legacy_profile_is_migrated_to_user_db_once(tmp_path: Path) -> None:
+    user_id = str(uuid4())
+    root = tmp_path / user_id
+    config = UserConfigStore(root / "config.toml")
+    config.update({"profile": {"display_name": "旧名字", "agent_preferences": "旧偏好"}})
+
+    store = UserSettingsStore(root / "user.db")
+    assert store.profile_for_user(user_id) == {"display_name": "旧名字", "agent_preferences": "旧偏好"}
+
+    config.update({"profile": {"display_name": "后来修改", "agent_preferences": "后来偏好"}})
+    assert UserSettingsStore(root / "user.db").profile_for_user(user_id) == {
+        "display_name": "旧名字",
+        "agent_preferences": "旧偏好",
+    }
+
+
+def test_legacy_preferences_fill_an_empty_database_field_without_overwriting_name(tmp_path: Path) -> None:
+    user_id = str(uuid4())
+    root = tmp_path / user_id
+    config = UserConfigStore(root / "config.toml")
+    config.update({"profile": {"display_name": "旧名字", "agent_preferences": "旧偏好"}})
+
+    UserSettingsStore(root / "user.db")
+    with sqlite3.connect(root / "user.db") as connection:
+        connection.execute("UPDATE user_profiles SET display_name = ?, agent_preferences = ?", ("自定义名", ""))
+        connection.execute("DELETE FROM app_metadata WHERE key = 'profile_migrated_v1'")
+        connection.commit()
+
+    reopened = UserSettingsStore(root / "user.db")
+    assert reopened.profile_for_user(user_id) == {"display_name": "自定义名", "agent_preferences": "旧偏好"}

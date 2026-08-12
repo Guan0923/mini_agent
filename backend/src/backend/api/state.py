@@ -111,7 +111,14 @@ class WebAppState:
         from .user_data import user_paths
 
         validate_identity_id(user_id, require_uuid=True)
-        return user_paths(self.data_root, user_id)
+        paths = user_paths(self.data_root, user_id)
+        identity = self.auth.user_by_id(user_id)
+        if identity is not None:
+            self.settings.ensure_profile(
+                user_id,
+                display_name_default="游客用户" if identity.is_guest else (identity.email or "用户"),
+            )
+        return paths
 
     def user_workspace(self, user_id: str, session_id: str) -> Path:
         from .user_data import user_workspace
@@ -167,6 +174,11 @@ class WebAppState:
     def settings_for_user(self, user_id: str) -> dict[str, object]:
         identity = self.auth.user_by_id(user_id)
         email = (identity.email or "") if identity is not None else ""
+        if identity is not None:
+            self.settings.ensure_profile(
+                user_id,
+                display_name_default="游客用户" if identity.is_guest else (email or "用户"),
+            )
         result = self.settings.settings_for_user(user_id, email=email)
         preferences = getattr(self.settings, "sync_preferences_for_user", None)
         sync_state = getattr(self.settings, "sync_state_for_user", None)
