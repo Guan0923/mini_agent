@@ -165,9 +165,12 @@ def test_plan_review_must_not_be_mixed_with_execution_tools(tmp_path: Path) -> N
     assert all("only tool call" in (tool.content or "") for tool in rejected.tool_messages)
 
 
-def test_repeated_invalid_plan_review_calls_stop_at_recovery_limit(tmp_path: Path) -> None:
+def test_repeated_invalid_plan_review_calls_continue_until_model_recovers(tmp_path: Path) -> None:
     planner = ScriptedPlanPlanner(
-        [AssistantMessage(tool_messages=[review_call(" ", f"review_{index}")]) for index in range(3)]
+        [
+            *[AssistantMessage(tool_messages=[review_call(" ", f"review_{index}")]) for index in range(5)],
+            AssistantMessage(content="The plan could not be prepared."),
+        ]
     )
     runner = AgentRunner(planner, ToolRegistry(tmp_path))
     runtime = runner.new_runtime(
@@ -178,9 +181,9 @@ def test_repeated_invalid_plan_review_calls_stop_at_recovery_limit(tmp_path: Pat
 
     result = runner.run(runtime)
 
-    assert result.status == "failed"
-    assert result.final_answer == "Stopped after repeated invalid request_plan_review calls."
-    assert len(result.actions) == 3
+    assert result.status == "completed"
+    assert result.final_answer == "The plan could not be prepared."
+    assert len(result.actions) == 5
 
 
 class StreamingPlanPlanner:

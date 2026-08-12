@@ -204,7 +204,7 @@ export default function ChatPage({
           if (kind === "response_delta" && !nodeProtocol) {
             const content = (message.data?.content as string | undefined) ?? message.message ?? "";
             if (content) appendDelta(content, conversationId);
-          } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result" || kind === "tool_failed") {
+          } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result") {
             updateLast((item) => appendLegacyRuntimeEvent(item, {
               kind,
               message: message.message ?? "",

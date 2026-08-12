@@ -83,13 +83,8 @@ class RuntimeState:
             "model": self.model,
             "request_parameters": self.request_parameters,
             "runner_settings": {
-                "max_retries": self.runner_settings.max_retries,
-                "max_model_repairs": self.runner_settings.max_model_repairs,
                 "max_transport_retries": self.runner_settings.max_transport_retries,
-                "max_tool_recoveries": self.runner_settings.max_tool_recoveries,
-                "max_model_turns": self.runner_settings.max_model_turns,
                 "max_tool_calls": self.runner_settings.max_tool_calls,
-                "max_replans": self.runner_settings.max_replans,
                 "strategy": self.runner_settings.strategy,
                 "log_full_messages": self.runner_settings.log_full_messages,
             },
@@ -120,7 +115,19 @@ class RuntimeState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RuntimeState:
-        settings = data.get("runner_settings") or {}
+        raw_settings = data.get("runner_settings") or {}
+        legacy_tool_calls = raw_settings.get("max_actions") if isinstance(raw_settings, dict) else None
+        settings = {
+            key: raw_settings[key]
+            for key in ("max_transport_retries", "max_tool_calls", "strategy", "log_full_messages")
+            if isinstance(raw_settings, dict) and key in raw_settings
+        }
+        if (
+            "max_tool_calls" not in settings
+            and isinstance(legacy_tool_calls, int)
+            and not isinstance(legacy_tool_calls, bool)
+        ):
+            settings["max_tool_calls"] = legacy_tool_calls
         active_data = data.get("active_message")
         active_message = None
         if isinstance(active_data, dict):

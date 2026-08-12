@@ -79,8 +79,8 @@ class LLMClient:
         if runtime.exchange.exchange_id is None:
             runtime.exchange.exchange_id = runtime.next_exchange_id()
         publish = runtime.services.publish or (lambda _event: None)
-        max_retries = runtime.state.runner_settings.max_transport_retries
-        for attempt in range(max_retries + 1):
+        max_transport_retries = runtime.state.runner_settings.max_transport_retries
+        for attempt in range(max_transport_retries + 1):
             try:
                 prepared = self._run_once(runtime, attempt=attempt + 1)
                 self._last_request_diagnostics["transport_attempts"] = attempt + 1
@@ -89,7 +89,7 @@ class LLMClient:
                 self._publish_request_failure(runtime, exc, publish)
                 raise
             except ModelTransportError as exc:
-                if exc.retryable and attempt < max_retries:
+                if exc.retryable and attempt < max_transport_retries:
                     delay = exc.retry_after if exc.retry_after is not None else 0.5 * (2**attempt)
                     publish(
                         RuntimeEvent(
@@ -97,7 +97,7 @@ class LLMClient:
                             str(exc),
                             {
                                 "attempt": attempt + 1,
-                                "max_retries": max_retries,
+                                "max_transport_retries": max_transport_retries,
                                 "delay_seconds": delay,
                                 "status_code": exc.status_code,
                             },

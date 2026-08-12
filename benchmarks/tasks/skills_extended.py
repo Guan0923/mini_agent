@@ -38,7 +38,7 @@ TASKS = (
             content_contains("CHANGELOG.md", "(wrote via release-notes)"),
             skill_activated("release-notes"),
         ),
-        budgets=Budgets(max_model_turns=7, max_tool_calls=16),
+        budgets=Budgets(max_tool_calls=16),
         planner_modes=frozenset({"llm"}),
     ),
 )

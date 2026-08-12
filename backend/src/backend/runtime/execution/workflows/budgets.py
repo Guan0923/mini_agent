@@ -30,7 +30,7 @@ def _budget_fallback(runtime: AgentRuntime, reason: str) -> str:
 
 def _fail_for_budget(runtime: AgentRuntime, limit_type: str, reason: str) -> None:
     settings = runtime.state.runner_settings
-    limit = settings.max_model_turns if limit_type == "model_turns" else settings.max_tool_calls
+    limit = settings.max_tool_calls
     capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
     answer = ""
     source = "fallback"
@@ -63,21 +63,13 @@ def _fail_for_budget(runtime: AgentRuntime, limit_type: str, reason: str) -> Non
 
 
 def _claim_model_turn(runtime: AgentRuntime, operation: str) -> bool:
-    limit = runtime.state.runner_settings.max_model_turns
-    if runtime.run.model_turns >= limit:
-        _fail_for_budget(
-            runtime,
-            "model_turns",
-            f"the maximum of {limit} model turns was reached before a final answer.",
-        )
-        return False
     runtime.run.model_turns += 1
     runtime.run.add_event(
         "model",
         "Logical model turn started",
         operation=operation,
         model_turn=runtime.run.model_turns,
-        limit=limit,
+        unlimited=True,
     )
     runtime.save()
     return True

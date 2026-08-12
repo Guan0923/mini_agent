@@ -309,7 +309,6 @@ def test_automatic_skill_selection_has_a_separate_budget_counter() -> None:
         planner,
         ToolRegistry(),
         strategy="reactive",
-        max_model_turns=1,
         skill_catalog=SkillCatalog((definition("demo"),)),
         skill_auto_select=True,
     )

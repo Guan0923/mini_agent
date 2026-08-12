@@ -14,9 +14,11 @@ from backend.storage.settings_contract import (
     DEFAULT_CAPABILITY_CONFIG,
     DEFAULT_PROFILE,
     DEFAULT_PROVIDER_CONFIG,
+    DEFAULT_RUNTIME_CONFIG,
     SUPPORTED_DISPLAY_MODES,
     normalize_agent_config,
     normalize_provider_config,
+    normalize_runtime_config,
     timezone_options,
 )
 
@@ -350,12 +352,18 @@ class AuthSettingsMixin:
         return ModelConfig.from_mapping({**values, "api_key": api_key})
 
     def settings_for_user(self, user_id: str, *, email: str = "") -> dict[str, object]:
+        runtime = self.runtime_config_for_user(user_id).get("runtime", {})
+        runtime_config = normalize_runtime_config(
+            DEFAULT_RUNTIME_CONFIG,
+            runtime if isinstance(runtime, Mapping) else {},
+        )
         return {
             "profile": {"email": email, **self.profile_for_user(user_id)},
             "agent_config": self.agent_config_for_user(user_id),
             "provider_config": self.provider_config_for_user(user_id),
             "provider_configs": self.provider_configs_for_user(user_id),
             "capability_config": self.capability_config_for_user(user_id),
+            "runtime_config": runtime_config,
             "timezone_options": timezone_options(),
         }
 
@@ -380,8 +388,28 @@ class AuthSettingsMixin:
         config = self._config(user_id)
         runtime = config.get("runtime")
         if isinstance(runtime, Mapping):
-            return {"runtime": dict(runtime)}
-        return {"runtime": {"log_full_messages": True}}
+            return {
+                "runtime": {
+                    "log_full_messages": bool(runtime.get("log_full_messages", True)),
+                    **normalize_runtime_config(DEFAULT_RUNTIME_CONFIG, runtime),
+                }
+            }
+        return {"runtime": {"log_full_messages": True, **DEFAULT_RUNTIME_CONFIG}}
+
+    def update_runtime_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, object]:
+        current = self.runtime_config_for_user(user_id).get("runtime", {})
+        result = normalize_runtime_config(
+            current if isinstance(current, Mapping) else DEFAULT_RUNTIME_CONFIG,
+            values,
+        )
+        config_store = self._config_store(user_id)
+        if config_store is None:
+            raise ValueError("runtime settings require a local config store")
+        current = config_store.read().get("runtime")
+        runtime = dict(current) if isinstance(current, Mapping) else {}
+        runtime.update(result)
+        config_store.update({"runtime": runtime})
+        return result
 
     def device_id_for_user(self, user_id: str) -> str:
         config_store = self._config_store(user_id)

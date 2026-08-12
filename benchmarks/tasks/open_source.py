@@ -44,7 +44,7 @@ TASKS = (
         ),
         seed=Seed(fixture="terminal-analyze-access-log"),
         checkers=(python_verifier("terminal_access_log"),),
-        budgets=Budgets(max_model_turns=8, max_tool_calls=20),
+        budgets=Budgets(max_tool_calls=20),
         tags=("terminal", "data-analysis", "text-processing"),
     ),
     BenchmarkTask(
@@ -68,7 +68,7 @@ TASKS = (
         ),
         seed=Seed(fixture="terminal-cancel-async-tasks"),
         checkers=(python_verifier("terminal_cancel_async", timeout_seconds=12),),
-        budgets=Budgets(max_model_turns=12, max_tool_calls=32, max_replans=3),
+        budgets=Budgets(max_tool_calls=32),
         tags=("terminal", "software-engineering", "async", "concurrency"),
     ),
     BenchmarkTask(
@@ -91,7 +91,7 @@ TASKS = (
         ),
         seed=Seed(fixture="terminal-countdown-462"),
         checkers=(python_verifier("terminal_countdown"),),
-        budgets=Budgets(max_model_turns=6, max_tool_calls=16),
+        budgets=Budgets(max_tool_calls=16),
         tags=("terminal", "mathematics", "safe-evaluation"),
     ),
     BenchmarkTask(
@@ -114,7 +114,7 @@ TASKS = (
         ),
         seed=Seed(fixture="swe-requests-2317"),
         checkers=(python_verifier("swe_requests"),),
-        budgets=Budgets(max_model_turns=10, max_tool_calls=28, max_replans=3),
+        budgets=Budgets(max_tool_calls=28),
         tags=("swe", "requests", "regression"),
     ),
     BenchmarkTask(
@@ -137,7 +137,7 @@ TASKS = (
         ),
         seed=Seed(fixture="swe-pytest-11143"),
         checkers=(python_verifier("swe_pytest"),),
-        budgets=Budgets(max_model_turns=10, max_tool_calls=28, max_replans=3),
+        budgets=Budgets(max_tool_calls=28),
         tags=("swe", "pytest", "ast", "regression"),
     ),
     BenchmarkTask(
@@ -160,7 +160,7 @@ TASKS = (
         ),
         seed=Seed(fixture="swe-astropy-14365"),
         checkers=(python_verifier("swe_astropy"),),
-        budgets=Budgets(max_model_turns=10, max_tool_calls=28, max_replans=3),
+        budgets=Budgets(max_tool_calls=28),
         tags=("swe", "astropy", "parser", "regression"),
     ),
     BenchmarkTask(
@@ -198,7 +198,7 @@ TASKS = (
             ),
         ),
         checkers=(python_verifier("tau_retail_exchange"),),
-        budgets=Budgets(max_model_turns=14, max_tool_calls=40, max_replans=3),
+        budgets=Budgets(max_tool_calls=40),
         tags=("tau3", "mcp", "retail", "stateful"),
     ),
     BenchmarkTask(
@@ -233,7 +233,7 @@ TASKS = (
             ),
         ),
         checkers=(python_verifier("tau_retail_cancel_all"),),
-        budgets=Budgets(max_model_turns=12, max_tool_calls=32, max_replans=3),
+        budgets=Budgets(max_tool_calls=32),
         tags=("tau3", "mcp", "retail", "policy"),
     ),
     BenchmarkTask(
@@ -264,7 +264,7 @@ TASKS = (
             ),
         ),
         checkers=(python_verifier("tau_airline_baggage"),),
-        budgets=Budgets(max_model_turns=10, max_tool_calls=24, max_replans=2),
+        budgets=Budgets(max_tool_calls=24),
         tags=("tau3", "mcp", "airline", "read-only"),
     ),
 )

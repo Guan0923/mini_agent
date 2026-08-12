@@ -224,7 +224,7 @@ def test_dynamic_replan_replaces_unfinished_steps_after_tool_failure(tmp_path: P
     assert state.plan.steps[0].status == "completed"
     assert (tmp_path / "fallback.txt").read_text(encoding="utf-8") == "fallback"
     assert not (tmp_path / "old.txt").exists()
-    assert "replan_requested" in [event.kind for event in events]
+    assert "replan_requested" in [event.kind for event in state.events]
     assert "replan_applied" in [event.kind for event in events]
 
 
@@ -257,7 +257,7 @@ class PlanWriteAttemptPlanner:
 
 def test_plan_mode_blocks_write_tools_during_planning(tmp_path: Path) -> None:
     events = []
-    state = AgentRunner(PlanWriteAttemptPlanner(), ToolRegistry(tmp_path), max_tool_recoveries=0).run(
+    state = AgentRunner(PlanWriteAttemptPlanner(), ToolRegistry(tmp_path)).run(
         "draft a plan",
         mode="plan",
         on_event=events.append,
@@ -266,7 +266,7 @@ def test_plan_mode_blocks_write_tools_during_planning(tmp_path: Path) -> None:
 
     assert state.status == "failed"
     assert not (tmp_path / "blocked.txt").exists()
-    assert "Read-only Plan mode blocked tool" in (state.final_answer or "")
+    assert "Execution budget exhausted" in (state.final_answer or "")
     assert "approval_requested" not in [event.kind for event in events]
 
 
@@ -305,14 +305,12 @@ def test_reactive_workflow_feeds_tool_errors_back_to_the_planner(tmp_path: Path)
     planner = RecoveringToolPlanner()
     events = []
 
-    state = AgentRunner(planner, ToolRegistry(tmp_path), max_retries=0).run(
-        "recover from a missing file", on_event=events.append
-    )
+    state = AgentRunner(planner, ToolRegistry(tmp_path)).run("recover from a missing file", on_event=events.append)
 
     assert state.status == "completed"
     assert state.final_answer == "recovered"
     assert "[Tool error]" in planner.histories[1][-1]["content"]
-    recoveries = [event for event in events if event.kind == "tool_recovery"]
+    recoveries = [event for event in state.events if event.kind == "tool_recovery"]
     assert [event.data["attempt"] for event in recoveries] == [1]
 
 
@@ -330,16 +328,17 @@ class ConsecutiveFailurePlanner:
         return StrategySelection("reactive", "The test exercises the recovery budget.")
 
 
-def test_reactive_tool_recovery_stops_after_two_consecutive_failures(tmp_path: Path) -> None:
+def test_reactive_tool_recovery_continues_until_tool_budget(tmp_path: Path) -> None:
     events = []
-    state = AgentRunner(ConsecutiveFailurePlanner(), ToolRegistry(tmp_path), max_retries=0).run(
+    state = AgentRunner(ConsecutiveFailurePlanner(), ToolRegistry(tmp_path), max_tool_calls=3).run(
         "keep failing", on_event=events.append
     )
 
     assert state.status == "failed"
-    recoveries = [event for event in events if event.kind == "tool_recovery"]
-    assert [event.data["attempt"] for event in recoveries] == [1, 2]
-    assert len([event for event in events if event.kind == "tool_failed"]) == 3
+    assert len(state.actions) == 3
+    recoveries = [event for event in state.events if event.kind == "tool_recovery"]
+    assert [event.data["attempt"] for event in recoveries] == [1, 2, 3]
+    assert not any(event.kind in {"tool_failed", "tool_recovery"} for event in events)
 
 
 def test_default_runner_confirmation_still_protects_mutating_tools(tmp_path: Path) -> None:

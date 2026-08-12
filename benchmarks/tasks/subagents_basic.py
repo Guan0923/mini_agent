@@ -37,7 +37,7 @@ TASKS = (
             subagents_completed(2),
             subagents_failed(0),
         ),
-        budgets=Budgets(max_model_turns=10, max_tool_calls=32, max_replans=3),
+        budgets=Budgets(max_tool_calls=32),
         planner_modes=frozenset({"llm"}),
     ),
 )

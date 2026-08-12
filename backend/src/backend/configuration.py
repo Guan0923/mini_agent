@@ -266,7 +266,7 @@ def initialize_config(paths: ClientPaths, workspace: Path) -> dict[str, object]:
             "context_size": 1_024_000,
             "tokenizer_model": "deepseek-ai/DeepSeek-V3",
         },
-        "runtime": {"log_full_messages": True},
+        "runtime": {"log_full_messages": True, "max_tool_calls": 32},
         "capabilities": {"skills": True, "rag": False, "plugins": False, "mcp": False},
         "sync": {"auto_save_enabled": False, "auto_save_rule": "idle_5m"},
     }

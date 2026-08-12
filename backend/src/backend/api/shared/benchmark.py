@@ -62,10 +62,7 @@ def list_tasks(request: Request) -> list[dict]:
             "prompt": task.prompt,
             "difficulty": task.difficulty,
             "budgets": {
-                "max_model_turns": task.budgets.max_model_turns,
                 "max_tool_calls": task.budgets.max_tool_calls,
-                "max_replans": task.budgets.max_replans,
-                "max_retries": task.budgets.max_retries,
             },
             "tags": list(task.tags),
             "source": {

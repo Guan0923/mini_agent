@@ -119,10 +119,7 @@ export interface TaskInfo {
   difficulty: string;
   prompt: string;
   budgets: {
-    max_model_turns: number;
     max_tool_calls: number;
-    max_replans: number;
-    max_retries: number;
   };
   tags: string[];
   source: {

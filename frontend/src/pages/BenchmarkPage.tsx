@@ -222,7 +222,7 @@ export default function BenchmarkPage() {
                           <Typography.Text strong>测试 Prompt</Typography.Text>
                           <pre className="benchmark-task-prompt">{task.prompt}</pre>
                           <Typography.Text type="secondary">
-                            预算：模型轮次 {task.budgets.max_model_turns} · 工具调用 {task.budgets.max_tool_calls} · 重规划 {task.budgets.max_replans} · 重试 {task.budgets.max_retries}
+                            预算：工具调用 {task.budgets.max_tool_calls}
                           </Typography.Text>
                           {task.tags.length > 0 ? <div className="benchmark-task-tags">{task.tags.map((tag) => <Tag key={tag}>{tag}</Tag>)}</div> : null}
                         </>

@@ -37,6 +37,8 @@ class PlanWorkflow:
             )
         except PlanningError as exc:
             _publish_repairs(runtime, capabilities)
+            if cancel_if_requested(runtime):
+                return None
             fail_run(runtime, f"Planning failed: {exc}", **planning_failure_data(exc, capabilities.name))
             return None
         finally:
@@ -45,14 +47,9 @@ class PlanWorkflow:
         return plan
 
     def _activate(self, runtime: AgentRuntime, plan: ExecutionPlan) -> bool:
-        remaining = runtime.state.runner_settings.max_tool_calls - len(runtime.run.actions)
-        if len(plan.steps) > remaining:
-            _fail_for_budget(
-                runtime,
-                "tool_calls",
-                f"the plan requires {len(plan.steps)} tool calls, but only {remaining} remained.",
-            )
-            return False
+        # A plan is a proposal, not an execution reservation.  Tool calls are
+        # claimed one at a time below so a replacement plan can continue after
+        # failures without bypassing the shared max_tool_calls budget.
         runtime.run.plan = plan
         snapshots = _plan_step_snapshots(plan)
         runtime.run.add_event(
@@ -95,6 +92,8 @@ class PlanWorkflow:
             replacement = replanner.replan(runtime)
         except PlanningError as exc:
             _publish_repairs(runtime, capabilities)
+            if cancel_if_requested(runtime):
+                return False
             fail_run(runtime, f"Replan failed: {exc}", **planning_failure_data(exc, capabilities.name))
             return False
         _publish_repairs(runtime, capabilities)
@@ -108,6 +107,13 @@ class PlanWorkflow:
         return self._activate(runtime, replacement)
 
     def _execute_step(self, runtime: AgentRuntime, step: PlanStep) -> ToolStepResult:
+        if len(runtime.run.actions) >= runtime.state.runner_settings.max_tool_calls:
+            _fail_for_budget(
+                runtime,
+                "tool_calls",
+                f"the maximum of {runtime.state.runner_settings.max_tool_calls} tool calls was reached before the next plan step.",
+            )
+            return ToolStepResult(success=False, error="Tool call budget exhausted.")
         step.status = "running"
         runtime.run.actions.append(step.tool_message)
         runtime.state.active_message = AssistantMessage(tool_messages=[step.tool_message])

@@ -33,10 +33,17 @@ def build_user_application(
     log_full_messages = runtime_values.get("log_full_messages", True) if isinstance(runtime_values, dict) else True
     if not isinstance(log_full_messages, bool):
         log_full_messages = True
+    max_tool_calls = runtime_values.get("max_tool_calls", 32) if isinstance(runtime_values, dict) else 32
+    if not isinstance(max_tool_calls, int) or isinstance(max_tool_calls, bool):
+        max_tool_calls = 32
     application = application_builder(
         state.user_workspace(user_id, session_id),
         planner_name="llm",
-        settings=RunnerSettings(log_full_messages=log_full_messages),
+        settings=RunnerSettings(
+            max_transport_retries=5,
+            max_tool_calls=max_tool_calls,
+            log_full_messages=log_full_messages,
+        ),
         project_mcp_enabled=False,
         user_preferences=user_preferences,
         paths=state.user_paths(user_id),

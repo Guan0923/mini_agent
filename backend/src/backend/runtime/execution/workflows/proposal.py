@@ -8,7 +8,6 @@ from backend.planning import PlannerCapabilities
 from ...conversation.steering import collect_steering, consume_steering
 from ...conversation.user_input import REQUEST_USER_INPUT_NAME
 from ...core.context import AgentRuntime
-from ...core.events import RuntimeEvent
 from ...planning.review import REQUEST_PLAN_REVIEW_NAME
 from ..lifecycle.cancellation import cancel_if_requested
 from ..lifecycle.outcomes import cancel_run, fail_run, planning_failure_data, record_plan_feedback
@@ -21,9 +20,9 @@ from .common import (
     _fail_pending_tools,
     _finish_assistant,
     _model_text_stream,
-    _publish,
     _publish_assistant_message,
     _publish_repairs,
+    _publish_tool_recovery,
     _record_reasoning,
     _start_assistant,
     _truncate,
@@ -41,7 +40,6 @@ class PlanProposalWorkflow(PlanControlMixin):
         if planner is None:
             fail_run(runtime, f"Planner {capabilities.name!r} does not support plan proposals.")
             return None
-        consecutive_failures = 0
         while True:
             if cancel_if_requested(runtime):
                 return None
@@ -55,6 +53,8 @@ class PlanProposalWorkflow(PlanControlMixin):
             except PlanningError as exc:
                 close()
                 _publish_repairs(runtime, capabilities)
+                if cancel_if_requested(runtime):
+                    return None
                 fail_run(runtime, f"Plan creation failed: {exc}", **planning_failure_data(exc, capabilities.name))
                 return None
             except BaseException:
@@ -79,25 +79,14 @@ class PlanProposalWorkflow(PlanControlMixin):
                 _reject_over_budget_tools(runtime, response)
                 return None
             if any(tool.name == REQUEST_USER_INPUT_NAME for tool in response.tool_messages):
-                answered = self._request_user_input(runtime, response)
+                self._request_user_input(runtime, response)
                 if runtime.run.status != "running":
                     return None
-                if answered:
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    if consecutive_failures > runtime.state.runner_settings.max_tool_recoveries:
-                        fail_run(runtime, "Stopped after repeated invalid request_user_input calls.")
-                        return None
                 continue
             if any(tool.name == REQUEST_PLAN_REVIEW_NAME for tool in response.tool_messages):
                 plan = self._request_plan_review(runtime, response)
                 if plan is not None:
                     return PlanProposalResult(response, plan, streamed.content)
-                consecutive_failures += 1
-                if consecutive_failures > runtime.state.runner_settings.max_tool_recoveries:
-                    fail_run(runtime, "Stopped after repeated invalid request_plan_review calls.")
-                    return None
                 continue
             _start_assistant(runtime, response)
             steered = False
@@ -135,34 +124,10 @@ class PlanProposalWorkflow(PlanControlMixin):
                     )
                     steered = True
                     break
-                if outcome.success:
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
+                if not outcome.success:
                     error = outcome.error or "Tool failed."
                     tool.content = f"{tool.name} failed: {_truncate(error)}"
-                    if consecutive_failures <= runtime.state.runner_settings.max_tool_recoveries:
-                        runtime.run.add_event(
-                            "tool_recovery",
-                            f"Recovering from {tool.name} failure",
-                            tool=tool.name,
-                            call_id=tool.call_id,
-                            error=_truncate(error),
-                            attempt=consecutive_failures,
-                        )
-                        _publish(
-                            runtime,
-                            RuntimeEvent(
-                                "tool_recovery",
-                                _truncate(error),
-                                {"tool": tool.name, "call_id": tool.call_id, "attempt": consecutive_failures},
-                            ),
-                        )
+                    _publish_tool_recovery(runtime, tool, error)
             if steered:
                 continue
             _finish_assistant(runtime)
-            if consecutive_failures > runtime.state.runner_settings.max_tool_recoveries:
-                failed = next((tool for tool in reversed(response.tool_messages) if tool.status == "failed"), None)
-                details = failed.content if failed is not None else "unknown error"
-                fail_run(runtime, f"Stopped: {details}")
-                return None

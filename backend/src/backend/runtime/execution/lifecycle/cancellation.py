@@ -40,13 +40,7 @@ def cancel_if_requested(runtime: AgentRuntime) -> bool:
                     error=tool.content,
                 )
                 publish = runtime.services.publish or (lambda _event: None)
-                publish(
-                    RuntimeEvent(
-                        "tool_failed",
-                        tool.content,
-                        {"tool": tool.name, "call_id": tool.call_id},
-                    )
-                )
+                publish(RuntimeEvent("tool_failed", tool.content, {"tool": tool.name, "call_id": tool.call_id}))
         if not any(message is active for message in runtime.state.messages):
             runtime.state.messages.append(active)
         runtime.run.history = runtime.state.messages

@@ -36,6 +36,19 @@ DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
     "api_key_configured": False,
 }
 DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {}
+DEFAULT_RUNTIME_CONFIG: dict[str, object] = {"max_tool_calls": 32}
+
+
+def normalize_runtime_config(current: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:
+    """Merge and validate execution limits stored per authenticated user."""
+
+    raw = values.get("max_tool_calls", current.get("max_tool_calls", 32))
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError("max_tool_calls must be an integer")
+    max_tool_calls = raw
+    if not 1 <= max_tool_calls <= 1000:
+        raise ValueError("max_tool_calls must be between 1 and 1000")
+    return {"max_tool_calls": max_tool_calls}
 
 
 def normalize_agent_config(current: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:

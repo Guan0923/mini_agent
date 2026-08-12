@@ -340,6 +340,8 @@ def get_session_transcript(
                     if not any(item.get("kind") == "thinking" for item in payload["events"]):
                         payload["events"].append({"kind": "thinking", "message": event.message, "data": event_data})
                 elif event.kind in {"tool_call", "tool_result", "tool_failed"}:
+                    if event.kind in {"tool_failed"}:
+                        continue
                     call_id = str(event_data.get("call_id") or "")
                     already_present = any(
                         item.get("kind") == event.kind
@@ -390,6 +392,8 @@ def get_session_transcript(
                     "tool_result",
                     "tool_failed",
                 }:
+                    if event.kind in {"tool_failed"}:
+                        continue
                     payload["events"].append({"kind": event.kind, "message": event.message, "data": dict(event.data)})
                 elif event.kind == "error":
                     payload.setdefault("error", event.message)

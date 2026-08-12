@@ -24,7 +24,7 @@ TASKS = (
             content_contains("notes/missing.txt", "UNKNOWN:D4"),
             tool_used("mcp_bench_demo_inventory_lookup"),
         ),
-        budgets=Budgets(max_model_turns=7, max_tool_calls=16),
+        budgets=Budgets(max_tool_calls=16),
         planner_modes=frozenset({"llm"}),
     ),
 )

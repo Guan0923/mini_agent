@@ -38,6 +38,9 @@ router = APIRouter(prefix="/api")
 router.include_router(decisions_router)
 
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+_HIDDEN_RECOVERABLE_EVENTS = frozenset(
+    {"tool_failed", "tool_recovery", "model_repair", "model_retry", "replan_requested"}
+)
 
 
 class ChatRequest(BaseModel):
@@ -173,6 +176,10 @@ def _stream(
             return
         if bridge is not None:
             bridge.handle(item)
+            if getattr(item, "kind", "") in _HIDDEN_RECOVERABLE_EVENTS:
+                return
+            return
+        if getattr(item, "kind", "") in _HIDDEN_RECOVERABLE_EVENTS:
             return
         payload = _event_payload(item)
         if item.kind == "run_finished":

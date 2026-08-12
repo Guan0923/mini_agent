@@ -8,6 +8,7 @@ const api = vi.hoisted(() => ({
   getSettings: vi.fn(),
   updateProfile: vi.fn(),
   updateAgentConfig: vi.fn(),
+  updateRuntimeConfig: vi.fn(),
   updateProviderConfig: vi.fn(),
   addProviderConfig: vi.fn(),
   updateProviderConfigById: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock("../api", () => api);
 const settings = {
   profile: { email: "user@example.com", display_name: "旧名字", agent_preferences: "" },
   agent_config: { tone: "balanced", verbosity: "balanced", initiative: "balanced", custom_instructions: "" },
+  runtime_config: { max_tool_calls: 32 },
   provider_config: {
     id: "provider-1",
     is_active: true,
@@ -86,6 +88,7 @@ describe("UserSettingsModal", () => {
     api.getSettings.mockResolvedValue(structuredClone(settings));
     api.updateProfile.mockResolvedValue({ display_name: "新名字", agent_preferences: "" });
     api.updateAgentConfig.mockResolvedValue(settings.agent_config);
+    api.updateRuntimeConfig.mockResolvedValue(settings.runtime_config);
     api.updateProviderConfig.mockResolvedValue(settings.provider_config);
     api.getSyncStatus.mockResolvedValue({
       preferences: settings.sync_preferences,
@@ -113,6 +116,8 @@ describe("UserSettingsModal", () => {
 
     await userEvent.click(screen.getByRole("menuitem", { name: "Agent 配置" }));
     expect(screen.getByRole("textbox", { name: "自由文本偏好" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("menuitem", { name: "运行配置" }));
+    expect(screen.getByRole("spinbutton", { name: "工具调用上限" })).toHaveValue("32");
 
     await userEvent.click(screen.getByRole("menuitem", { name: "添加提供商" }));
     expect(screen.getByText("Base URL")).toBeInTheDocument();

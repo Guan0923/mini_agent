@@ -160,35 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         help="Execution strategy override (default: auto).",
     )
-    parser.add_argument(
-        "--max-model-turns", type=int, default=8, help="Maximum logical model turns per task (default: 8)."
-    )
     parser.add_argument("--max-tool-calls", type=int, help="Maximum accepted tool calls per task (default: 32).")
-    parser.add_argument(
-        "--max-actions",
-        type=int,
-        help="Deprecated alias for --max-tool-calls; cannot be combined with it.",
-    )
-    parser.add_argument("--max-retries", type=int, default=1, help="Retries for a failed tool call (default: 1).")
-    parser.add_argument(
-        "--max-model-repairs",
-        type=int,
-        default=2,
-        help="Retries for malformed model output (default: 2).",
-    )
-    parser.add_argument(
-        "--max-transport-retries",
-        type=int,
-        default=2,
-        help="Retries for transient model transport failures (default: 2).",
-    )
-    parser.add_argument(
-        "--max-tool-recoveries",
-        type=int,
-        default=2,
-        help="Consecutive LLM recovery decisions after tool failures (default: 2).",
-    )
-    parser.add_argument("--max-replans", type=int, default=2, help="Maximum dynamic replans per task (default: 2).")
     parser.add_argument("--resume", metavar="SESSION_ID", help="Resume an existing workspace session by ID.")
     parser.add_argument(
         "--server",
@@ -207,12 +179,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Review and trust this workspace's project MCP configuration, then exit.",
     )
     args = parser.parse_args(argv)
-    if args.max_actions is not None and args.max_tool_calls is not None:
-        parser.error("--max-actions and --max-tool-calls cannot be used together.")
     tool_budget: dict[str, int] = {}
-    if args.max_actions is not None:
-        tool_budget["max_actions"] = args.max_actions
-    elif args.max_tool_calls is not None:
+    if args.max_tool_calls is not None:
         tool_budget["max_tool_calls"] = args.max_tool_calls
     if args.server:
         return _run_network_task(args)
@@ -230,12 +198,7 @@ def main(argv: list[str] | None = None) -> int:
             return _trust_project_mcp(parser, mcp_plan, trust_store)
         project_mcp_enabled = _project_mcp_policy(parser, mcp_plan, trust_store)
         settings = RunnerSettings(
-            max_model_turns=args.max_model_turns,
-            max_retries=args.max_retries,
-            max_model_repairs=args.max_model_repairs,
-            max_transport_retries=args.max_transport_retries,
-            max_tool_recoveries=args.max_tool_recoveries,
-            max_replans=args.max_replans,
+            max_transport_retries=5,
             strategy=args.strategy,
             **tool_budget,
             log_full_messages=log_full_messages_from_toml(paths.config_file),

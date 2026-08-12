@@ -50,7 +50,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", type=Path, help="config.toml to seed the sandbox with (default ~/mini_agent/config.toml)."
     )
     parser.add_argument("--keep-workspaces", action="store_true", help="Keep per-task workspaces for debugging.")
-    parser.add_argument("--max-model-turns", type=int, help="Override max model turns for every task.")
     parser.add_argument("--max-tool-calls", type=int, help="Override max tool calls for every task.")
     parser.add_argument("--repeat", type=_positive_int, default=1, help="Run every selected task N times (default: 1).")
     return parser
@@ -149,7 +148,6 @@ def main(argv: list[str] | None = None) -> int:
                 planner=args.planner,
                 sandbox=sandbox,
                 keep_workspaces=args.keep_workspaces,
-                max_model_turns=args.max_model_turns,
                 max_tool_calls=args.max_tool_calls,
                 attempt=attempt,
             )

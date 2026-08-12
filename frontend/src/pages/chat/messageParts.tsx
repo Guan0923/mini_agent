@@ -1,5 +1,5 @@
 import { Alert, Avatar, BorderBeam, Collapse, App as AntApp, message as staticMessage } from "antd";
-import { BranchesOutlined, CloseCircleOutlined, CopyOutlined, EditOutlined, FileTextOutlined, RollbackOutlined, ToolOutlined } from "@ant-design/icons";
+import { BranchesOutlined, CopyOutlined, EditOutlined, FileTextOutlined, RollbackOutlined, ToolOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, DecisionRequest, DisplayMode, ToolEvent } from "../../types";
 import { effectiveDisplayMode } from "../../app/displayMode";
@@ -97,18 +97,6 @@ export function ToolLine({ ev, display, active = false }: { ev: ToolEvent; displ
       </div>
     );
   }
-  if (ev.kind === "tool_failed") {
-    return (
-      <Alert
-        className="tool-line failed"
-        type="error"
-        showIcon
-        icon={<CloseCircleOutlined />}
-        title={ev.message}
-        description={display === "developer" ? <pre className="tool-payload">{jsonText(ev.data)}</pre> : undefined}
-      />
-    );
-  }
   if (ev.kind === "tool_result") {
     const result = (ev.data?.result as string | undefined) ?? ev.message;
     return (
@@ -128,7 +116,7 @@ function RuntimeDetails({ msg, configuredDisplay }: { msg: ChatMessage; configur
   const [activeKey, setActiveKey] = useState<string[]>(msg.running ? ["details"] : []);
   const previousRunning = useRef(Boolean(msg.running));
   const thinking = msg.events.filter((event) => event.kind === "thinking").map((event) => event.message).filter(Boolean).join("\n\n");
-  const toolEvents = msg.events.filter((event) => ["tool_call", "tool_result", "tool_failed"].includes(event.kind));
+  const toolEvents = msg.events.filter((event) => ["tool_call", "tool_result"].includes(event.kind));
   const finishedCallIds = new Set(toolEvents.filter((event) => event.kind !== "tool_call").map(callId).filter(Boolean));
   const activeCalls = toolEvents.filter((event) => event.kind === "tool_call" && (!callId(event) || !finishedCallIds.has(callId(event))));
   const showAllTools = display === "verbose" || display === "developer";

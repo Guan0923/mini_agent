@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from backend.domain import PlanningError, ToolMessage
+from backend.domain import PlanningError
 from backend.planning import PlannerCapabilities
 
 from ...conversation.steering import collect_steering, consume_steering
 from ...core.context import AgentRuntime
-from ...core.events import RuntimeEvent
 from ..lifecycle.cancellation import cancel_if_requested
 from ..lifecycle.outcomes import cancel_run, complete_run, fail_run, planning_failure_data, record_plan_feedback
 from ..steps import ToolStepExecutor
@@ -18,12 +17,10 @@ from .common import (
     _fail_pending_tools,
     _finish_assistant,
     _model_text_stream,
-    _publish,
     _publish_assistant_message,
     _publish_repairs,
-    _publish_tool_failure,
+    _publish_tool_recovery,
     _record_reasoning,
-    _same_tool,
     _start_assistant,
     _truncate,
 )
@@ -39,9 +36,6 @@ class ReactiveWorkflow:
         if planner is None:
             fail_run(runtime, f"Planner {capabilities.name!r} does not support reactive decisions.")
             return runtime.run
-        consecutive_failures = 0
-        blocked: ToolMessage | None = None
-
         while True:
             if cancel_if_requested(runtime):
                 return runtime.run
@@ -55,6 +49,8 @@ class ReactiveWorkflow:
             except PlanningError as exc:
                 close()
                 _publish_repairs(runtime, capabilities)
+                if cancel_if_requested(runtime):
+                    return runtime.run
                 fail_run(runtime, f"Decision failed: {exc}", **planning_failure_data(exc, capabilities.name))
                 return runtime.run
             except BaseException:
@@ -82,7 +78,6 @@ class ReactiveWorkflow:
                 return runtime.run
 
             _start_assistant(runtime, response)
-            stop_after_batch: str | None = None
             steered = False
             for index, tool in enumerate(response.tool_messages):
                 if cancel_if_requested(runtime):
@@ -97,13 +92,6 @@ class ReactiveWorkflow:
                     )
                     steered = True
                     break
-                if _same_tool(tool, blocked):
-                    stop_after_batch = f"Stopped: refusing to repeat non-retryable tool call {tool.name} after failure."
-                    tool.status = "failed"
-                    tool.content = stop_after_batch
-                    tool.retryable = False
-                    _publish_tool_failure(runtime, tool, stop_after_batch)
-                    continue
                 outcome = _execute_tool(runtime, index, self._steps)
                 if cancel_if_requested(runtime):
                     return runtime.run
@@ -126,35 +114,10 @@ class ReactiveWorkflow:
                     steered = True
                     break
                 if outcome.success:
-                    consecutive_failures = 0
-                    blocked = None
                     continue
                 error = outcome.error or "Tool execution failed without an error message."
                 tool.content = f"{tool.name} failed: {_truncate(error)}"
-                consecutive_failures += 1
-                blocked = tool if outcome.retryable is False else None
-                if consecutive_failures > runtime.state.runner_settings.max_tool_recoveries:
-                    stop_after_batch = f"Stopped: {tool.name} failed: {error}"
-                    continue
-                runtime.run.add_event(
-                    "tool_recovery",
-                    f"Recovering from {tool.name} failure",
-                    tool=tool.name,
-                    call_id=tool.call_id,
-                    error=_truncate(error),
-                    attempt=consecutive_failures,
-                )
-                _publish(
-                    runtime,
-                    RuntimeEvent(
-                        "tool_recovery",
-                        _truncate(error),
-                        {"tool": tool.name, "call_id": tool.call_id, "attempt": consecutive_failures},
-                    ),
-                )
+                _publish_tool_recovery(runtime, tool, error)
             if steered:
                 continue
             _finish_assistant(runtime)
-            if stop_after_batch:
-                fail_run(runtime, stop_after_batch)
-                return runtime.run

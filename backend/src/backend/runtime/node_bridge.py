@@ -49,6 +49,9 @@ _AGENT_ERROR_TYPES = frozenset(
         "HookError",
     }
 )
+_HIDDEN_RECOVERABLE_EVENTS = frozenset(
+    {"tool_failed", "tool_recovery", "model_repair", "model_retry", "replan_requested"}
+)
 
 
 class RuntimeEventNodeBridge:
@@ -348,6 +351,13 @@ class RuntimeEventNodeBridge:
         if self.closed or not self.started:
             return
         kind = getattr(event, "kind", "")
+        if kind in _HIDDEN_RECOVERABLE_EVENTS:
+            # Recoverable diagnostics stay out of user-facing nodes, but a
+            # terminal error arriving immediately afterwards still needs the
+            # most specific category for its visible terminal explanation.
+            if kind == "tool_failed":
+                self._remember_abort("tool", code="tool_failed")
+            return
         message = str(getattr(event, "message", "") or "")
         data = getattr(event, "data", {})
         if not isinstance(data, Mapping):
@@ -409,7 +419,7 @@ class RuntimeEventNodeBridge:
                 }
             )
             self._update_assistant()
-        elif kind in {"tool_result", "tool_failed"}:
+        elif kind == "tool_result":
             if self.assistant is not None:
                 self._seal_assistant("success")
             tool_name = str(data.get("tool") or data.get("name") or "")
@@ -439,8 +449,6 @@ class RuntimeEventNodeBridge:
             self.last_node = self.writer.delete(
                 result.session_id, result.id, status="success" if kind == "tool_result" else "failed"
             )
-            if kind == "tool_failed":
-                self._remember_abort("tool", code="tool_failed")
         elif kind == "model_error":
             self._remember_abort(self._model_error_category(data), code=str(data.get("error_type") or "model_error"))
         elif kind == "error":

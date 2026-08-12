@@ -6,6 +6,7 @@ import {
   Collapse,
   Form,
   Input,
+  InputNumber,
   List,
   Menu,
   Modal,
@@ -32,17 +33,19 @@ import {
   setTimezone,
   updateAgentConfig,
   updateProfile,
+  updateRuntimeConfig,
   updateProviderConfigById,
   updateSyncPreferences,
   type AgentConfig,
   type ProviderConfig,
   type UserSettings,
+  type RuntimeConfig,
   type CloudSnapshot,
   type SyncJob,
 } from "../api";
 import type { AuthUser } from "../types";
 
-type SettingsSection = "profile" | "agent" | "provider_add" | "provider_manage" | "cloud";
+type SettingsSection = "profile" | "agent" | "runtime" | "provider_add" | "provider_manage" | "cloud";
 
 type ProviderDraft = {
   provider: string;
@@ -158,6 +161,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
           provider_configs: providers,
           sync_preferences: next.sync_preferences ?? defaultSyncPreferences,
           sync_state: next.sync_state ?? defaultSyncState,
+          runtime_config: next.runtime_config ?? { max_tool_calls: 32 },
         };
         const drafts = Object.fromEntries(providers.map((provider) => [provider.id, { model: provider.model, api_key: "" }]));
         setSettings(normalized);
@@ -182,6 +186,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
           provider_config: defaultProvider,
           provider_configs: [],
           capability_config: {},
+          runtime_config: { max_tool_calls: 32 },
           timezone_options: [],
           sync_preferences: defaultSyncPreferences,
           sync_state: defaultSyncState,
@@ -327,6 +332,10 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
         updateSettings({ agent_config: agent });
         setSaved((current) => (current ? { ...current, agent_config: agent } : current));
         onAgentConfigUpdate?.(agent);
+      } else if (section === "runtime") {
+        const runtime = await updateRuntimeConfig(settings.runtime_config);
+        updateSettings({ runtime_config: runtime });
+        setSaved((current) => (current ? { ...current, runtime_config: runtime } : current));
       } else if (section === "provider_add") {
         const provider = await addProviderConfig({
           provider: providerAddDraft.provider,
@@ -474,6 +483,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
   const menuItems = [
     { key: "profile", label: "个人简介" },
     { key: "agent", label: "Agent 配置" },
+    { key: "runtime", label: "运行配置" },
     { key: "provider_add", label: "添加提供商" },
     { key: "provider_manage", label: "提供商管理" },
     { key: "cloud", label: "云同步" },
@@ -604,6 +614,29 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
                   agent_config: { ...settings.agent_config, custom_instructions: event.target.value },
                 })}
               />
+            </Form.Item>
+          </Form>
+        )}
+        {section === "runtime" && (
+          <Form layout="vertical">
+            <Typography.Title level={4}>运行配置</Typography.Title>
+            <Form.Item label="工具调用上限">
+              <InputNumber
+                aria-label="工具调用上限"
+                min={1}
+                max={1000}
+                step={1}
+                precision={0}
+                value={settings.runtime_config.max_tool_calls}
+                onChange={(max_tool_calls) => {
+                  if (typeof max_tool_calls === "number" && Number.isInteger(max_tool_calls)) {
+                    updateSettings({ runtime_config: { max_tool_calls } as RuntimeConfig });
+                  }
+                }}
+              />
+              <Typography.Paragraph type="secondary">
+                默认值为 32。成功、失败和重复的工具调用都会计入整个 Agent 工作流的上限；保存后仅影响新建或恢复的运行。
+              </Typography.Paragraph>
             </Form.Item>
           </Form>
         )}

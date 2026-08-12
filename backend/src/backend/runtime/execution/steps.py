@@ -156,94 +156,61 @@ class ToolStepExecutor:
                 },
             )
         )
-        for attempt in range(runtime.state.runner_settings.max_retries + 1):
-            try:
-                subagents = runtime.services.subagents
-                if subagents is not None and subagents.handles(tool):
-                    result = subagents.invoke(runtime, tool, tool_message.arguments)
+        try:
+            subagents = runtime.services.subagents
+            if subagents is not None and subagents.handles(tool):
+                result = subagents.invoke(runtime, tool, tool_message.arguments)
+            else:
+                invoke_with_context = getattr(tools, "invoke_with_context", None)
+                if callable(invoke_with_context):
+                    result = invoke_with_context(
+                        tool,
+                        tool_message.arguments,
+                        ToolInvocationContext(runtime.state.session_id, runtime.state.timezone, runtime.services.clock),
+                        confirmed=True,
+                    )
                 else:
-                    invoke_with_context = getattr(tools, "invoke_with_context", None)
-                    if callable(invoke_with_context):
-                        result = invoke_with_context(
-                            tool,
-                            tool_message.arguments,
-                            ToolInvocationContext(
-                                runtime.state.session_id, runtime.state.timezone, runtime.services.clock
-                            ),
-                            confirmed=True,
-                        )
-                    else:
-                        result = tools.invoke(tool, tool_message.arguments, confirmed=True)
-                tool_message.status = "succeeded"
-                tool_message.content = result
-                tool_message.retryable = retryable
-                run.completed_steps.append(len(run.actions))
-                duration_ms = round((perf_counter() - started_at) * 1000, 3)
-                run.add_event(
+                    result = tools.invoke(tool, tool_message.arguments, confirmed=True)
+            tool_message.status = "succeeded"
+            tool_message.content = result
+            tool_message.retryable = retryable
+            run.completed_steps.append(len(run.actions))
+            duration_ms = round((perf_counter() - started_at) * 1000, 3)
+            run.add_event(
+                "tool_result",
+                f"{tool} succeeded",
+                call_id=tool_message.call_id,
+                result=result,
+                duration_ms=duration_ms,
+                attempts=1,
+            )
+            publish(
+                RuntimeEvent(
                     "tool_result",
-                    f"{tool} succeeded",
-                    call_id=tool_message.call_id,
-                    result=result,
-                    duration_ms=duration_ms,
-                    attempts=attempt + 1,
+                    result,
+                    {"tool": tool, "call_id": tool_message.call_id, "duration_ms": duration_ms, "attempts": 1},
                 )
-                publish(
-                    RuntimeEvent(
-                        "tool_result",
-                        result,
-                        {
-                            "tool": tool,
-                            "call_id": tool_message.call_id,
-                            "duration_ms": duration_ms,
-                            "attempts": attempt + 1,
-                        },
-                    )
-                )
-                runtime.save()
-                return ToolStepResult(success=True, output=result, retryable=retryable)
-            except ToolError as exc:
-                if attempt < runtime.state.runner_settings.max_retries and retryable:
-                    run.add_event(
-                        "retry", f"Retrying {tool}", call_id=tool_message.call_id, error=str(exc), attempt=attempt + 1
-                    )
-                    publish(
-                        RuntimeEvent(
-                            "retry",
-                            str(exc),
-                            {
-                                "tool": tool,
-                                "call_id": tool_message.call_id,
-                                "attempt": attempt + 1,
-                                "elapsed_ms": round((perf_counter() - started_at) * 1000, 3),
-                            },
-                        )
-                    )
-                    continue
-                return self._failure(
-                    runtime,
-                    tool,
-                    str(exc),
-                    retryable=retryable,
-                    duration_ms=round((perf_counter() - started_at) * 1000, 3),
-                )
-            except Exception as exc:
-                # Defensive net: a non-ToolError escaping the tool boundary
-                # (e.g. from the subagent coordinator) must fail this tool call,
-                # never abort the whole run.
-                return self._failure(
-                    runtime,
-                    tool,
-                    f"Unexpected tool failure: {type(exc).__name__}: {exc}",
-                    retryable=retryable,
-                    duration_ms=round((perf_counter() - started_at) * 1000, 3),
-                )
-        return self._failure(
-            runtime,
-            tool,
-            "Tool execution ended without an outcome.",
-            retryable=retryable,
-            duration_ms=round((perf_counter() - started_at) * 1000, 3),
-        )
+            )
+            runtime.save()
+            return ToolStepResult(success=True, output=result, retryable=retryable)
+        except ToolError as exc:
+            return self._failure(
+                runtime,
+                tool,
+                str(exc),
+                retryable=retryable,
+                duration_ms=round((perf_counter() - started_at) * 1000, 3),
+            )
+        except Exception as exc:
+            # A tool failure is returned to the planner so it can select a
+            # different action; it must not abort the surrounding run.
+            return self._failure(
+                runtime,
+                tool,
+                f"Unexpected tool failure: {type(exc).__name__}: {exc}",
+                retryable=retryable,
+                duration_ms=round((perf_counter() - started_at) * 1000, 3),
+            )
 
     @staticmethod
     def _hook_outcome(result: ToolStepResult) -> HookOutcome[ToolHookResult]:
