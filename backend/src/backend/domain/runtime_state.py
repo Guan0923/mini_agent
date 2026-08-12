@@ -28,6 +28,7 @@ APP_VERSION = "0.2.0"
 DEFAULT_COMPACTION_RETENTION = 8
 
 NodeStatus: TypeAlias = Literal["failed", "success", "abort"]
+TerminalErrorCategory: TypeAlias = Literal["unknown", "tool", "agent", "user", "network"]
 NodeDataType: TypeAlias = Literal["message", "thinking_level_change", "model_change", "compaction"]
 MessageRole: TypeAlias = Literal["user", "assistant", "tool_result", "bash"]
 ContentBlockType: TypeAlias = Literal[
@@ -60,6 +61,17 @@ CONTENT_BLOCK_TYPES = frozenset(
     }
 )
 MESSAGE_ROLES = frozenset({"user", "assistant", "tool_result", "bash"})
+
+FAILED_TERMINAL_MESSAGE = "An unknown error caused the system to encounter an exception."
+ABORT_TERMINAL_MESSAGES: dict[TerminalErrorCategory, str] = {
+    "unknown": "The run was aborted for an unknown reason.",
+    "tool": "The run was aborted because an internal tool error prevented execution from continuing.",
+    "agent": "The run was aborted because the agent encountered an internal error.",
+    "user": "The run was aborted at the user's request.",
+    "network": (
+        "The run was aborted because a network error interrupted communication with the model or a required service."
+    ),
+}
 
 
 class RuntimeStateValidationError(ValueError):
@@ -171,6 +183,53 @@ def message_payload(
     if extra:
         payload["message"].update(_json_safe(extra, "message metadata"))
     return payload
+
+
+def terminal_error_payload(
+    status: Literal["failed", "abort"],
+    category: TerminalErrorCategory | None = None,
+    *,
+    code: str | None = None,
+    detail: str | None = None,
+) -> dict[str, str]:
+    """Build the stable, provider-neutral reason attached to a terminal node.
+
+    ``failed`` is deliberately the last-resort state and therefore never
+    claims a cause that the runtime could not prove.  ``abort`` carries the
+    best known source category so presentation and the next model turn share
+    exactly the same explanation.
+    """
+
+    if status == "failed":
+        resolved_category: TerminalErrorCategory = "unknown"
+        message = FAILED_TERMINAL_MESSAGE
+    elif status == "abort":
+        resolved_category = category or "unknown"
+        if resolved_category not in ABORT_TERMINAL_MESSAGES:
+            raise RuntimeStateValidationError(f"Unsupported terminal error category: {resolved_category!r}.")
+        message = (
+            "The run was paused at the user's request."
+            if resolved_category == "user" and code == "user_paused"
+            else ABORT_TERMINAL_MESSAGES[resolved_category]
+        )
+    else:
+        raise RuntimeStateValidationError(f"Unsupported terminal error status: {status!r}.")
+
+    payload = {"category": resolved_category, "message": message}
+    if code:
+        payload["code"] = code
+    normalized_detail = " ".join((detail or "").split())
+    if status == "abort" and normalized_detail and normalized_detail.rstrip(".") != message.rstrip("."):
+        payload["detail"] = normalized_detail
+    return payload
+
+
+def terminal_error_text(error: Mapping[str, Any]) -> str:
+    """Render a structured terminal reason for people and model context."""
+
+    message = str(error.get("message") or FAILED_TERMINAL_MESSAGE)
+    detail = str(error.get("detail") or "").strip()
+    return f"{message}\n\nDetails: {detail}" if detail else message
 
 
 def change_payload(kind: Literal["thinking_level_change", "model_change"], **values: Any) -> dict[str, Any]:
@@ -933,11 +992,52 @@ class NodeWriter:
             self.emit(NodeFrame("node.delete", node.clone()))
             return node.clone()
 
-    def fail(self, session_id: str, node_id: str) -> RuntimeState:
-        return self.delete(session_id, node_id, status="failed")
+    def _finish_with_error(
+        self,
+        session_id: str,
+        node_id: str,
+        *,
+        status: Literal["failed", "abort"],
+        category: TerminalErrorCategory | None = None,
+        code: str | None = None,
+        detail: str | None = None,
+    ) -> RuntimeState:
+        error = terminal_error_payload(status, category, code=code, detail=detail)
+        rendered = terminal_error_text(error)
+        node = self.current(session_id, node_id)
+        if not node.data:
+            self.update_data(node, message_payload("assistant", rendered, error=error))
+        elif node.data.get("type") == "message" and isinstance(node.data.get("message"), Mapping):
+            message = dict(node.data["message"])
+            blocks = [dict(item) for item in message.get("content", []) if isinstance(item, Mapping)]
+            if not any(item.get("type") == "text" and item.get("text") == rendered for item in blocks):
+                blocks.append(_text_block(rendered))
+            role = str(message.pop("role", "assistant"))
+            message.pop("content", None)
+            message["error"] = error
+            self.update_data(node, message_payload(role, blocks, **message))  # type: ignore[arg-type]
+        return self.delete(session_id, node_id, status=status)
 
-    def abort(self, session_id: str, node_id: str) -> RuntimeState:
-        return self.delete(session_id, node_id, status="abort")
+    def fail(self, session_id: str, node_id: str) -> RuntimeState:
+        return self._finish_with_error(session_id, node_id, status="failed")
+
+    def abort(
+        self,
+        session_id: str,
+        node_id: str,
+        *,
+        category: TerminalErrorCategory = "user",
+        code: str | None = None,
+        detail: str | None = None,
+    ) -> RuntimeState:
+        return self._finish_with_error(
+            session_id,
+            node_id,
+            status="abort",
+            category=category,
+            code=code,
+            detail=detail,
+        )
 
     def resume(
         self,

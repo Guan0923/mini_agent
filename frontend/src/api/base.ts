@@ -1,6 +1,7 @@
-/** Resolve API paths for same-origin development or a dedicated API subdomain. */
+/** Resolve API paths on the local backend's same-origin contract. */
 export function apiUrl(path: string): string {
-  const configured = String(import.meta.env.VITE_API_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  if (!configured || /^https?:\/\//i.test(path)) return path;
-  return `${configured}${path.startsWith("/") ? path : `/${path}`}`;
+  if (/^https?:\/\//i.test(path)) {
+    throw new Error("Frontend API requests must use the local backend origin.");
+  }
+  return path.startsWith("/") ? path : `/${path}`;
 }

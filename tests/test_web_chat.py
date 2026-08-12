@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from backend.api import chat
 from backend.api.interrupts import make_interactive_interrupt, registry
+from backend.domain.runtime_state import InMemoryNodeStore
 from backend.runtime.core.contracts import InterruptRequest
 from backend.runtime.core.events import RuntimeEvent
 
@@ -56,6 +59,33 @@ class _CompletingConversation:
             )
         )
         return SimpleNamespace(status="completed", final_answer="finished answer", run_id="run-completed")
+
+
+class _TerminalConversation:
+    def __init__(self, outcome: list[RuntimeEvent] | BaseException) -> None:
+        self.active_session = SimpleNamespace(session_id="session-terminal")
+        self.outcome = outcome
+
+    def ensure_session(self, _prompt: str | None = None) -> None:
+        return None
+
+    def run_task(self, _prompt: str, **kwargs: object) -> SimpleNamespace:
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        sink = kwargs["on_event"]
+        assert callable(sink)
+        for event in self.outcome:
+            sink(event)
+        return SimpleNamespace(status="failed", final_answer="", run_id="run-terminal")
+
+
+class _NodeApp(_FakeApp):
+    def __init__(self, conversation: _TerminalConversation) -> None:
+        super().__init__(conversation)
+        self.session_store = InMemoryNodeStore()
+
+    def open_conversation(self, *_args: object) -> object:
+        return self.conversation
 
 
 def test_closing_sse_stream_requests_runtime_cancellation(monkeypatch, tmp_path: Path) -> None:
@@ -109,4 +139,37 @@ def test_completed_sse_stream_delivers_done_payload(monkeypatch, tmp_path: Path)
     items = asyncio.run(scenario())
     assert any('"kind": "run_finished"' in item for item in items)
     assert any('"type": "done"' in item and "finished answer" in item for item in items)
+    assert app.closed is True
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "expected"),
+    [
+        (
+            [
+                RuntimeEvent("tool_failed", "disk unavailable", {"tool": "write", "call_id": "c1"}),
+                RuntimeEvent("error", "Stopped"),
+            ],
+            "abort",
+            "internal tool error",
+        ),
+        (RuntimeError("unexpected failure"), "failed", "unknown error caused the system"),
+    ],
+)
+def test_terminal_sse_payload_explains_failed_and_abort_reasons(
+    monkeypatch, tmp_path: Path, outcome: list[RuntimeEvent] | BaseException, status: str, expected: str
+) -> None:
+    app = _NodeApp(_TerminalConversation(outcome))
+    monkeypatch.setattr(chat, "build_application", lambda *_args, **_kwargs: app)
+    state = SimpleNamespace(chat_workspace=tmp_path)
+
+    async def scenario() -> list[dict[str, object]]:
+        stream = chat._stream(state, "terminal", False)
+        items = [item async for item in stream]
+        return [json.loads(item.removeprefix("data: ").strip()) for item in items]
+
+    items = asyncio.run(scenario())
+    terminal = next(item for item in items if item.get("type") == "error")
+    assert terminal["status"] == status
+    assert expected in str(terminal["error"])
     assert app.closed is True

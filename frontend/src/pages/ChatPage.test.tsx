@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./ChatPage";
+import { copyText } from "./chat/messageParts";
 import type { ChatMode, Conversation, PermissionMode, ReasoningEffort, StreamMessage } from "../types";
 
 const mocks = vi.hoisted(() => ({
@@ -18,6 +19,8 @@ const baseConversation = (): Conversation => ({
   title: "测试对话",
   messages: [],
 });
+
+const initialClipboardDescriptor = Object.getOwnPropertyDescriptor(window.navigator, "clipboard");
 
 function Harness({
   initial = baseConversation(),
@@ -64,6 +67,11 @@ import * as React from "react";
 afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllGlobals();
+  if (initialClipboardDescriptor) {
+    Object.defineProperty(window.navigator, "clipboard", initialClipboardDescriptor);
+  } else {
+    delete (window.navigator as { clipboard?: Clipboard }).clipboard;
+  }
 });
 
 describe("ChatPage run lifecycle", () => {
@@ -165,9 +173,16 @@ describe("ChatPage run lifecycle", () => {
     await waitFor(() => expect(aborted).toBe(true));
   });
 
-  it("copies raw message text and invokes fork and rewind actions", async () => {
+  it("copies raw Markdown source and invokes fork and rewind actions", async () => {
     const onFork = vi.fn().mockResolvedValue(undefined);
     const onRewind = vi.fn().mockResolvedValue("用户原文");
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    await copyText("用户原文");
+    expect(writeText).toHaveBeenCalledWith("用户原文");
     const initial: Conversation = {
       id: "conversation-actions",
       title: "操作测试",
@@ -282,5 +297,27 @@ describe("ChatPage run lifecycle", () => {
     const send = screen.getByRole("button", { name: "发送" });
     expect(send).toHaveClass("ant-btn-circle", "send-btn");
     expect(send.previousElementSibling).toHaveClass("composer-toolbar");
+  });
+
+  it("keeps Timeline inside the same scroll container as messages", () => {
+    const initial: Conversation = {
+      id: "conversation-timeline-layout",
+      title: "Timeline 布局",
+      messages: [
+        { id: "user-layout", role: "user", content: "第一轮", events: [] },
+        { id: "assistant-layout", role: "assistant", content: "回答", events: [] },
+      ],
+    };
+    const { container } = render(<Harness initial={initial} />);
+    const scroll = container.querySelector(".chat-scroll");
+    const content = scroll?.querySelector(":scope > .chat-scroll-content");
+    const messages = content?.querySelector(":scope > .chat-messages");
+    const timeline = content?.querySelector(":scope > .conversation-timeline");
+
+    expect(scroll).toBeInTheDocument();
+    expect(content).toBeInTheDocument();
+    expect(messages).toBeInTheDocument();
+    expect(timeline).toBeInTheDocument();
+    expect(timeline?.parentElement).toBe(content);
   });
 });

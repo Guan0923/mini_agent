@@ -223,6 +223,7 @@ export default function ChatPage({
             content: message.final_answer ?? "",
             status: message.status,
             metrics: message.metrics,
+            ...(message.status === "completed" || message.status === "success" ? { error: undefined } : {}),
             running: false,
             decision: undefined,
             ...(message.run_id ? { runId: message.run_id } : {}),
@@ -255,10 +256,22 @@ export default function ChatPage({
               resumeSourceNodeId,
             )
           : await streamResume(sessionId, onMessage, controller.signal, permissionMode, reasoningEffort);
-        if (result === "aborted") setLast({ running: false, status: "已停止", decision: undefined }, conversationId);
+        if (result === "aborted") setLast({
+          running: false,
+          status: "已停止",
+          error: "The run was aborted at the user's request.",
+          decision: undefined,
+        }, conversationId);
         else if (!sawDone && finalNode) {
-          const content = projectRuntimeNode(finalNode)?.content ?? "";
-          setLast({ content: content || "", status: finalNode.status, running: false, decision: undefined }, conversationId);
+          const projection = projectRuntimeNode(finalNode);
+          const content = projection?.content ?? "";
+          setLast({
+            content: content || "",
+            status: finalNode.status,
+            error: projection?.error,
+            running: false,
+            decision: undefined,
+          }, conversationId);
           void onRefresh();
         }
       } else {
@@ -277,10 +290,22 @@ export default function ChatPage({
           controller.signal,
           options,
         );
-        if (result === "aborted") setLast({ running: false, status: "已停止", decision: undefined }, conversationId);
+        if (result === "aborted") setLast({
+          running: false,
+          status: "已停止",
+          error: "The run was aborted at the user's request.",
+          decision: undefined,
+        }, conversationId);
         else if (!sawDone && finalNode) {
-          const content = projectRuntimeNode(finalNode)?.content ?? "";
-          setLast({ content: content || "", status: finalNode.status, running: false, decision: undefined }, conversationId);
+          const projection = projectRuntimeNode(finalNode);
+          const content = projection?.content ?? "";
+          setLast({
+            content: content || "",
+            status: finalNode.status,
+            error: projection?.error,
+            running: false,
+            decision: undefined,
+          }, conversationId);
           void onRefresh();
         }
       }
@@ -398,7 +423,12 @@ export default function ChatPage({
       return;
     }
     abortRef.current?.abort();
-    setLast({ running: false, status: "已停止", decision: undefined });
+    setLast({
+      running: false,
+      status: "已停止",
+      error: "The run was aborted at the user's request.",
+      decision: undefined,
+    });
     setLocalBusy(false);
   }
 
@@ -475,69 +505,73 @@ export default function ChatPage({
     <div className="chat-page">
       <div className="chat-content">
         <div className="chat-scroll" ref={chatScrollRef}>
-          {messages.length === 0 ? (
-            <div className="welcome">
-              <div className="logo">Mini-Agent</div>
-              <p className="welcome-sub">向你的智能体提问，它会调用文件、Shell、Web 等工具完成任务</p>
-            </div>
-          ) : messages.map((message) => message.role === "user" ? (
-            <div className="message user" id={conversationTurnId(message.id)} key={message.id}>
-              <div className={editingMessageId === message.id ? "message-content is-editing" : "message-content"}>
-                {editingMessageId === message.id ? (
-                  <div className="message-edit" aria-label="编辑用户消息">
-                    <Input.TextArea
-                      className="message-edit-input"
-                      ref={editRef}
-                      aria-label="编辑用户消息"
-                      value={editingDraft}
-                      onChange={(event) => setEditingDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape") {
-                          event.preventDefault();
-                          cancelEdit();
-                        } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                          event.preventDefault();
-                          void saveEdit(message);
-                        }
-                      }}
-                      autoSize={{ minRows: 2, maxRows: 8 }}
-                    />
-                    <div className="message-edit-actions">
-                      <Button type="text" onClick={cancelEdit}>取消</Button>
-                      <Button type="primary" onClick={() => void saveEdit(message)} disabled={!editingDraft.trim()}>保存并重新生成</Button>
-                    </div>
+          <div className="chat-scroll-content">
+            <div className="chat-messages">
+              {messages.length === 0 ? (
+                <div className="welcome">
+                  <div className="logo">Mini-Agent</div>
+                  <p className="welcome-sub">向你的智能体提问，它会调用文件、Shell、Web 等工具完成任务</p>
+                </div>
+              ) : messages.map((message) => message.role === "user" ? (
+                <div className="message user" id={conversationTurnId(message.id)} key={message.id}>
+                  <div className={editingMessageId === message.id ? "message-content is-editing" : "message-content"}>
+                    {editingMessageId === message.id ? (
+                      <div className="message-edit" aria-label="编辑用户消息">
+                        <Input.TextArea
+                          className="message-edit-input"
+                          ref={editRef}
+                          aria-label="编辑用户消息"
+                          value={editingDraft}
+                          onChange={(event) => setEditingDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              cancelEdit();
+                            } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                              event.preventDefault();
+                              void saveEdit(message);
+                            }
+                          }}
+                          autoSize={{ minRows: 2, maxRows: 8 }}
+                        />
+                        <div className="message-edit-actions">
+                          <Button type="text" onClick={cancelEdit}>取消</Button>
+                          <Button type="primary" onClick={() => void saveEdit(message)} disabled={!editingDraft.trim()}>保存并重新生成</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className="bubble user-bubble"
+                        onClick={(event) => handleUserBubbleClick(event, message)}
+                        title={onRewind && !busy ? "点击编辑此消息" : undefined}
+                      >
+                        <MarkdownContent text={message.content} />
+                      </div>
+                    )}
+                    {editingMessageId !== message.id ? (
+                      <MessageActions
+                        msg={message}
+                        busy={busy}
+                        onRewind={onRewind ? () => void rewindMessage(message.id) : undefined}
+                        onEdit={onRewind ? () => beginEdit(message) : undefined}
+                      />
+                    ) : null}
                   </div>
-                ) : (
-                  <div
-                    className="bubble user-bubble"
-                    onClick={(event) => handleUserBubbleClick(event, message)}
-                    title={onRewind && !busy ? "点击编辑此消息" : undefined}
-                  >
-                    <MarkdownContent text={message.content} />
-                  </div>
-                )}
-                {editingMessageId !== message.id ? (
-                  <MessageActions
-                    msg={message}
-                    busy={busy}
-                    onRewind={onRewind ? () => void rewindMessage(message.id) : undefined}
-                    onEdit={onRewind ? () => beginEdit(message) : undefined}
-                  />
-                ) : null}
-              </div>
+                </div>
+              ) : (
+                <AssistantMessage
+                  key={message.id}
+                  msg={message}
+                  display={display}
+                  onDecision={chooseDecision}
+                  busy={busy}
+                  onFork={onFork ? () => forkMessage(message.id) : undefined}
+                />
+              ))}
             </div>
-          ) : (
-            <AssistantMessage
-              key={message.id}
-              msg={message}
-              display={display}
-              onDecision={chooseDecision}
-              busy={busy}
-              onFork={onFork ? () => forkMessage(message.id) : undefined}
-            />
-          ))}
+            {!isMobile ? <ConversationTimeline messages={messages} scrollContainerRef={chatScrollRef} /> : null}
+          </div>
         </div>
-        {!isMobile ? <ConversationTimeline messages={messages} scrollContainerRef={chatScrollRef} /> : null}
       </div>
       <Composer
         input={input}

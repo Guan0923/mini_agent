@@ -7,15 +7,29 @@
 }
 .chat-content {
   flex: 1;
-  display: flex;
   min-width: 0;
   min-height: 0;
 }
 .chat-scroll {
-  flex: 1;
+  width: 100%;
+  height: 100%;
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 32px 0 16px;
+}
+
+.chat-scroll-content {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  min-height: 100%;
+}
+
+.chat-messages {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .conversation-timeline {
@@ -510,7 +524,7 @@
 }
 
 .markdown .math-display,
-.markdown mjx-container[display="true"] {
+.markdown .math-svg-fallback mjx-container[display="true"] {
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
@@ -530,26 +544,38 @@
 }
 
 .markdown .math-source,
-.markdown mjx-container,
-.markdown mjx-container svg,
-.markdown mjx-container svg * {
+.markdown .math-native math,
+.markdown .math-native math *,
+.markdown .math-svg-fallback mjx-container,
+.markdown .math-svg-fallback mjx-container svg,
+.markdown .math-svg-fallback mjx-container svg * {
   user-select: text;
   -webkit-user-select: text;
 }
 
-.markdown mjx-container {
+.markdown .math-native,
+.markdown .math-native math,
+.markdown .math-svg-fallback mjx-container {
   cursor: text;
 }
 
-.markdown mjx-assistive-mml,
-.markdown mjx-help,
-.markdown mjx-container > mjx-help {
+.markdown .math-native math {
+  max-width: 100%;
+}
+
+.markdown .math-equation-number {
+  margin-left: 4px;
+}
+
+.markdown .math-svg-fallback mjx-assistive-mml,
+.markdown .math-svg-fallback mjx-help,
+.markdown .math-svg-fallback mjx-container > mjx-help {
   user-select: none;
   -webkit-user-select: none;
   pointer-events: none;
 }
 
-.markdown mjx-help {
+.markdown .math-svg-fallback mjx-help {
   display: none !important;
 }
 .markdown a {

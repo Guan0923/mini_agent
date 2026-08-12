@@ -17,7 +17,7 @@ function renderSidebar(archivedCount = 0, conversations: Conversation[] = [conve
   const onProfileUpdate = vi.fn().mockResolvedValue(undefined);
   const view = render(
     <AppSidebar
-      user={{ id: "u1", email: "user@example.com", legacy_owner: false }}
+      user={{ id: "u1", email: "user@example.com", kind: "account" }}
       conversations={conversations}
       archivedCount={archivedCount}
       currentId={conversation.id}
@@ -53,6 +53,16 @@ describe("AppSidebar utility navigation", () => {
     renderSidebar();
     expect(screen.getByRole("button", { name: "回收站" })).toBeInTheDocument();
     expect(document.querySelector(".ant-badge-count")).not.toBeInTheDocument();
+  });
+  it("uses only the spinner for a running conversation", () => {
+    const running: Conversation = {
+      ...conversation,
+      messages: [{ id: "assistant-1", role: "assistant", content: "", events: [], running: true }],
+    };
+    renderSidebar(0, [running]);
+
+    expect(document.querySelector(".ant-spin")).toBeInTheDocument();
+    expect(document.querySelector(".ant-badge-status")).not.toBeInTheDocument();
   });
   it("opens the profile card and saves the username and agent preferences", async () => {
     const user = userEvent.setup();

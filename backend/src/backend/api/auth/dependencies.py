@@ -35,6 +35,6 @@ def require_user(request: Request) -> UserIdentity:
 
 def require_browser_user(request: Request) -> UserIdentity:
     resolved = current_identity(request)
-    if resolved is None or resolved[1] != "browser":
+    if resolved is None or resolved[1] != "browser" or resolved[0].is_guest:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请在浏览器中登录。")
     return resolved[0]

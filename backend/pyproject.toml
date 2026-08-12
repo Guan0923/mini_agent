@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mini-agent-backend"
 version = "0.2.0"
-description = "Mini-Agent core runtime and FastAPI service (server tier)."
+description = "Mini-Agent local Agent Runtime and loopback FastAPI backend."
 keywords = ["agent", "mcp", "skills", "subagents"]
 requires-python = ">=3.11"
 dependencies = [
@@ -14,8 +14,8 @@ dependencies = [
     "jsonschema>=4.23,<5",
     "mcp>=1.28,<2",
     "mdit-py-plugins>=0.6,<1",
-    "email-validator>=2.2,<3",
-    "pwdlib[argon2]>=0.2,<1",
+    "cryptography>=44,<50",
+    "keyring>=25,<26",
     "pylatexenc>=2.10,<3",
     "pyyaml>=6,<7",
     "regex>=2024.11.6,<2027",
@@ -26,20 +26,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-web = [
-    "cryptography>=44,<50",
-    "psycopg[binary]>=3.2,<4",
-    "psycopg-pool>=3.2,<4",
-]
-sync = [
-    "psycopg[binary]>=3.2,<4",
-    "psycopg-pool>=3.2,<4",
-]
+web = []
+sync = []
 
 [project.scripts]
 mini-agent-mcp = "backend.mcp.cli:main"
-mini-agent-sync-server = "backend.sync.cli:main"
-mini-agent-migrate-web-auth = "backend.storage.postgres.auth_migration:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

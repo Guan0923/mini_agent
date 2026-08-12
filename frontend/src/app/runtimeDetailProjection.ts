@@ -40,11 +40,39 @@ export interface ProjectedNodeDetails {
   content: string;
   events: ToolEvent[];
   runId?: string;
+  error?: string;
 }
 
-export function projectRuntimeNode(node: RuntimeStateNode): ProjectedNodeDetails | null {
+function terminalError(message: Record<string, unknown>): string | undefined {
+  const raw = message.error;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const error = raw as Record<string, unknown>;
+  const summary = typeof error.message === "string" ? error.message.trim() : "";
+  const detail = typeof error.detail === "string" ? error.detail.trim() : "";
+  if (!summary) return undefined;
+  return detail ? `${summary}\n\nDetails: ${detail}` : summary;
+}
+
+function terminalNodeError(
+  node: RuntimeStateNode,
+  message?: Record<string, unknown> | null,
+  terminal = true,
+): string | undefined {
+  if (!terminal) return undefined;
+  if (node.status !== "failed" && node.status !== "abort") return undefined;
+  const embedded = message ? terminalError(message) : undefined;
+  if (embedded) return embedded;
+  if (node.status === "failed") return "An unknown error caused the system to encounter an exception.";
+  if (node.status === "abort") return "The run was aborted for an unknown reason.";
+  return undefined;
+}
+
+export function projectRuntimeNode(node: RuntimeStateNode, terminal = true): ProjectedNodeDetails | null {
   const message = messageData(node);
-  if (!message) return null;
+  if (!message) {
+    const error = terminalNodeError(node, null, terminal);
+    return error ? { role: "assistant", content: error, events: [], error } : null;
+  }
   const role = String(message.role ?? "");
   const key = nodeKey(node);
   const events: ToolEvent[] = [];
@@ -71,7 +99,7 @@ export function projectRuntimeNode(node: RuntimeStateNode): ProjectedNodeDetails
         },
       });
     } else if (kind === "tool_result") {
-      const failed = block.status === "failed" || node.status === "failed";
+      const failed = block.status === "failed";
       events.push({
         kind: failed ? "tool_failed" : "tool_result",
         message: textValue(block.content),
@@ -89,7 +117,7 @@ export function projectRuntimeNode(node: RuntimeStateNode): ProjectedNodeDetails
     events.unshift({
       kind: "thinking",
       message: reasoning.join(""),
-      data: { node_key: key, completed: node.status !== "abort" },
+      data: { node_key: key, completed: terminal && node.status !== "abort" },
     });
   }
   return {
@@ -97,23 +125,32 @@ export function projectRuntimeNode(node: RuntimeStateNode): ProjectedNodeDetails
     content: answers.join(""),
     events,
     runId: typeof message.run_id === "string" ? message.run_id : undefined,
+    error: terminalNodeError(node, message, terminal),
   };
 }
 
-function projectMessageNodes(message: ChatMessage, nodes: Map<string, RuntimeStateNode>): ChatMessage {
+function projectMessageNodes(
+  message: ChatMessage,
+  nodes: Map<string, RuntimeStateNode>,
+  activeNodeKey?: string,
+): ChatMessage {
   const projections = (message.runtimeNodeIds ?? [])
-    .map((key) => nodes.get(key))
-    .filter((node): node is RuntimeStateNode => Boolean(node))
-    .map(projectRuntimeNode)
+    .map((key) => ({ key, node: nodes.get(key) }))
+    .filter((item): item is { key: string; node: RuntimeStateNode } => Boolean(item.node))
+    .map(({ key, node }) => projectRuntimeNode(node, key !== activeNodeKey))
     .filter((item): item is ProjectedNodeDetails => Boolean(item));
   if (projections.length === 0) return message;
   const projectedEvents = projections.flatMap((item) => item.events);
   const hasAssistantProjection = projections.some((item) => item.role === "assistant");
+  const projectedError = [...projections].reverse().find((item) => item.error)?.error;
+  const withoutPreviousError = { ...message };
+  delete withoutPreviousError.error;
   return {
-    ...message,
+    ...withoutPreviousError,
     content: hasAssistantProjection ? projections.map((item) => item.content).join("") : message.content,
     events: hasAssistantProjection ? projectedEvents : message.events,
     runId: [...projections].reverse().find((item) => item.runId)?.runId ?? message.runId,
+    ...(projectedError ? { error: projectedError } : {}),
   };
 }
 
@@ -122,7 +159,7 @@ export function integrateRuntimeNodeFrame(conversation: Conversation, frame: Run
     (conversation.runtimeNodes ?? []).map((node) => [nodeKey(node), node] as const),
   );
   const next = applyRuntimeNodeFrame(current, frame);
-  const projection = projectRuntimeNode(frame.node);
+  const projection = projectRuntimeNode(frame.node, frame.type === "node.delete");
   const messages = [...conversation.messages];
   const key = nodeKey(frame.node);
 
@@ -141,6 +178,7 @@ export function integrateRuntimeNodeFrame(conversation: Conversation, frame: Run
       messages[index] = projectMessageNodes(
         { ...messages[index], runtimeNodeIds, sourceNodeId: frame.node.id },
         next,
+        frame.type === "node.delete" ? undefined : key,
       );
       break;
     }

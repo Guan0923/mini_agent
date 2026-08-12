@@ -17,13 +17,14 @@ function safeNext(value: string | null): string {
 }
 
 export default function LoginPage() {
-  const { signIn } = useAuth();
+  const { signIn, signInGuest } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const next = new URLSearchParams(location.search).get("next");
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [guestBusy, setGuestBusy] = useState(false);
 
   async function submit(values: { email: string; password: string }) {
     setError(null);
@@ -35,6 +36,19 @@ export default function LoginPage() {
       setError(err instanceof ApiError ? err.message : "登录失败，请稍后再试。");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function continueAsGuest() {
+    setError(null);
+    setGuestBusy(true);
+    try {
+      await signInGuest();
+      navigate(safeNext(next), { replace: true });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "游客登录失败，请稍后再试。");
+    } finally {
+      setGuestBusy(false);
     }
   }
 
@@ -62,9 +76,27 @@ export default function LoginPage() {
         <Form.Item label="密码" name="password" rules={[{ required: true, message: "请输入密码。" }]}>
           <Input.Password autoComplete="current-password" placeholder="输入密码" required />
         </Form.Item>
-        {error ? <Alert className="form-error" message={error} type="error" showIcon /> : null}
-        <Button className="primary-cta form-submit" type="primary" htmlType="submit" loading={busy} block>
+        {error ? <Alert className="form-error" title={error} type="error" showIcon /> : null}
+        <Button
+          className="form-submit form-submit--primary"
+          type="primary"
+          htmlType="submit"
+          loading={busy}
+          disabled={guestBusy}
+          block
+        >
           登录
+        </Button>
+        <Button
+          className="form-submit form-submit--secondary"
+          type="default"
+          htmlType="button"
+          loading={guestBusy}
+          disabled={busy}
+          onClick={() => void continueAsGuest()}
+          block
+        >
+          游客登录
         </Button>
       </Form>
       <div className="form-links"><AuthTransitionLink target="forgot-password" search={email ? `email=${encodeURIComponent(email)}` : ""}>忘记密码？</AuthTransitionLink><span>还没有账号？ <AuthTransitionLink target="register">立即注册</AuthTransitionLink></span></div>

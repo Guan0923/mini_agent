@@ -110,7 +110,8 @@ export default function RegisterPage() {
           >
             <Input.OTP
               length={6}
-              type="number"
+              type="text"
+              inputMode="numeric"
               autoComplete="one-time-code"
               formatter={(value) => value.replace(/\D/g, "").slice(0, 6)}
               disabled={!sent}
@@ -144,7 +145,7 @@ export default function RegisterPage() {
         >
           <Input.Password autoComplete="new-password" placeholder="再次输入密码" minLength={12} maxLength={128} required disabled={!sent} />
         </Form.Item>
-        {error ? <Alert className="form-error" message={error} type="error" showIcon /> : null}
+        {error ? <Alert className="form-error" title={error} type="error" showIcon /> : null}
         <Button className="primary-cta form-submit" type="primary" htmlType="submit" loading={busy} disabled={!sent} block>
           创建账号
         </Button>

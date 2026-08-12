@@ -24,6 +24,8 @@ DEFAULT_AGENT_CONFIG: dict[str, object] = {
 SUPPORTED_DISPLAY_MODES = frozenset({"minimal", "medium", "verbose", "developer"})
 
 DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
+    "id": "",
+    "is_active": False,
     "provider": "deepseek",
     "protocol": "chat_completions",
     "base_url": "",

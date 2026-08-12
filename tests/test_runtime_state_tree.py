@@ -5,9 +5,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from backend.api.sessions.projection import project_node_transcript
 from backend.configuration import ClientPaths
 from backend.domain.runtime_state import (
     APP_VERSION,
+    FAILED_TERMINAL_MESSAGE,
     InMemoryNodeStore,
     NodeFrame,
     NodeWriter,
@@ -92,6 +94,128 @@ def test_failed_and_abort_lifecycle() -> None:
     assert store.get_node("s", paused.id).status == "abort"
     resumed = RuntimeStateTree([failed, paused]).resume(paused, data=message_payload("user", "continue"))
     assert resumed.parent_id == paused.id
+
+
+def test_failed_node_records_generic_reason_for_ui_and_next_model_turn() -> None:
+    store = InMemoryNodeStore()
+    writer = NodeWriter(store)
+    node = writer.create(session_id="s")
+
+    failed = writer.fail("s", node.id)
+
+    error = failed.data["message"]["error"]
+    assert failed.status == "failed"
+    assert error == {"category": "unknown", "message": FAILED_TERMINAL_MESSAGE}
+    assert project_node_transcript([failed])[0]["error"] == FAILED_TERMINAL_MESSAGE
+    assert to_chat_completions([failed]) == [{"role": "assistant", "content": FAILED_TERMINAL_MESSAGE}]
+
+
+def test_provider_adapters_preserve_terminal_reason_for_mapping_nodes() -> None:
+    terminal = {
+        "status": "abort",
+        "data": {
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "error": {
+                    "category": "user",
+                    "message": "The run was aborted at the user's request.",
+                },
+            },
+        },
+    }
+    expected = "The run was aborted at the user's request."
+
+    assert to_chat_completions([{"status": "abort", "data": {}}]) == [
+        {"role": "assistant", "content": "The run was aborted for an unknown reason."}
+    ]
+    for adapter in (to_chat_completions, to_responses, to_messages):
+        rendered = json.dumps(adapter([terminal]), ensure_ascii=False)
+        assert expected in rendered
+        assert rendered.count(expected) == 1
+
+
+def test_provider_adapters_do_not_duplicate_an_existing_terminal_reason() -> None:
+    reason = "The run was aborted at the user's request."
+    terminal = {
+        "status": "abort",
+        "data": {
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": reason}],
+                "error": {"category": "user", "message": reason},
+            },
+        },
+    }
+
+    for adapter in (to_chat_completions, to_responses, to_messages):
+        rendered = json.dumps(adapter([terminal]), ensure_ascii=False)
+        assert rendered.count(reason) == 1
+
+
+@pytest.mark.parametrize(
+    ("events", "category", "expected"),
+    [
+        (
+            [
+                RuntimeEvent("tool_failed", "disk unavailable", {"tool": "write", "call_id": "c1"}),
+                RuntimeEvent("error", "Stopped"),
+            ],
+            "tool",
+            "internal tool error",
+        ),
+        (
+            [
+                RuntimeEvent("model_error", "request failed", {"error_type": "ModelTransportError"}),
+                RuntimeEvent("error", "Decision failed"),
+            ],
+            "network",
+            "network error",
+        ),
+        ([RuntimeEvent("error", "planner failed")], "agent", "agent encountered an internal error"),
+        (
+            [RuntimeEvent("cancelled", "Run cancelled by user", {"stop_reason": "user_cancelled"})],
+            "user",
+            "user's request",
+        ),
+    ],
+)
+def test_bridge_classifies_abort_reason_for_projection_and_model_context(
+    events: list[RuntimeEvent], category: str, expected: str
+) -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(store, session_id="s", prompt="hello", emit=lambda _frame: None)
+    bridge.start()
+
+    for event in events:
+        bridge.handle(event)
+
+    terminal = bridge.last_node
+    assert terminal is not None and terminal.status == "abort"
+    error = terminal.data["message"]["error"]
+    assert error["category"] == category
+    assert expected in error["message"]
+    transcript = project_node_transcript(store.all_nodes("s"))
+    assert expected in transcript[-1]["error"]
+    assert expected in str(to_chat_completions([terminal])[-1]["content"])
+
+
+@pytest.mark.parametrize(
+    ("error_type", "category"),
+    [("ModelTransportError", "network"), ("TaskPreparationError", "tool"), ("PlanningError", "agent")],
+)
+def test_bridge_keeps_known_uncaught_exception_categories(error_type: str, category: str) -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(store, session_id="s", prompt="hello", emit=lambda _frame: None)
+    bridge.start()
+
+    error = type(error_type, (RuntimeError,), {})()
+    terminal = bridge.finish_exception(error)
+
+    assert terminal is not None and terminal.status == "abort"
+    assert terminal.data["message"]["error"]["category"] == category
 
 
 def test_compaction_retains_recent_window_without_deleting_ancestors() -> None:

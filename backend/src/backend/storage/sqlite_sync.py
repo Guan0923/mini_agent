@@ -17,6 +17,25 @@ from .sqlite_schema import SCHEMA_VERSION
 class SQLiteSyncMixin:
     """Add remote snapshot import/export to a per-session SQLite store."""
 
+    _LEGACY_SNAPSHOT_TABLES: dict[str, tuple[str, ...]] = {
+        "session_runs": (
+            "run_id",
+            "task",
+            "status",
+            "workflow_id",
+            "attempt",
+            "origin_kind",
+            "source_session_id",
+            "source_run_id",
+            "started_at",
+            "updated_at",
+        ),
+        "session_messages": ("id", "run_id", "role", "content", "created_at"),
+        "runs": ("run_id", "status", "state_json", "updated_at"),
+        "checkpoints": ("id", "run_id", "reason", "state_json", "created_at"),
+        "runtime_messages": ("run_id", "sequence", "kind", "message", "data_json", "created_at"),
+    }
+
     def export_runtime_node_snapshot(self, session_id: str) -> dict[str, object]:
         """Export only session metadata and canonical nodes (schema 3)."""
 
@@ -46,7 +65,13 @@ class SQLiteSyncMixin:
         }
 
     def apply_runtime_node_snapshot(self, snapshot: dict[str, object], *, local_device_id: str) -> None:
-        """Import a schema-3 node snapshot; legacy runtime snapshots are rejected."""
+        """Import a schema-3 snapshot, preferring canonical nodes when present.
+
+        ``export_runtime_node_snapshot`` intentionally emits only nodes for
+        callers that need the small tree protocol.  Accepting the optional
+        legacy fields here keeps imports from the durable sync outbox
+        lossless while the node tree is rolled out incrementally.
+        """
 
         if int(snapshot.get("schema_version", -1)) != 3:
             raise ValueError("Only RuntimeState node snapshots (schema_version=3) are supported.")
@@ -63,6 +88,11 @@ class SQLiteSyncMixin:
         nodes = [TreeRuntimeState.from_dict(item) for item in raw_nodes]
         if any(node.session_id != session_id for node in nodes):
             raise ValueError("Node snapshot contains a node from another session.")
+        # A remote session must satisfy the same local directory contract as
+        # a newly created session.  ``_connection`` initializes SQLite but
+        # deliberately does not create workspace/uploads, which would make a
+        # freshly restored session impossible to fork or use with tools.
+        self.paths.ensure_session(session_id)
         with self._connection(session_id) as connection:
             self._clear_snapshot_tables(connection)
             connection.execute(
@@ -88,6 +118,8 @@ class SQLiteSyncMixin:
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     self._node_values(node),
                 )
+            if not nodes:
+                self._restore_snapshot_tables(connection, snapshot, snapshot.get("runtime"))
 
     def pending_sync_operations(self) -> list[dict[str, object]]:
         operations: list[dict[str, object]] = []
@@ -167,12 +199,13 @@ class SQLiteSyncMixin:
         if meta.get("session_id") not in {None, session_id}:
             raise ValueError("Remote snapshot session id does not match its envelope.")
         if int(snapshot.get("schema_version", -1)) != 3 or not isinstance(snapshot.get("nodes"), list):
-            raise ValueError("Legacy runtime snapshots are no longer supported; expected schema_version=3 nodes.")
+            raise ValueError("Remote snapshot must use schema_version=3 and contain a nodes list.")
         if not all(isinstance(item, dict) for item in snapshot["nodes"]):
             raise ValueError("Remote snapshot nodes must be objects.")
         nodes = [TreeRuntimeState.from_dict(item) for item in snapshot["nodes"]]
         if any(node.session_id != session_id for node in nodes):
             raise ValueError("Remote snapshot contains a node from another session.")
+        self.paths.ensure_session(session_id)
         with self._connection(session_id) as connection:
             self._clear_snapshot_tables(connection)
             connection.execute(
@@ -200,6 +233,11 @@ class SQLiteSyncMixin:
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     self._node_values(node),
                 )
+            # New node snapshots are authoritative for conversation history.
+            # Legacy tables are restored only for snapshots produced by a
+            # client that has not populated runtime_nodes yet.
+            if not nodes:
+                self._restore_snapshot_tables(connection, snapshot, snapshot.get("runtime"))
 
     @staticmethod
     def _clear_snapshot_tables(connection: sqlite3.Connection) -> None:
@@ -217,27 +255,22 @@ class SQLiteSyncMixin:
             connection.execute(f"DELETE FROM {table}")
 
     @staticmethod
-    def _restore_snapshot_tables(connection: sqlite3.Connection, snapshot: dict[str, object], runtime: object) -> None:
-        table_specs = {
-            "session_runs": (
-                "run_id",
-                "task",
-                "status",
-                "workflow_id",
-                "attempt",
-                "origin_kind",
-                "source_session_id",
-                "source_run_id",
-                "started_at",
-                "updated_at",
-            ),
-            "session_messages": ("id", "run_id", "role", "content", "created_at"),
-            "runs": ("run_id", "status", "state_json", "updated_at"),
-            "checkpoints": ("id", "run_id", "reason", "state_json", "created_at"),
-            "runtime_messages": ("run_id", "sequence", "kind", "message", "data_json", "created_at"),
-        }
+    def _restore_snapshot_tables(
+        connection: sqlite3.Connection,
+        snapshot: dict[str, object],
+        runtime: object,
+    ) -> None:
+        """Restore the legacy execution projection used by older clients.
+
+        The node tree is the preferred representation.  This helper is only
+        called when a snapshot has no nodes, so restoring these rows cannot
+        overwrite a newer canonical history.  ``runtime`` is retained in
+        ``session_runtime`` and also provides a best-effort projection for
+        older snapshots that only contained one resumable state.
+        """
+
         restored_any = False
-        for table, columns in table_specs.items():
+        for table, columns in SQLiteSyncMixin._LEGACY_SNAPSHOT_TABLES.items():
             rows = snapshot.get(table, [])
             if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
                 raise ValueError(f"Remote snapshot {table} must be a list of objects.")
@@ -248,6 +281,21 @@ class SQLiteSyncMixin:
                     [tuple(row.get(column) for column in columns) for row in rows],
                 )
                 restored_any = True
+
+        if isinstance(runtime, dict):
+            meta_row = connection.execute("SELECT session_id FROM session_meta LIMIT 1").fetchone()
+            target_session_id = str(meta_row[0]) if meta_row is not None else ""
+            runtime_session_id = str(runtime.get("session_id") or target_session_id)
+            if target_session_id and runtime_session_id != target_session_id:
+                raise ValueError("Remote runtime state session id does not match session metadata.")
+            connection.execute(
+                "INSERT INTO session_runtime(session_id,state_json,updated_at) VALUES (?,?,?)",
+                (
+                    runtime_session_id,
+                    json.dumps(runtime, ensure_ascii=False),
+                    str(runtime.get("updated_at") or utc_now()),
+                ),
+            )
         if restored_any or not isinstance(runtime, dict):
             return
         state = RuntimeState.from_dict(runtime)
@@ -317,6 +365,10 @@ class SQLiteSyncMixin:
                 "deleted_at": str(meta[6]) if meta[6] is not None else None,
             },
             "nodes": [],
+            # Keep the old execution projection in the version-3 envelope.
+            # It is needed by TUI/legacy ConversationService until all local
+            # writers emit runtime_nodes, and is ignored when nodes exist.
+            "runtime": None,
         }
         rows = connection.execute("SELECT * FROM runtime_nodes ORDER BY timestamp,id").fetchall()
         snapshot["nodes"] = [
@@ -337,4 +389,20 @@ class SQLiteSyncMixin:
             }
             for row in rows
         ]
+        runtime_row = connection.execute("SELECT state_json FROM session_runtime LIMIT 1").fetchone()
+        if runtime_row is not None:
+            try:
+                runtime = json.loads(str(runtime_row[0]))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Persisted runtime state is not valid JSON.") from exc
+            if not isinstance(runtime, dict):
+                raise ValueError("Persisted runtime state must be a JSON object.")
+            snapshot["runtime"] = runtime
+        for table, columns in SQLiteSyncMixin._LEGACY_SNAPSHOT_TABLES.items():
+            table_rows = connection.execute(
+                f"SELECT {','.join(columns)} FROM {table} ORDER BY rowid"
+            ).fetchall()
+            snapshot[table] = [
+                {column: row[index] for index, column in enumerate(columns)} for row in table_rows
+            ]
         return snapshot

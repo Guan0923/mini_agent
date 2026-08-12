@@ -5,8 +5,8 @@ from pathlib import Path
 
 from backend.domain import AssistantMessage, ToolMessage, UserMessage
 from backend.runtime import AgentRunner, ConversationService
-from backend.storage.postgres import PostgresSessionStore
 from backend.tools import Tool, ToolRegistry
+from tests.local_store import session_store
 
 
 class SteeringPlanner:
@@ -75,6 +75,12 @@ def test_cancellation_after_model_response_discards_stale_tool_call() -> None:
     result = runner.run(runtime)
 
     assert result.status == "cancelled"
+    assert "aborted at the user's request" in (result.final_answer or "")
+    assert any(
+        "aborted at the user's request" in (message.content or "")
+        for message in runtime.state.messages
+        if isinstance(message, AssistantMessage)
+    )
     assert calls == []
     assert [event.kind for event in result.events[-3:]] == ["cancelled", "tool_failed", "run_finished"]
 
@@ -125,7 +131,7 @@ def test_cancellation_during_tool_keeps_result_and_skips_remaining_tools() -> No
 
 
 def test_conversation_persists_cooperatively_cancelled_run(tmp_path: Path) -> None:
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     cancel_requested = False
 
     class CancellingPlanner:
@@ -208,7 +214,7 @@ def test_steering_during_tool_keeps_result_and_stops_remaining_actions() -> None
 
 
 def test_conversation_persists_merged_in_run_messages(tmp_path: Path) -> None:
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     service = ConversationService(
         AgentRunner(SteeringPlanner(), ToolRegistry([Tool("work", "Work", lambda: "done")]), strategy="reactive"),
         store,

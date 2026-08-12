@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Literal
 
-from backend.domain import AssistantMessage, RunStopReason, UserMessage
+from backend.domain import (
+    AssistantMessage,
+    RunStopReason,
+    UserMessage,
+    terminal_error_payload,
+    terminal_error_text,
+)
 
 from ...core.context import AgentRuntime
 from ...core.events import RuntimeEvent
@@ -69,11 +75,24 @@ def cancel_run(
     message: str = "Run cancelled by user",
 ) -> None:
     run = runtime.run
+    detail = message if message not in {"Run cancelled by user", "Run paused by user"} else None
+    reason = terminal_error_text(terminal_error_payload("abort", "user", code=stop_reason, detail=detail))
+    boundary = min(max(run.turn_start_index, 0), len(runtime.state.messages))
+    assistant = next(
+        (item for item in reversed(runtime.state.messages[boundary:]) if isinstance(item, AssistantMessage)),
+        None,
+    )
+    if assistant is None:
+        runtime.state.messages.append(AssistantMessage(content=reason))
+    elif reason not in (assistant.content or ""):
+        assistant.content = f"{assistant.content}\n\n{reason}".strip()
     run.status = "cancelled"
     run.stop_reason = stop_reason
-    run.add_event("cancelled", message, stop_reason=stop_reason)
+    run.final_answer = reason
+    run.history = runtime.state.messages
+    run.add_event("cancelled", reason, stop_reason=stop_reason)
     publish = runtime.services.publish or (lambda _event: None)
-    publish(RuntimeEvent("cancelled", message, {"stop_reason": stop_reason}))
+    publish(RuntimeEvent("cancelled", reason, {"stop_reason": stop_reason}))
 
 
 def pause_run(runtime: AgentRuntime) -> None:

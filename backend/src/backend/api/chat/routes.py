@@ -19,11 +19,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from backend.domain import DEFAULT_TIME_ZONE
+from backend.domain import DEFAULT_TIME_ZONE, FAILED_TERMINAL_MESSAGE, terminal_error_text
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime import RunnerSettings, build_application
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
+from backend.storage.auth.crypto import SecretDecryptionError
 
 from ..auth.dependencies import require_user
 from ..auth.types import UserIdentity
@@ -108,11 +109,16 @@ def _event_payload(event: RuntimeEvent) -> dict:
     return identifiers
 
 
-def _model_config_snapshot(state: WebAppState, user_id: str) -> ModelConfig | None:
+def _model_config_snapshot(state: WebAppState, user_id: str) -> ModelConfig:
     try:
         return state.model_config_for_user(user_id)
-    except Exception:
-        return None
+    except SecretDecryptionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="当前提供商密钥无法解密，请在用户设置中重新填写 API Key。",
+        ) from exc
+    except ModelConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=f"模型未配置：{exc}") from exc
 
 
 def _validate_source_node(store, session_id: str, source_node_id: str | None, *, resume: bool = False) -> None:
@@ -197,12 +203,17 @@ def _stream(
     def worker() -> None:
         app = None
         try:
-            workspace = state.user_workspace(identity.id) if identity is not None else state.chat_workspace
+            workspace = (
+                state.user_workspace(identity.id, session_id)
+                if identity is not None and session_id is not None
+                else state.chat_workspace
+            )
             path_options = {"paths": state.user_paths(identity.id)} if identity is not None else {}
             if identity is not None:
                 app = build_user_application(
                     state,
                     identity.id,
+                    session_id=session_id,
                     user_preferences=user_preferences,
                     model_config=model_config,
                     load_model_config=False,
@@ -266,13 +277,28 @@ def _stream(
             if bridge is not None:
                 old_status = str(run_state.status if run_state is not None else "failed")
                 stop_reason = str(getattr(run_state, "stop_reason", "") or "")
-                terminal_status = (
-                    "abort"
-                    if old_status == "cancelled" and stop_reason == "user_paused"
-                    else ("success" if old_status in {"completed", "success"} else "failed")
-                )
+                if old_status in {"completed", "success"}:
+                    requested_status = "success"
+                    category = None
+                elif old_status == "cancelled":
+                    requested_status = "abort"
+                    category = "user"
+                elif bridge.abort_category is not None:
+                    requested_status = "abort"
+                    category = bridge.abort_category
+                else:
+                    requested_status = "failed"
+                    category = None
                 final_answer = (run_state.final_answer if run_state is not None else "") or ""
-                bridge.finish(terminal_status, final_answer)
+                final_node = bridge.finish(
+                    requested_status,
+                    final_answer,
+                    category=category,
+                    code=stop_reason or bridge.abort_code,
+                )
+                terminal_status = final_node.status if final_node is not None else requested_status
+                terminal_error = bridge.terminal_error
+                rendered_error = terminal_error_text(terminal_error) if terminal_error is not None else ""
                 runtime_finish = next(
                     (
                         item
@@ -291,8 +317,8 @@ def _stream(
                 enqueue_terminal(
                     {
                         "type": "done" if terminal_status == "success" else "error",
-                        "status": run_state.status if run_state is not None else terminal_status,
-                        "final_answer": final_answer,
+                        "status": terminal_status,
+                        "final_answer": final_answer if terminal_status == "success" else rendered_error,
                         "session_id": active_session.session_id if active_session is not None else session_id,
                         "run_id": run_state.run_id
                         if run_state is not None
@@ -305,7 +331,9 @@ def _stream(
                             "tool_calls": finished.get("tool_calls", finish_data.get("tool_calls")),
                             "active_skills": finished.get("active_skills", finish_data.get("active_skills", [])),
                         },
-                        **({"error": final_answer} if terminal_status != "success" else {}),
+                        **(
+                            {"error": rendered_error or FAILED_TERMINAL_MESSAGE} if terminal_status != "success" else {}
+                        ),
                     }
                 )
             else:
@@ -328,24 +356,43 @@ def _stream(
                         },
                     }
                 )
+            if identity is not None and state.snapshot_manager is not None:
+                state.snapshot_manager.notify_run_finished(identity.id)
         except ModelConfigurationError as exc:
             if bridge_ref["bridge"] is not None:
                 error_message = f"模型未配置：{exc}"
-                bridge_ref["bridge"].finish("failed", error_message)
+                bridge_ref["bridge"].finish("abort", error_message, category="agent", code="model_configuration_error")
+                rendered_error = terminal_error_text(bridge_ref["bridge"].terminal_error or {})
                 enqueue_terminal(
-                    {"type": "error", "status": "failed", "error": error_message, "message": error_message}
+                    {"type": "error", "status": "abort", "error": rendered_error, "message": rendered_error}
                 )
             else:
                 enqueue_terminal({"type": "error", "message": f"模型未配置：{exc}"})
         except Exception as exc:
-            if bridge_ref["bridge"] is not None:
-                error_message = f"{type(exc).__name__}: {exc}"
-                bridge_ref["bridge"].finish("failed", error_message)
+            bridge = bridge_ref["bridge"]
+            if bridge is not None:
+                final_node = bridge.finish_exception(exc)
+                terminal_status = final_node.status if final_node is not None else "failed"
+                rendered_error = terminal_error_text(bridge.terminal_error or {}) if bridge.terminal_error else ""
+                if terminal_status == "failed":
+                    rendered_error = rendered_error or FAILED_TERMINAL_MESSAGE
                 enqueue_terminal(
-                    {"type": "error", "status": "failed", "error": error_message, "message": error_message}
+                    {
+                        "type": "error",
+                        "status": terminal_status,
+                        "error": rendered_error,
+                        "message": rendered_error,
+                    }
                 )
             else:
-                enqueue_terminal({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+                enqueue_terminal(
+                    {
+                        "type": "error",
+                        "status": "failed",
+                        "error": FAILED_TERMINAL_MESSAGE,
+                        "message": FAILED_TERMINAL_MESSAGE,
+                    }
+                )
         finally:
             if app is not None:
                 try:
@@ -384,21 +431,25 @@ async def chat(
     state: WebAppState = request.app.state.web
     if not body.prompt.strip():
         raise HTTPException(status_code=400, detail="prompt 不能为空")
-    if body.session_id:
-        store = _store(state, identity.id)
-        summary = _require_active(store, body.session_id)
+    store = _store(state, identity.id)
+    resolved_session_id = body.session_id
+    if resolved_session_id:
+        summary = _require_active(store, resolved_session_id)
         if summary.last_run_status == "running":
             raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
-        nodes = getattr(store, "load_nodes", lambda _session_id: [])(body.session_id)
+        nodes = getattr(store, "load_nodes", lambda _session_id: [])(resolved_session_id)
         if nodes and not body.source_node_id:
             raise HTTPException(status_code=409, detail="续聊请求必须提交当前最后节点 ID。")
-        _validate_source_node(store, body.session_id, body.source_node_id)
+        _validate_source_node(store, resolved_session_id, body.source_node_id)
+    else:
+        resolved_session_id = store.create_session().session_id
+    state.user_paths(identity.id).ensure_session(resolved_session_id)
     return StreamingResponse(
         _stream(
             state,
             body.prompt.strip(),
             identity=identity,
-            session_id=body.session_id,
+            session_id=resolved_session_id,
             source_node_id=body.source_node_id,
             mode=body.mode,
             interactive=body.interactive,

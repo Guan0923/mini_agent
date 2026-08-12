@@ -8,7 +8,7 @@ import ResetPasswordPage from "./ResetPasswordPage";
 import "../../styles.css";
 
 vi.mock("../../auth/AuthProvider", () => ({
-  useAuth: () => ({ signIn: vi.fn(), setUser: vi.fn() }),
+  useAuth: () => ({ signIn: vi.fn(), signInGuest: vi.fn(), setUser: vi.fn() }),
 }));
 
 describe("Auth form spacing", () => {
@@ -34,6 +34,22 @@ describe("Auth form spacing", () => {
     expect(form).toBeInTheDocument();
     expect(field).toBeInTheDocument();
     expect(getComputedStyle(label).display).not.toBe("flex");
+  });
+
+  it("uses shared button geometry with explicit primary and secondary variants", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <LoginPage />
+      </MemoryRouter>,
+    );
+    const buttons = container.querySelectorAll(".auth-form .form-submit");
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0]).toHaveClass("form-submit--primary");
+    expect(buttons[1]).toHaveClass("form-submit--secondary");
+    for (const button of buttons) {
+      expect(button).toHaveClass("form-submit");
+      expect(button).not.toHaveClass("primary-cta");
+    }
   });
 
   it("uses the shared auth card and form scope on every auth page", () => {

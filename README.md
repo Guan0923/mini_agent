@@ -2,18 +2,18 @@
 
 Mini-Agent 是一个面向学习与实验的 Python Agent Harness。它用可观察的终端界面展示模型决策、工具调用、规划、审批、上下文压缩、持久化恢复、项目级 Skills、MCP 工具服务和并发 Subagents。
 
-当前版本要求 Python 3.11+。TUI 客户端以每会话 SQLite 为运行时存储且不直连数据库；Web 后端则强制使用 PostgreSQL 保存账户与用户设置，聊天历史和 RuntimeState 暂时仍保存在服务器本地 SQLite。
+当前版本要求 Python 3.11+。系统按 frontend、backend、tui、cloud 四个部署边界组织：backend 在用户电脑 loopback 上运行 Agent Runtime 和本地 SQLite，frontend 只访问 backend，cloud 独占 PostgreSQL、SMTP 和云端密钥。
 
 ## 已实现能力
 
 - **执行与规划**：支持 `reactive`、`dynamic_replan` 和自动策略选择；独立的只读 Plan mode 可调研、提问并提交 Plan Review。
 - **安全工具**：提供 workspace-confined 的文件读取、搜索、写入和精确编辑，以及网页搜索、受 SSRF 防护的网页抓取和跨平台命令执行；写入、命令和联网操作需要审批。
-- **分层 Skills**：合并 `~/mini_agent/skills` 与项目 `.mini_agent/skills`，同名时项目版本完整覆盖全局版本。
+- **分层 Skills**：合并 `~/.mini_agent/<user_id>/skills` 与项目 `.mini_agent/skills`，同名时项目版本完整覆盖全局版本。
 - **并发 Subagents**：父 Agent 可把独立工作交给多个子 Agent 并发执行；批次结果持久化，同路径写入和命令执行有进程内协调。
 - **MCP**：既可通过 stdio 暴露安全只读工具，也可从全局/项目 `mcp.toml` 加载外部 server；外部工具始终需要审批且不进入 Plan mode。
-- **耐久运行**：`~/mini_agent/<session_id>/state.db` 保存完整本地状态和同步 outbox；离线或服务端失败不影响运行。
+- **耐久运行**：backend 使用 `~/.mini_agent/client.db` 保存本地浏览器会话哈希，认证用户使用 `~/.mini_agent/<user_id>/runtime/<session_id>/state.db`，每个会话拥有独立的 `workspace/` 与 `uploads/`。
 - **可观察 TUI**：流式展示 reasoning、响应、工具与 Subagent 事件；支持详情级别、下一轮消息队列、历史和结构化 trace。
-- **上下文与审计**：按上下文窗口估算 token，支持自动或手动压缩；`~/mini_agent/logs` 与会话 SQLite 保存递归脱敏的运行轨迹。
+- **上下文与审计**：按上下文窗口估算 token，支持自动或手动压缩；Web 运行轨迹以会话 SQLite 为准，诊断日志位于用户树之外。
 
 尚未完成的主要方向包括强执行沙箱、统一的全局时间/费用/工具输出预算、后台进程管理、Replay/Eval、浏览器前端和跨进程 Subagent 调度。当前 Subagents 是单进程、单层并发能力，不是分布式多 Agent 系统。
 
@@ -26,7 +26,7 @@ python -m pip install -e ".[dev]"
 python run.py --planner rule "calculate 1 + 1"
 ```
 
-首次启动会创建 `~/mini_agent/config.toml` 和稳定的 device ID。若项目仍有旧 `.env`，启动器会原子迁移其受支持字段、校验 TOML 后删除旧文件；之后客户端只读 TOML，不接受进程环境覆盖。使用默认 LLM planner 前请填写 `[model]`。
+Web 登录后会创建 `~/.mini_agent/client.db` 以及 `~/.mini_agent/<user_id>/config.toml`、`user.db` 和稳定的设备 ID。简单偏好由 TOML 管理，多提供商、加密 API Key、加密 cloud token 和同步事务状态由本地 SQLite 管理；cloud 只接收本地加密快照。没有网络时游客和已登录账户仍可运行本地 Agent。
 
 ```powershell
 # 交互式 TUI；三个入口等价
@@ -61,7 +61,7 @@ mini-agent --resume session_xxx
 
 ## 配置
 
-唯一客户端配置是 `~/mini_agent/config.toml`；仓库中的 `config.toml.example` 可作为模板：
+以下 `~/.mini_agent/config.toml` 仅用于尚未接入账户存储的独立离线 TUI；Web 用户不要在此保存提供商密钥：
 
 ```toml
 [model]
@@ -106,7 +106,7 @@ TUI 使用 alternate screen，消息区可滚动，状态栏和输入框固定�
 
 ## 全局与项目 Skills
 
-全局 Skill 位于 `~/mini_agent/skills/<skill-name>/SKILL.md`，项目 Skill 位于 `<workspace>/.mini_agent/skills/<skill-name>/SKILL.md`；同名时项目版本完整覆盖全局版本。manifest 示例：
+全局 Skill 位于 `~/.mini_agent/<user_id>/skills/<skill-name>/SKILL.md`，项目 Skill 位于 `<workspace>/.mini_agent/skills/<skill-name>/SKILL.md`；同名时项目版本完整覆盖全局版本。manifest 示例：
 
 ```markdown
 ---
@@ -154,14 +154,16 @@ mini-agent-mcp --workspace C:\path\to\workspace
 
 MCP adapter 只暴露 `read_file`、`glob`、`grep`、`get_current_time`。写入、命令和联网工具不会通过该 server 暴露；所有参数仍经过共享 JSON Schema 校验，路径仍限制在指定 workspace 内。MCP server 本身不需要模型密钥或 PostgreSQL。
 
-客户端也会合并 `~/mini_agent/mcp.toml` 与 `<workspace>/.mini_agent/mcp.toml`，同名 server 由项目配置完整覆盖：
+客户端也会合并 `~/.mini_agent/<user_id>/mcp/servers.toml` 与 `<workspace>/.mini_agent/mcp.toml`，同名 server 由项目配置完整覆盖：
 
 ```toml
 [servers.example]
 command = "example-mcp-server"
 args = ["--stdio"]
 # cwd = "C:/path/to/workspace"
-# env = { EXAMPLE_TOKEN = "secret" }
+# env = { EXAMPLE_MODE = "readonly" }
+# Sensitive values must be references, never plaintext:
+# env_refs = { EXAMPLE_TOKEN = "env://EXAMPLE_TOKEN" }
 ```
 
 发现的工具注册为 `mcp_<server>_<tool>`。外部 server 使用长生命周期 stdio session；其工具始终需要审批且不向 Plan mode 暴露。
@@ -181,9 +183,9 @@ TUI -> ConversationService -> AgentRunner -> workflows -> planner / tools
 MCP stdio -> McpToolAdapter -> safe ToolRegistry subset
 LLMClient -> JsonHttpTransport <-> DeepSeek adapter
 SQLite     <-> local sessions / RuntimeState / audit / checkpoints / outbox
-HTTPS sync <-> optional PostgreSQL remote snapshots and idempotent operations
-Web auth/settings <-> mandatory PostgreSQL identities, sessions and encrypted provider settings
-JSONL      <-> ~/mini_agent/logs redacted diagnostics
+Local backend HTTP client <-> cloud API <-> PostgreSQL account records, key envelopes and latest three ciphertext snapshots
+Browser/TUI <-> loopback backend API; cloud never owns Agent Runtime or workspace files
+JSONL      <-> ~/.mini_agent-cache/logs/<user_id> redacted diagnostics
 ```
 
 - `src/backend/domain/`：provider-neutral message、plan、session、skill 和 run state。
@@ -192,7 +194,8 @@ JSONL      <-> ~/mini_agent/logs redacted diagnostics
 - `src/backend/providers/`：通用 HTTP/SSE transport、Provider 门面和 DeepSeek wire adapter。
 - `src/backend/tools/`：ToolRegistry、JSON Schema、文件、网页、命令和 delegation tool。
 - `src/backend/mcp/`：只读 MCP adapter 与分层外部 stdio MCP client。
-- `src/backend/storage/sqlite.py`、`src/backend/sync/`：本地会话存储、同步客户端和远端 PostgreSQL 服务。
+- `src/backend/storage/sqlite.py`、`src/backend/sync/`：本地会话存储、同步客户端和快照端口；`src/backend/cloud/`：cloud HTTPS client 与 HTTP snapshot adapter。
+- `cloud/src/cloud/`：独立账户、设备授权、密钥封装和 PostgreSQL snapshot API。
 - `src/backend/observability/`：事件扇出、JSONL 记录与脱敏。
 - `src/tui/`：CLI、Textual 组件、screen、rendering、view 和 widget。
 - `src/frontend/`：未来浏览器前端占位；只能通过版本化 backend API 通信。
@@ -208,4 +211,4 @@ python -m pytest -q
 python -m pytest --cov=backend --cov-report=term-missing
 ```
 
-TUI 客户端与大多数测试不需要 PostgreSQL；Web 后端和服务端集成测试需要它。Web 启动、跨子域配置及 SQLite 账户迁移见 [frontend/README.md](frontend/README.md)；测试会重置 `mini_agent_test` 的 `public` schema，绝不能把 `TEST_DATABASE_URL` 指向开发或生产数据库。开发约定详见 [docs/development.md](docs/development.md)。
+backend 单元测试和游客模式不需要 PostgreSQL；只有 cloud 集成测试和 cloud 部署需要它。启动方式、跨域配置及本地存储约定见 [frontend/README.md](frontend/README.md) 与 [docs/development.md](docs/development.md)。

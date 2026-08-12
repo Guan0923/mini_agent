@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from backend.configuration import ClientPaths
 from backend.domain import (
     AssistantMessage,
     StrategySelection,
@@ -11,8 +12,9 @@ from backend.domain import (
 from backend.runtime import AgentRunner, ConversationService
 from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
-from backend.storage.postgres import PostgresSessionStore
 from backend.tools import ToolRegistry
+from backend.storage.sqlite import SQLiteSessionStore
+from tests.local_store import session_store
 
 PLAN = "# Reviewed change\n\n## Summary\nImplement the reviewed change."
 
@@ -69,7 +71,7 @@ class ConversationPlanner(PlanMessagePlanner):
 
 def build_service(tmp_path: Path, planner: PlanMessagePlanner) -> ConversationService:
     runner = AgentRunner(planner, ToolRegistry(tmp_path))
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     return ConversationService(runner, store)
 
 
@@ -167,20 +169,19 @@ def test_cancelled_plan_history_survives_restart(tmp_path: Path) -> None:
 
     reopened = ConversationService(
         service.runner,
-        PostgresSessionStore(),
+        session_store(tmp_path / "store"),
         session_id=service.active_session.session_id,
     )
 
     assert reopened.runtime is not None
-    assert reopened.runtime.state.messages == [
-        UserMessage(content="Plan the change"),
-        completed_review_message(),
-    ]
+    assert reopened.runtime.state.messages[0] == UserMessage(content="Plan the change")
+    assert reopened.runtime.state.messages[1].tool_messages == completed_review_message().tool_messages
+    assert "aborted at the user's request" in (reopened.runtime.state.messages[1].content or "")
 
 
-class FailingSecondSessionStore(PostgresSessionStore):
-    def __init__(self) -> None:
-        super().__init__()
+class FailingSecondSessionStore(SQLiteSessionStore):
+    def __init__(self, root: Path) -> None:
+        super().__init__(ClientPaths(root), "device_test")
         self.created_sessions = 0
 
     def create_session(self, title: str | None = None):
@@ -192,7 +193,7 @@ class FailingSecondSessionStore(PostgresSessionStore):
 
 def test_clear_session_failure_preserves_source_plan_history(tmp_path: Path) -> None:
     planner = PlanMessagePlanner()
-    store = FailingSecondSessionStore()
+    store = FailingSecondSessionStore(tmp_path / "store")
     service = ConversationService(AgentRunner(planner, ToolRegistry(tmp_path)), store)
     source = service.new_session("Source plan")
 

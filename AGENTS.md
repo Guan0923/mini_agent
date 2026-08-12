@@ -17,8 +17,9 @@ Mini-Agent is a Python 3.11+ agent lab. Production code is split into `src/backe
 - `backend/providers/`: `client.py` orchestrates providers, `transport.py` owns generic JSON/SSE HTTP, and `deepseek/` owns DeepSeek wire conversion.
 - `backend/tools/`: contracts and registry plus grouped `filesystem/`, `web/`, `default_tools/`, command, and delegation implementations.
 - `backend/mcp/`: safe stdio server plus layered, approval-gated external MCP clients.
-- `backend/storage/sqlite.py`: per-session local state, checkpoints, audit records, and sync outbox.
-- `backend/sync/`: HTTPS client/coordinator and the isolated PostgreSQL synchronization service.
+- `backend/storage/sqlite.py`: per-session local state, checkpoints, and audit records below the unified user runtime.
+- `backend/storage/user_settings.py`: per-user `user.db`, the local source of truth for authenticated settings.
+- `backend/sync/`: encrypted cloud snapshots, background save/restore jobs, and PostgreSQL ciphertext storage.
 - `backend/observability/`: JSONL logging, redaction, and event fan-out.
 - `tui/`: CLI/application loops, approval components, screens, rendering, view behavior, and reusable widgets.
 - `frontend/`: reserved for a future browser frontend; it consumes backend APIs and must not import backend implementation modules directly.
@@ -68,7 +69,8 @@ Use focused Conventional Commit-style messages such as `feat: add anthropic adap
 
 ## Security and Configuration
 
-- Client configuration comes only from `~/mini_agent/config.toml`; a workspace `.env` is a one-time migration source and process environment values do not override client TOML.
+- Authenticated Web data lives below `~/.mini_agent/<user_id>/`; `config.toml` owns simple profile/agent/runtime preferences, while `user.db` owns provider ciphertext and sync state. `runtime/<session_id>/` owns `state.db`, workspace, and uploads. Web runtime must never fall back to a root-level config.
+- Server deployment values such as PostgreSQL, CORS, SMTP, and cloud master-key versions come from process environment or the deployment secret manager. Standalone TUI TOML compatibility is legacy-only until TUI adopts the authenticated user store.
 - Treat model-generated tool arguments and all web/tool output as untrusted.
 - Authentication headers, config secrets, legacy `.env` contents, sync tokens, MCP environment values, and full process environments must never be persisted. Keep recursive redaction intact when changing logs.
 - `runtime.log_full_messages = true` records complete redacted bodies; `false` records summaries. Both modes must remain schema-compatible across JSONL, SQLite runtime/audit records, sync snapshots, runtime state, and history projections.

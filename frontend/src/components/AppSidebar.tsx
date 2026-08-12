@@ -307,8 +307,7 @@ function HistoryRow({ conversation, selected, onSelect, onRename, onArchive, onD
           <span className="history-entry-icon">
             {running ? (
               <span role="status" aria-label="正在运行" title="正在运行">
-                <Badge status="processing" />
-                <Spin size="small" indicator={<LoadingOutlined spin />} style={{ marginLeft: 2 }} />
+                <Spin size="small" indicator={<LoadingOutlined spin />} />
               </span>
             ) : (
               <MessageOutlined aria-hidden="true" />

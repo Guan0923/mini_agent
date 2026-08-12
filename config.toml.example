@@ -1,4 +1,4 @@
-# Copy this file to ~/mini_agent/config.toml and replace the model placeholders.
+# Copy this file to ~/.mini_agent/config.toml for standalone offline TUI use.
 # The client reads only this TOML file; it does not apply process-environment overrides.
 [model]
 provider = "deepseek"
@@ -20,17 +20,9 @@ public_url = "http://localhost:5173"
 allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 # Set true when the web app is served over HTTPS.
 cookie_secure = false
-# Web auth/settings additionally require DATABASE_URL and a random
-# MINI_AGENT_SECRET_KEY of at least 32 UTF-8 bytes in the server environment.
-
-[email]
-# Configure a real SMTP relay to enable registration and password recovery.
-smtp_host = "smtp.example.com"
-smtp_port = 587
-smtp_username = "replace-with-your-mail-user"
-smtp_password = "replace-with-your-mail-password"
-from_address = "Mini-Agent <no-reply@example.com>"
-use_starttls = true
+# Account registration, password reset, SMTP, PostgreSQL and the cloud master
+# key belong to the independent cloud process. They are never read from this
+# local client TOML file; see cloud/.env.example or compose.yml.
 
 [sync]
 # device_id is generated automatically and remains stable on this client.

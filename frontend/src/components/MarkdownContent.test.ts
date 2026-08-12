@@ -1,5 +1,31 @@
-import { describe, expect, it } from "vitest";
-import { renderMarkdown } from "./MarkdownContent";
+import { fireEvent, render } from "@testing-library/react";
+import React from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { MathJaxBrowserInstance } from "../math/mathjax.d";
+import { MATHML_NAMESPACE } from "../math";
+import MarkdownContent, { renderMarkdown, renderNativeMathML } from "./MarkdownContent";
+
+const originalMathMLElement = Object.getOwnPropertyDescriptor(window, "MathMLElement");
+
+function enableNativeMathML(): void {
+  Object.defineProperty(window, "MathMLElement", {
+    configurable: true,
+    value: class MathMLElement {},
+  });
+}
+
+function restoreMathMLElement(): void {
+  if (originalMathMLElement) {
+    Object.defineProperty(window, "MathMLElement", originalMathMLElement);
+  } else {
+    delete (window as Window & { MathMLElement?: unknown }).MathMLElement;
+  }
+}
+
+afterEach(() => {
+  restoreMathMLElement();
+  document.body.replaceChildren();
+});
 
 describe("shared Markdown and LaTeX renderer", () => {
   it("keeps all supported delimiters as complete MathJax source wrappers", () => {
@@ -42,5 +68,57 @@ describe("shared Markdown and LaTeX renderer", () => {
     const html = renderMarkdown("[docs](https://example.com)");
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noopener noreferrer"');
+  });
+
+  it("selects the complete formula when the rendered formula is clicked", () => {
+    const { container } = render(React.createElement(MarkdownContent, { text: "结果是 $x^2$" }));
+    const root = container.firstElementChild as HTMLElement;
+    const formula = root.querySelector<HTMLElement>("[data-latex-source]")!;
+
+    fireEvent.click(formula);
+
+    expect(root).toHaveFocus();
+    expect(window.getSelection()?.isCollapsed).toBe(false);
+    expect(window.getSelection()?.toString()).toContain("$x^2$");
+  });
+
+  it("converts every formula atomically to native MathML before committing", async () => {
+    enableNativeMathML();
+    const root = document.createElement("div");
+    root.innerHTML = renderMarkdown("结果是 $x^2$ 和 $$\\frac{a}{b}$$");
+    document.body.appendChild(root);
+    const mathJax: MathJaxBrowserInstance = {
+      tex2mmlPromise: vi.fn(async (body, options) => {
+        const display = options?.display ? "block" : "inline";
+        return `<math xmlns="${MATHML_NAMESPACE}" display="${display}"><mi>${body}</mi></math>`;
+      }),
+    };
+
+    const rendered = await renderNativeMathML(root, mathJax, () => true);
+
+    expect(rendered).toBe(true);
+    expect(root.querySelectorAll("math")).toHaveLength(2);
+    expect(root.querySelectorAll("[data-latex-source]")).toHaveLength(2);
+    expect(root.querySelectorAll(".math-native")).toHaveLength(2);
+    expect(root.querySelector("[data-latex-source]")?.textContent).toBe("x^2");
+    expect(root.querySelector("[data-latex-source]")?.getAttribute("data-latex-source")).toBe("$x^2$");
+  });
+
+  it("does not partially commit when MathML conversion fails", async () => {
+    enableNativeMathML();
+    const root = document.createElement("div");
+    root.innerHTML = renderMarkdown("$x$ and $y$");
+    document.body.appendChild(root);
+    const validMathML = `<math xmlns="${MATHML_NAMESPACE}"><mi>x</mi></math>`;
+    const mathJax: MathJaxBrowserInstance = {
+      tex2mmlPromise: vi.fn().mockResolvedValueOnce(validMathML).mockRejectedValueOnce(new Error("invalid TeX")),
+    };
+
+    const rendered = await renderNativeMathML(root, mathJax, () => true);
+
+    expect(rendered).toBe(false);
+    expect(root.querySelector("math")).toBeNull();
+    expect(root.textContent).toContain("$x$");
+    expect(root.textContent).toContain("$y$");
   });
 });

@@ -16,7 +16,7 @@ function LoadingScreen() {
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   if (loading) return <LoadingScreen />;
-  return user ? <Navigate to="/app" replace /> : <>{children}</>;
+  return user && user.kind !== "guest" ? <Navigate to="/app" replace /> : <>{children}</>;
 }
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {

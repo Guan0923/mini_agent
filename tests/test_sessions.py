@@ -1,16 +1,15 @@
-import os
+import sqlite3
 from pathlib import Path
 
-import psycopg
 from backend.domain import AgentAction, RunState, StrategySelection
 from backend.runtime import AgentRunner
-from backend.storage.postgres import PostgresCheckpointStore, PostgresSessionStore
 from backend.tools import ToolRegistry
+from tests.local_store import session_store
 from tui.cli import TerminalApp
 
 
-def test_postgres_session_store_persists_multi_turn_conversation(tmp_path: Path) -> None:
-    store = PostgresSessionStore()
+def test_sqlite_session_store_persists_multi_turn_conversation(tmp_path: Path) -> None:
+    store = session_store(tmp_path / "store")
     session = store.create_session()
 
     store.start_turn(session.session_id, "run_one", "Remember that I like Python.")
@@ -18,7 +17,7 @@ def test_postgres_session_store_persists_multi_turn_conversation(tmp_path: Path)
     store.start_turn(session.session_id, "run_two", "What do I like?")
     store.finish_turn(session.session_id, "run_two", "completed", "You like Python.")
 
-    reopened = PostgresSessionStore()
+    reopened = session_store(tmp_path / "store")
     assert reopened.load_conversation(session.session_id) == [
         {"role": "user", "content": "Remember that I like Python."},
         {"role": "assistant", "content": "I will remember that."},
@@ -34,7 +33,7 @@ def test_postgres_session_store_persists_multi_turn_conversation(tmp_path: Path)
 
 
 def test_session_store_finish_is_idempotent_and_persists_terminal_messages(tmp_path: Path) -> None:
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     session = store.create_session("Test session")
 
     store.start_turn(session.session_id, "run_failed", "This will fail.")
@@ -52,25 +51,34 @@ def test_session_store_finish_is_idempotent_and_persists_terminal_messages(tmp_p
 
 
 def test_session_store_shares_database_with_existing_checkpoints(tmp_path: Path) -> None:
-    checkpoints = PostgresCheckpointStore()
+    checkpoints = session_store(tmp_path / "store")
     state = RunState(task="checkpointed", mode="agent")
-    checkpoints.save(state, "run_started")
+    session = checkpoints.create_session()
+    runner = AgentRunner(HistoryPlanner(), ToolRegistry())
+    runtime = runner.new_runtime(
+        task=state.task,
+        session_id=session.session_id,
+        run_id=state.run_id,
+        runtime_store=checkpoints,
+    )
+    checkpoints.save(runtime, "run_started")
 
-    sessions = PostgresSessionStore()
-    session = sessions.create_session()
+    sessions = session_store(tmp_path / "store")
     sessions.start_turn(session.session_id, state.run_id, state.task)
     sessions.finish_turn(session.session_id, state.run_id, "completed", "done")
 
-    assert checkpoints.load(state.run_id) is not None
+    restored = checkpoints.load_runtime(session.session_id)
+    assert restored is not None and restored.current_run is not None
+    assert restored.current_run.run_id == state.run_id
     assert sessions.load_conversation(session.session_id) == [
         {"role": "user", "content": "checkpointed"},
         {"role": "assistant", "content": "done"},
     ]
 
 
-def test_postgres_schema_initialization_is_idempotent(tmp_path: Path) -> None:
-    first_store = PostgresSessionStore()
-    second_store = PostgresSessionStore()
+def test_sqlite_schema_initialization_is_idempotent(tmp_path: Path) -> None:
+    first_store = session_store(tmp_path / "store")
+    second_store = session_store(tmp_path / "store")
     session = first_store.create_session("Schema")
     first_store.start_turn(session.session_id, "run_schema", "start")
     second_store.append_turn_input(session.session_id, "run_schema", "steer")
@@ -81,16 +89,10 @@ def test_postgres_schema_initialization_is_idempotent(tmp_path: Path) -> None:
         {"role": "user", "content": "steer"},
         {"role": "assistant", "content": "done"},
     ]
-    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as connection:
-        columns = {
-            row[0]
-            for row in connection.execute(
-                """SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'session_runs'"""
-            ).fetchall()
-        }
+    with sqlite3.connect(first_store.paths.session_db(session.session_id)) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(session_runs)").fetchall()}
         lineage = connection.execute(
-            "SELECT workflow_id, attempt, origin_kind FROM session_runs WHERE run_id = %s",
+            "SELECT workflow_id, attempt, origin_kind FROM session_runs WHERE run_id = ?",
             ("run_schema",),
         ).fetchone()
     assert {"workflow_id", "attempt", "origin_kind", "source_session_id", "source_run_id"} <= columns
@@ -144,15 +146,15 @@ def test_tui_does_not_treat_paths_or_urls_as_commands() -> None:
     assert segments == [("task", "read docs/architecture.md from https://example.com/guide", "")]
 
 
-def test_postgres_stores_reuse_the_process_connection_pool() -> None:
-    first = PostgresSessionStore()
-    second = PostgresSessionStore()
+def test_sqlite_stores_keep_state_in_the_configured_session_root(tmp_path: Path) -> None:
+    first = session_store(tmp_path / "first")
+    second = session_store(tmp_path / "second")
 
-    assert first._database is second._database
+    assert first.paths.root != second.paths.root
 
 
-def test_session_store_reads_conversation_in_chronological_cursor_pages() -> None:
-    store = PostgresSessionStore()
+def test_session_store_reads_conversation_in_chronological_cursor_pages(tmp_path: Path) -> None:
+    store = session_store(tmp_path / "store")
     session = store.create_session("Paged")
     for index in range(3):
         run_id = f"run_page_{index}"

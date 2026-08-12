@@ -125,18 +125,57 @@
   color: rgba(5, 67, 82, 0.34);
 }
 
-.form-submit {
+.auth-form .form-submit {
   width: 100%;
+  min-height: 48px;
   margin-top: 4px;
   padding: 12px 18px;
   border: 1px solid rgba(4, 108, 124, 0.36);
+  border-radius: 999px;
+  color: #07475a;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.2;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.auth-form .form-submit--primary {
+  border-color: rgba(4, 108, 124, 0.42);
   background: #eafff6;
+  box-shadow: 0 10px 34px rgba(4, 88, 107, 0.12);
   color: #07475a;
 }
 
-.form-submit:disabled,
-.code-button:disabled,
-.primary-cta:disabled {
+.auth-form .form-submit--secondary {
+  border-color: rgba(5, 105, 123, 0.28);
+  background: rgba(255, 255, 255, 0.42);
+  box-shadow: none;
+  color: #075f70;
+}
+
+.auth-form .form-submit--primary:hover:not(:disabled),
+.auth-form .form-submit--secondary:hover:not(:disabled) {
+  border-color: rgba(4, 102, 119, 0.62);
+  transform: translateY(-1px);
+}
+
+.auth-form .form-submit--primary:hover:not(:disabled) {
+  background: rgba(245, 255, 251, 0.78);
+  box-shadow: 0 14px 38px rgba(3, 82, 101, 0.16);
+}
+
+.auth-form .form-submit--secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.auth-form .form-submit:focus-visible {
+  outline: 2px solid rgba(4, 116, 132, 0.52);
+  outline-offset: 3px;
+}
+
+.auth-form .form-submit:disabled,
+.auth-form .code-button:disabled,
+.auth-form .primary-cta:disabled {
   cursor: not-allowed;
   opacity: 0.5;
   transform: none;

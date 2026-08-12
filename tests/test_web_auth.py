@@ -3,121 +3,143 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import pytest
+from fastapi.testclient import TestClient
+
 from backend.api.app import create_app
 from backend.api.auth.service import WebAuthSettings
 from backend.api.state import WebAppState
-from backend.configuration import ClientPaths
-from backend.storage.auth import AuthStore
-from backend.storage.auth.types import AuthStorageUnavailable
-from fastapi.testclient import TestClient
+from backend.cloud import CloudUnavailable
 
 
-class FakeMailer:
-    def __init__(self) -> None:
-        self.messages: list[tuple[str, str, str]] = []
-
-    def send_code(self, recipient: str, code: str, purpose: str) -> None:
-        self.messages.append((recipient, code, purpose))
+def _state(tmp_path: Path, *, cloud_client=None) -> WebAppState:
+    return WebAppState(tmp_path / "web", cloud_client=cloud_client)
 
 
-def test_default_web_state_requires_server_database_and_secret(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.delenv("MINI_AGENT_SECRET_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="DATABASE_URL"):
-        WebAppState(tmp_path / "missing-database")
-
-    monkeypatch.setenv("DATABASE_URL", "postgresql://unused")
-    with pytest.raises(RuntimeError, match="MINI_AGENT_SECRET_KEY"):
-        WebAppState(tmp_path / "missing-secret")
+def test_default_web_state_is_local_and_does_not_require_postgres(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    assert state.auth.path.name == "client.db"
+    assert state.auth.path.is_file()
     assert not list(tmp_path.rglob("auth.sqlite3"))
 
 
-def test_default_web_state_does_not_fall_back_when_postgres_connection_fails(tmp_path: Path, monkeypatch) -> None:
-    from backend.storage.postgres import auth as postgres_auth
-
-    def unavailable(*_args, **_kwargs):
-        raise AuthStorageUnavailable("offline")
-
-    monkeypatch.setattr(postgres_auth, "PostgresAuthRepository", unavailable)
-    monkeypatch.setenv("DATABASE_URL", "postgresql://unavailable")
-    monkeypatch.setenv("MINI_AGENT_SECRET_KEY", "x" * 32)
-
-    with pytest.raises(AuthStorageUnavailable, match="offline"):
-        WebAppState(tmp_path / "unavailable-database")
-    assert not list(tmp_path.rglob("auth.sqlite3"))
-
-
-def test_readiness_returns_503_without_falling_back_to_sqlite(tmp_path: Path) -> None:
-    class UnavailableAuth(AuthStore):
-        def ping(self) -> None:
-            raise AuthStorageUnavailable("offline")
-
-    auth = UnavailableAuth(tmp_path / "injected.sqlite3")
-    state = WebAppState(tmp_path / "web", auth_repository=auth, settings_repository=auth)
+def test_guest_login_is_fully_offline_and_reuses_cookie(tmp_path: Path) -> None:
+    state = _state(tmp_path)
     with TestClient(create_app(state)) as client:
-        response = client.get("/api/ready")
-    assert response.status_code == 503
-    assert response.json() == {"detail": "认证与用户设置服务暂不可用。"}
-
-
-def _state(tmp_path: Path) -> tuple[WebAppState, FakeMailer]:
-    mailer = FakeMailer()
-    auth = AuthStore(tmp_path / "web" / "auth.sqlite3")
-    state = WebAppState(
-        tmp_path / "web",
-        mailer=mailer,
-        auth_repository=auth,
-        settings_repository=auth,
-    )
-    state.paths = ClientPaths(tmp_path / "legacy-client")
-    state.paths.ensure()
-    state.config_path = state.paths.config_file
-    return state, mailer
-
-
-def _register(client: TestClient, mailer: FakeMailer, email: str, password: str) -> dict:
-    assert client.post("/api/auth/register/code", json={"email": email}).status_code == 202
-    code = mailer.messages[-1][1]
-    response = client.post("/api/auth/register", json={"email": email, "code": code, "password": password})
-    assert response.status_code == 200, response.text
-    return response.json()["user"]
-
-
-def test_auth_cookie_protects_api_and_logout_revokes_it(tmp_path: Path) -> None:
-    state, mailer = _state(tmp_path)
-    with TestClient(create_app(state)) as client:
-        assert client.get("/api/tools").status_code == 401
-        assert client.post("/api/auth/register/code", json={"email": "Alice@example.com"}).status_code == 202
-        code = mailer.messages[-1][1]
-        registration = client.post(
-            "/api/auth/register",
-            json={"email": "Alice@example.com", "code": code, "password": "a" * 12},
-        )
-        assert registration.status_code == 200
-        cookie_header = registration.headers["set-cookie"].lower()
-        assert "httponly" in cookie_header
-        assert "samesite=lax" in cookie_header
-        assert "max-age=2592000" in cookie_header
-        user = registration.json()["user"]
-        cookie = client.cookies.get("mini_agent_session")
-        assert cookie
+        first = client.post("/api/auth/guest")
+        assert first.status_code == 200, first.text
+        user = first.json()["user"]
+        assert user["kind"] == "guest"
+        assert state.user_paths(user["id"]).user_db.is_file()
         assert client.get("/api/auth/me").json()["id"] == user["id"]
-        assert client.get("/api/tools").status_code == 200
-        assert client.get("/api/skills").status_code == 200
-        assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {cookie}"}).status_code == 401
-        assert (
-            client.post(
-                "/api/chat", json={"prompt": "cross-site"}, headers={"Origin": "https://evil.example"}
-            ).status_code
-            == 403
-        )
+
+        second = client.post("/api/auth/guest")
+        assert second.status_code == 200
+        assert second.json()["user"]["id"] == user["id"]
+
         assert client.post("/api/auth/logout", json={}).status_code == 200
         assert client.get("/api/auth/me").status_code == 401
 
+        after_logout = client.post("/api/auth/guest")
+        assert after_logout.status_code == 200
+        assert after_logout.json()["user"]["id"] == user["id"]
+
+    with sqlite3.connect(state.auth.path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(local_sessions)")}
+        assert "token_hash" in columns
+        assert "token" not in columns
+        assert connection.execute("SELECT COUNT(*) FROM local_identities WHERE kind='guest'").fetchone()[0] == 1
+        assert connection.execute("SELECT guest_id FROM local_device_state WHERE id=1").fetchone()[0] == user["id"]
+
+
+def test_guest_identity_is_shared_by_independent_browser_sessions(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    with TestClient(create_app(state)) as first, TestClient(create_app(state)) as second:
+        first_user = first.post("/api/auth/guest").json()["user"]
+        second_user = second.post("/api/auth/guest").json()["user"]
+
+        assert second_user["id"] == first_user["id"]
+        assert first.cookies.get("mini_agent_session") != second.cookies.get("mini_agent_session")
+
+
+def test_guest_provisioning_failure_removes_new_canonical_identity(tmp_path: Path, monkeypatch) -> None:
+    state = _state(tmp_path)
+
+    def fail_user_paths(_user_id: str):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(state, "user_paths", fail_user_paths)
+    with TestClient(create_app(state)) as client:
+        response = client.post("/api/auth/guest")
+    assert response.status_code == 503
+    with sqlite3.connect(state.auth.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM local_identities WHERE kind='guest'").fetchone()[0] == 0
+        assert connection.execute("SELECT guest_id FROM local_device_state WHERE id=1").fetchone()[0] is None
+
+
+def test_legacy_multiple_guests_choose_the_oldest_canonical_identity(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    older = "11111111-1111-4111-8111-111111111111"
+    newer = "22222222-2222-4222-8222-222222222222"
+    with sqlite3.connect(state.auth.path) as connection:
+        connection.executemany(
+            "INSERT INTO local_identities(id,email,kind,created_at,updated_at) VALUES (?,?,?, ?, ?)",
+            [(older, None, "guest", 1.0, 1.0), (newer, None, "guest", 2.0, 2.0)],
+        )
+
+    identity, created = state.auth.get_or_create_guest()
+
+    assert identity.id == older
+    assert created is False
+    with sqlite3.connect(state.auth.path) as connection:
+        assert connection.execute("SELECT guest_id FROM local_device_state WHERE id=1").fetchone()[0] == older
+
+
+def test_account_operations_report_cloud_unavailable_without_clearing_local_state(tmp_path: Path) -> None:
+    class OfflineCloud:
+        base_url = "http://127.0.0.1:8100"
+
+        def register_code(self, _email: str) -> None:
+            raise CloudUnavailable("cloud offline", retryable=True)
+
+    state = _state(tmp_path, cloud_client=OfflineCloud())
+    with TestClient(create_app(state)) as client:
+        response = client.post("/api/auth/register/code", json={"email": "user@example.com"})
+        assert response.status_code == 503
+        assert "offline" in response.json()["detail"]
+        guest = client.post("/api/auth/guest")
+        assert guest.status_code == 200
+
+
+def test_account_password_operations_never_fall_back_to_local_storage(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    with TestClient(create_app(state)) as client:
+        assert (
+            client.post(
+                "/api/auth/register",
+                json={"email": "a@example.com", "code": "123456", "password": "p" * 12},
+            ).status_code
+            == 503
+        )
+        assert client.post("/api/auth/login", json={"email": "a@example.com", "password": "p" * 12}).status_code == 503
+        assert (
+            client.post(
+                "/api/auth/password-reset/confirm",
+                json={"email": "a@example.com", "code": "123456", "password": "p" * 12},
+            ).status_code
+            == 503
+        )
+
+
+def test_readiness_only_checks_local_components(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    with TestClient(create_app(state)) as client:
+        response = client.get("/api/ready")
+    assert response.status_code == 200
+    assert response.json()["service"] == "mini-agent-backend"
+
 
 def test_production_cookie_and_cors_are_scoped_to_the_frontend_origin(tmp_path: Path) -> None:
-    state, mailer = _state(tmp_path)
+    state = _state(tmp_path)
     state.auth_service.settings = WebAuthSettings(
         public_url="https://app.example.com",
         allowed_origins=("https://app.example.com",),
@@ -135,161 +157,11 @@ def test_production_cookie_and_cors_are_scoped_to_the_frontend_origin(tmp_path: 
         assert preflight.headers["access-control-allow-origin"] == "https://app.example.com"
         assert preflight.headers["access-control-allow-credentials"] == "true"
 
-        assert (
-            client.post(
-                "/api/auth/register/code",
-                json={"email": "secure@example.com"},
-                headers={"Origin": "https://app.example.com"},
-            ).status_code
-            == 202
-        )
-        registration = client.post(
-            "/api/auth/register",
-            json={"email": "secure@example.com", "code": mailer.messages[-1][1], "password": "s" * 12},
-            headers={"Origin": "https://app.example.com"},
-        )
-        cookie = registration.headers["set-cookie"].lower()
-        assert "secure" in cookie
-        assert "httponly" in cookie
-        assert "samesite=lax" in cookie
-        assert "domain=" not in cookie
 
-        rejected = client.post(
-            "/api/auth/login",
-            json={"email": "secure@example.com", "password": "s" * 12},
-            headers={"Origin": "https://evil.example"},
-        )
-        assert rejected.status_code == 403
-        assert "access-control-allow-origin" not in rejected.headers
-
-
-def test_password_reset_revokes_old_browser_session(tmp_path: Path) -> None:
-    state, mailer = _state(tmp_path)
-    app = create_app(state)
-    with TestClient(app) as client:
-        _register(client, mailer, "reset@example.com", "r" * 12)
-        old_cookie = client.cookies.get("mini_agent_session")
-        assert client.post("/api/auth/password-reset/code", json={"email": "reset@example.com"}).status_code == 202
-        reset_code = mailer.messages[-1][1]
-        response = client.post(
-            "/api/auth/password-reset/confirm",
-            json={"email": "reset@example.com", "code": reset_code, "password": "n" * 12},
-        )
-        assert response.status_code == 200
-        assert old_cookie != client.cookies.get("mini_agent_session")
-        assert client.post("/api/auth/logout", json={}).status_code == 200
-        login = client.post("/api/auth/login", json={"email": "reset@example.com", "password": "n" * 12})
-        assert login.status_code == 200
-
-
-def test_verification_code_is_hashed_and_device_authorization_returns_bearer(tmp_path: Path) -> None:
-    state, mailer = _state(tmp_path)
-    app = create_app(state)
-    with TestClient(app) as browser:
-        user = _register(browser, mailer, "device@example.com", "d" * 12)
-        code = mailer.messages[-1][1]
-        with sqlite3.connect(state.auth.path) as connection:
-            stored = connection.execute("SELECT code_hash FROM verification_challenges").fetchone()[0]
-        assert code not in stored
-
-        started = browser.post("/api/auth/device/start")
-        assert started.status_code == 200
-        payload = started.json()
-        grant = payload["verification_url"].split("grant=", 1)[1]
-        assert browser.post("/api/auth/device/approve", json={"grant": grant, "approved": True}).status_code == 200
-
-        poll = browser.post("/api/auth/device/token", json={"poll_secret": payload["poll_secret"]})
-        assert poll.status_code == 200
-        token = poll.json()["access_token"]
-        with TestClient(app) as cli:
-            response = cli.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
-            assert response.status_code == 200
-            assert response.json()["id"] == user["id"]
-        assert browser.post("/api/auth/device/token", json={"poll_secret": payload["poll_secret"]}).status_code == 400
-
-
-def test_users_get_separate_storage_roots(tmp_path: Path) -> None:
-    state, mailer = _state(tmp_path)
-    app = create_app(state)
-    with TestClient(app) as first, TestClient(app) as second:
-        alice = _register(first, mailer, "alice@example.com", "a" * 12)
-        first_cookie = first.cookies.get("mini_agent_session")
-        bob = _register(second, mailer, "bob@example.com", "b" * 12)
-        assert alice["id"] != bob["id"]
-        assert state.user_paths(alice["id"]).root != state.user_paths(bob["id"]).root
-        assert first_cookie
-        assert second.get("/api/sessions").json() == []
-
-
-def test_user_profile_is_persisted_and_isolated_between_accounts(tmp_path: Path) -> None:
-    state, mailer = _state(tmp_path)
-    app = create_app(state)
-    with TestClient(app) as alice_client, TestClient(app) as bob_client:
-        alice = _register(alice_client, mailer, "profile-alice@example.com", "a" * 12)
-        bob = _register(bob_client, mailer, "profile-bob@example.com", "b" * 12)
-
-        assert alice["display_name"] == ""
-        assert alice_client.get("/api/auth/profile").json() == {
-            "display_name": "",
-            "agent_preferences": "",
-        }
-        response = alice_client.put(
-            "/api/auth/profile",
-            json={"display_name": " Alice ", "agent_preferences": "  concise answers  "},
-        )
-        assert response.status_code == 200
-        assert response.json() == {"display_name": "Alice", "agent_preferences": "concise answers"}
-        assert alice_client.get("/api/auth/me").json()["display_name"] == "Alice"
-        assert bob_client.get("/api/auth/profile").json() == {
-            "display_name": "",
-            "agent_preferences": "",
-        }
-        assert alice["id"] != bob["id"]
-
-
-def test_user_profile_rejects_oversized_fields_and_unauthenticated_access(tmp_path: Path) -> None:
-    state, mailer = _state(tmp_path)
-    with TestClient(create_app(state)) as client:
-        assert client.get("/api/auth/profile").status_code == 401
-        _register(client, mailer, "profile-validation@example.com", "v" * 12)
-        assert (
-            client.put(
-                "/api/auth/profile",
-                json={"display_name": "Cross-site"},
-                headers={"Origin": "https://evil.example"},
-            ).status_code
-            == 403
-        )
-        assert client.put("/api/auth/profile", json={"display_name": "x" * 81}).status_code == 422
-        assert client.put("/api/auth/profile", json={"agent_preferences": "x" * 4001}).status_code == 422
-
-
-def test_agent_config_preserves_new_fields_for_partial_legacy_updates(tmp_path: Path) -> None:
-    state, mailer = _state(tmp_path)
-    with TestClient(create_app(state)) as client:
-        _register(client, mailer, "agent-config@example.com", "c" * 12)
-        configured = client.put(
-            "/api/auth/agent-config",
-            json={
-                "tone": "direct",
-                "verbosity": "concise",
-                "initiative": "proactive",
-                "custom_instructions": "Use concise bullets",
-                "display_mode": "verbose",
-                "timezone": "UTC",
-                "location_enabled": True,
-            },
-        )
-        assert configured.status_code == 200, configured.text
-
-        legacy_update = client.put("/api/auth/agent-config", json={"tone": "balanced"})
-        assert legacy_update.status_code == 200, legacy_update.text
-        assert legacy_update.json() == {
-            "tone": "balanced",
-            "verbosity": "concise",
-            "initiative": "proactive",
-            "custom_instructions": "Use concise bullets",
-            "display_mode": "verbose",
-            "timezone": "UTC",
-            "location_enabled": True,
-        }
+def test_web_routes_keep_the_stable_local_contract(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    routes = set(create_app(state).openapi()["paths"])
+    assert "/api/chat" in routes
+    assert "/api/sessions" in routes
+    assert "/api/sync/snapshots" in routes
+    assert "/api/ready" in routes

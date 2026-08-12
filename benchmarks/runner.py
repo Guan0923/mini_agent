@@ -10,6 +10,8 @@ from time import perf_counter
 from backend.providers import ModelConfigurationError
 from backend.runtime import RunnerSettings, build_application
 from backend.runtime.core.contracts import InterruptDecision, InterruptRequest
+from backend.runtime.core.events import RuntimeEvent
+from backend.runtime.persistence.recording import persistent_event
 
 from .event_collector import EventCollector
 from .grading.programmatic import run_checkers
@@ -65,7 +67,22 @@ def apply_budget_overrides(
     )
 
 
-def _error_result(task: BenchmarkTask, message: str, *, attempt: int = 1) -> TaskResult:
+def _error_result(
+    task: BenchmarkTask,
+    message: str,
+    *,
+    attempt: int = 1,
+    collector: EventCollector | None = None,
+    failure_phase: str | None = None,
+) -> TaskResult:
+    diagnostic_event = RuntimeEvent(
+        "error",
+        message,
+        {"failure_phase": failure_phase or "unknown"},
+    )
+    if collector is not None and (not collector.events or collector.events[-1].kind != "error"):
+        collector(diagnostic_event)
+    safe_message, safe_data = persistent_event(diagnostic_event, include_full_messages=True)
     return TaskResult(
         task_name=task.name,
         capability=task.capability,
@@ -74,9 +91,18 @@ def _error_result(task: BenchmarkTask, message: str, *, attempt: int = 1) -> Tas
         final_answer="",
         metrics=RunMetrics(0.0, 0, 0, 0, 0, 0, 0, 0, []),
         verdicts=[],
-        error=message,
+        error=safe_message,
         passed=False,
         attempt=attempt,
+        trace=collector.trace() if collector is not None else [
+            {
+                "kind": diagnostic_event.kind,
+                "timestamp": diagnostic_event.timestamp,
+                "message": safe_message,
+                "data": safe_data,
+            }
+        ],
+        failure_phase=failure_phase,
     )
 
 
@@ -92,12 +118,18 @@ def run_one_task(
 ) -> TaskResult:
     """Run one task end to end and return its graded result."""
     if planner not in task.planner_modes:
-        return _error_result(task, f"planner {planner!r} is not supported by this task", attempt=attempt)
+        return _error_result(
+            task,
+            f"planner {planner!r} is not supported by this task",
+            attempt=attempt,
+            failure_phase="configuration",
+        )
 
     task = apply_budget_overrides(task, max_model_turns=max_model_turns, max_tool_calls=max_tool_calls)
     workspace: Path | None = None
     app = None
     collector = EventCollector()
+    phase = "workspace"
     try:
         workspace = sandbox.materialize_workspace(task)
         if task.seed.mcp is not None:
@@ -110,15 +142,18 @@ def run_one_task(
             max_retries=task.budgets.max_retries,
             log_full_messages=True,
         )
+        phase = "application"
         app = build_application(
             workspace,
             planner_name=planner,
             settings=settings,
             project_mcp_enabled=True,
             paths=sandbox.paths,
+            model_config=sandbox.model_config,
         )
         conversation = app.open_conversation()
         started = perf_counter()
+        phase = "agent"
         state = conversation.run_task(
             task.prompt,
             mode="agent",
@@ -136,6 +171,7 @@ def run_one_task(
             metrics=metrics,
             tool_calls_by_name=dict(collector.tool_calls_by_name),
         )
+        phase = "grading"
         verdicts = run_checkers(task, context)
         if state.status != "completed":
             verdicts = [CheckerVerdict(0.0, detail=f"agent run status: {state.status}")]
@@ -151,11 +187,25 @@ def run_one_task(
             run_id=state.run_id,
             passed=score == 1.0,
             attempt=attempt,
+            trace=collector.trace(),
+            failure_phase="agent" if state.status != "completed" else None,
         )
     except ModelConfigurationError as exc:
-        return _error_result(task, f"model is not configured: {exc}", attempt=attempt)
+        return _error_result(
+            task,
+            f"model is not configured: {exc}",
+            attempt=attempt,
+            collector=collector,
+            failure_phase="configuration",
+        )
     except Exception as exc:  # keep the harness alive across task failures
-        return _error_result(task, f"{type(exc).__name__}: {exc}", attempt=attempt)
+        return _error_result(
+            task,
+            f"{type(exc).__name__}: {exc}",
+            attempt=attempt,
+            collector=collector,
+            failure_phase=phase,
+        )
     finally:
         if app is not None:
             try:

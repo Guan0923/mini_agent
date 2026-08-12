@@ -6,8 +6,9 @@ export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface AuthUser {
   id: string;
-  email: string;
-  legacy_owner: boolean;
+  email: string | null;
+  kind?: "account" | "guest";
+  guest_import?: { guest_id: string; status: "pending"; created_at: number; updated_at: number } | null;
   display_name?: string;
   agent_preferences?: string;
 }
@@ -116,6 +117,14 @@ export interface TaskInfo {
   capability: string;
   description: string;
   difficulty: string;
+  prompt: string;
+  budgets: {
+    max_model_turns: number;
+    max_tool_calls: number;
+    max_replans: number;
+    max_retries: number;
+  };
+  tags: string[];
   source: {
     benchmark: string;
     task_id: string;
@@ -125,6 +134,29 @@ export interface TaskInfo {
     adaptation_notes: string;
   };
   planner_modes: string[];
+}
+
+export interface BenchmarkTraceEvent {
+  kind: string;
+  timestamp: string;
+  message: string;
+  data: Record<string, unknown>;
+}
+
+export interface BenchmarkResult {
+  task_name: string;
+  capability?: string;
+  status?: string;
+  score?: number | null;
+  final_answer?: string;
+  metrics?: Record<string, unknown>;
+  verdicts?: Array<Record<string, unknown>>;
+  error?: string | null;
+  run_id?: string | null;
+  passed?: boolean;
+  attempt?: number;
+  trace: BenchmarkTraceEvent[];
+  failure_phase?: string | null;
 }
 
 export interface ToolInfo {

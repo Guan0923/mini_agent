@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from uuid import uuid4
 
-from backend.api.auth_store import AuthStore
+from backend.storage.user_settings import UserSettingsStore
 from backend.domain import SystemMessage, ToolSpec, UserMessage
 from backend.providers import (
     ChatCompletionsAdapter,
@@ -128,17 +129,16 @@ def test_messages_adapter_preserves_system_and_tool_blocks() -> None:
 
 
 def test_user_settings_are_isolated_and_api_keys_are_not_returned(tmp_path) -> None:
-    store = AuthStore(tmp_path / "auth.sqlite3")
-    store.insert_challenge("one@example.com", "register", "123456", None)
-    store.insert_challenge("two@example.com", "register", "123456", None)
-    first = store.register_user("one@example.com", "123456", "password")
-    second = store.register_user("two@example.com", "123456", "password")
+    first_id = str(uuid4())
+    second_id = str(uuid4())
+    first = UserSettingsStore(tmp_path / first_id / "user.db")
+    second = UserSettingsStore(tmp_path / second_id / "user.db")
 
-    assert store.profile_for_user(first.id) == {"display_name": "", "agent_preferences": ""}
-    store.update_profile(first.id, display_name=" One ", agent_preferences=" concise ")
-    store.update_agent_config(first.id, {"tone": "direct", "custom_instructions": "Use bullets"})
-    saved = store.update_provider_config(
-        first.id,
+    assert first.profile_for_user(first_id) == {"display_name": "", "agent_preferences": ""}
+    first.update_profile(first_id, display_name=" One ", agent_preferences=" concise ")
+    first.update_agent_config(first_id, {"tone": "direct", "custom_instructions": "Use bullets"})
+    saved = first.update_provider_config(
+        first_id,
         {
             "provider": "openai",
             "protocol": "responses",
@@ -150,14 +150,14 @@ def test_user_settings_are_isolated_and_api_keys_are_not_returned(tmp_path) -> N
 
     assert saved["api_key_configured"] is True
     assert "api_key" not in saved
-    assert store.profile_for_user(first.id)["display_name"] == "One"
-    assert store.agent_preferences_for_user(first.id) == "Preferred tone: direct\nUse bullets\nconcise"
-    assert store.profile_for_user(second.id) == {"display_name": "", "agent_preferences": ""}
-    assert store.provider_config_for_user(second.id)["api_key_configured"] is False
-    with sqlite3.connect(store.path) as connection:
+    assert first.profile_for_user(first_id)["display_name"] == "One"
+    assert first.agent_preferences_for_user(first_id) == "Preferred tone: direct\nUse bullets\nconcise"
+    assert second.profile_for_user(second_id) == {"display_name": "", "agent_preferences": ""}
+    assert second.provider_config_for_user(second_id)["api_key_configured"] is False
+    with sqlite3.connect(first.path) as connection:
         raw = connection.execute(
             "SELECT api_key_ciphertext FROM user_provider_settings WHERE user_id = ?",
-            (first.id,),
+            (first_id,),
         ).fetchone()[0]
     assert raw and "secret-key" not in raw
-    assert store.model_config_for_user(first.id).api_key == "secret-key"
+    assert first.model_config_for_user(first_id).api_key == "secret-key"

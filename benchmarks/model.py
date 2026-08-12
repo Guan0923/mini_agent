@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -119,6 +119,8 @@ class TaskResult:
     run_id: str | None = None
     passed: bool = False
     attempt: int = 1
+    trace: list[dict] = field(default_factory=list)
+    failure_phase: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -136,4 +138,6 @@ class TaskResult:
             "run_id": self.run_id,
             "passed": self.passed,
             "attempt": self.attempt,
+            "trace": self.trace or [],
+            "failure_phase": self.failure_phase,
         }

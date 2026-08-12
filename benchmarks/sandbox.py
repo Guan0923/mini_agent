@@ -17,6 +17,7 @@ import tomllib
 from pathlib import Path
 
 from backend.configuration import ClientPaths, atomic_write_text
+from backend.providers import ModelConfig
 
 from .model import BenchmarkTask, SeedMcp
 
@@ -48,10 +49,17 @@ def _to_toml(values: dict[str, dict]) -> str:
 class Sandbox:
     """One isolated client-data root shared by all runs in a benchmark session."""
 
-    def __init__(self, root: Path, source_config: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        source_config: Path | None = None,
+        *,
+        model_config: ModelConfig | None = None,
+    ) -> None:
         self.root = Path(root).resolve()
         self.paths = ClientPaths(self.root / "mini_agent")
         self.source_config = source_config
+        self.model_config = model_config
         self.workspaces_dir = self.root / "workspaces"
 
     def prepare(self) -> ClientPaths:

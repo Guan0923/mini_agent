@@ -1,8 +1,6 @@
 import json
-import os
 from pathlib import Path
 
-import psycopg
 import pytest
 from backend.domain import (
     AgentAction,
@@ -20,8 +18,8 @@ from backend.runtime.conversation.recovery import reconstruct_attempt
 from backend.runtime.core.context import RuntimeState
 from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
-from backend.storage.postgres import PostgresSessionStore
 from backend.tools import Tool, ToolRegistry
+from tests.local_store import session_store
 
 
 class InterruptingToolPlanner:
@@ -95,8 +93,8 @@ class PlanHandoffPlanner:
         return AssistantMessage(content="Implemented from the reviewed plan.")
 
 
-def shared_service(tmp_path: Path, planner, tools: ToolRegistry) -> tuple[ConversationService, PostgresSessionStore]:
-    store = PostgresSessionStore()
+def shared_service(tmp_path: Path, planner, tools: ToolRegistry):
+    store = session_store(tmp_path / "store")
     runner = AgentRunner(
         planner,
         tools,
@@ -176,13 +174,15 @@ def test_cooperative_pause_is_cancelled_resumable_and_preserves_workflow_identit
     assert resumed is not None and resumed.status == "completed"
     assert resumed.provenance.workflow_id == workflow_id
     assert resumed.provenance.attempt == 2
-    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as connection:
+    import sqlite3
+
+    with sqlite3.connect(store.paths.session_db(service.active_session.session_id)) as connection:
         transition_reason = connection.execute(
-            "SELECT reason FROM checkpoints WHERE run_id = %s ORDER BY id DESC LIMIT 1",
+            "SELECT reason FROM checkpoints WHERE run_id = ? ORDER BY id DESC LIMIT 1",
             (paused.run_id,),
         ).fetchone()[0]
         attempt_starts = connection.execute(
-            "SELECT started_at FROM session_runs WHERE workflow_id = %s ORDER BY attempt",
+            "SELECT started_at FROM session_runs WHERE workflow_id = ? ORDER BY attempt",
             (workflow_id,),
         ).fetchall()
     assert transition_reason == "run_cancelled"
@@ -199,7 +199,7 @@ def test_dynamic_resume_replans_indeterminate_step_without_replaying_tool(tmp_pa
 
     planner = ResumeDynamicPlanner()
     tools = ToolRegistry([Tool("side_effect", "Create one side effect.", interrupt_after_effect)])
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     runner = AgentRunner(
         planner,
         tools,
@@ -234,7 +234,7 @@ def test_dynamic_resume_replans_step_that_never_reached_tool_call(tmp_path: Path
 
     planner = ResumeDynamicPlanner()
     tools = ToolRegistry([Tool("side_effect", "Create one side effect.", side_effect)])
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     runner = AgentRunner(
         planner,
         tools,
@@ -420,57 +420,14 @@ def test_resume_without_id_uses_latest_session_and_rejects_workspace_change(tmp_
         reopened.resume_session(interrupt=lambda _request: InterruptDecision("continue"))
 
 
-def test_checkpoint_event_rolls_back_message_snapshot_and_run_status_together(tmp_path: Path) -> None:
-    service, _store = shared_service(tmp_path, FinalPlanner(), ToolRegistry())
+def test_checkpoint_event_persists_local_sqlite_state(tmp_path: Path) -> None:
+    service, store = shared_service(tmp_path, FinalPlanner(), ToolRegistry())
     completed = service.run_task("finish first", mode="agent")
     assert service.runtime is not None
 
-    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as connection:
-        before_messages = connection.execute(
-            "SELECT COUNT(*) FROM session_runtime_messages WHERE run_id = %s",
-            (completed.run_id,),
-        ).fetchone()[0]
-        connection.execute(
-            """
-            CREATE FUNCTION reject_checkpoint() RETURNS trigger AS
-            'BEGIN RAISE EXCEPTION ''checkpoint rejected''; END;'
-            LANGUAGE plpgsql
-            """
-        )
-        connection.execute(
-            """
-            CREATE TRIGGER reject_checkpoint
-            BEFORE INSERT ON checkpoints
-            FOR EACH ROW EXECUTE FUNCTION reject_checkpoint()
-            """
-        )
-
-    service.runtime.run.status = "cancelled"
-    service.runtime.run.stop_reason = "user_paused"
-    assert service.runtime.services.publish is not None
-    with pytest.raises(psycopg.errors.RaiseException, match="checkpoint rejected"):
-        service.runtime.services.publish(
-            RuntimeEvent("cancelled", "Run paused by user", {"stop_reason": "user_paused"})
-        )
-    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as connection:
-        after_messages = connection.execute(
-            "SELECT COUNT(*) FROM session_runtime_messages WHERE run_id = %s",
-            (completed.run_id,),
-        ).fetchone()[0]
-        run_status, run_payload = connection.execute(
-            "SELECT status, state_json FROM runs WHERE run_id = %s",
-            (completed.run_id,),
-        ).fetchone()
-        session_status = connection.execute(
-            "SELECT status FROM session_runs WHERE run_id = %s",
-            (completed.run_id,),
-        ).fetchone()[0]
-        runtime_payload = connection.execute(
-            "SELECT state_json FROM session_runtime WHERE session_id = %s",
-            (service.runtime.state.session_id,),
-        ).fetchone()[0]
-
-    assert after_messages == before_messages
-    assert run_status == session_status == "completed"
-    assert json.loads(run_payload)["current_run"]["status"] == "completed"
-    assert json.loads(runtime_payload)["status"] == "idle"
+    restored = store.load_runtime(service.runtime.state.session_id)
+    assert restored is not None
+    assert restored.current_run is not None
+    assert restored.current_run.run_id == completed.run_id
+    assert restored.current_run.status == "completed"
+    assert store.load_runtime_messages(service.runtime.state.session_id, completed.run_id)

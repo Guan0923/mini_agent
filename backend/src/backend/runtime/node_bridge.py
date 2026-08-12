@@ -19,9 +19,35 @@ from backend.domain.runtime_state import (
     NodeWriter,
     RuntimeNodeStore,
     RuntimeState,
+    TerminalErrorCategory,
     change_payload,
     compaction_payload,
     message_payload,
+    terminal_error_payload,
+    terminal_error_text,
+)
+
+_NETWORK_ERROR_TYPES = frozenset(
+    {
+        "ConnectionError",
+        "ConnectTimeout",
+        "ModelTransportError",
+        "NetworkError",
+        "ReadTimeout",
+        "Timeout",
+        "TimeoutError",
+    }
+)
+_TOOL_ERROR_TYPES = frozenset({"ToolError", "ConfirmationRequired", "TaskPreparationError"})
+_AGENT_ERROR_TYPES = frozenset(
+    {
+        "PlanningError",
+        "ModelOutputError",
+        "ProviderOutputError",
+        "ModelRequestError",
+        "ModelConfigurationError",
+        "HookError",
+    }
 )
 
 
@@ -58,6 +84,9 @@ class RuntimeEventNodeBridge:
         self.assistant_blocks: list[dict[str, Any]] = []
         self.response_text = ""
         self.run_id = ""
+        self.abort_category: TerminalErrorCategory | None = None
+        self.abort_code = ""
+        self.terminal_error: dict[str, str] | None = None
         self.started = False
         self.closed = False
 
@@ -137,10 +166,74 @@ class RuntimeEventNodeBridge:
 
     def _update_assistant(self) -> None:
         if self.assistant is not None:
+            metadata: dict[str, Any] = {}
+            if self.run_id:
+                metadata["run_id"] = self.run_id
+            if self.terminal_error is not None:
+                metadata["error"] = self.terminal_error
             self.writer.update_data(
                 self.assistant,
-                message_payload("assistant", self.assistant_blocks, **({"run_id": self.run_id} if self.run_id else {})),
+                message_payload("assistant", self.assistant_blocks, **metadata),
             )
+
+    def _remember_abort(
+        self,
+        category: TerminalErrorCategory,
+        *,
+        code: str = "",
+    ) -> None:
+        """Retain the strongest structured cause until the run terminates."""
+
+        self.abort_category = category
+        self.abort_code = code
+
+    @staticmethod
+    def _model_error_category(data: Mapping[str, Any]) -> TerminalErrorCategory:
+        error_type = str(data.get("error_type") or "")
+        if error_type in _NETWORK_ERROR_TYPES or any(
+            token in error_type.lower() for token in ("connection", "network", "timeout", "transport")
+        ):
+            return "network"
+        if error_type in _TOOL_ERROR_TYPES or "tool" in error_type.lower():
+            return "tool"
+        return "agent"
+
+    @classmethod
+    def _exception_category(cls, error: BaseException) -> TerminalErrorCategory | None:
+        """Map a known runtime exception to an abort category.
+
+        Unknown exceptions intentionally remain ``failed`` so that the
+        generic failed message does not claim a cause the runtime cannot
+        prove.  Provider transport errors and tool/preparation failures are
+        safe to classify because their exception types are part of the local
+        runtime contract.
+        """
+
+        error_type = error.__class__.__name__
+        if error_type in _NETWORK_ERROR_TYPES or any(
+            token in error_type.lower() for token in ("connection", "network", "timeout", "transport")
+        ):
+            return "network"
+        if error_type in _TOOL_ERROR_TYPES or "tool" in error_type.lower():
+            return "tool"
+        if error_type in _AGENT_ERROR_TYPES:
+            return "agent"
+        return None
+
+    @classmethod
+    def _data_category(cls, data: Mapping[str, Any]) -> TerminalErrorCategory | None:
+        error_type = str(data.get("error_type") or "")
+        if not error_type:
+            return None
+        if error_type in _NETWORK_ERROR_TYPES or any(
+            token in error_type.lower() for token in ("connection", "network", "timeout", "transport")
+        ):
+            return "network"
+        if error_type in _TOOL_ERROR_TYPES or "tool" in error_type.lower():
+            return "tool"
+        if error_type in _AGENT_ERROR_TYPES:
+            return "agent"
+        return None
 
     @staticmethod
     def _json_value(value: Any) -> Any:
@@ -244,6 +337,9 @@ class RuntimeEventNodeBridge:
         self.assistant_blocks = []
         self.response_text = ""
         self.run_id = ""
+        self.abort_category = None
+        self.abort_code = ""
+        self.terminal_error = None
         self.started = False
         self.closed = False
         self.start()
@@ -343,11 +439,32 @@ class RuntimeEventNodeBridge:
             self.last_node = self.writer.delete(
                 result.session_id, result.id, status="success" if kind == "tool_result" else "failed"
             )
-        elif kind in {"error", "model_error"}:
-            self.finish("failed", message or "execution failed")
+            if kind == "tool_failed":
+                self._remember_abort("tool", code="tool_failed")
+        elif kind == "model_error":
+            self._remember_abort(self._model_error_category(data), code=str(data.get("error_type") or "model_error"))
+        elif kind == "error":
+            if data.get("unexpected"):
+                category = self.abort_category or self._data_category(data)
+                if category is None:
+                    self.finish("failed")
+                else:
+                    self.finish(
+                        "abort",
+                        message,
+                        category=category,
+                        code=self.abort_code or str(data.get("error_type") or "runtime_error"),
+                    )
+            else:
+                self.finish(
+                    "abort",
+                    message,
+                    category=self.abort_category or "agent",
+                    code=self.abort_code or str(data.get("error_type") or "agent_error"),
+                )
         elif kind in {"cancelled", "run_suspended"}:
             stop_reason = str(data.get("stop_reason") or data.get("reason") or "")
-            self.finish("abort" if stop_reason == "user_paused" else "failed", message)
+            self.finish("abort", message, category="user", code=stop_reason or "user_cancelled")
         elif kind in {"approval_requested", "approval_granted"}:
             self._append_event_block("approval", kind, message, data)
         elif kind in {"user_input_requested", "user_input_received"}:
@@ -418,9 +535,24 @@ class RuntimeEventNodeBridge:
         self.assistant_blocks.append(block)
         self._update_assistant()
 
-    def finish(self, status: NodeStatus, final_answer: str = "") -> RuntimeState | None:
+    def finish(
+        self,
+        status: NodeStatus,
+        final_answer: str = "",
+        *,
+        category: TerminalErrorCategory | None = None,
+        code: str = "",
+    ) -> RuntimeState | None:
         if self.closed:
             return self.last_node
+        if status != "success":
+            self.terminal_error = terminal_error_payload(
+                status,
+                category if status == "abort" else None,
+                code=code or self.abort_code or None,
+                detail=final_answer if status == "abort" else None,
+            )
+            final_answer = terminal_error_text(self.terminal_error)
         if self.assistant is None and (final_answer or status != "success"):
             self._ensure_assistant()
             self.assistant_blocks = [{"type": "text", "text": final_answer}] if final_answer else []
@@ -439,6 +571,19 @@ class RuntimeEventNodeBridge:
             self._seal_assistant(status)
         self.closed = True
         return self.last_node
+
+    def finish_exception(self, error: BaseException) -> RuntimeState | None:
+        """Finish an uncaught worker exception without losing its category."""
+
+        category = self.abort_category or self._exception_category(error)
+        if category is None:
+            return self.finish("failed")
+        return self.finish(
+            "abort",
+            str(error),
+            category=category,
+            code=self.abort_code or error.__class__.__name__,
+        )
 
 
 __all__ = ["RuntimeEventNodeBridge"]

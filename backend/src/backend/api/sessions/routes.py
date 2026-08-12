@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -21,14 +22,14 @@ router = APIRouter(prefix="/api")
 build_application = _default_build_application
 
 
-def _build_user_application(state: WebAppState, user_id: str):
+def _build_user_application(state: WebAppState, user_id: str, *, session_id: str):
     """Resolve the historical module-level builder patch point."""
 
     import sys
 
     package = sys.modules.get("backend.api.sessions")
     builder = getattr(package, "build_application", build_application)
-    return build_user_application(state, user_id, builder=builder)
+    return build_user_application(state, user_id, session_id=session_id, builder=builder)
 
 
 class SessionMessageInput(BaseModel):
@@ -62,7 +63,10 @@ def _store(state: WebAppState, user_id: str):
     from backend.storage.sqlite import SQLiteSessionStore
 
     paths = state.user_paths(user_id)
-    return SQLiteSessionStore(paths, f"web_{user_id}")
+    store = SQLiteSessionStore(paths, f"web_{user_id}")
+    if state.snapshot_manager is not None:
+        store.set_sync_listener(lambda: state.mark_sync_dirty(user_id))
+    return store
 
 
 def _summary_payload(summary) -> dict:
@@ -86,7 +90,13 @@ def _node_payload(node) -> dict:
 
 
 def _require_summary(store, session_id: str):
-    summary = store.get_session_summary(session_id)
+    try:
+        summary = store.get_session_summary(session_id)
+    except ValueError as exc:
+        # Session identifiers are part of the filesystem boundary.  Invalid
+        # values must become a client error rather than an internal traceback
+        # (and must never be normalized into a path by the route layer).
+        raise HTTPException(status_code=400, detail="会话 ID 无效。") from exc
     if summary is None:
         raise HTTPException(status_code=404, detail=f"未知会话：{session_id}")
     return summary
@@ -122,7 +132,11 @@ def list_sessions(
 ) -> list[dict]:
     app_state: WebAppState = request.app.state.web
     store = _store(app_state, identity.id)
-    return [_summary_payload(summary) for summary in store.list_sessions(state=state)]
+    try:
+        summaries = store.list_sessions(state=state)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="会话目录包含无效的会话 ID。") from exc
+    return [_summary_payload(summary) for summary in summaries]
 
 
 @router.post("/sessions")
@@ -152,6 +166,7 @@ def create_session(
         raise _mutation_error(exc) from exc
     summary = store.get_session_summary(session.session_id)
     assert summary is not None
+    state.user_paths(identity.id).ensure_session(session.session_id)
     return _summary_payload(summary)
 
 
@@ -243,6 +258,21 @@ def delete_session(
     return _summary_payload(summary)
 
 
+@router.delete("/sessions/{session_id}/purge", status_code=204)
+def purge_session(
+    session_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> None:
+    state: WebAppState = request.app.state.web
+    store = _store(state, identity.id)
+    _require_summary(store, session_id)
+    try:
+        store.purge_session(session_id)
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+
+
 @router.get("/sessions/{session_id}/messages")
 def get_session_messages(
     session_id: str, request: Request, identity: UserIdentity = Depends(require_user)
@@ -319,7 +349,7 @@ def get_session_transcript(
                     if not already_present:
                         payload["events"].append({"kind": event.kind, "message": event.message, "data": event_data})
                 elif event.kind == "error":
-                    payload["error"] = event.message
+                    payload.setdefault("error", event.message)
                 elif event.kind == "run_finished":
                     payload["status"] = str(event.data.get("status") or event.message)
                     payload["metrics"] = {
@@ -362,7 +392,7 @@ def get_session_transcript(
                 }:
                     payload["events"].append({"kind": event.kind, "message": event.message, "data": dict(event.data)})
                 elif event.kind == "error":
-                    payload["error"] = event.message
+                    payload.setdefault("error", event.message)
                 elif event.kind == "run_finished":
                     payload["status"] = str(event.data.get("status") or event.message)
                     payload["metrics"] = {
@@ -432,14 +462,16 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
                 client_id=client_id,
                 force_new=rewind,
             )
-        if rewind:
-            try:
-                store.delete_session(source.session_id)
-            except Exception:
-                if target is not None:
-                    store.delete_session(target.session_id)
-                raise
     except Exception:
+        if target is not None:
+            # ``target`` is a fresh session created by this branch operation.
+            # Remove its durable shell when building the copied state fails;
+            # otherwise a failed request would leave an empty/partial session
+            # visible to the next list request.
+            try:
+                shutil.rmtree(store.paths.session_root(target.session_id), ignore_errors=True)
+            except Exception:
+                pass
         raise
     summary = store.get_session_summary(target.session_id)
     assert summary is not None
@@ -456,9 +488,17 @@ def fork_session(
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     source = _require_branchable(store, session_id)
+    target_id: str | None = None
     try:
         summary = _branch_session(store, source, body, rewind=False)
+        target_id = summary.session_id
+        state.copy_session_files(identity.id, source.session_id, summary.session_id)
     except Exception as exc:
+        if target_id is not None:
+            try:
+                shutil.rmtree(store.paths.session_root(target_id), ignore_errors=True)
+            except Exception:
+                pass
         raise _mutation_error(exc) from exc
     return _summary_payload(summary)
 
@@ -473,9 +513,30 @@ def rewind_session(
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     source = _require_branchable(store, session_id)
+    target_id: str | None = None
+    copied = False
     try:
         summary = _branch_session(store, source, body, rewind=True)
+        target_id = summary.session_id
+        state.copy_session_files(identity.id, source.session_id, summary.session_id)
+        copied = True
+        store.delete_session(source.session_id)
     except Exception as exc:
+        if target_id is not None:
+            try:
+                if copied:
+                    # Rewind is a compound operation.  If deleting the
+                    # source fails after the new session was copied, keep the
+                    # source authoritative and move the speculative target to
+                    # the soft-deleted state instead of leaving two active
+                    # conversations.
+                    store.delete_session(target_id)
+                else:
+                    # A failed file copy must not leave a discoverable,
+                    # half-initialized session behind.
+                    shutil.rmtree(store.paths.session_root(target_id), ignore_errors=True)
+            except Exception:
+                pass
         raise _mutation_error(exc) from exc
     return _summary_payload(summary)
 
@@ -507,7 +568,7 @@ def set_timezone(
     _require_session(state, identity.id, session_id)
     application = None
     try:
-        application = _build_user_application(state, identity.id)
+        application = _build_user_application(state, identity.id, session_id=session_id)
         conversation = application.open_conversation(session_id)
         selected = conversation.set_timezone(body.timezone)
         return {"timezone": selected}
@@ -530,7 +591,7 @@ def compact_session(
     _require_session(state, identity.id, session_id)
     application = None
     try:
-        application = _build_user_application(state, identity.id)
+        application = _build_user_application(state, identity.id, session_id=session_id)
         conversation = application.open_conversation(session_id)
         result = conversation.compact_context()
         return {
@@ -580,10 +641,29 @@ def fork_run(
 ) -> dict:
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
+    target_id: str | None = None
     try:
         session = store.fork_run(run_id)
+        target_id = session.session_id
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # The direct run-fork endpoint must carry the source session's current
+    # workspace and uploads just like the branch/rewind endpoints.
+    try:
+        source_session_id = getattr(session, "source_session_id", None)
+        if not source_session_id:
+            runtime = store.load_runtime(session.session_id)
+            provenance = runtime.state.current_run.provenance if runtime and runtime.state.current_run else None
+            source_session_id = getattr(provenance, "source_session_id", None)
+        if source_session_id:
+            state.copy_session_files(identity.id, str(source_session_id), session.session_id)
+    except Exception as exc:
+        if target_id is not None:
+            try:
+                shutil.rmtree(store.paths.session_root(target_id), ignore_errors=True)
+            except Exception:
+                pass
+        raise _mutation_error(exc) from exc
     summary = store.get_session_summary(session.session_id)
     assert summary is not None
     return _summary_payload(summary)

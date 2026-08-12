@@ -35,7 +35,11 @@ def _benchmark_sandbox(request: Request):
     from benchmarks.sandbox import Sandbox
 
     web: WebAppState = app.state.web
-    sandbox = Sandbox(web.user_benchmark_root(identity.id), web.config_path)
+    try:
+        model_config = web.model_config_for_user(identity.id)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"模型未配置：{exc}") from exc
+    sandbox = Sandbox(web.user_benchmark_root(identity.id), model_config=model_config)
     sandbox.prepare()
     cached_by_user[identity.id] = sandbox
     app.state.benchmark_by_user = cached_by_user
@@ -55,7 +59,15 @@ def list_tasks(request: Request) -> list[dict]:
             "name": task.name,
             "capability": task.capability,
             "description": task.description,
+            "prompt": task.prompt,
             "difficulty": task.difficulty,
+            "budgets": {
+                "max_model_turns": task.budgets.max_model_turns,
+                "max_tool_calls": task.budgets.max_tool_calls,
+                "max_replans": task.budgets.max_replans,
+                "max_retries": task.budgets.max_retries,
+            },
+            "tags": list(task.tags),
             "source": {
                 "benchmark": task.source.benchmark,
                 "task_id": task.source.task_id,

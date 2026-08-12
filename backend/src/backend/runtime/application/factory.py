@@ -52,7 +52,14 @@ def build_application(
     default_timezone: str = DEFAULT_TIME_ZONE,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
-    config = config_override if config_override is not None else initialize_config(resolved_paths, workspace)
+    base_config = initialize_config(resolved_paths, workspace)
+    config = dict(base_config)
+    if config_override is not None:
+        for name, value in config_override.items():
+            if isinstance(value, dict) and isinstance(config.get(name), dict):
+                config[name] = {**config[name], **value}
+            else:
+                config[name] = value
     resolved = _settings_for(resolved_paths, settings, config_override is not None)
     device_id = str(section(config, "sync").get("device_id") or f"local_{resolved_paths.root.name}")
     store = SQLiteSessionStore(resolved_paths, device_id)

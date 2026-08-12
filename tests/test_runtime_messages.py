@@ -1,10 +1,8 @@
 import json
-import os
 from pathlib import Path
 
-import psycopg
 import pytest
-from backend.domain import AssistantMessage, PlanningError, ToolMessage
+from backend.domain import FAILED_TERMINAL_MESSAGE, AssistantMessage, PlanningError, ToolMessage
 from backend.observability import EventFanout, JsonlRunLogger
 from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.runtime import (
@@ -12,10 +10,10 @@ from backend.runtime import (
     ConversationService,
     PreparedResponse,
 )
-from backend.runtime.core.config import database_url_from_env, log_full_messages_from_env
+from backend.runtime.core.config import log_full_messages_from_env
 from backend.runtime.execution.lifecycle.outcomes import fail_run
-from backend.storage.postgres import PostgresCheckpointStore, PostgresSessionStore
 from backend.tools import Tool, ToolRegistry
+from tests.local_store import session_store
 
 
 class StaticCompletionClient:
@@ -78,13 +76,13 @@ class FailingCompletionClient:
 
 
 def test_session_runtime_messages_survive_restart_and_match_run_state(tmp_path: Path) -> None:
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     service = ConversationService(AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)), store)
 
     state = service.run_task("calculate 2 + 2", mode="agent")
 
     assert service.active_session is not None
-    reopened = PostgresSessionStore()
+    reopened = session_store(tmp_path / "store")
     messages = reopened.load_runtime_messages(service.active_session.session_id, state.run_id)
 
     assert messages == state.runtime_messages
@@ -100,7 +98,7 @@ def test_session_runtime_messages_survive_restart_and_match_run_state(tmp_path: 
 
 
 def test_unexpected_failure_still_ends_the_persisted_runtime_trace(tmp_path: Path) -> None:
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     service = ConversationService(AgentRunner(ExplodingPlanner(), ToolRegistry(), strategy="reactive"), store)
 
     with pytest.raises(RuntimeError, match="unexpected failure"):
@@ -111,15 +109,22 @@ def test_unexpected_failure_still_ends_the_persisted_runtime_trace(tmp_path: Pat
     assert summary is not None and summary.last_run_id is not None
     messages = store.load_runtime_messages(service.active_session.session_id, summary.last_run_id)
     assert [message.kind for message in messages[-2:]] == ["error", "run_finished"]
+    assert messages[-2].message == FAILED_TERMINAL_MESSAGE
+    restored = store.load_runtime(service.active_session.session_id)
+    assert restored is not None
+    assert any(
+        isinstance(message, AssistantMessage) and message.content == FAILED_TERMINAL_MESSAGE
+        for message in restored.messages
+    )
 
 
 def test_restored_session_uses_the_current_runtime_message_policy(tmp_path: Path) -> None:
-    first_store = PostgresSessionStore()
+    first_store = session_store(tmp_path / "store")
     first_service = ConversationService(AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)), first_store)
     first_service.run_task("calculate 1 + 1", mode="agent")
 
     assert first_service.active_session is not None
-    second_store = PostgresSessionStore()
+    second_store = session_store(tmp_path / "store")
     second_service = ConversationService(
         AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path), log_full_messages=False),
         second_store,
@@ -132,13 +137,14 @@ def test_restored_session_uses_the_current_runtime_message_policy(tmp_path: Path
 
 
 def test_checkpoint_and_jsonl_share_the_same_ordered_runtime_timestamps(tmp_path: Path) -> None:
-    checkpoints = PostgresCheckpointStore()
+    checkpoints = session_store(tmp_path / "checkpoints")
     logger = JsonlRunLogger(tmp_path / "logs")
     runner = AgentRunner(ReasoningPlanner(), ToolRegistry(), strategy="reactive", checkpoints=checkpoints)
-    runtime = runner.new_runtime(task="think", on_event=logger)
+    session = checkpoints.create_session("think")
+    runtime = runner.new_runtime(task="think", session_id=session.session_id, on_event=logger, runtime_store=checkpoints)
 
     state = runner.run(runtime)
-    saved = checkpoints.load(state.run_id)
+    saved = checkpoints.load_runtime(session.session_id)
     records = [json.loads(line) for line in logger.path_for(state.run_id).read_text(encoding="utf-8").splitlines()]
 
     assert saved is not None
@@ -150,7 +156,8 @@ def test_checkpoint_and_jsonl_share_the_same_ordered_runtime_timestamps(tmp_path
     assert state_by_kind["thinking"].timestamp == record_by_kind["thinking"]["timestamp"]
     assert state_by_kind["thinking"].data == record_by_kind["thinking"]["data"]
     assert [record["sequence"] for record in records] == [message.sequence for message in state.runtime_messages]
-    assert saved.runtime_messages[-1] == state.runtime_messages[-1]
+    assert saved.current_run is not None
+    assert saved.current_run.runtime_messages[-1] == state.runtime_messages[-1]
 
 
 def test_model_exchange_messages_are_logged_as_normalized_request_and_response(tmp_path: Path) -> None:
@@ -200,7 +207,7 @@ def test_model_request_failure_is_recorded_without_secret_content() -> None:
 
 
 def test_failed_run_closes_canonical_history_and_survives_restart(tmp_path: Path) -> None:
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     planner = LLMPlanner(FailingCompletionClient(), [], [])
     service = ConversationService(AgentRunner(planner, ToolRegistry(), strategy="reactive"), store)
 
@@ -214,7 +221,7 @@ def test_failed_run_closes_canonical_history_and_survives_restart(tmp_path: Path
     ]
     assert [(message.role, message.content) for message in service.runtime.state.messages] == expected
 
-    reopened = PostgresSessionStore()
+    reopened = session_store(tmp_path / "store")
     restored = reopened.load_runtime(service.runtime.state.session_id)
     assert restored is not None
     assert [(message.role, message.content) for message in restored.messages] == expected
@@ -273,16 +280,10 @@ def test_log_full_messages_rejects_invalid_env_value(tmp_path: Path) -> None:
         log_full_messages_from_env(env_path, environ={})
 
 
-def test_database_url_is_required_and_environment_overrides_env_file(tmp_path: Path) -> None:
-    env_path = tmp_path / ".env"
-    with pytest.raises(ValueError, match="DATABASE_URL"):
-        database_url_from_env(env_path, environ={})
+def test_backend_runtime_has_no_database_url_configuration() -> None:
+    from backend.runtime.core import config
 
-    env_path.write_text("DATABASE_URL=postgresql://file\n", encoding="utf-8")
-    assert (
-        database_url_from_env(env_path, environ={"DATABASE_URL": "postgresql://environment"})
-        == "postgresql://environment"
-    )
+    assert not hasattr(config, "database_url_from_env")
 
 
 class StreamingCompletionClient:
@@ -415,14 +416,16 @@ def test_unexpected_failure_closes_open_response_stream() -> None:
 
 
 def test_session_snapshot_excludes_audit_messages_and_restores_them(tmp_path: Path) -> None:
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     service = ConversationService(AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)), store)
     state = service.run_task("calculate 2 + 2", mode="agent")
 
     assert service.active_session is not None
-    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as connection:
+    import sqlite3
+
+    with sqlite3.connect(store.paths.session_db(service.active_session.session_id)) as connection:
         payload = connection.execute(
-            "SELECT state_json FROM session_runtime WHERE session_id = %s", (service.active_session.session_id,)
+            "SELECT state_json FROM session_runtime WHERE session_id = ?", (service.active_session.session_id,)
         ).fetchone()[0]
     assert json.loads(payload)["current_run"]["runtime_messages"] == []
 

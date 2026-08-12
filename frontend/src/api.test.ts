@@ -80,13 +80,12 @@ describe("streamChat", () => {
     });
   });
 
-  it("streams through the configured API subdomain", async () => {
-    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com");
+  it("keeps chat requests on the local backend origin", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(responseWithChunks('data: {"type":"done"}\n\n')));
 
     await streamChat("task", () => undefined, new AbortController().signal);
 
-    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("https://api.example.com/api/chat");
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("/api/chat");
     expect((vi.mocked(fetch).mock.calls[0]?.[1] as RequestInit).credentials).toBe("include");
   });
 });
@@ -106,7 +105,7 @@ describe("web auth API", () => {
   });
 
   it("sends login JSON with browser credentials enabled", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ user: { id: "u1", email: "a@example.com", legacy_owner: false } }), { status: 200 })));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ user: { id: "u1", email: "a@example.com", kind: "account" } }), { status: 200 })));
     await expect(login("a@example.com", "a".repeat(12))).resolves.toMatchObject({ id: "u1" });
     const fetchMock = vi.mocked(fetch);
     const options = fetchMock.mock.calls[0]?.[1] as RequestInit;
@@ -115,14 +114,13 @@ describe("web auth API", () => {
     expect(options.body).toBe(JSON.stringify({ email: "a@example.com", password: "a".repeat(12) }));
   });
 
-  it("targets a configured API subdomain while retaining browser credentials", async () => {
-    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ user: { id: "u1", email: "a@example.com", legacy_owner: false } }), { status: 200 })));
+  it("keeps auth requests on the local backend origin", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ user: { id: "u1", email: "a@example.com", kind: "account" } }), { status: 200 })));
 
     await login("a@example.com", "a".repeat(12));
 
     const fetchMock = vi.mocked(fetch);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.example.com/api/auth/login");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/auth/login");
     expect((fetchMock.mock.calls[0]?.[1] as RequestInit).credentials).toBe("include");
   });
 });

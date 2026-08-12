@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import BenchmarkPage from "./BenchmarkPage";
 import type { TaskInfo } from "../types";
 
@@ -17,6 +17,9 @@ const task = (name: string): TaskInfo => ({
   capability: "software_engineering",
   description: "修复一个需要较长说明的适配任务",
   difficulty: "中等",
+  prompt: "请修复这个适配任务并说明原因。",
+  budgets: { max_model_turns: 8, max_tool_calls: 32, max_replans: 2, max_retries: 1 },
+  tags: ["适配"],
   source: {
     benchmark: "SWE-bench",
     task_id: "owner/repository#123",
@@ -31,7 +34,13 @@ const task = (name: string): TaskInfo => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.listTasks.mockResolvedValue([task("task-one"), task("task-two")]);
-  mocks.runBenchmark.mockResolvedValue({ task_name: "task-one", score: 0.9, passed: true });
+  mocks.runBenchmark.mockResolvedValue({
+    task_name: "task-one",
+    score: 0.9,
+    passed: true,
+    final_answer: "已完成",
+    trace: [{ kind: "tool_call", timestamp: "2026-01-01T00:00:00Z", message: "读取文件", data: { path: "safe.txt" } }],
+  });
   mocks.runAllBenchmark.mockResolvedValue([
     { task_name: "task-one", score: 0.9, passed: true },
     { task_name: "task-two", score: 0.5, passed: false },
@@ -39,6 +48,8 @@ beforeEach(() => {
 });
 
 describe("BenchmarkPage layout and runs", () => {
+  afterEach(() => cleanup());
+
   it("renders wide task cards through the shared two-column grid", async () => {
     const { container } = render(<BenchmarkPage />);
 
@@ -57,6 +68,11 @@ describe("BenchmarkPage layout and runs", () => {
     await user.click(runButtons[0]);
     await waitFor(() => expect(mocks.runBenchmark).toHaveBeenCalledWith("task-one", "llm"));
     expect(await screen.findByText("状态：通过")).toBeInTheDocument();
+    expect(document.querySelector(".task-card .spinner")).toBeNull();
+    const traceLabel = screen.getByText(/完整 Trace（1 条事件）/);
+    expect(traceLabel.closest(".ant-collapse-item")).not.toHaveClass("ant-collapse-item-active");
+    await user.click(traceLabel);
+    expect(await screen.findByText("读取文件")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /全部运行/ }));
     await waitFor(() => expect(mocks.runAllBenchmark).toHaveBeenCalledWith("llm"));

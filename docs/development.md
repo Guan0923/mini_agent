@@ -14,25 +14,24 @@ The editable install exposes the `mini-agent` command and keeps the `src/` packa
 
 ### Client configuration and optional synchronization
 
-The client runs without PostgreSQL. Its sole runtime configuration is `~/mini_agent/config.toml`; use `config.toml.example` as a template or start once with `--planner rule` to generate the file and a stable device ID. Process environment values do not override client TOML. A legacy workspace `.env` is read only when TOML does not yet exist, then atomically migrated and deleted after validation.
+The local backend keeps `client.db` under `~/.mini_agent/` for hashed browser sessions and cached identities. Authenticated users keep `config.toml` and `user.db` under `~/.mini_agent/<user_id>/`; TOML owns non-sensitive preferences, while SQLite owns providers, encrypted credentials, cloud token and sync transaction state. PostgreSQL remains behind the independent `cloud` service and keeps account data plus encrypted cloud snapshot chunks and key envelopes. Deployment-only values are supplied through the cloud process environment. Standalone offline TUI account binding remains out of scope.
 
-Each session is stored in `~/mini_agent/<session_id>/state.db`. Optional synchronization pushes SQLite snapshot operations over HTTPS at startup, checkpoint notification, and normal shutdown, then pulls remote revisions. It does not poll periodically, and failures leave the local outbox intact.
+Each authenticated or guest session is stored in `~/.mini_agent/<user_id>/runtime/<session_id>/`, containing `state.db`, `workspace/`, and `uploads/`. Cloud save uses SQLite Online Backup, copies the explicit allowlist to immutable staging, compresses and AES-GCM encrypts bounded chunks, and retains the latest three completed PostgreSQL snapshots. Guest identities never use cloud sync.
 
-The Web backend, sync server, and PostgreSQL integration tests require PostgreSQL. Web auth and user settings never fall back to SQLite:
+Only the cloud service and its PostgreSQL integration tests require PostgreSQL. The backend starts without it and runs guest/local Agent features entirely offline:
 
 ```powershell
-docker compose up -d postgres
-$env:DATABASE_URL = "postgresql://mini_agent:mini_agent@127.0.0.1:5432/mini_agent"
-$env:MINI_AGENT_SECRET_KEY = "replace-with-at-least-32-random-bytes"
-uv sync --extra web
+docker compose up -d postgres cloud
+$env:CLOUD_URL = "http://127.0.0.1:8100"
+uv sync
 uv run python -m backend.api
 ```
 
-Tests use the separate `TEST_DATABASE_URL` database, reset its `public` schema, and must never point at development or production data. The deployable sync server reads `MINI_AGENT_DATABASE_URL` and `MINI_AGENT_SYNC_TOKEN`; clients receive only an HTTPS endpoint and bearer token.
+Cloud integration tests use a separate test PostgreSQL database, reset its `public` schema, and must never point at development or production data. Backend unit tests do not start PostgreSQL. The cloud API receives only its own `DATABASE_URL`; backend clients receive an HTTPS endpoint and an encrypted local bearer token.
 
-The browser build uses same-origin paths by default. Set `VITE_API_BASE_URL=https://api.example.com` when the frontend and API are on different HTTPS subdomains. Configure `[web]` with the exact frontend `public_url` and `allowed_origins`, plus `cookie_secure=true`. All API, SSE, and Benchmark requests retain `credentials: "include"`.
+The browser build uses same-origin paths exclusively: Vite proxies `/api` and `/benchmark` to `127.0.0.1:8000`, and production backend serves `frontend/dist`. Configure `[web]` with the exact local frontend origin and `cookie_secure=true` when HTTPS is terminated locally. All API, SSE, and Benchmark requests retain `credentials: "include"`; the browser never receives a cloud URL or database credential.
 
-To move a legacy Web `auth.sqlite3`, stop the old server and run `uv run --extra web mini-agent-migrate-web-auth check --source <path>` before `apply`. The target is read only from `DATABASE_URL`; the source stays unchanged. Sessions and provider API keys are intentionally excluded, so users sign in and enter their keys again after migration.
+Run `python scripts/reset_storage_architecture.py` before or after an upgrade to produce a read-only compatibility report. It never removes local payloads, cloud snapshots, key envelopes, or formal accounts; start the cloud service to apply its additive schema migrations.
 
 Tasks can reference workspace files with `@relative/path`, for example `summarize @README.md`. References are expanded before planning, remain workspace-confined, and are bounded to avoid unintentional oversized prompts.
 
@@ -69,11 +68,11 @@ python run.py "读取 README.md"
 mini-agent
 ```
 
-The rule planner is offline and deterministic. The default LLM planner reads `[model]` only from `~/mini_agent/config.toml`; never commit real API keys or synchronization tokens.
+The rule planner is offline and deterministic. The standalone TUI reads `[model]` only from `~/.mini_agent/config.toml`; Web provider credentials remain in per-user `user.db` and never appear in TOML.
 
 ### Skills, Subagents, and MCP
 
-Global Skills live under `~/mini_agent/skills/<name>/SKILL.md`, while workspace Skills live under `.mini_agent/skills/<name>/SKILL.md` and fully override same-named global entries. Discovery validates YAML frontmatter, directory/name equality, UTF-8, size, line count, and path confinement.
+Global Skills live under `~/.mini_agent/<user_id>/skills/<name>/SKILL.md`, while workspace Skills live under `.mini_agent/skills/<name>/SKILL.md` and fully override same-named global entries. Discovery validates YAML frontmatter, directory/name equality, UTF-8, size, line count, and path confinement.
 
 Explicit `$skill-name` references activate installed Skills directly and fail before the task model call when a name is unknown. Automatic routing is disabled by default; set `[skills].auto_select = true` only when the extra selector model call is desired. Selector calls are counted separately from task model turns.
 
@@ -87,9 +86,9 @@ Run the safe stdio MCP server without model or database configuration:
 mini-agent-mcp --workspace C:\path\to\workspace
 ```
 
-The MCP adapter intentionally exports only approval-free read tools. The client separately merges `~/mini_agent/mcp.toml` with `.mini_agent/mcp.toml`, fully overriding same-named project servers; external tools use long-lived stdio sessions, always require approval, and are unavailable in Plan mode.
+The MCP adapter intentionally exports only approval-free read tools. The client separately merges `~/.mini_agent/<user_id>/mcp/servers.toml` with `.mini_agent/mcp.toml`, fully overriding same-named project servers; external tools use long-lived stdio sessions, always require approval, and are unavailable in Plan mode.
 
-Global MCP configuration is treated as user-owned and trusted. A project MCP file is keyed by canonical workspace-path and semantic configuration hashes in `~/mini_agent/mcp-trust.toml`; moving the workspace or changing any command, argument, working directory, or environment value requires approval again. Run `mini-agent --workspace <path> --trust-project-mcp` to review environment variable names (never values), record trust, and exit without starting a server. Non-interactive runs refuse untrusted project MCP.
+Global MCP configuration is treated as user-owned and trusted. A project MCP file is keyed by canonical workspace-path and semantic configuration hashes in `~/.mini_agent/<user_id>/mcp/trust.toml`; moving the workspace or changing any command, argument, working directory, or environment value requires approval again. Run `mini-agent --workspace <path> --trust-project-mcp` to review environment variable names (never values), record trust, and exit without starting a server. Non-interactive runs refuse untrusted project MCP.
 
 The `[mcp]` table configures finite positive initialization, call, and shutdown timeouts. Tool names are validated before registry insertion, MCP sessions are owned by one application/runner instance, and closing that instance cannot stop another instance's MCP processes.
 
@@ -99,13 +98,13 @@ Plan mode supports ordinary read-only conversation plus two built-in control Too
 
 ## Runtime data
 
-The application writes mutable client data below `~/mini_agent`:
+The application writes mutable client data below `~/.mini_agent/<user_id>`:
 
-- `config.toml`, `mcp.toml`, and `skills/`: global client configuration and extensions;
+- `config.toml`, `mcp/`, and `skills/`: user configuration and extensions;
 - `logs/`: redacted JSONL audit streams;
 - `<session_id>/state.db`: messages, runs, checkpoints, runtime/audit events, metadata, and sync outbox.
 
-Set `runtime.log_full_messages = false` to write summaries instead of complete redacted message bodies. Authentication headers, model credentials, sync tokens, and MCP environment values must never be persisted or included in model context.
+Set `runtime.log_full_messages = false` to write summaries instead of complete redacted message bodies. Authentication headers, model credentials, sync tokens, and sensitive MCP environment values must never be persisted or included in model context. User MCP configuration may keep non-sensitive values; secrets use `env://NAME`/`keyring://service/account` references and resolve only when the server starts.
 
 ## Change boundaries
 
@@ -115,7 +114,7 @@ Set `runtime.log_full_messages = false` to write summaries instead of complete r
 - Provider adapters own wire conversion only and accept active chat messages. Keep reusable HTTP and SSE mechanics in `providers/transport.py`.
 - MCP reuses the tool registry but exposes only read-only, approval-free tools; do not add a second filesystem implementation.
 - Subagent coordination belongs at the runtime composition boundary. Preserve single-level delegation, parent cancellation/approval routing, persisted batch summaries, and write coordination.
-- The TUI client composition root selects SQLite. The Web composition root requires PostgreSQL for auth/settings, while chat RuntimeState remains local SQLite; legacy SQLite auth is restricted to tests and explicit migration.
+- The TUI and Web composition roots both select local SQLite for runtime state. The Web backend keeps only browser-session hashes and cached identities in `client.db`; account authentication and PostgreSQL access belong exclusively to `cloud/`. No legacy auth migration is shipped.
 - TUI renders runtime events and owns terminal commands/approval prompts; keep application loops, components, screens, rendering state, and view behavior in their focused subpackages. Keep the Plan Review and Tool Review decision sets separate, and do not implement tool behavior or session persistence in the TUI.
 
 When adding behavior, add or update focused tests in `tests/`, then run the complete validation commands before opening a pull request.

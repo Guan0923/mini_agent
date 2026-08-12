@@ -86,6 +86,72 @@ describe("runtime detail projection", () => {
     expect(current.messages[1].events).toEqual([]);
   });
 
+  it("does not surface the failed placeholder from a dynamic node", () => {
+    const placeholder = node("assistant", "user", { role: "assistant", content: [] }, "failed");
+    const current = integrateRuntimeNodeFrame(conversation(), { type: "node.update", node: placeholder });
+
+    expect(current.messages[1].error).toBeUndefined();
+  });
+
+  it("uses the tool block status instead of the parent node status", () => {
+    const tool = node("tool", "user", {
+      role: "tool_result",
+      content: [{ type: "tool_result", tool: "search", status: "succeeded", content: "ok" }],
+    }, "failed");
+
+    expect(projectRuntimeNode(tool)?.events[0]?.kind).toBe("tool_result");
+  });
+
+  it("clears a stale error when a terminal success replaces it", () => {
+    const current = conversation();
+    current.messages[1].error = "An unknown error caused the system to encounter an exception.";
+    const completed = node("assistant", "user", { role: "assistant", content: [{ type: "text", text: "完成" }] });
+
+    const next = integrateRuntimeNodeFrame(current, { type: "node.delete", node: completed });
+
+    expect(next.messages[1].error).toBeUndefined();
+    expect(next.messages[1].content).toBe("完成");
+  });
+
+  it("ignores stale error metadata on a successful historical node", () => {
+    const completed = node("assistant", "user", {
+      role: "assistant",
+      content: [{ type: "text", text: "完成" }],
+      error: { message: "An unknown error caused the system to encounter an exception." },
+    }, "success");
+
+    expect(projectRuntimeNode(completed)?.error).toBeUndefined();
+  });
+
+  it("projects a structured abort reason into the assistant error alert", () => {
+    const aborted = node("assistant", "user", {
+      role: "assistant",
+      content: [{ type: "text", text: "The run was aborted." }],
+      error: {
+        category: "network",
+        message: "The run was aborted because a network error interrupted communication.",
+        detail: "Model request timed out.",
+      },
+    }, "abort");
+
+    const current = integrateRuntimeNodeFrame(conversation(), { type: "node.delete", node: aborted });
+
+    expect(current.messages[1].error).toBe(
+      "The run was aborted because a network error interrupted communication.\n\nDetails: Model request timed out.",
+    );
+    expect(projectRuntimeNode(aborted)?.error).toContain("network error");
+  });
+
+  it("uses the generic failed reason when a legacy node has no error metadata", () => {
+    const failed = node("failed", "user", { role: "assistant", content: [] }, "failed");
+
+    expect(projectRuntimeNode(failed)).toMatchObject({
+      role: "assistant",
+      content: "",
+      error: "An unknown error caused the system to encounter an exception.",
+    });
+  });
+
   it("keeps legacy thinking open until the explicit end event", () => {
     const initial: ChatMessage = { id: "a", role: "assistant", content: "", events: [], running: true };
     const started = appendLegacyRuntimeEvent(initial, { kind: "thinking_start", message: "", data: {} });

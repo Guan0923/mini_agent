@@ -19,6 +19,7 @@ def build_user_application(
     state: WebAppState,
     user_id: str,
     *,
+    session_id: str,
     user_preferences: str = "",
     model_config: ModelConfig | None = None,
     load_model_config: bool = True,
@@ -27,16 +28,26 @@ def build_user_application(
     """Build an application with the canonical per-user runtime settings."""
 
     application_builder = builder or build_application
-    return application_builder(
-        state.user_workspace(user_id),
+    runtime_config = state.runtime_config_for_user(user_id)
+    runtime_values = runtime_config.get("runtime", {})
+    log_full_messages = runtime_values.get("log_full_messages", True) if isinstance(runtime_values, dict) else True
+    if not isinstance(log_full_messages, bool):
+        log_full_messages = True
+    application = application_builder(
+        state.user_workspace(user_id, session_id),
         planner_name="llm",
-        settings=RunnerSettings(log_full_messages=True),
+        settings=RunnerSettings(log_full_messages=log_full_messages),
         project_mcp_enabled=False,
         user_preferences=user_preferences,
         paths=state.user_paths(user_id),
         model_config=state.model_config_for_user(user_id)
         if load_model_config and model_config is None
         else model_config,
-        config_override=state.runtime_config_for_user(user_id),
+        config_override=runtime_config,
         default_timezone=str(state.agent_config_for_user(user_id).get("timezone", DEFAULT_TIME_ZONE)),
     )
+    if state.snapshot_manager is not None:
+        store = getattr(application, "session_store", None) or getattr(application, "store", None)
+        if callable(getattr(store, "set_sync_listener", None)):
+            store.set_sync_listener(lambda: state.mark_sync_dirty(user_id))
+    return application

@@ -3,8 +3,8 @@ from pathlib import Path
 from backend.domain import AssistantMessage, RunState, StrategySelection, ToolMessage, ToolSpec, UserMessage
 from backend.planning import RuleBasedPlanner
 from backend.runtime import AgentRunner, ConversationService, RuntimeState
-from backend.storage.postgres import PostgresSessionStore
 from backend.tools import Tool, ToolRegistry
+from tests.local_store import session_store
 
 
 def test_messages_expose_required_fields_and_nest_tools() -> None:
@@ -79,7 +79,7 @@ def test_runtime_state_round_trips_complete_session_state() -> None:
 
 
 def test_postgres_persists_and_reloads_runtime_snapshot(tmp_path: Path) -> None:
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     session = store.create_session("Runtime")
     tools = ToolRegistry(
         [
@@ -124,7 +124,7 @@ class UsagePlanner:
 
 
 def test_completed_turn_overwrites_session_usage(tmp_path: Path) -> None:
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     service = ConversationService(AgentRunner(UsagePlanner(), ToolRegistry()), store)
 
     service.run_task("first", mode="agent")

@@ -6,81 +6,119 @@ import base64
 import hashlib
 import os
 import secrets
-from pathlib import Path
-
-_SERVER_CIPHER_PREFIX = "v2:"
-_SERVER_CIPHER_AAD = b"mini-agent-provider-key:v2"
 
 
 class SecretDecryptionError(ValueError):
     """A server-encrypted secret cannot be authenticated or decoded."""
 
 
-class ServerSecretCipher:
-    """Stable authenticated encryption for secrets persisted by the Web server."""
+class LocalKeyStoreError(RuntimeError):
+    """The per-user local data key is unavailable."""
 
-    def __init__(self, configured_secret: str) -> None:
-        encoded = configured_secret.encode("utf-8")
-        if len(encoded) < 32:
-            raise ValueError("MINI_AGENT_SECRET_KEY must contain at least 32 UTF-8 bytes.")
-        self._key = hashlib.sha256(encoded).digest()
 
-    def encrypt(self, value: str) -> str:
-        if not value:
-            return ""
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+class UserDataKeyStore:
+    """Store one random user DEK in the operating-system credential vault."""
 
-        nonce = secrets.token_bytes(12)
-        encrypted = AESGCM(self._key).encrypt(nonce, value.encode("utf-8"), _SERVER_CIPHER_AAD)
-        return _SERVER_CIPHER_PREFIX + base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
+    service_name = "mini-agent-user-data-key"
 
-    def decrypt(self, value: str) -> str:
-        if not value:
-            return ""
-        if not value.startswith(_SERVER_CIPHER_PREFIX):
-            raise SecretDecryptionError("Stored provider credential uses an unsupported format.")
+    @staticmethod
+    def _fallback(user_id: str, cause: Exception) -> bytes:
+        """Return deterministic test/headless material or preserve the error.
+
+        Some Windows credential backends raise ``OSError``/backend-specific
+        exceptions rather than ``KeyringError`` when the process has no
+        interactive logon session.  An explicitly configured fallback is the
+        documented way to run such environments; without it, fail closed so
+        encrypted data is never silently made unrecoverable.
+        """
+
+        configured = os.environ.get("MINI_AGENT_LOCAL_DEK_FALLBACK", "")
+        if len(configured.encode("utf-8")) < 32:
+            raise LocalKeyStoreError(
+                "OS credential storage is unavailable and MINI_AGENT_LOCAL_DEK_FALLBACK is not configured."
+            ) from cause
+        return hashlib.sha256(f"{configured}:{user_id}".encode()).digest()
+
+    def get(self, user_id: str) -> bytes | None:
+        if not user_id:
+            raise LocalKeyStoreError("A user id is required for local secret encryption.")
+        try:
+            import keyring
+
+            encoded = keyring.get_password(self.service_name, user_id)
+            if encoded:
+                key = base64.urlsafe_b64decode(encoded.encode("ascii"))
+                if len(key) != 32:
+                    raise LocalKeyStoreError("The stored user data key has an invalid length.")
+                return key
+            return None
+        except Exception as exc:
+            # Headless test/server environments and Windows keyring backends
+            # can surface several exception classes (including OSError).
+            # They must explicitly supply stable fallback material; a random
+            # process-local key would make persisted data unrecoverable.
+            return self._fallback(user_id, exc)
+
+    def set(self, user_id: str, key: bytes) -> None:
+        if len(key) != 32:
+            raise LocalKeyStoreError("A user data key must contain exactly 32 bytes.")
+        try:
+            import keyring
+
+            keyring.set_password(self.service_name, user_id, base64.urlsafe_b64encode(key).decode("ascii"))
+        except Exception as exc:
+            configured = os.environ.get("MINI_AGENT_LOCAL_DEK_FALLBACK", "")
+            if len(configured.encode("utf-8")) < 32:
+                raise LocalKeyStoreError("OS credential storage is unavailable.") from exc
+
+    def get_or_create(self, user_id: str) -> bytes:
+        existing = self.get(user_id)
+        if existing is not None:
+            return existing
+        configured = os.environ.get("MINI_AGENT_LOCAL_DEK_FALLBACK", "")
+        key = (
+            hashlib.sha256(f"{configured}:{user_id}".encode()).digest()
+            if len(configured.encode("utf-8")) >= 32
+            else secrets.token_bytes(32)
+        )
+        self.set(user_id, key)
+        # ``set`` may have had to fall back after a keyring backend rejected
+        # the write.  Re-read so the first encryption operation uses the same
+        # deterministic material that later decryptions will derive.
+        return self.get(user_id) or key
+
+
+_LOCAL_CIPHER_PREFIX = "v3:"
+_LOCAL_KEY_STORE = UserDataKeyStore()
+
+
+def _encrypt_secret(value: str, user_id: str) -> str:
+    if not value:
+        return ""
+    if not user_id:
+        raise LocalKeyStoreError("A user id is required for local secret encryption.")
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    nonce = secrets.token_bytes(12)
+    aad = f"mini-agent-local-secret:v3:{user_id}".encode()
+    encrypted = AESGCM(_LOCAL_KEY_STORE.get_or_create(user_id)).encrypt(nonce, value.encode("utf-8"), aad)
+    return _LOCAL_CIPHER_PREFIX + base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
+
+
+def _decrypt_secret(value: str, user_id: str) -> str:
+    if not value:
+        return ""
+    if value.startswith(_LOCAL_CIPHER_PREFIX):
         from cryptography.exceptions import InvalidTag
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         try:
-            raw = base64.urlsafe_b64decode(value[len(_SERVER_CIPHER_PREFIX) :].encode("ascii"))
+            raw = base64.urlsafe_b64decode(value[len(_LOCAL_CIPHER_PREFIX) :].encode("ascii"))
             if len(raw) <= 12:
                 raise ValueError
-            decrypted = AESGCM(self._key).decrypt(raw[:12], raw[12:], _SERVER_CIPHER_AAD)
+            aad = f"mini-agent-local-secret:v3:{user_id}".encode()
+            decrypted = AESGCM(_LOCAL_KEY_STORE.get_or_create(user_id)).decrypt(raw[:12], raw[12:], aad)
             return decrypted.decode("utf-8")
         except (InvalidTag, UnicodeError, ValueError) as exc:
-            raise SecretDecryptionError("Stored provider credential could not be decrypted.") from exc
-
-
-def _key_material() -> bytes:
-    configured = os.environ.get("MINI_AGENT_SECRET_KEY", "")
-    if configured:
-        return hashlib.sha256(configured.encode()).digest()
-    try:
-        login = os.getlogin()
-    except OSError:
-        login = ""
-    return hashlib.sha256(f"{Path.home()}:{login}".encode()).digest()
-
-
-def _encrypt_secret(value: str) -> str:
-    if not value:
-        return ""
-    nonce = secrets.token_bytes(16)
-    key = _key_material()
-    raw = value.encode("utf-8")
-    stream = bytes(byte ^ key[index % len(key)] for index, byte in enumerate(raw))
-    return base64.urlsafe_b64encode(nonce + stream).decode("ascii")
-
-
-def _decrypt_secret(value: str) -> str:
-    if not value:
-        return ""
-    try:
-        raw = base64.urlsafe_b64decode(value.encode("ascii"))
-    except (ValueError, UnicodeError):
-        return ""
-    key = _key_material()
-    payload = raw[16:]
-    decoded = bytes(byte ^ key[index % len(key)] for index, byte in enumerate(payload))
-    return decoded.decode("utf-8", errors="replace")
+            raise SecretDecryptionError("Stored local credential could not be decrypted.") from exc
+    raise SecretDecryptionError("Stored local credential uses an unsupported format.")

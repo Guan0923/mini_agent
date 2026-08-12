@@ -110,14 +110,50 @@ def test_generic_checkers_and_checker_failures_are_isolated(tmp_path: Path) -> N
 
 def test_event_collector_publishes_subagent_metrics() -> None:
     collector = EventCollector()
-    collector(RuntimeEvent("subagent_completed", "done"))
-    collector(RuntimeEvent("subagent_failed", "failed"))
+    collector(RuntimeEvent(
+        "model_request",
+        "Authorization: Bearer secret-value",
+        {"headers": {"Authorization": "Bearer secret-value"}, "prompt": "read this"},
+        timestamp="2026-01-01T00:00:00Z",
+    ))
+    collector(RuntimeEvent("subagent_completed", "done", timestamp="2026-01-01T00:00:01Z"))
+    collector(RuntimeEvent("subagent_failed", "failed", timestamp="2026-01-01T00:00:02Z"))
     state = SimpleNamespace(model_turns=0, actions=[], replan_count=0, active_skills=[])
 
     metrics = build_metrics(collector, state, 12.5)
     assert metrics.subagent_completed == 1
     assert metrics.subagent_failed == 1
     assert metrics.to_dict()["subagent_completed"] == 1
+    trace = collector.trace()
+    assert [event["kind"] for event in trace] == ["model_request", "subagent_completed", "subagent_failed"]
+    assert "secret-value" not in json.dumps(trace)
+    assert trace[0]["data"]["prompt"] == "read this"
+
+
+def test_runner_returns_a_redacted_failure_trace_with_phase() -> None:
+    task = BenchmarkTask(
+        name="broken-workspace",
+        description="Exercise safe harness failures.",
+        capability="terminal",
+        prompt="read notes/alpha.md",
+        difficulty="easy",
+        source=_test_source(),
+        planner_modes=frozenset({"rule"}),
+    )
+
+    class BrokenSandbox:
+        def materialize_workspace(self, _task):
+            raise RuntimeError("Authorization: Bearer secret-value")
+
+    result = run_one_task(task, planner="rule", sandbox=BrokenSandbox())
+
+    encoded = json.dumps(result.to_dict(), ensure_ascii=False)
+    assert result.status == "error"
+    assert result.failure_phase == "workspace"
+    assert [event["kind"] for event in result.trace] == ["error"]
+    assert "RuntimeError" in result.error
+    assert "secret-value" not in encoded
+    assert "Traceback" not in encoded
 
 
 def test_rule_planner_smoke_uses_a_temporary_unregistered_task(tmp_path: Path, monkeypatch) -> None:

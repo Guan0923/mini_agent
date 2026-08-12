@@ -6,8 +6,8 @@ from backend.domain import DEFAULT_TIME_ZONE
 from backend.planning import RuleBasedPlanner
 from backend.planning.prompts import compose_system_prompt
 from backend.runtime import AgentRunner, ConversationService, RuntimeState
-from backend.storage.postgres import PostgresSessionStore
 from backend.tools import ToolError, ToolInvocationContext, ToolRegistry, build_tool_registry
+from tests.local_store import session_store
 from tui.application.commands import CommandAppMixin
 from tui.components.commands import render_help
 from tui.components.completion import SlashCommandCompleter
@@ -46,8 +46,8 @@ def test_runtime_timezone_round_trip_and_legacy_default() -> None:
     assert RuntimeState.from_dict({"session_id": "legacy"}).timezone == DEFAULT_TIME_ZONE
 
 
-def test_session_timezone_persists_in_runtime_snapshot() -> None:
-    store = PostgresSessionStore()
+def test_session_timezone_persists_in_runtime_snapshot(tmp_path: Path) -> None:
+    store = session_store(tmp_path / "store")
     service = ConversationService(AgentRunner(RuleBasedPlanner(), ToolRegistry()), store)
 
     assert service.current_timezone == DEFAULT_TIME_ZONE

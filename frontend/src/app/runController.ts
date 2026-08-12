@@ -67,6 +67,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
           content: message.final_answer ?? "",
           status: message.status,
           metrics: message.metrics,
+          ...(message.status === "completed" || message.status === "success" ? { error: undefined } : {}),
           running: false,
           decision: undefined,
           runId: message.run_id ?? item.runId,
@@ -107,15 +108,18 @@ export function createRunController(callbacks: RunControllerCallbacks) {
           ...item,
           running: false,
           status: "已停止",
+          error: "The run was aborted at the user's request.",
           decision: undefined,
         }));
       } else if (!sawDone && finalNode) {
         const terminalNode = finalNode;
-        const content = projectRuntimeNode(terminalNode)?.content ?? "";
+        const projection = projectRuntimeNode(terminalNode);
+        const content = projection?.content ?? "";
         callbacks.updateLastMessage(request.conversationId, (item) => ({
           ...item,
           status: terminalNode.status,
           content: content || item.content,
+          error: projection?.error,
           running: false,
           decision: undefined,
         }));
@@ -140,7 +144,13 @@ export function createRunController(callbacks: RunControllerCallbacks) {
     const active = callbacks.activeRuns.get(id);
     if (!active) return;
     active.controller.abort();
-    callbacks.updateLastMessage(id, (item) => ({ ...item, running: false, status: "已停止", decision: undefined }));
+    callbacks.updateLastMessage(id, (item) => ({
+      ...item,
+      running: false,
+      status: "已停止",
+      error: "The run was aborted at the user's request.",
+      decision: undefined,
+    }));
   }
 
   return { runConversation, stopConversation };

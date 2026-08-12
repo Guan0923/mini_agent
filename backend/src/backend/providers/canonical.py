@@ -11,7 +11,14 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from backend.domain.runtime_state import RuntimeState, RuntimeStateValidationError, message_payload, validate_data
+from backend.domain.runtime_state import (
+    RuntimeState,
+    RuntimeStateValidationError,
+    message_payload,
+    terminal_error_payload,
+    terminal_error_text,
+    validate_data,
+)
 
 
 def _payload(value: RuntimeState | Mapping[str, Any]) -> Mapping[str, Any]:
@@ -32,11 +39,36 @@ def _messages(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[Mappin
     for value in values:
         raw = value.to_dict() if isinstance(value, RuntimeState) else value
         data = raw.get("data") if isinstance(raw, Mapping) and "data" in raw else raw
+        status = _status(value)
         if _is_message(value):
-            result.append(_payload(value))
+            message = dict(_payload(value))
+            if status in {"failed", "abort"}:
+                # Terminal metadata is part of the next model turn even when
+                # a crash left the message content empty.  Keep the reason in
+                # a regular text block so every provider adapter can transmit
+                # it without a vendor-specific error field.
+                raw_error = message.get("error")
+                if isinstance(raw_error, Mapping):
+                    reason = terminal_error_text(raw_error)
+                elif isinstance(raw_error, str) and raw_error:
+                    reason = raw_error
+                else:
+                    reason = terminal_error_text(terminal_error_payload(status))
+                blocks = [dict(item) for item in message.get("content", []) if isinstance(item, Mapping)]
+                if not any(item.get("type") == "text" and item.get("text") == reason for item in blocks):
+                    blocks.append({"type": "text", "text": reason})
+                message["content"] = blocks
+            result.append(message)
         elif isinstance(data, Mapping) and data.get("type") == "compaction":
             summary = str(data.get("summary") or "")
             result.append({"role": "user", "content": [{"type": "text", "text": f"[compaction]\n{summary}"}]})
+        elif status in {"failed", "abort"}:
+            # A process may stop after the failed placeholder is committed but
+            # before its final delete frame. Keep that durable safety marker
+            # (including abort categories) useful to the next turn instead of
+            # silently dropping it.
+            reason = terminal_error_text(terminal_error_payload(status))
+            result.append({"role": "assistant", "content": [{"type": "text", "text": reason}]})
     return result
 
 
@@ -44,6 +76,13 @@ def _is_message(value: RuntimeState | Mapping[str, Any]) -> bool:
     raw = value.to_dict() if isinstance(value, RuntimeState) else value
     data = raw.get("data") if isinstance(raw, Mapping) and "data" in raw else raw
     return isinstance(data, Mapping) and data.get("type") == "message"
+
+
+def _status(value: RuntimeState | Mapping[str, Any]) -> str | None:
+    if isinstance(value, RuntimeState):
+        return value.status
+    raw = value.get("status") if isinstance(value, Mapping) else None
+    return raw if isinstance(raw, str) else None
 
 
 def _text(blocks: Sequence[Mapping[str, Any]], *, include_reasoning: bool = False) -> str:

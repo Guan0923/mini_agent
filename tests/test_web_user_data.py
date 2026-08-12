@@ -2,35 +2,50 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.api.auth_types import UserIdentity
-from backend.api.user_data import migrate_legacy_for_owner, user_root
-from backend.configuration import ClientPaths
+import pytest
+from backend.api.user_data import copy_session_files, user_paths, user_root, user_workspace
+from backend.configuration import ClientPaths, ConfigurationError
+
+USER_ID = "123e4567-e89b-12d3-a456-426614174000"
 
 
-def test_legacy_migration_copies_sessions_logs_and_workspace(tmp_path: Path) -> None:
-    data_root = tmp_path / "web"
-    source_paths = ClientPaths(tmp_path / "legacy")
-    source_paths.ensure()
-    (source_paths.root / "session_legacy" / "state.db").parent.mkdir()
-    (source_paths.root / "session_legacy" / "state.db").write_bytes(b"state")
-    (source_paths.logs_dir / "run.jsonl").write_text('{"kind":"run_finished"}\n', encoding="utf-8")
-    source_workspace = tmp_path / "legacy-workspace"
-    source_workspace.mkdir()
-    (source_workspace / "notes.txt").write_text("legacy notes", encoding="utf-8")
-    identity = UserIdentity("user-1", "legacy@example.com", legacy_owner=True)
-    statuses: list[str] = []
+def test_user_layout_is_canonical_and_rejects_non_uuid_ids(tmp_path: Path) -> None:
+    paths = user_paths(tmp_path, USER_ID)
+    assert paths.root == tmp_path / USER_ID
+    assert {item.relative_to(paths.root).as_posix() for item in paths.root.iterdir() if item.is_dir()} == {
+        "skills",
+        "rag",
+        "plugins",
+        "mcp",
+        "runtime",
+        "sync",
+    }
+    assert paths.mcp_resources_dir.is_dir()
+    assert paths.sync_staging_dir.is_dir()
+    assert paths.sync_recovery_dir.is_dir()
+    assert paths.config_file.is_file()
+    assert paths.user_db.is_file()
+    assert paths.mcp_file.is_file()
+    assert paths.mcp_trust_file.is_file()
+    assert not (paths.runtime_dir / "web").exists()
+    assert not (paths.runtime_dir / "tui").exists()
 
-    migrate_legacy_for_owner(
-        data_root,
-        identity,
-        source_paths,
-        source_workspace,
-        status=None,
-        set_status=statuses.append,
-    )
+    with pytest.raises(ConfigurationError):
+        user_root(tmp_path, "user@example.com")
+    with pytest.raises(ConfigurationError):
+        user_root(tmp_path, "../outside")
 
-    target_root = user_root(data_root, identity.id)
-    assert (target_root / "client" / "session_legacy" / "state.db").read_bytes() == b"state"
-    assert (target_root / "client" / "logs" / "run.jsonl").read_text(encoding="utf-8")
-    assert (target_root / "workspace" / "notes.txt").read_text(encoding="utf-8") == "legacy notes"
-    assert statuses == ["pending", "complete"]
+
+def test_each_session_has_an_independent_workspace_and_branch_copy(tmp_path: Path) -> None:
+    source = user_workspace(tmp_path, USER_ID, "session_source")
+    (source / "notes.txt").write_text("source", encoding="utf-8")
+    source_paths = ClientPaths(user_root(tmp_path, USER_ID))
+    (source_paths.session_uploads("session_source") / "input.txt").write_text("upload", encoding="utf-8")
+
+    copy_session_files(tmp_path, USER_ID, "session_source", "session_branch")
+    branch = user_workspace(tmp_path, USER_ID, "session_branch")
+    assert (branch / "notes.txt").read_text(encoding="utf-8") == "source"
+    assert (source_paths.session_uploads("session_branch") / "input.txt").read_text(encoding="utf-8") == "upload"
+
+    (branch / "notes.txt").write_text("branch", encoding="utf-8")
+    assert (source / "notes.txt").read_text(encoding="utf-8") == "source"

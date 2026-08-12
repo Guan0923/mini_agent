@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 from backend.domain import RunProvenance, Session, new_run_id
 from backend.domain.state import utc_now
 from backend.runtime.core.context import text_messages
@@ -68,6 +71,48 @@ class SQLiteForkMixin:
                         "INSERT INTO session_messages(run_id,role,content,created_at) VALUES (?,?,?,?)",
                         (state.current_run.run_id, message["role"], message["content"], timestamp),
                     )
-            self._save_state(state, "forked")
+            try:
+                self._save_state(state, "forked")
+                self.paths.ensure_session(target.session_id)
+                _copy_tree_without_symlinks(
+                    self.paths.session_workspace(summary.session_id),
+                    self.paths.session_workspace(target.session_id),
+                )
+                _copy_tree_without_symlinks(
+                    self.paths.session_uploads(summary.session_id),
+                    self.paths.session_uploads(target.session_id),
+                )
+            except Exception:
+                # The target was created solely for this fork.  A failed
+                # workspace/upload copy must not leave a discoverable,
+                # partially initialized session behind.
+                shutil.rmtree(self.paths.session_root(target.session_id), ignore_errors=True)
+                raise
             return target
         raise ValueError(f"Unknown run: {run_id}")
+
+
+def _copy_tree_without_symlinks(source: Path, target: Path) -> None:
+    """Copy fork payloads without allowing workspace links to escape."""
+
+    if source.is_symlink():
+        raise ValueError("Session workspace cannot be a symbolic link.")
+    if not source.is_dir():
+        raise ValueError("Session workspace must be a directory.")
+    if target.is_symlink():
+        raise ValueError("Session target cannot be a symbolic link.")
+    target.mkdir(parents=True, exist_ok=True)
+    for item in source.rglob("*"):
+        relative = item.relative_to(source)
+        if item.is_symlink():
+            raise ValueError("Session payload contains a symbolic link.")
+        destination = target / relative
+        if destination.is_symlink():
+            raise ValueError("Session target contains a symbolic link.")
+        if item.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+        elif item.is_file():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, destination)
+        else:
+            raise ValueError("Session payload contains an unsupported special file.")

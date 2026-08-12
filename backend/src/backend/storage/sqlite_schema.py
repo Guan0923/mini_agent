@@ -61,6 +61,16 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
     kind TEXT NOT NULL DEFAULT 'snapshot', payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
     acknowledged_at TEXT
 );
+CREATE TABLE IF NOT EXISTS workspace_files (
+    session_id TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    PRIMARY KEY (session_id, relative_path)
+);
+CREATE INDEX IF NOT EXISTS workspace_files_session_idx
+    ON workspace_files (session_id, relative_path);
 """
 
 
@@ -99,20 +109,14 @@ class SQLiteSchemaMixin:
             (self.device_id,),
         )
         if prior_version < SCHEMA_VERSION:
-            # Runtime/history tables have no compatible representation in the
-            # node tree.  Keep session metadata and authentication-owned data,
-            # but intentionally discard old execution rows and sync outbox.
-            for table in (
-                "session_runs",
-                "session_messages",
-                "session_runtime",
-                "runs",
-                "checkpoints",
-                "runtime_messages",
-                "runtime_nodes",
-                "sync_outbox",
-            ):
-                connection.execute(f"DELETE FROM {table}")
+            # The node tree is additive.  Older local clients still store
+            # resumable state and transcript rows in the legacy tables, so a
+            # schema upgrade must retain them and let the sync exporter carry
+            # both representations until a canonical node snapshot exists.
+            connection.execute(
+                "UPDATE session_meta SET schema_version=? WHERE schema_version < ?",
+                (SCHEMA_VERSION, SCHEMA_VERSION),
+            )
         outbox_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(sync_outbox)")}
         for name, definition in (
             ("operation_id", "TEXT"),

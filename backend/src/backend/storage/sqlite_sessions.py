@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -22,20 +23,30 @@ from .codec import normalize_session_title
 class SQLiteSessionMixin:
     def create_session(self, title: str | None = None, *, client_id: str | None = None) -> Session:
         session = Session(new_session_id(), normalize_session_title(title), utc_now(), utc_now(), client_id=client_id)
-        with self._connection(session.session_id) as connection:
-            connection.execute(
-                "INSERT INTO session_meta(session_id,title,owner_device_id,created_at,updated_at,client_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    session.session_id,
-                    session.title,
-                    self.device_id,
-                    session.created_at,
-                    session.updated_at,
-                    session.client_id,
-                ),
-            )
-            self._queue(connection, session.session_id)
+        root_path = self.paths.session_root(session.session_id)
+        root_existed = root_path.exists()
+        root = self.paths.ensure_session(session.session_id)
+        try:
+            with self._connection(session.session_id) as connection:
+                connection.execute(
+                    "INSERT INTO session_meta(session_id,title,owner_device_id,created_at,updated_at,client_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        session.session_id,
+                        session.title,
+                        self.device_id,
+                        session.created_at,
+                        session.updated_at,
+                        session.client_id,
+                    ),
+                )
+                self._queue(connection, session.session_id)
+        except Exception:
+            # A failed schema/metadata initialization must not leave a
+            # session directory that later looks like a valid conversation.
+            if not root_existed:
+                shutil.rmtree(root, ignore_errors=True)
+            raise
         return session
 
     def get_session(self, session_id: str) -> Session | None:
@@ -91,8 +102,13 @@ class SQLiteSessionMixin:
             raise ValueError(f"Unknown session state: {state}")
         summaries = [
             summary
-            for directory in self.paths.root.iterdir()
-            if directory.is_dir() and directory.name.startswith("session_") and (directory / "state.db").exists()
+            for directory in self.paths.runtime_dir.iterdir()
+            if (
+                directory.is_dir()
+                and not directory.is_symlink()
+                and not (directory / "state.db").is_symlink()
+                and (directory / "state.db").is_file()
+            )
             if (summary := self.get_session_summary(directory.name)) is not None
             if state == "all"
             or (state == "active" and summary.is_active)
@@ -181,19 +197,23 @@ class SQLiteSessionMixin:
                 return existing
         parsed = [message_from_dict(item) for item in messages if item.get("role") in {"user", "assistant"}]
         session = self.create_session(title, client_id=client_id)
-        import_run_id = f"import_{uuid4().hex}"
-        timestamp = utc_now()
-        with self._connection(session.session_id) as connection:
-            for message in parsed:
-                role = "assistant" if getattr(message, "role", "") == "assistant" else "user"
-                content = str(getattr(message, "content", "") or "")
-                connection.execute(
-                    "INSERT INTO session_messages(run_id,role,content,created_at) VALUES (?,?,?,?)",
-                    (import_run_id, role, content, timestamp),
-                )
-        if parsed:
-            runtime = self._empty_import_runtime(session.session_id, parsed)
-            self.save_runtime(runtime)
+        try:
+            import_run_id = f"import_{uuid4().hex}"
+            timestamp = utc_now()
+            with self._connection(session.session_id) as connection:
+                for message in parsed:
+                    role = "assistant" if getattr(message, "role", "") == "assistant" else "user"
+                    content = str(getattr(message, "content", "") or "")
+                    connection.execute(
+                        "INSERT INTO session_messages(run_id,role,content,created_at) VALUES (?,?,?,?)",
+                        (import_run_id, role, content, timestamp),
+                    )
+            if parsed:
+                runtime = self._empty_import_runtime(session.session_id, parsed)
+                self.save_runtime(runtime)
+        except Exception:
+            shutil.rmtree(self.paths.session_root(session.session_id), ignore_errors=True)
+            raise
         return session
 
     def rename_session(self, session_id: str, title: str) -> Session:
@@ -240,6 +260,18 @@ class SQLiteSessionMixin:
         """Soft-delete a session; its SQLite database remains available for audit."""
 
         return self._set_lifecycle(session_id, deleted_at=utc_now())
+
+    def purge_session(self, session_id: str) -> None:
+        """Permanently remove a deleted, idle session and its file payload."""
+
+        with self._connection_for_existing(session_id) as connection:
+            self._assert_not_running(connection)
+            row = connection.execute("SELECT deleted_at FROM session_meta").fetchone()
+            if row is None or row[0] is None:
+                raise ValueError("Only deleted sessions can be permanently removed.")
+        shutil.rmtree(self.paths.session_root(session_id), ignore_errors=False)
+        if self._sync_listener is not None:
+            self._sync_listener()
 
     def _set_lifecycle(
         self,

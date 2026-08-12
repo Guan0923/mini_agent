@@ -318,6 +318,34 @@ class SQLiteRuntimeMixin:
             )
             run = state.current_run
             if run is not None:
+                # Resume reconstruction creates a new RunState before the
+                # execution loop emits its first checkpoint.  Register that
+                # attempt in the per-session run index before updating its
+                # status; otherwise the first durable event (and the final
+                # answer) is rejected as an unknown run.
+                existing_run = connection.execute(
+                    "SELECT 1 FROM session_runs WHERE run_id=?", (run.run_id,)
+                ).fetchone()
+                if existing_run is None:
+                    provenance = run.provenance
+                    connection.execute(
+                        """INSERT INTO session_runs
+                        (run_id, task, status, workflow_id, attempt, origin_kind,
+                         source_session_id, source_run_id, started_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            run.run_id,
+                            run.task,
+                            run.status,
+                            provenance.workflow_id,
+                            provenance.attempt,
+                            provenance.trigger,
+                            provenance.source_session_id,
+                            provenance.source_run_id,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
                 connection.execute(
                     "INSERT INTO runs VALUES (?, ?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,state_json=excluded.state_json,updated_at=excluded.updated_at",
                     (run.run_id, run.status, payload, timestamp),

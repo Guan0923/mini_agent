@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Card, Col, Collapse, Row, Spin, Statistic, Tag } from "antd";
+import { Alert, Button, Card, Col, Collapse, Row, Spin, Statistic, Tag, Typography } from "antd";
 import {
   ApiOutlined,
   BarChartOutlined,
@@ -9,11 +9,11 @@ import {
   ToolOutlined,
 } from "@ant-design/icons";
 import { listTasks, runAllBenchmark, runBenchmark } from "../api";
-import type { TaskInfo } from "../types";
+import type { BenchmarkResult, BenchmarkTraceEvent, TaskInfo } from "../types";
 
 interface RunState {
   busy: boolean;
-  result: Record<string, unknown> | null;
+  result: BenchmarkResult | null;
   error: string | null;
 }
 
@@ -30,13 +30,23 @@ function scoreColor(score: number | null | undefined): string {
   return "#dc2626";
 }
 
-function ResultCard({ result }: { result: Record<string, unknown> }) {
+function ResultCard({ result }: { result: BenchmarkResult }) {
   const metrics = (result.metrics ?? {}) as Record<string, unknown>;
   const score = (result.score as number | null | undefined) ?? null;
   const verdicts = (result.verdicts ?? []) as Array<Record<string, unknown>>;
   const passed = result.passed;
   const statusLabel = passed === true ? "通过" : passed === false ? "未通过" : String(result.status ?? "?");
   const statusColor = passed === true ? "success" : passed === false ? "error" : "processing";
+  const trace = Array.isArray(result.trace) ? result.trace as BenchmarkTraceEvent[] : [];
+  const failurePhase = typeof result.failure_phase === "string" ? result.failure_phase : "";
+
+  function jsonText(value: unknown): string {
+    try {
+      return JSON.stringify(value ?? {}, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
 
   return (
     <Card className="result-card" size="small">
@@ -50,7 +60,8 @@ function ResultCard({ result }: { result: Record<string, unknown> }) {
           styles={{ content: { color: scoreColor(score) } }}
         />
         <Tag color={statusColor}>状态：{statusLabel}</Tag>
-        {result.error ? <Alert className="error-text" message={String(result.error)} type="error" showIcon /> : null}
+        {result.error ? <Alert className="error-text" title={String(result.error)} type="error" showIcon /> : null}
+        {failurePhase ? <Typography.Text type="secondary">失败阶段：{failurePhase}</Typography.Text> : null}
       </div>
       <Row className="result-metrics" gutter={[12, 12]}>
         <Col xs={12} sm={8}><Statistic prefix={<ClockCircleOutlined />} title="耗时" value={Number(metrics.duration_ms ?? 0) / 1000} precision={1} suffix="s" /></Col>
@@ -78,6 +89,28 @@ function ResultCard({ result }: { result: Record<string, unknown> }) {
           items={[{ key: "answer", label: "最终答复", children: <pre>{String(result.final_answer)}</pre> }]}
         />
       ) : null}
+      <Collapse
+        className="benchmark-trace"
+        size="small"
+        items={[{
+          key: "trace",
+          label: `完整 Trace（${trace.length} 条事件）`,
+          children: trace.length === 0 ? <Typography.Text type="secondary">没有可显示的运行事件。</Typography.Text> : (
+            <div className="benchmark-trace-list">
+              {trace.map((event, index) => (
+                <div className="benchmark-trace-event" key={`${event.timestamp}-${event.kind}-${index}`}>
+                  <div className="benchmark-trace-head">
+                    <Tag>{event.kind}</Tag>
+                    <Typography.Text type="secondary">{event.timestamp}</Typography.Text>
+                  </div>
+                  {event.message ? <pre className="benchmark-trace-message">{event.message}</pre> : null}
+                  <pre className="benchmark-trace-data">{jsonText(event.data)}</pre>
+                </div>
+              ))}
+            </div>
+          ),
+        }]}
+      />
     </Card>
   );
 }
@@ -177,6 +210,25 @@ export default function BenchmarkPage() {
                       },
                     ]}
                   />
+                  <Collapse
+                    className="task-details"
+                    size="small"
+                    items={[{
+                      key: "details",
+                      label: "完整测试内容",
+                      children: (
+                        <>
+                          <Typography.Paragraph>{task.description}</Typography.Paragraph>
+                          <Typography.Text strong>测试 Prompt</Typography.Text>
+                          <pre className="benchmark-task-prompt">{task.prompt}</pre>
+                          <Typography.Text type="secondary">
+                            预算：模型轮次 {task.budgets.max_model_turns} · 工具调用 {task.budgets.max_tool_calls} · 重规划 {task.budgets.max_replans} · 重试 {task.budgets.max_retries}
+                          </Typography.Text>
+                          {task.tags.length > 0 ? <div className="benchmark-task-tags">{task.tags.map((tag) => <Tag key={tag}>{tag}</Tag>)}</div> : null}
+                        </>
+                      ),
+                    }]}
+                  />
                   <div className="task-actions">
                     {task.planner_modes.includes(planner) ? (
                       <Button className="send-btn" type="primary" icon={<PlayCircleOutlined />} onClick={() => runTask(task.name, planner)} loading={run?.busy}>
@@ -186,7 +238,6 @@ export default function BenchmarkPage() {
                       <span className="muted">该任务不支持 {planner} 模式</span>
                     )}
                   </div>
-                  {run?.busy ? <Spin className="spinner" size="small" /> : null}
                   {run?.error ? <Alert className="error-text" title={run.error} type="error" showIcon /> : null}
                   {run?.result ? <ResultCard result={run.result} /> : null}
                 </Card>

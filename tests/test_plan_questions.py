@@ -11,8 +11,8 @@ from backend.runtime.conversation.user_input import (
 )
 from backend.runtime.core.contracts import InterruptDecision, QuestionOption, UserQuestion
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
-from backend.storage.postgres import PostgresSessionStore
 from backend.tools import ToolRegistry
+from tests.local_store import session_store
 
 
 def question_arguments() -> dict[str, object]:
@@ -133,7 +133,7 @@ def review_call(call_id: str = "review_1") -> ToolMessage:
 
 def build_service(tmp_path: Path, planner: QuestionThenPlanPlanner) -> ConversationService:
     runner = AgentRunner(planner, ToolRegistry(tmp_path))
-    store = PostgresSessionStore()
+    store = session_store(tmp_path / "store")
     return ConversationService(runner, store)
 
 
@@ -164,7 +164,7 @@ def test_plan_question_answer_is_saved_once_then_plan_review_starts(tmp_path: Pa
     }
     review_message = service.runtime.state.messages[2]
     assert isinstance(review_message, AssistantMessage)
-    assert review_message.content is None
+    assert "aborted at the user's request" in (review_message.content or "")
     assert review_message.tool_messages[0].name == REQUEST_PLAN_REVIEW_NAME
     assert review_message.tool_messages[0].arguments == {"plan": PLAN}
     assert review_message.tool_messages[0].status == "succeeded"

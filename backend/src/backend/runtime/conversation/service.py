@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping
 from typing import Any
 
 from backend.domain import (
+    FAILED_TERMINAL_MESSAGE,
     AssistantMessage,
     ResumePreview,
     RunHandoff,
@@ -119,13 +121,29 @@ class ConversationService(ConversationSessionController):
             raise RuntimeError("Cannot create an isolated handoff session without an active session.")
         source_session = self.active_session
         isolated_session = self.session_store.create_session(f"Implement: {source_session.title}")
-        isolated_runtime = self.runner.empty_runtime(
-            session_id=isolated_session.session_id,
-            messages=[plan_message],
-            runtime_store=self.session_store,
-        )
-        isolated_runtime.state.timezone = self.default_timezone
-        isolated_runtime.save()
+        paths = getattr(self.session_store, "paths", None)
+        try:
+            isolated_runtime = self.runner.empty_runtime(
+                session_id=isolated_session.session_id,
+                messages=[plan_message],
+                runtime_store=self.session_store,
+            )
+            isolated_runtime.state.timezone = self.default_timezone
+            isolated_runtime.save()
+            if paths is not None:
+                paths.ensure_session(isolated_session.session_id)
+                _copy_session_tree(
+                    paths.session_workspace(source_session.session_id),
+                    paths.session_workspace(isolated_session.session_id),
+                )
+                _copy_session_tree(
+                    paths.session_uploads(source_session.session_id),
+                    paths.session_uploads(isolated_session.session_id),
+                )
+        except Exception:
+            if paths is not None:
+                shutil.rmtree(paths.session_root(isolated_session.session_id), ignore_errors=True)
+            raise
 
         self.active_session = isolated_session
         self.runtime = isolated_runtime
@@ -248,8 +266,18 @@ class ConversationService(ConversationSessionController):
             return
         run = self.runtime.state.current_run
         run.status = "failed"
-        run.final_answer = f"Unexpected runtime failure: {error}"
-        run.add_event("error", run.final_answer, error_type=error.__class__.__name__)
+        boundary = min(max(run.turn_start_index, 0), len(self.runtime.state.messages))
+        assistant = next(
+            (item for item in reversed(self.runtime.state.messages[boundary:]) if isinstance(item, AssistantMessage)),
+            None,
+        )
+        if assistant is None:
+            self.runtime.state.messages.append(AssistantMessage(content=FAILED_TERMINAL_MESSAGE))
+        elif FAILED_TERMINAL_MESSAGE not in (assistant.content or ""):
+            assistant.content = f"{assistant.content}\n\n{FAILED_TERMINAL_MESSAGE}".strip()
+        run.history = self.runtime.state.messages
+        run.final_answer = FAILED_TERMINAL_MESSAGE
+        run.add_event("error", FAILED_TERMINAL_MESSAGE, error_type=error.__class__.__name__)
         self.runtime.state.status = "idle"
         self.runtime.state.usage = self.runtime.state.turn_usage
         self.runtime.state.turn_usage = None
@@ -259,7 +287,7 @@ class ConversationService(ConversationSessionController):
             publish(
                 RuntimeEvent(
                     "error",
-                    run.final_answer,
+                    FAILED_TERMINAL_MESSAGE,
                     {"error_type": error.__class__.__name__, "unexpected": True},
                 )
             )
@@ -273,3 +301,25 @@ class ConversationService(ConversationSessionController):
                 run.status,
                 run.final_answer,
             )
+
+
+def _copy_session_tree(source, target) -> None:
+    """Copy a session payload without following links or special files."""
+
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError("Session payload source must be a real directory.")
+    if target.is_symlink():
+        raise ValueError("Session payload target cannot be a symbolic link.")
+    target.mkdir(parents=True, exist_ok=True)
+    for item in source.rglob("*"):
+        relative = item.relative_to(source)
+        destination = target / relative
+        if item.is_symlink() or destination.is_symlink():
+            raise ValueError("Session payload cannot contain symbolic links.")
+        if item.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+        elif item.is_file():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, destination)
+        else:
+            raise ValueError("Session payload cannot contain special files.")

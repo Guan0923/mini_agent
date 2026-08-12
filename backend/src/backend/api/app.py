@@ -6,12 +6,14 @@ live in a separately mounted sub-application under /benchmark.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.storage.auth.types import AuthStorageUnavailable
 
@@ -45,11 +47,13 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
     from .sessions import router as sessions_router
     from .shared.benchmark import create_benchmark_app
     from .shared.info import router as info_router
+    from .sync_routes import router as sync_router
 
     app.include_router(auth_router)
     app.include_router(chat_router, dependencies=[Depends(require_user)])
     app.include_router(info_router, dependencies=[Depends(require_user)])
     app.include_router(sessions_router, dependencies=[Depends(require_user)])
+    app.include_router(sync_router, dependencies=[Depends(require_user)])
     app.mount("/benchmark", create_benchmark_app(resolved))
 
     @app.get("/api/health")
@@ -63,6 +67,13 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
         if callable(ping_settings):
             ping_settings()
         return {"status": "ready", "service": "mini-agent-backend", "database": "ok"}
+
+    # In production the local backend can serve the browser bundle from the
+    # same loopback origin.  Development keeps using Vite's proxy, and an
+    # absent ``dist`` directory simply leaves the API-only app unchanged.
+    frontend_dist = Path(os.environ.get("MINI_AGENT_FRONTEND_DIST", str(REPO_ROOT / "frontend" / "dist"))).expanduser()
+    if frontend_dist.is_dir():
+        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
 
     @app.on_event("shutdown")
     def close_state() -> None:

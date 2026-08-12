@@ -15,6 +15,7 @@ from typing import Any, overload
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from backend.configuration import validate_identity_id
 from backend.tools import Tool, ToolError
 
 from .config import McpServerConfig, McpSettings, read_server_configs, valid_tool_name
@@ -140,9 +141,25 @@ class ExternalMcpResources(Sequence[Tool]):
 def load_server_configs(global_file: Path, project_file: Path) -> tuple[McpServerConfig, ...]:
     """Compatibility helper that parses and merges two configuration files."""
 
-    servers = {item.name: item for item in read_server_configs(global_file)}
+    servers = {
+        item.name: item
+        for item in read_server_configs(global_file, reject_plaintext_secrets=_is_user_mcp_file(global_file))
+    }
     servers.update({item.name: item for item in read_server_configs(project_file)})
     return tuple(servers[name] for name in sorted(servers))
+
+
+def _is_user_mcp_file(path: Path) -> bool:
+    """Recognize the canonical per-identity MCP file for compatibility callers."""
+
+    path = Path(path)
+    if path.name != "servers.toml" or path.parent.name != "mcp":
+        return False
+    try:
+        validate_identity_id(path.parent.parent.name, require_uuid=True)
+    except (ValueError, TypeError):
+        return False
+    return True
 
 
 def load_external_tools(
@@ -214,12 +231,47 @@ def _handler(manager: ExternalMcpManager, server_name: str, tool_name: str):
 
 
 def _parameters(server: McpServerConfig) -> StdioServerParameters:
+    environment = {**os.environ, **(server.env or {})}
+    for name, reference in (server.env_refs or {}).items():
+        environment[name] = _resolve_environment_reference(reference, name)
     return StdioServerParameters(
         command=server.command,
         args=list(server.args),
         cwd=server.cwd,
-        env={**os.environ, **(server.env or {})},
+        env=environment,
     )
+
+
+def _resolve_environment_reference(reference: str, name: str) -> str:
+    """Resolve a configured MCP secret only at process start.
+
+    The reference itself is safe to persist in ``servers.toml``.  Values are
+    loaded from the process environment or the OS credential vault and are
+    never included in configuration digests, review text, or exception
+    messages.
+    """
+
+    if reference.startswith("env://"):
+        environment_name = reference[6:]
+        value = os.environ.get(environment_name)
+        if value is None:
+            raise ToolError(f"MCP environment reference for {name} is unavailable.")
+        return value
+    if reference.startswith("keyring://"):
+        try:
+            import keyring
+
+            _, location = reference.split("://", 1)
+            service, account = location.split("/", 1)
+            value = keyring.get_password(service, account)
+        except (ImportError, ValueError, OSError) as exc:
+            raise ToolError(f"MCP credential reference for {name} is unavailable.") from exc
+        if not isinstance(value, str) or not value:
+            raise ToolError(f"MCP credential reference for {name} is unavailable.")
+        return value
+    # ``read_server_configs`` validates references before a manager is
+    # started.  Keep this guard for programmatically constructed configs.
+    raise ToolError(f"MCP environment reference for {name} is invalid.")
 
 
 def _render_result(result: object) -> str:

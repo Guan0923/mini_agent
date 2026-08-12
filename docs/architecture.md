@@ -2,20 +2,23 @@
 
 Mini-Agent keeps provider wire formats outside its execution model. Public pipeline methods accept one `AgentRuntime`; provider adapters translate between that runtime and vendor payloads.
 
-## Three-tier layout (deployment boundaries)
+## Four-layer layout (deployment boundaries)
 
-The repository is split into three independent top-level packages that only talk over the network (no cross-package imports between clients and server):
+The deployable system has four responsibilities. The browser and terminal are clients; the backend is a loopback process on the user's computer; only the cloud process can reach PostgreSQL.
 
 ```text
-backend/        server tier  — core runtime + FastAPI service, port 8000
-tui/            client tier  — terminal UI, network client of the backend
-frontend/       client tier  — React (Vite), network client of the backend, port 5173
+frontend/ ──HTTP/SSE──> local backend (127.0.0.1:8000)
+tui/      ──future unified protocol──┘
+                              │ HTTPS (optional)
+                              ▼
+                       cloud API (8100) ──> PostgreSQL
 ```
 
-- `backend/` owns the runtime and the `backend.api` FastAPI service (`python -m backend.api`). The main API (chat, tools, skills, decisions, health) never imports the benchmark harness; benchmark routes live in a separately mounted sub-application at `/benchmark` (`backend.api.benchmark_app`).
-- `tui/` owns the terminal client. `tui.client.MiniAgentClient` streams `/api/chat` over SSE and resolves interactive approvals via `/api/decisions` — no backend imports on that path (`mini-agent --server <url> "task"`).
-- `frontend/` owns the React client and talks only to the backend's HTTP API through the Vite dev proxy.
-- Each tier runs independently (`scripts/dev.sh backend|frontend|tui`); `benchmarks/` is an optional harness imported by the benchmark sub-application, not by the main API.
+- `frontend/` is a browser client. It never imports Python and only calls the local backend contract. Vite proxies `/api` and `/benchmark` to port 8000 during development; a production backend may serve `frontend/dist`.
+- `backend/` owns the Agent Runtime, model/provider calls, tools, workspace, per-session SQLite, local settings, browser sessions and cloud synchronization jobs. It binds to loopback and has no PostgreSQL, SMTP or account-password authority.
+- `tui/` remains an independent terminal client for this change. Its Web protocol compatibility is intentionally unchanged.
+- `cloud/` is an independent FastAPI service for accounts, mail verification, device grants, bearer tokens, key envelopes and encrypted snapshot metadata/chunks. It owns `DATABASE_URL`, SMTP and the cloud master key; it must not import Agent Runtime modules.
+- `benchmarks/`, `docs/` and `scripts/` are support directories, not deployment layers.
 
 ## Runtime
 
@@ -29,7 +32,7 @@ TUI -> ConversationService -> RuntimeRunner port -> AgentRunner(runtime) -> work
 MCP stdio      -> McpToolAdapter -> approval-free ToolRegistry subset
 HTTP transport <-> provider adapter prepare_request/prepare_response <-> AgentRuntime
 Per-session SQLite <-> RuntimeState, messages, audit events, checkpoints, and sync outbox
-HTTPS sync service <-> PostgreSQL owner/revision metadata and current JSON snapshots
+Local backend `backend.cloud.CloudClient` <-> versioned cloud HTTPS API <-> PostgreSQL owner/revision metadata and ciphertext snapshots
 ```
 
 ## Runtime
@@ -71,7 +74,7 @@ Top-level history contains `SystemMessage`, `UserMessage`, and `AssistantMessage
 
 A ToolMessage owns the model's call ID, tool name, arguments, status, result or error content, and retryability. Pending tool calls live in `RuntimeState.active_message`; after every nested tool has a terminal result, the complete AssistantMessage moves into history. `ExecutionPlan` steps use the same ToolMessage type.
 
-Each `~/mini_agent/<session_id>/state.db` retains resumable runtime state, ordered runtime messages, checkpoints, compact conversation projections, sync metadata, and an idempotent snapshot outbox. Usage is kept in its provider-native JSON shape and overwritten with the most recent completed turn's final model usage.
+Each account or guest `~/.mini_agent/<user_id>/runtime/<session_id>/state.db` retains resumable runtime state, ordered runtime messages, checkpoints, and compact conversation projections. The same session directory owns an independent `workspace/` and `uploads/`; Web and network TUI do not receive separate directory layers. Usage is kept in its provider-native JSON shape and overwritten with the most recent completed turn's final model usage.
 
 ## Plan Messages and Handoffs
 
@@ -89,7 +92,7 @@ Plan questions, Plan Review, and Tool Review intentionally use separate decision
 
 ## Layered Skills
 
-`SkillCatalog` merges direct child manifests from `~/mini_agent/skills` and `<workspace>/.mini_agent/skills`; a project Skill fully overrides the same global name. Discovery is fail-fast and validates UTF-8, bounded size and line count, exact metadata, directory-name equality, duplicates within each layer, and resolved path confinement. Optional resources remain ordinary files; Skills do not register tools or expand permissions.
+`SkillCatalog` merges direct child manifests from `~/.mini_agent/<user_id>/skills` and `<workspace>/.mini_agent/skills`; a project Skill fully overrides the same global name. Discovery is fail-fast and validates UTF-8, bounded size and line count, exact metadata, directory-name equality, duplicates within each layer, and resolved path confinement. Optional resources remain ordinary files; Skills do not register tools or expand permissions.
 
 `SkillActivator` runs before both Plan-mode dispatch and Agent strategy routing. With an LLM planner and a non-empty catalog, it claims one model turn and invokes the `SkillSelector` capability with metadata only. The runtime unions semantic selections with installed names explicitly referenced as `$name`, resolves them in stable catalog order, snapshots full instructions/root/hash into `RunState.active_skills`, and emits `skills_selected`. Empty catalogs add no request; planners without the capability retain normal behavior unless a known Skill was explicitly requested, which fails clearly.
 
@@ -106,15 +109,15 @@ Plan questions, Plan Review, and Tool Review intentionally use separate decision
 
 `backend.mcp` is a separate adapter over the shared tool registry, not a second agent runtime. The stdio server derives MCP schemas from ToolSpecs and exposes only read-only tools that do not require confirmation: `read_file`, `glob`, `grep`, and `get_current_time`. Calls retain JSON Schema validation, bounded output, and workspace confinement. Mutation, command, and network tools are rejected because stdio has no interactive approval channel.
 
-The MCP server requires neither model credentials nor PostgreSQL. Separately, the client merges global and project `mcp.toml` server definitions, with a complete project override by name. Project MCP configuration must be trusted by workspace/config digest before any process starts. Each AgentRunner owns its own `ExternalMcpManager` and long-lived stdio sessions; imported tools are approval-gated mutations from the planner's perspective and are excluded from Plan mode. Initialization, calls, and shutdown have finite configured timeouts. Configured environment values are process-only and never enter logs, audit records, or model context.
+The MCP server requires neither model credentials nor PostgreSQL. Separately, the client merges global and project `mcp.toml` server definitions, with a complete project override by name. Project MCP configuration must be trusted by workspace/config digest before any process starts. Each AgentRunner owns its own `ExternalMcpManager` and long-lived stdio sessions; imported tools are approval-gated mutations from the planner's perspective and are excluded from Plan mode. Initialization, calls, and shutdown have finite configured timeouts. User-owned sensitive environment values are stored only as `env://` or `keyring://` references and resolved at process start; plaintext secrets never enter snapshots, logs, audit records, or model context.
 
 ## Local-first persistence and synchronization
 
-The client composition root uses `SQLiteSessionStore` only. Each session database is self-contained and stores an owner device ID, remote revision, read-only flag, schema version, full runtime history, and stable outbox operation IDs. Remote sessions owned by another device are imported read-only; `/fork` copies a terminal run into a new session and gives ownership to the current device.
+The backend composition root uses `LocalAuthStore(<data_root>/client.db)` plus `PerUserSettingsRepository(<data_root>/<user_id>/user.db)`. `client.db` contains only hashed local browser sessions, cached identity metadata and guest-import state; cloud access tokens are encrypted in the account's `user.db` with the OS credential-backed local key. Each session database is self-contained and stores an owner device ID, remote revision, read-only flag, schema version, full runtime history, and stable outbox operation IDs. Remote sessions owned by another device are imported read-only; `/fork` copies a terminal run into a new session and gives ownership to the current device.
 
 `SyncCoordinator` has one event-driven background worker. Startup, checkpoint notification, and normal shutdown trigger push-then-pull; there is no periodic polling. Network, authentication, and server failures are categorized without logging tokens or snapshots and leave the outbox for a later lifecycle retry.
 
-The deployable FastAPI service is the only new runtime component that accesses PostgreSQL. It authenticates bearer tokens and device IDs, serializes concurrent writes per session, enforces owner-only updates and base revisions, records operation IDs idempotently, and returns current JSON snapshots. TLS terminates at the deployment layer; clients reject non-HTTPS endpoints and never receive database credentials.
+The deployable `cloud` FastAPI service is the only component that accesses PostgreSQL. It authenticates bearer tokens and derives the user from the token, serializes snapshot writes per user, enforces parent-head conflict rules, retains the latest three completed snapshots and validates ciphertext chunks. TLS terminates at the deployment layer; local clients reject non-HTTPS cloud endpoints (except loopback development hosts) and never receive database credentials. Guests never call cloud and remain fully usable offline; an account can continue locally while cloud requests are paused, with only an explicit 401 clearing its remote credential.
 
 ## Provider Boundary
 
@@ -142,7 +145,7 @@ Tool decisions use DeepSeek native Tool Calls. Strategy selection, plan creation
 - `tools` owns handlers, executable JSON Schema validation, registration, workspace confinement, and confirmation metadata.
   `catalog.py` is a thin composition boundary; grouped default definitions live under `tools/default_tools/`.
 - `providers` owns `LLMClient` selection, generic JSON/SSE transport, and vendor-specific request/response adapters.
-- `storage.sqlite` persists client state and outbox operations; `sync` owns the HTTPS client/coordinator and the isolated PostgreSQL server repository. Legacy PostgreSQL adapters are not selected by the client composition root.
+- `storage.sqlite` persists local session state; `sync` owns snapshot packaging/jobs and the repository port, while `backend.cloud` owns the HTTPS adapter. PostgreSQL repositories and account authority exist only under `cloud/`.
 - `mcp` adapts the approval-free read-tool subset to stdio without depending on model or persistence services.
 - `tui` handles terminal commands, approval input, RuntimeEvent presentation, and the process-local full-screen transcript only. `application/` owns the CLI loop and command routing; `components/` owns completion and approvals; `screens/`, `rendering/`, `view_parts/`, and `widgets/` isolate Textual responsibilities. Worker threads enqueue display chunks; the Textual event loop owns all widget mutation and rendering.
 

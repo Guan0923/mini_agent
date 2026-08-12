@@ -15,7 +15,7 @@ from backend.sync import RequestsSyncTransport, SyncClient, SyncCoordinator
 from backend.tools import ToolRegistry
 
 
-def test_env_migration_is_atomic_and_device_id_is_stable(tmp_path: Path) -> None:
+def test_legacy_env_is_not_read_or_deleted_and_device_id_is_stable(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     legacy = workspace / ".env"
@@ -26,9 +26,12 @@ def test_env_migration_is_atomic_and_device_id_is_stable(tmp_path: Path) -> None
     first_device = section(first, "sync")["device_id"]
     second = initialize_config(paths, workspace)
 
-    assert not legacy.exists()
+    # Secrets in legacy ``.env`` files are deliberately outside the local
+    # client configuration contract.  Initialization must neither consume nor
+    # delete them.
+    assert legacy.exists()
     assert paths.config_file.exists()
-    assert section(load_config(paths.config_file), "model")["api_key"] == "secret"
+    assert section(load_config(paths.config_file), "model").get("api_key", "") == ""
     assert section(second, "sync")["device_id"] == first_device
 
 
@@ -145,6 +148,7 @@ def test_sync_ack_remote_read_only_and_fork(tmp_path: Path) -> None:
 
     snapshot = dict(operation["snapshot"])
     snapshot["session"] = {**snapshot["session"], "session_id": "session_remote"}
+    snapshot["runtime"] = {**snapshot["runtime"], "session_id": "session_remote"}
     store.apply_remote_snapshot(
         {"session_id": "session_remote", "owner_device_id": "device_b", "revision": 2, "snapshot": snapshot},
         local_device_id="device_a",

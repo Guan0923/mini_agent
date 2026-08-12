@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadMathJax, mathJaxConfig, resetMathJaxLoaderForTests, TEX_EXTENSIONS } from "./math";
+import { loadMathJax, mathJaxConfig, resetMathJaxLoaderForTests, supportsNativeMathML, TEX_EXTENSIONS } from "./math";
 
 afterEach(() => {
   resetMathJaxLoaderForTests();
@@ -18,6 +18,33 @@ describe("MathJax browser integration", () => {
     expect(config.options?.enableExplorerHelp).toBe(false);
     expect(config.tex?.processEnvironments).toBe(true);
     expect(config.svg?.fontCache).toBe("global");
+    expect(config.startup?.typeset).toBe(false);
+  });
+
+  it("waits for MathJax startup before reading the public conversion methods", async () => {
+    let resolveStartup!: () => void;
+    const startup = new Promise<void>((resolve) => {
+      resolveStartup = resolve;
+    });
+    const loading = loadMathJax();
+    const script = document.querySelector<HTMLScriptElement>("script[data-mini-agent-mathjax]");
+    expect(script).not.toBeNull();
+
+    const instance = {
+      startup: { promise: startup },
+      typesetClear: vi.fn(),
+      typesetPromise: vi.fn().mockResolvedValue(undefined),
+      tex2mmlPromise: vi.fn().mockResolvedValue("<math />"),
+    };
+    window.MathJax = instance;
+    script!.dispatchEvent(new Event("load"));
+    resolveStartup();
+
+    await expect(loading).resolves.toBe(instance);
+  });
+
+  it("falls back when the browser does not advertise native MathML", () => {
+    expect(supportsNativeMathML()).toBe(false);
   });
 
   it("reuses an already loaded MathJax instance", async () => {

@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, type RefObject } from "react";
 import MarkdownIt from "markdown-it";
 import type { Token } from "markdown-it";
 import texmath from "markdown-it-texmath";
-import { loadMathJax } from "../math";
-import { copySelectionWithLatex } from "./latexClipboard";
+import { MATHML_NAMESPACE, loadMathJax, supportsNativeMathML } from "../math";
+import type { MathJaxBrowserInstance } from "../math/mathjax.d";
+import { MATH_SOURCE_SELECTOR, copySelectionWithMarkdown, selectFormula } from "./latexClipboard";
 
 const MATH_SOURCE_ATTRIBUTE = "data-latex-source";
 
@@ -91,29 +92,42 @@ function blockDelimiters(token: Token): { open: string; close: string } | null {
   return { open: "$$", close: "$$" };
 }
 
-function sourceForToken(token: Token): { source: string; display: boolean } {
+type MathTokenSource = {
+  source: string;
+  body: string;
+  display: boolean;
+  equationNumber?: string;
+};
+
+function sourceForToken(token: Token): MathTokenSource {
   if (!token.block) {
     const markup = token.markup || "$";
     return {
       source: `${markup}${token.content}${inlineClosingDelimiter(markup)}`,
+      body: token.content,
       display: token.type === "math_inline_double",
     };
   }
 
   const delimiters = blockDelimiters(token);
-  if (!delimiters) return { source: token.content, display: true };
+  if (!delimiters) return { source: token.content, body: token.content, display: true };
   const equationNumber = token.type === "math_block_eqno" && token.info ? ` (${token.info})` : "";
   return {
     source: `${delimiters.open}${token.content}${delimiters.close}${equationNumber}`,
+    body: token.content,
     display: true,
+    equationNumber: equationNumber || undefined,
   };
 }
 
 function renderMathToken(token: Token): string {
-  const { source, display } = sourceForToken(token);
+  const { source, body, display, equationNumber } = sourceForToken(token);
   const className = display ? "math-source math-display" : "math-source math-inline";
   const tag = display ? "div" : "span";
-  return `<${tag} class="${className}" ${MATH_SOURCE_ATTRIBUTE}="${escapeHtml(source)}">${escapeHtml(source)}</${tag}>`;
+  const equationNumberAttribute = equationNumber
+    ? ` data-equation-number="${escapeHtml(equationNumber)}"`
+    : "";
+  return `<${tag} class="${className}" ${MATH_SOURCE_ATTRIBUTE}="${escapeHtml(source)}" data-latex-body="${escapeHtml(body)}" data-math-display="${String(display)}"${equationNumberAttribute}>${escapeHtml(source)}</${tag}>`;
 }
 
 for (const ruleName of ["math_inline", "math_inline_double", "math_block", "math_block_eqno"]) {
@@ -121,6 +135,94 @@ for (const ruleName of ["math_inline", "math_inline_double", "math_block", "math
 }
 
 const typesetQueues = new WeakMap<HTMLElement, Promise<void>>();
+
+type NativeMathReplacement = {
+  formula: HTMLElement;
+  mathml: Element;
+};
+
+function parseSafeMathML(markup: string): Element | null {
+  const parsed = new DOMParser().parseFromString(markup, "application/xml");
+  const root = parsed.documentElement;
+  if (!root || root.localName !== "math" || root.namespaceURI !== MATHML_NAMESPACE) return null;
+  if (parsed.querySelector("parsererror")) return null;
+
+  const elements = [root, ...Array.from(root.querySelectorAll("*"))];
+  for (const element of elements) {
+    if (element.namespaceURI !== MATHML_NAMESPACE) return null;
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase();
+      if (name.startsWith("on") || name === "href" || name === "xlink:href" || name === "src") {
+        element.removeAttribute(attribute.name);
+      } else if (name === "style" && /url\s*\(/iu.test(attribute.value)) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+  }
+
+  return document.importNode(root, true) as Element;
+}
+
+export async function renderNativeMathML(
+  root: HTMLElement,
+  mathJax: MathJaxBrowserInstance,
+  isCurrent: () => boolean,
+): Promise<boolean> {
+  if (!supportsNativeMathML() || !mathJax.tex2mmlPromise) {
+    return false;
+  }
+
+  const replacements: NativeMathReplacement[] = [];
+  const formulas = Array.from(root.querySelectorAll<HTMLElement>(MATH_SOURCE_SELECTOR));
+  for (const formula of formulas) {
+    const body = formula.getAttribute("data-latex-body");
+    if (body === null || !isCurrent()) {
+      return false;
+    }
+
+    let markup: string;
+    try {
+      markup = await mathJax.tex2mmlPromise(body, {
+        display: formula.getAttribute("data-math-display") === "true",
+      });
+    } catch (error) {
+      return false;
+    }
+    if (!isCurrent()) {
+      return false;
+    }
+
+    const mathml = parseSafeMathML(markup);
+    if (!mathml) {
+      return false;
+    }
+    replacements.push({ formula, mathml });
+  }
+
+  if (!isCurrent()) {
+    return false;
+  }
+  for (const { formula, mathml } of replacements) {
+    formula.replaceChildren(mathml);
+    const equationNumber = formula.getAttribute("data-equation-number");
+    if (equationNumber) {
+      const number = document.createElement("span");
+      number.className = "math-equation-number";
+      number.textContent = equationNumber;
+      formula.append(number);
+    }
+    formula.classList.add("math-native");
+    formula.dataset.mathRenderer = "mathml";
+  }
+  return true;
+}
+
+function markSvgFallback(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>(MATH_SOURCE_SELECTOR).forEach((formula) => {
+    formula.classList.add("math-svg-fallback");
+    formula.dataset.mathRenderer = "svg";
+  });
+}
 
 function enqueueMathJaxTypesetting(
   root: HTMLElement,
@@ -135,7 +237,12 @@ function enqueueMathJaxTypesetting(
       if (!isCurrent()) return;
       mathJax.typesetClear?.([root]);
       if (!isCurrent()) return;
+
+      if (await renderNativeMathML(root, mathJax, isCurrent)) return;
+      if (!isCurrent()) return;
+
       await mathJax.typesetPromise?.([root]);
+      if (isCurrent()) markSvgFallback(root);
     });
   typesetQueues.set(root, next);
   void next.then(
@@ -187,8 +294,18 @@ export default function MarkdownContent({ text, className = "" }: { text: string
     <div
       ref={rootRef}
       className={classes}
+      tabIndex={-1}
       dangerouslySetInnerHTML={{ __html: html }}
-      onCopy={(event) => copySelectionWithLatex(event.nativeEvent, event.currentTarget)}
+      onClick={(event) => {
+        const target = event.target as Element;
+        const formula = target.closest(MATH_SOURCE_SELECTOR);
+        const selection = window.getSelection();
+        const svgFallback = formula?.classList.contains("math-svg-fallback") || !supportsNativeMathML();
+        if (formula && svgFallback && rootRef.current?.contains(formula) && (!selection || selection.isCollapsed)) {
+          selectFormula(formula, event.currentTarget);
+        }
+      }}
+      onCopyCapture={(event) => copySelectionWithMarkdown(event.nativeEvent, event.currentTarget)}
     />
   );
 }

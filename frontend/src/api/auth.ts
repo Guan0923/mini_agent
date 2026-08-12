@@ -1,6 +1,7 @@
 import type { AuthResponse, AuthUser } from "../types";
 import { apiUrl } from "./base";
 import { ApiError, errorFrom, jsonBody, requestJson } from "./request";
+import type { SyncPreferences, SyncState } from "./sync";
 
 export async function getCurrentUser(): Promise<AuthUser | null> {
   const res = await fetch(apiUrl("/api/auth/me"), { credentials: "include" });
@@ -38,6 +39,8 @@ export interface AgentConfig {
 }
 
 export interface ProviderConfig {
+  id: string;
+  is_active: boolean;
   provider: string;
   protocol: "chat_completions" | "responses" | "messages";
   base_url: string;
@@ -57,8 +60,12 @@ export interface UserSettings {
   profile: UserProfile & { email: string };
   agent_config: AgentConfig;
   provider_config: ProviderConfig;
+  provider_configs: ProviderConfig[];
   capability_config: Record<string, unknown>;
   timezone_options: TimezoneOption[];
+  sync_preferences: SyncPreferences;
+  sync_state: SyncState;
+  cloud_sync_available?: boolean;
 }
 
 export async function getSettings(): Promise<UserSettings> {
@@ -74,12 +81,60 @@ export async function updateAgentConfig(config: AgentConfig): Promise<AgentConfi
 }
 
 export async function updateProviderConfig(
-  config: Omit<ProviderConfig, "api_key_configured"> & { api_key?: string },
+  config: Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { api_key?: string },
 ): Promise<ProviderConfig> {
   return requestJson<ProviderConfig>("/api/auth/provider-config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
+  });
+}
+
+export async function addProviderConfig(
+  config: Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { api_key?: string },
+): Promise<ProviderConfig> {
+  return requestJson<ProviderConfig>("/api/auth/provider-configs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+}
+
+export async function updateProviderConfigById(
+  id: string,
+  values: { model?: string; api_key?: string },
+): Promise<ProviderConfig> {
+  return requestJson<ProviderConfig>(`/api/auth/provider-configs/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(values),
+  });
+}
+
+export async function activateProviderConfig(id: string): Promise<ProviderConfig> {
+  return requestJson<ProviderConfig>(`/api/auth/provider-configs/${encodeURIComponent(id)}/active`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+export async function deleteProviderConfig(id: string): Promise<ProviderConfig[]> {
+  return requestJson<ProviderConfig[]>(`/api/auth/provider-configs/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function discoverProviderModels(values: {
+  config_id?: string;
+  provider: string;
+  protocol: ProviderConfig["protocol"];
+  base_url: string;
+  api_key?: string;
+}): Promise<{ models: string[] }> {
+  return requestJson<{ models: string[] }>("/api/auth/provider-models/discover", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(values),
   });
 }
 
@@ -95,6 +150,29 @@ export async function register(email: string, code: string, password: string): P
 export async function login(email: string, password: string): Promise<AuthUser> {
   const body = await requestJson<AuthResponse>("/api/auth/login", jsonBody({ email, password }));
   return body.user;
+}
+
+export async function guestLogin(): Promise<AuthUser> {
+  const body = await requestJson<AuthResponse>("/api/auth/guest", jsonBody({}));
+  return body.user;
+}
+
+export interface GuestImportStatus {
+  available: boolean;
+  pending: { guest_id: string; status: "pending"; created_at: number; updated_at: number } | null;
+}
+
+export async function getGuestImportStatus(): Promise<GuestImportStatus> {
+  return requestJson<GuestImportStatus>("/api/auth/guest-import");
+}
+
+export async function resolveGuestImport(decision: "import" | "dismiss"): Promise<{
+  status: string;
+  imported: string[];
+  skipped: string[];
+  count: number;
+}> {
+  return requestJson(`/api/auth/guest-import`, jsonBody({ decision }));
 }
 
 export async function requestPasswordResetCode(email: string): Promise<void> {
