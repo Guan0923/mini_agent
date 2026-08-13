@@ -141,11 +141,37 @@ def copy_session_files(data_root: Path, user_id: str, source_session_id: str, ta
         raise
 
 
+def copy_session_uploads(data_root: Path, user_id: str, source_session_id: str, target_session_id: str) -> None:
+    """Copy only durable uploads when sessions share an external project cwd."""
+
+    if source_session_id == target_session_id:
+        raise ValueError("Source and target sessions must be different.")
+    paths = user_paths(data_root, user_id)
+    source_root = paths.session_root(source_session_id)
+    target_root = paths.session_root(target_session_id)
+    if source_root.is_symlink() or target_root.is_symlink():
+        raise ValueError("Session data cannot be a symbolic link.")
+    if not source_root.is_dir() or not paths.session_db(source_session_id).is_file():
+        raise ValueError("Source session does not exist.")
+    target_existed = target_root.exists()
+    paths.ensure_session(target_session_id)
+    try:
+        _copy_tree_without_symlinks(paths.session_uploads(source_session_id), paths.session_uploads(target_session_id))
+    except Exception:
+        if not target_existed:
+            shutil.rmtree(target_root, ignore_errors=True)
+        raise
+
+
 def import_guest_sessions(data_root: Path, source_user_id: str, target_user_id: str) -> dict[str, object]:
     """Copy idle guest sessions into an account without importing settings."""
 
     source_paths = user_paths(data_root, source_user_id)
     target_paths = user_paths(data_root, target_user_id)
+    from backend.storage.projects import ProjectStore
+
+    source_projects = ProjectStore(source_paths.projects_db)
+    target_projects = ProjectStore(target_paths.projects_db)
     source_sessions: list[Path] = []
     for item in source_paths.runtime_dir.iterdir():
         if item.is_symlink() or not item.is_dir():
@@ -185,7 +211,31 @@ def import_guest_sessions(data_root: Path, source_user_id: str, target_user_id: 
             continue
         _copy_session_payload(source, target)
         imported.append(source.name)
-    return {"imported": imported, "skipped": skipped, "count": len(imported)}
+
+    # Projects are device-local metadata, but guest upgrade must preserve the
+    # same local grouping and cwd binding.  Copy only bindings for sessions
+    # that exist in the target; malformed/stale index rows are ignored rather
+    # than making an otherwise valid session import fail.
+    imported_projects: list[str] = []
+    project_session_ids: set[str] = set()
+    for project in source_projects.list("all"):
+        session_ids = [
+            session_id
+            for session_id in source_projects.session_ids(project.project_id)
+            if target_paths.session_db(session_id).is_file()
+        ]
+        if not session_ids:
+            continue
+        project_session_ids.update(session_ids)
+        target_projects.import_project(project, session_ids)
+        imported_projects.append(project.project_id)
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "count": len(imported),
+        "sync_count": sum(1 for session_id in imported if session_id not in project_session_ids),
+        "projects_imported": imported_projects,
+    }
 
 
 def _copy_session_payload(source: Path, target: Path) -> None:

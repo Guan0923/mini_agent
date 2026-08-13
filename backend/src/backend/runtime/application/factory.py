@@ -50,6 +50,8 @@ def build_application(
     model_config: ModelConfig | None = None,
     config_override: dict[str, object] | None = None,
     default_timezone: str = DEFAULT_TIME_ZONE,
+    session_provisioner: object | None = None,
+    session_provisioner_cleanup: object | None = None,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     base_config = initialize_config(resolved_paths, workspace)
@@ -85,7 +87,15 @@ def build_application(
     except Exception:
         runner.close()
         raise
-    return AgentApplication(runner, store, FileReferenceExpander(files), sync_coordinator, default_timezone)
+    return AgentApplication(
+        runner,
+        store,
+        FileReferenceExpander(files),
+        sync_coordinator,
+        default_timezone,
+        session_provisioner,
+        session_provisioner_cleanup,
+    )
 
 
 def build_runner(

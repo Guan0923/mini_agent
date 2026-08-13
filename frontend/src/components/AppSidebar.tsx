@@ -2,6 +2,7 @@ import {
   Badge,
   App as AntApp,
   Button,
+  Collapse,
   Divider,
   Dropdown,
   Empty,
@@ -12,6 +13,7 @@ import {
   Popover,
   Space,
   Spin,
+  Tooltip,
   Typography,
   type MenuProps,
 } from "antd";
@@ -26,9 +28,12 @@ import {
   BarChartOutlined,
   MessageOutlined,
   UserOutlined,
+  FolderOpenOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { AuthUser, Conversation, Page } from "../types";
+import type { ProjectInfo } from "../api";
 import IconAction from "./IconAction";
 
 interface AppSidebarProps {
@@ -38,6 +43,11 @@ interface AppSidebarProps {
   currentId: string | null;
   page: Page;
   onNew: () => void | Promise<unknown>;
+  projects?: ProjectInfo[];
+  projectLoading?: boolean;
+  onNewProject?: () => void | Promise<unknown>;
+  onNewProjectConversation?: (projectId: string) => void | Promise<unknown>;
+  onRemoveProject?: (projectId: string) => void | Promise<unknown>;
   onSelect: (id: string) => void;
   onNavigate: (page: Page) => void;
   onRename: (id: string, title: string) => Promise<void>;
@@ -344,6 +354,11 @@ export default function AppSidebar({
   currentId,
   page,
   onNew,
+  projects,
+  projectLoading,
+  onNewProject,
+  onNewProjectConversation,
+  onRemoveProject,
   onSelect,
   onNavigate,
   onRename,
@@ -353,6 +368,53 @@ export default function AppSidebar({
   onProfileUpdate,
   onOpenSettings,
 }: AppSidebarProps) {
+  const { modal } = AntApp.useApp();
+  const projectStorageKey = `mini-agent-project-collapse:${user?.id ?? "anonymous"}`;
+  const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
+  const loadedProjectStorageKey = useRef<string | null>(null);
+  const currentProjectId = conversations.find((conversation) => conversation.id === currentId)?.projectId;
+
+  useEffect(() => {
+    if (loadedProjectStorageKey.current !== projectStorageKey) return;
+    try {
+      localStorage.setItem(projectStorageKey, JSON.stringify(expandedProjectIds));
+    } catch {
+      // Browser storage can be disabled; Collapse remains fully usable in memory.
+    }
+  }, [expandedProjectIds, projectStorageKey]);
+
+  useEffect(() => {
+    if (!currentProjectId || expandedProjectIds.includes(currentProjectId)) return;
+    setExpandedProjectIds((previous) => [...previous, currentProjectId]);
+  }, [currentProjectId, expandedProjectIds]);
+
+  useEffect(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(projectStorageKey) ?? "[]");
+      const knownProjectIds = new Set((projects ?? []).map((project) => project.project_id));
+      setExpandedProjectIds(
+        Array.isArray(parsed)
+          ? parsed.filter((item): item is string => typeof item === "string" && knownProjectIds.has(item))
+          : [],
+      );
+      loadedProjectStorageKey.current = projectStorageKey;
+    } catch {
+      setExpandedProjectIds([]);
+      loadedProjectStorageKey.current = projectStorageKey;
+    }
+  }, [projectStorageKey, projects]);
+
+  const confirmRemove = (project: ProjectInfo) => {
+    const confirm = typeof modal?.confirm === "function" ? modal.confirm.bind(modal) : Modal.confirm;
+    confirm({
+      title: `移除项目“${project.name}”？`,
+      content: "只会从侧边栏隐藏项目及其历史，不会删除本地文件夹。可在回收站中恢复。",
+      okText: "移除",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => onRemoveProject?.(project.project_id),
+    });
+  };
   return (
     <div
       className="app-sidebar"
@@ -376,14 +438,26 @@ export default function AppSidebar({
         新建对话
       </Button>
 
+      <Button
+        type="default"
+        block
+        icon={<FolderOpenOutlined />}
+        loading={projectLoading}
+        onClick={() => void onNewProject?.()}
+        aria-label="新建项目"
+        style={{ marginTop: 8, textAlign: "left" }}
+      >
+        新建项目
+      </Button>
+
       <Typography.Text type="secondary" style={{ margin: "20px 8px 8px", fontSize: 12 }}>
-        对话
+        无项目对话
       </Typography.Text>
       <div style={{ minHeight: 0, flex: 1, overflowY: "auto" }}>
         <List
           size="small"
           split={false}
-          dataSource={conversations}
+          dataSource={conversations.filter((conversation) => !conversation.projectId)}
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无对话" /> }}
           renderItem={(conversation) => {
             const selected = conversation.id === currentId && page === "chat";
@@ -399,6 +473,62 @@ export default function AppSidebar({
               />
             );
           }}
+        />
+      </div>
+
+      <Typography.Text type="secondary" style={{ margin: "12px 8px 8px", fontSize: 12 }}>
+        项目对话
+      </Typography.Text>
+      <div className="project-history-list" style={{ minHeight: 0, maxHeight: 360, overflowY: "auto" }}>
+        <Collapse
+          ghost
+          activeKey={expandedProjectIds}
+          onChange={(keys) => {
+            const next = Array.isArray(keys) ? keys.map(String) : [String(keys)];
+            setExpandedProjectIds(next);
+          }}
+          items={(projects ?? []).map((project) => ({
+            key: project.project_id,
+            label: (
+              <Tooltip title={project.cwd}>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{project.name}</span>
+                {!project.available ? <WarningOutlined aria-label="项目目录不可用" title="项目目录不可用" /> : null}
+                </span>
+              </Tooltip>
+            ),
+            extra: (
+              <span onClick={(event) => event.stopPropagation()}>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<PlusOutlined />}
+                  disabled={!project.available}
+                  aria-label={`在项目 ${project.name} 中新建对话`}
+                  onClick={() => void onNewProjectConversation?.(project.project_id)}
+                />
+                <Button
+                  type="text"
+                  size="small"
+                  danger
+                  icon={<DeleteOutlined />}
+                  aria-label={`移除项目 ${project.name}`}
+                  onClick={() => confirmRemove(project)}
+                />
+              </span>
+            ),
+            children: conversations.filter((conversation) => conversation.projectId === project.project_id).map((conversation) => (
+              <HistoryRow
+                key={conversation.id}
+                conversation={conversation}
+                selected={conversation.id === currentId && page === "chat"}
+                onSelect={onSelect}
+                onRename={onRename}
+                onArchive={onArchive}
+                onDelete={onDelete}
+              />
+            )),
+          }))}
         />
       </div>
 

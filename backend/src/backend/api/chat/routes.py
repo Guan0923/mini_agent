@@ -204,7 +204,7 @@ def _stream(
         app = None
         try:
             workspace = (
-                state.user_workspace(identity.id, session_id)
+                state.session_workspace(identity.id, session_id)
                 if identity is not None and session_id is not None
                 else state.chat_workspace
             )
@@ -217,6 +217,7 @@ def _stream(
                     user_preferences=user_preferences,
                     model_config=model_config,
                     load_model_config=False,
+                    workspace=workspace,
                 )
             else:
                 app = build_application(
@@ -357,7 +358,22 @@ def _stream(
                     }
                 )
             if identity is not None and state.snapshot_manager is not None:
-                state.snapshot_manager.notify_run_finished(identity.id)
+                # Project conversations are local-only.  Their runtime writes
+                # are already excluded from the outbox; do not let the
+                # generic end-of-run hook mark the account cloud snapshot
+                # dirty either.
+                local_only = bool(getattr(active_session, "local_only", False))
+                if not local_only and session_id:
+                    session_store = getattr(app, "session_store", None)
+                    getter = getattr(session_store, "get_session", None)
+                    if callable(getter):
+                        try:
+                            persisted = getter(session_id)
+                            local_only = bool(getattr(persisted, "local_only", False))
+                        except Exception:
+                            pass
+                if not local_only:
+                    state.snapshot_manager.notify_run_finished(identity.id)
         except ModelConfigurationError as exc:
             if bridge_ref["bridge"] is not None:
                 error_message = f"模型未配置：{exc}"
@@ -435,6 +451,10 @@ async def chat(
     resolved_session_id = body.session_id
     if resolved_session_id:
         summary = _require_active(store, resolved_session_id)
+        try:
+            state.session_workspace(identity.id, resolved_session_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if summary.last_run_status == "running":
             raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
         nodes = getattr(store, "load_nodes", lambda _session_id: [])(resolved_session_id)
@@ -442,6 +462,9 @@ async def chat(
             raise HTTPException(status_code=409, detail="续聊请求必须提交当前最后节点 ID。")
         _validate_source_node(store, resolved_session_id, body.source_node_id)
     else:
+        # A project conversation must always be created through the scoped
+        # project endpoint.  The chat endpoint's implicit session is only for
+        # ordinary, isolated conversations and is therefore safe to sync.
         resolved_session_id = store.create_session().session_id
     state.user_paths(identity.id).ensure_session(resolved_session_id)
     return StreamingResponse(
@@ -477,6 +500,10 @@ async def resume(
 
     store = _store(state, identity.id)
     summary = _require_active(store, session_id)
+    try:
+        state.session_workspace(identity.id, session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if summary.last_run_status == "running":
         raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
     nodes = getattr(store, "load_nodes", lambda _session_id: [])(session_id)

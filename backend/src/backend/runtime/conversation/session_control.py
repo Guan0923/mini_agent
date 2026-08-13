@@ -160,6 +160,13 @@ class ConversationSessionController:
             self.runtime.state.timezone = self.default_timezone
             self.runtime.save()
             return
+        # Imported/fallback branches created before a runtime was bound may
+        # not carry a workspace root.  The application was built from the
+        # effective session workspace, so fill that missing provenance before
+        # the first run (without overriding an existing root used by resume
+        # safety checks).
+        if state.workspace_root is None:
+            state.workspace_root = getattr(self.runner, "workspace_root", None)
         runtime = self.runner.empty_runtime(session_id=session_id, runtime_store=self.session_store)
         runtime.state = state
         self.runtime = self.runner.bind(runtime)

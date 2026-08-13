@@ -55,7 +55,14 @@ class SyncClient:
             acknowledgements = result.get("acknowledged", [])
             if isinstance(acknowledgements, list):
                 store.acknowledge_sync_operations([item for item in acknowledgements if isinstance(item, dict)])
-        known = {summary.session_id: store.remote_revision(summary.session_id) for summary in store.list_sessions()}
+        # Local project conversations never participate in cloud sync.  Keep
+        # them out of the pull cursor as well as the push outbox so their
+        # session identifiers are not disclosed to the sync service.
+        known = {
+            summary.session_id: store.remote_revision(summary.session_id)
+            for summary in store.list_sessions()
+            if not summary.local_only
+        }
         result = self.transport.post("/v1/sync/pull", {"known": known})
         sessions = result.get("sessions", [])
         if isinstance(sessions, list):

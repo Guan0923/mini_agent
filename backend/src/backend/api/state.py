@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from backend.configuration import ClientPaths, validate_identity_id
+from backend.storage.projects import ProjectStore
 
 from .auth.mail import NullMailer
 
@@ -30,6 +32,7 @@ class WebAppState:
         cloud_url: str | None = None,
         cloud_client: Any | None = None,
         snapshot_repository: Any | None = None,
+        project_picker: Callable[[], Path | None] | None = None,
     ) -> None:
         data_root = Path(data_root)
         if data_root.is_symlink():
@@ -43,6 +46,7 @@ class WebAppState:
         self.chat_workspace = self.data_root.parent / ".mini_agent-cache" / "chat" / "workspace"
         self.benchmark_root = self.data_root.parent / ".mini_agent-cache" / "benchmark"
         self.cloud_client = cloud_client
+        self.project_picker = project_picker
         self.snapshot_manager = None
         if auth_repository is not None:
             self.auth = auth_repository
@@ -106,6 +110,7 @@ class WebAppState:
         from .auth.service import AuthService
 
         self.auth_service = AuthService(self)
+        self._project_stores: dict[str, ProjectStore] = {}
 
     def user_paths(self, user_id: str) -> ClientPaths:
         from .user_data import user_paths
@@ -120,15 +125,45 @@ class WebAppState:
             )
         return paths
 
+    def projects(self, user_id: str) -> ProjectStore:
+        validate_identity_id(user_id, require_uuid=True)
+        store = self._project_stores.get(user_id)
+        if store is None:
+            store = ProjectStore(self.user_paths(user_id).projects_db)
+            self._project_stores[user_id] = store
+        return store
+
     def user_workspace(self, user_id: str, session_id: str) -> Path:
         from .user_data import user_workspace
 
         return user_workspace(self.data_root, user_id, session_id)
 
+    def session_workspace(self, user_id: str, session_id: str) -> Path:
+        """Resolve the effective cwd for a session and validate project access."""
+
+        bound = self.projects(user_id).session_project(session_id)
+        if bound is None:
+            return self.user_workspace(user_id, session_id)
+        if bound.removed_at is not None:
+            raise RuntimeError("项目已移除，请从回收站恢复后再运行。")
+        path = Path(bound.cwd)
+        try:
+            resolved = path.resolve(strict=True)
+            if not resolved.is_dir():
+                raise RuntimeError("项目 cwd 不可访问，请恢复文件夹后重试。")
+            return resolved
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError("项目 cwd 不可访问，请恢复文件夹后重试。") from exc
+
     def copy_session_files(self, user_id: str, source_session_id: str, target_session_id: str) -> None:
         from .user_data import copy_session_files
 
         copy_session_files(self.data_root, user_id, source_session_id, target_session_id)
+
+    def copy_session_uploads(self, user_id: str, source_session_id: str, target_session_id: str) -> None:
+        from .user_data import copy_session_uploads
+
+        copy_session_uploads(self.data_root, user_id, source_session_id, target_session_id)
 
     def mark_sync_dirty(self, user_id: str) -> None:
         """Mark account data dirty while keeping guest activity local-only."""
@@ -216,7 +251,14 @@ class WebAppState:
 
     def close(self) -> None:
         closed: set[int] = set()
-        for resource in (self.snapshot_manager, self.cloud_client, self.mailer, self.settings, self.auth):
+        for resource in (
+            self.snapshot_manager,
+            self.cloud_client,
+            self.mailer,
+            self.settings,
+            self.auth,
+            *self._project_stores.values(),
+        ):
             if resource is None:
                 continue
             if id(resource) in closed:

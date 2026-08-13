@@ -14,6 +14,7 @@ import {
   updateProfile,
   type SessionInfo,
 } from "../api";
+import { createProject, createProjectSession, listProjects, removeProject, restoreProject, type ProjectInfo } from "../api/projects";
 import { useAuth } from "../auth/AuthProvider";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
 import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnreadArchived, summaryToConversation, transcriptToMessages, importableMessages, STORAGE_KEY, ARCHIVE_READ_KEY } from "./storage";
@@ -41,6 +42,9 @@ function AgentApp() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("medium");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [removedProjects, setRemovedProjects] = useState<ProjectInfo[]>([]);
+  const [projectLoading, setProjectLoading] = useState(false);
   const activeRunsRef = useRef(new Map<string, import("./types").ActiveRun>());
 
   useEffect(() => {
@@ -90,18 +94,30 @@ function AgentApp() {
     async function hydrate() {
       const local = loadConversations(storageKey);
       let summaries: SessionInfo[] = [];
+      let projectSessionIds = new Set<string>();
       try {
-        const [active, archived, deleted] = await Promise.all([
+        const [active, archived, deleted, activeProjects, removedProjectItems] = await Promise.all([
           listSessions("active").catch(() => []),
           listSessions("archived").catch(() => []),
           listSessions("deleted").catch(() => []),
+          listProjects("active").catch(() => []),
+          listProjects("removed").catch(() => []),
         ]);
         summaries = [...active, ...archived, ...deleted];
+        setProjects(activeProjects);
+        setRemovedProjects(removedProjectItems);
+        projectSessionIds = new Set(
+          [...activeProjects, ...removedProjectItems].flatMap((project) => project.session_ids ?? []),
+        );
       } catch {
         // The local cache remains usable while the backend is unavailable.
       }
       if (disposed) return;
 
+      // The browser cache can predate project metadata.  The project index is
+      // authoritative for session membership, so use its binding list to
+      // prevent a hidden project session from being re-imported as an
+      // ordinary cloud-synced conversation.
       const byClient = new Map<string, SessionInfo>();
       const bySession = new Map<string, SessionInfo>();
       const deletedByClient = new Map<string, SessionInfo>();
@@ -131,6 +147,12 @@ function AgentApp() {
         }
 
         if (deletedByClient.has(conversation.clientId ?? conversation.id)) continue;
+
+        if (conversation.sessionId && projectSessionIds.has(conversation.sessionId)) continue;
+
+        // A stale browser copy of a project conversation must never be
+        // re-imported as an ordinary cloud-synced conversation.
+        if (conversation.projectId || conversation.localOnly) continue;
 
         if (conversation.messages.length > 0) {
           try {
@@ -162,13 +184,14 @@ function AgentApp() {
     };
   }, []);
 
+  const visibleProjectIds = useMemo(() => new Set(projects.map((project) => project.project_id)), [projects]);
   const activeConversations = useMemo(
-    () => conversations.filter((conversation) => !conversation.archivedAt && !conversation.deletedAt),
-    [conversations],
+    () => conversations.filter((conversation) => (!conversation.projectId || visibleProjectIds.has(conversation.projectId)) && !conversation.archivedAt && !conversation.deletedAt),
+    [conversations, visibleProjectIds],
   );
   const archivedConversations = useMemo(
-    () => conversations.filter((conversation) => Boolean(conversation.archivedAt) && !conversation.deletedAt),
-    [conversations],
+    () => conversations.filter((conversation) => !conversation.projectId && Boolean(conversation.archivedAt) && !conversation.deletedAt),
+    [conversations, visibleProjectIds],
   );
   const unreadArchivedCount = useMemo(
     () => countUnreadArchived(archivedConversations, archiveReadState),
@@ -179,6 +202,15 @@ function AgentApp() {
     if (page === "trash") setArchiveReadState((previous) => markArchivedAsRead(previous, archivedConversations));
   }, [archivedConversations, page]);
   const current = activeConversations.find((conversation) => conversation.id === currentId) ?? activeConversations[0] ?? null;
+
+  // Removing a project can hide the currently selected conversation. Keep
+  // the chat page in a deterministic empty/ordinary state instead of letting
+  // the fallback silently select an unrelated project session.
+  useEffect(() => {
+    if (currentId && !activeConversations.some((conversation) => conversation.id === currentId)) {
+      setCurrentId(activeConversations.find((conversation) => !conversation.projectId)?.id ?? null);
+    }
+  }, [activeConversations, currentId]);
 
   useEffect(() => {
     if (current && current.sessionId && (!current.messagesLoaded || !current.runtimeNodes)) {
@@ -267,7 +299,12 @@ function AgentApp() {
   }
 
   async function newConversation(title?: string): Promise<string> {
-    const empty = activeConversations.find((conversation) => conversation.messages.length === 0);
+    const empty = activeConversations.find(
+      (conversation) =>
+        !conversation.projectId &&
+        conversation.messages.length === 0 &&
+        (conversation.messageCount ?? 0) === 0,
+    );
     if (empty && !title) {
       setCurrentId(empty.id);
       setPage("chat");
@@ -287,6 +324,86 @@ function AgentApp() {
     setCurrentId(conversation.id);
     setPage("chat");
     return conversation.id;
+  }
+
+  async function newProject(): Promise<void> {
+    if (projectLoading) return;
+    setProjectLoading(true);
+    setActionError(null);
+    try {
+      const result = await createProject();
+      if (!result) return;
+      const conversation = summaryToConversation(result.session, {
+        id: result.session.session_id,
+        clientId: result.session.client_id ?? result.session.session_id,
+        title: result.session.title || "新对话",
+        messages: [],
+        messagesLoaded: true,
+      });
+      setProjects((previous) => [result.project, ...previous.filter((item) => item.project_id !== result.project.project_id)]);
+      setConversations((previous) => [conversation, ...previous]);
+      setCurrentId(conversation.id);
+      setPage("chat");
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    } finally {
+      setProjectLoading(false);
+    }
+  }
+
+  async function newProjectConversation(projectId: string): Promise<void> {
+    setActionError(null);
+    try {
+      const existing = activeConversations.find(
+        (conversation) =>
+          conversation.projectId === projectId &&
+          conversation.messages.length === 0 &&
+          (conversation.messageCount ?? 0) === 0,
+      );
+      if (existing) {
+        setCurrentId(existing.id);
+        setPage("chat");
+        return;
+      }
+      const result = await createProjectSession(projectId, crypto.randomUUID());
+      const conversation = summaryToConversation(result.session, {
+        id: result.session.session_id,
+        clientId: result.session.client_id ?? result.session.session_id,
+        title: result.session.title || "新对话",
+        messages: [],
+        messagesLoaded: true,
+      });
+      setConversations((previous) => [conversation, ...previous]);
+      setProjects((previous) => previous.map((item) => item.project_id === projectId ? result.project : item));
+      setCurrentId(conversation.id);
+      setPage("chat");
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    }
+  }
+
+  async function removeProjectFromSidebar(projectId: string): Promise<void> {
+    setActionError(null);
+    try {
+      await removeProject(projectId);
+      setProjects((previous) => previous.filter((item) => item.project_id !== projectId));
+      const removed = await listProjects("removed").catch(() => []);
+      setRemovedProjects(removed);
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    }
+  }
+
+  async function restoreProjectFromTrash(projectId: string): Promise<void> {
+    setActionError(null);
+    try {
+      const restored = await restoreProject(projectId);
+      setProjects((previous) => [restored, ...previous.filter((item) => item.project_id !== projectId)]);
+      setRemovedProjects((previous) => previous.filter((item) => item.project_id !== projectId));
+      await refreshSessions();
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    }
   }
 
   function selectConversation(id: string) {
@@ -486,6 +603,9 @@ function AgentApp() {
       page={page}
       current={current}
       activeConversations={activeConversations}
+      projects={projects}
+      removedProjects={removedProjects}
+      projectLoading={projectLoading}
       archivedConversations={archivedConversations}
       unreadArchivedCount={unreadArchivedCount}
       modeBySession={modeBySession}
@@ -496,6 +616,10 @@ function AgentApp() {
       setSettingsOpen={setSettingsOpen}
       onUserUpdate={(patch) => setUser(user ? { ...user, ...patch } : user)}
       onNew={newConversation}
+      onNewProject={newProject}
+      onNewProjectConversation={newProjectConversation}
+      onRemoveProject={removeProjectFromSidebar}
+      onRestoreProject={restoreProjectFromTrash}
       onSelect={(id) => { setCurrentId(id); setPage("chat"); }}
       onNavigate={setPage}
       onRename={renameConversation}

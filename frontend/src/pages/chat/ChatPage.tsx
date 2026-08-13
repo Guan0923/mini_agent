@@ -598,6 +598,8 @@ export default function ChatPage({
         onCloseSettings={() => setSettingsOpen(false)}
         onStop={stop}
         onSend={() => void send()}
+        disabled={conversation?.projectId !== undefined && conversation.projectAvailable === false}
+        disabledReason={conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
       />
     </div>
   );

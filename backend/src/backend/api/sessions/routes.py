@@ -41,6 +41,7 @@ class CreateSessionRequest(BaseModel):
     title: str | None = Field(default=None, max_length=120)
     client_id: str | None = Field(default=None, max_length=200)
     messages: list[SessionMessageInput] = Field(default_factory=list, max_length=500)
+    project_id: str | None = Field(default=None, max_length=200)
 
 
 class RenameSessionRequest(BaseModel):
@@ -69,7 +70,7 @@ def _store(state: WebAppState, user_id: str):
     return store
 
 
-def _summary_payload(summary) -> dict:
+def _summary_payload(summary, *, project_id: str | None = None, project_available: bool | None = None) -> dict:
     return {
         "session_id": summary.session_id,
         "title": summary.title,
@@ -82,7 +83,19 @@ def _summary_payload(summary) -> dict:
         "client_id": summary.client_id,
         "archived_at": summary.archived_at,
         "deleted_at": summary.deleted_at,
+        "local_only": summary.local_only,
+        "project_id": project_id,
+        "project_available": project_available,
     }
+
+
+def _summary_for_user(state: WebAppState, user_id: str, summary) -> dict:
+    project = state.projects(user_id).session_project(summary.session_id)
+    return _summary_payload(
+        summary,
+        project_id=project.project_id if project is not None else None,
+        project_available=project.available if project is not None else None,
+    )
 
 
 def _node_payload(node) -> dict:
@@ -136,7 +149,24 @@ def list_sessions(
         summaries = store.list_sessions(state=state)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="会话目录包含无效的会话 ID。") from exc
-    return [_summary_payload(summary) for summary in summaries]
+    projects = app_state.projects(identity.id)
+    result: list[dict] = []
+    for summary in summaries:
+        project = projects.session_project(summary.session_id)
+        # Project history has its own sidebar/recycle-bin projection.  Never
+        # let it leak into the ordinary archive/deleted lists; removed project
+        # sessions are hidden from every ordinary list while retaining direct
+        # history access by session id.
+        if project is not None and (project.removed_at is not None or state in {"archived", "deleted"}):
+            continue
+        result.append(
+            _summary_payload(
+                summary,
+                project_id=project.project_id if project is not None else None,
+                project_available=project.available if project is not None else None,
+            )
+        )
+    return result
 
 
 @router.post("/sessions")
@@ -148,12 +178,20 @@ def create_session(
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     try:
+        if body.project_id is not None:
+            raise ValueError("项目会话必须通过项目接口创建。")
         if body.client_id:
             existing = store.find_session_by_client_id(body.client_id)
             if existing is not None:
+                # A stale browser cache must never re-open or overwrite a
+                # project conversation through the ordinary session endpoint.
+                # Project sessions are created only through their scoped API;
+                # callers that submit this client id must refresh metadata.
+                if state.projects(identity.id).session_project(existing.session_id) is not None:
+                    raise ValueError("项目会话必须通过项目接口打开。")
                 summary = store.get_session_summary(existing.session_id)
                 assert summary is not None
-                return _summary_payload(summary)
+                return _summary_for_user(state, identity.id, summary)
         if body.messages:
             session = store.import_conversation(
                 body.title,
@@ -167,12 +205,21 @@ def create_session(
     summary = store.get_session_summary(session.session_id)
     assert summary is not None
     state.user_paths(identity.id).ensure_session(session.session_id)
-    return _summary_payload(summary)
+    return _summary_for_user(state, identity.id, summary)
 
 
 def _require_session(state: WebAppState, user_id: str, session_id: str):
     store = _store(state, user_id)
     return store, _require_summary(store, session_id)
+
+
+def _require_session_workspace(state: WebAppState, user_id: str, session_id: str) -> None:
+    """Reject operations that would run against a removed/unavailable cwd."""
+
+    try:
+        state.session_workspace(user_id, session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/sessions/{session_id}")
@@ -183,7 +230,7 @@ def get_session(
 ) -> dict:
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
-    return _summary_payload(_require_summary(store, session_id))
+    return _summary_for_user(state, identity.id, _require_summary(store, session_id))
 
 
 @router.patch("/sessions/{session_id}")
@@ -201,7 +248,7 @@ def rename_session(
         raise _mutation_error(exc) from exc
     summary = store.get_session_summary(session.session_id)
     assert summary is not None
-    return _summary_payload(summary)
+    return _summary_for_user(state, identity.id, summary)
 
 
 @router.post("/sessions/{session_id}/archive")
@@ -219,7 +266,7 @@ def archive_session(
         raise _mutation_error(exc) from exc
     summary = store.get_session_summary(session.session_id)
     assert summary is not None
-    return _summary_payload(summary)
+    return _summary_for_user(state, identity.id, summary)
 
 
 @router.post("/sessions/{session_id}/restore")
@@ -237,7 +284,7 @@ def restore_session(
         raise _mutation_error(exc) from exc
     summary = store.get_session_summary(session.session_id)
     assert summary is not None
-    return _summary_payload(summary)
+    return _summary_for_user(state, identity.id, summary)
 
 
 @router.delete("/sessions/{session_id}")
@@ -255,7 +302,7 @@ def delete_session(
         raise _mutation_error(exc) from exc
     summary = store.get_session_summary(session.session_id)
     assert summary is not None
-    return _summary_payload(summary)
+    return _summary_for_user(state, identity.id, summary)
 
 
 @router.delete("/sessions/{session_id}/purge", status_code=204)
@@ -435,7 +482,7 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
                 source_node = store.get_node(source.session_id, body.source_node_id)
             if source_node is None:
                 raise ValueError("指定的 source_node_id 不属于当前会话。")
-            target = store.create_session(title, client_id=client_id)
+            target = store.create_session(title, client_id=client_id, local_only=source.local_only)
             writer = NodeWriter(store)
             root = writer.create(
                 session_id=target.session_id,
@@ -461,6 +508,7 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
                 [message.model_dump() for message in body.fallback_messages],
                 client_id=client_id,
                 force_new=rewind,
+                local_only=source.local_only,
             )
     except Exception:
         if target is not None:
@@ -478,6 +526,19 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
     return summary
 
 
+def _copy_or_bind_project(state: WebAppState, user_id: str, source_session_id: str, target_session_id: str) -> None:
+    project = state.projects(user_id).session_project(source_session_id)
+    if project is not None:
+        if project.removed_at is not None:
+            raise RuntimeError("项目已移除，请从回收站恢复后再创建分支。")
+        if not project.available:
+            raise RuntimeError("项目 cwd 不可访问，请恢复文件夹后再创建分支。")
+        state.projects(user_id).create_session(project.project_id, target_session_id)
+        state.copy_session_uploads(user_id, source_session_id, target_session_id)
+        return
+    state.copy_session_files(user_id, source_session_id, target_session_id)
+
+
 @router.post("/sessions/{session_id}/fork")
 def fork_session(
     session_id: str,
@@ -488,19 +549,21 @@ def fork_session(
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     source = _require_branchable(store, session_id)
+    _require_session_workspace(state, identity.id, source.session_id)
     target_id: str | None = None
     try:
         summary = _branch_session(store, source, body, rewind=False)
         target_id = summary.session_id
-        state.copy_session_files(identity.id, source.session_id, summary.session_id)
+        _copy_or_bind_project(state, identity.id, source.session_id, summary.session_id)
     except Exception as exc:
         if target_id is not None:
             try:
+                state.projects(identity.id).discard_session(target_id)
                 shutil.rmtree(store.paths.session_root(target_id), ignore_errors=True)
             except Exception:
                 pass
         raise _mutation_error(exc) from exc
-    return _summary_payload(summary)
+    return _summary_for_user(state, identity.id, summary)
 
 
 @router.post("/sessions/{session_id}/rewind")
@@ -513,12 +576,13 @@ def rewind_session(
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     source = _require_branchable(store, session_id)
+    _require_session_workspace(state, identity.id, source.session_id)
     target_id: str | None = None
     copied = False
     try:
         summary = _branch_session(store, source, body, rewind=True)
         target_id = summary.session_id
-        state.copy_session_files(identity.id, source.session_id, summary.session_id)
+        _copy_or_bind_project(state, identity.id, source.session_id, summary.session_id)
         copied = True
         store.delete_session(source.session_id)
     except Exception as exc:
@@ -535,10 +599,11 @@ def rewind_session(
                     # A failed file copy must not leave a discoverable,
                     # half-initialized session behind.
                     shutil.rmtree(store.paths.session_root(target_id), ignore_errors=True)
+                state.projects(identity.id).discard_session(target_id)
             except Exception:
                 pass
         raise _mutation_error(exc) from exc
-    return _summary_payload(summary)
+    return _summary_for_user(state, identity.id, summary)
 
 
 @router.get("/sessions/{session_id}/timezone")
@@ -566,6 +631,7 @@ def set_timezone(
 ) -> dict:
     state: WebAppState = request.app.state.web
     _require_session(state, identity.id, session_id)
+    _require_session_workspace(state, identity.id, session_id)
     application = None
     try:
         application = _build_user_application(state, identity.id, session_id=session_id)
@@ -589,6 +655,7 @@ def compact_session(
 ) -> dict:
     state: WebAppState = request.app.state.web
     _require_session(state, identity.id, session_id)
+    _require_session_workspace(state, identity.id, session_id)
     application = None
     try:
         application = _build_user_application(state, identity.id, session_id=session_id)
@@ -642,6 +709,10 @@ def fork_run(
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     target_id: str | None = None
+    source = store.find_run_session(run_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail=f"Unknown run: {run_id}")
+    _require_session_workspace(state, identity.id, source.session_id)
     try:
         session = store.fork_run(run_id)
         target_id = session.session_id
@@ -650,20 +721,21 @@ def fork_run(
     # The direct run-fork endpoint must carry the source session's current
     # workspace and uploads just like the branch/rewind endpoints.
     try:
-        source_session_id = getattr(session, "source_session_id", None)
-        if not source_session_id:
+        inherited_source_session_id = getattr(session, "source_session_id", None)
+        if not inherited_source_session_id:
             runtime = store.load_runtime(session.session_id)
             provenance = runtime.state.current_run.provenance if runtime and runtime.state.current_run else None
-            source_session_id = getattr(provenance, "source_session_id", None)
-        if source_session_id:
-            state.copy_session_files(identity.id, str(source_session_id), session.session_id)
+            inherited_source_session_id = getattr(provenance, "source_session_id", None)
+        if inherited_source_session_id:
+            _copy_or_bind_project(state, identity.id, str(inherited_source_session_id), session.session_id)
     except Exception as exc:
         if target_id is not None:
             try:
+                state.projects(identity.id).discard_session(target_id)
                 shutil.rmtree(store.paths.session_root(target_id), ignore_errors=True)
             except Exception:
                 pass
         raise _mutation_error(exc) from exc
     summary = store.get_session_summary(session.session_id)
     assert summary is not None
-    return _summary_payload(summary)
+    return _summary_for_user(state, identity.id, summary)

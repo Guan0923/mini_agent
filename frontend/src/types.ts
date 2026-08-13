@@ -85,6 +85,9 @@ export interface Conversation {
   messagesLoaded?: boolean;
   lastNodeId?: string;
   runtimeNodes?: RuntimeStateNode[];
+  projectId?: string;
+  localOnly?: boolean;
+  projectAvailable?: boolean;
 }
 
 export interface DecisionOption {

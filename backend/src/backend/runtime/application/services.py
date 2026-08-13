@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from backend.domain import DEFAULT_TIME_ZONE
@@ -18,6 +19,8 @@ class AgentApplication:
     task_preprocessor: TaskPreprocessor
     sync_coordinator: object | None = None
     default_timezone: str = DEFAULT_TIME_ZONE
+    session_provisioner: Callable[..., object] | None = None
+    session_provisioner_cleanup: Callable[[str], None] | None = None
 
     def close(self) -> None:
         try:
@@ -31,5 +34,11 @@ class AgentApplication:
 
     def open_conversation(self, session_id: str | None = None) -> ConversationService:
         return ConversationService(
-            self.runner, self.session_store, self.task_preprocessor, session_id, self.default_timezone
+            self.runner,
+            self.session_store,
+            self.task_preprocessor,
+            session_id,
+            self.default_timezone,
+            session_provisioner=self.session_provisioner,
+            session_provisioner_cleanup=self.session_provisioner_cleanup,
         )

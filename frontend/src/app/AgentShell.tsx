@@ -5,6 +5,7 @@ import type { AuthUser } from "../types";
 import type { AgentConfig } from "../api";
 import type { ChatRunRequest } from "./types";
 import type { ChatMode, Conversation, DisplayMode, Page } from "../types";
+import type { ProjectInfo } from "../api";
 import AppSidebar from "../components/AppSidebar";
 import BenchmarkPage from "../pages/BenchmarkPage";
 import ChatPage from "../pages/ChatPage";
@@ -17,6 +18,9 @@ export interface AgentShellProps {
   page: Page;
   current: Conversation | null;
   activeConversations: Conversation[];
+  projects: ProjectInfo[];
+  removedProjects: ProjectInfo[];
+  projectLoading?: boolean;
   archivedConversations: Conversation[];
   unreadArchivedCount: number;
   modeBySession: Record<string, ChatMode>;
@@ -27,6 +31,10 @@ export interface AgentShellProps {
   setSettingsOpen: (open: boolean) => void;
   onUserUpdate: (patch: Partial<AuthUser>) => void;
   onNew: (title?: string) => Promise<string>;
+  onNewProject: () => Promise<void>;
+  onNewProjectConversation: (projectId: string) => Promise<void>;
+  onRemoveProject: (projectId: string) => Promise<void>;
+  onRestoreProject: (projectId: string) => Promise<void>;
   onSelect: (id: string) => void;
   onNavigate: (page: Page) => void;
   onRename: (id: string, title: string) => Promise<void>;
@@ -70,6 +78,14 @@ export default function AgentShell(props: AgentShellProps) {
     closeMobile();
     return id;
   };
+  const createProject = async () => {
+    await props.onNewProject();
+    closeMobile();
+  };
+  const createProjectConversation = async (projectId: string) => {
+    await props.onNewProjectConversation(projectId);
+    closeMobile();
+  };
   const useSession = async (sessionId: string) => {
     const id = await props.onSelectSession(sessionId);
     closeMobile();
@@ -79,10 +95,15 @@ export default function AgentShell(props: AgentShellProps) {
     <AppSidebar
       user={props.user}
       conversations={props.activeConversations}
+      projects={props.projects}
+      projectLoading={props.projectLoading}
       archivedCount={props.unreadArchivedCount}
       currentId={props.current?.id ?? null}
       page={props.page}
       onNew={create}
+      onNewProject={createProject}
+      onNewProjectConversation={createProjectConversation}
+      onRemoveProject={props.onRemoveProject}
       onSelect={select}
       onNavigate={navigate}
       onRename={props.onRename}
@@ -123,7 +144,7 @@ export default function AgentShell(props: AgentShellProps) {
               onRun={props.onRun}
               onStopRun={props.onStopRun}
             />
-          ) : props.page === "trash" ? <TrashPage conversations={props.archivedConversations} onRestore={props.onRestore} onDelete={props.onDelete} /> : <BenchmarkPage />}
+          ) : props.page === "trash" ? <TrashPage conversations={props.archivedConversations} projects={props.removedProjects} onRestore={props.onRestore} onDelete={props.onDelete} onRestoreProject={props.onRestoreProject} /> : <BenchmarkPage />}
         </Layout.Content>
       </Layout>
       <UserSettingsModal

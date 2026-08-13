@@ -57,6 +57,7 @@ class Session:
     client_id: str | None = None
     archived_at: str | None = None
     deleted_at: str | None = None
+    local_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class SessionSummary:
     archived_at: str | None = None
     deleted_at: str | None = None
     last_node_id: str | None = None
+    local_only: bool = False
 
     @property
     def is_active(self) -> bool:

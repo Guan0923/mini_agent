@@ -42,6 +42,8 @@ class SQLiteSyncMixin:
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Unknown session: {session_id}")
+        if session.local_only:
+            raise ValueError("Local-only sessions are excluded from cloud sync.")
         with self._connection(session_id) as connection:
             row = connection.execute(
                 "SELECT owner_device_id,title,created_at,updated_at,client_id,archived_at,deleted_at FROM session_meta"
@@ -85,6 +87,11 @@ class SQLiteSyncMixin:
         owner = str(meta.get("owner_device_id") or "")
         if not session_id or not owner:
             raise ValueError("Node snapshot is missing session ownership metadata.")
+        existing = self.get_session(session_id)
+        if existing is not None and existing.local_only:
+            # A stale/forged remote snapshot must never replace a local
+            # project conversation, even if it reuses the same session id.
+            return
         nodes = [TreeRuntimeState.from_dict(item) for item in raw_nodes]
         if any(node.session_id != session_id for node in nodes):
             raise ValueError("Node snapshot contains a node from another session.")
@@ -124,6 +131,8 @@ class SQLiteSyncMixin:
     def pending_sync_operations(self) -> list[dict[str, object]]:
         operations: list[dict[str, object]] = []
         for summary in self.list_sessions(state="all"):
+            if summary.local_only:
+                continue
             with self._connection(summary.session_id) as connection:
                 rows = connection.execute(
                     "SELECT operation_id,base_revision,kind,payload_json FROM sync_outbox "
@@ -180,6 +189,10 @@ class SQLiteSyncMixin:
             raise ValueError("Invalid remote session snapshot.")
         existing = self.get_session(session_id)
         if existing is not None:
+            if existing.local_only:
+                # Project conversations are deliberately outside cloud sync.
+                # Defensively ignore a remote item that happens to reuse one.
+                return
             with self._connection(session_id) as connection:
                 current = connection.execute("SELECT owner_device_id,remote_revision FROM session_meta").fetchone()
                 if current is None:
@@ -210,8 +223,8 @@ class SQLiteSyncMixin:
             self._clear_snapshot_tables(connection)
             connection.execute(
                 "INSERT INTO session_meta(session_id,title,owner_device_id,remote_revision,read_only,"
-                "schema_version,created_at,updated_at,client_id,archived_at,deleted_at) "
-                "VALUES (?,?,?,?,1,?,?,?,?,?,?)",
+                "schema_version,created_at,updated_at,client_id,archived_at,deleted_at,local_only) "
+                "VALUES (?,?,?,?,1,?,?,?,?,?,?,0)",
                 (
                     session_id,
                     str(meta.get("title") or DEFAULT_SESSION_TITLE),
@@ -330,8 +343,10 @@ class SQLiteSyncMixin:
 
     @classmethod
     def _queue(cls, connection: sqlite3.Connection, session_id: str) -> None:
-        meta = connection.execute("SELECT remote_revision FROM session_meta").fetchone()
+        meta = connection.execute("SELECT remote_revision,local_only FROM session_meta").fetchone()
         if meta is None:
+            return
+        if int(meta[1]):
             return
         snapshot = cls._export_snapshot(connection, session_id)
         connection.execute(
@@ -399,10 +414,6 @@ class SQLiteSyncMixin:
                 raise ValueError("Persisted runtime state must be a JSON object.")
             snapshot["runtime"] = runtime
         for table, columns in SQLiteSyncMixin._LEGACY_SNAPSHOT_TABLES.items():
-            table_rows = connection.execute(
-                f"SELECT {','.join(columns)} FROM {table} ORDER BY rowid"
-            ).fetchall()
-            snapshot[table] = [
-                {column: row[index] for index, column in enumerate(columns)} for row in table_rows
-            ]
+            table_rows = connection.execute(f"SELECT {','.join(columns)} FROM {table} ORDER BY rowid").fetchall()
+            snapshot[table] = [{column: row[index] for index, column in enumerate(columns)} for row in table_rows]
         return snapshot

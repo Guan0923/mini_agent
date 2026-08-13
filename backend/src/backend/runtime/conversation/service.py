@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from backend.domain import (
@@ -15,6 +15,7 @@ from backend.domain import (
     RunProvenance,
     RunState,
     RunTrigger,
+    Session,
     SkillSnapshot,
     UserMessage,
     new_run_id,
@@ -44,9 +45,13 @@ class ConversationService(ConversationSessionController):
         task_preprocessor: TaskPreprocessor | None = None,
         session_id: str | None = None,
         default_timezone: str = "Asia/Shanghai",
+        session_provisioner: Callable[[SessionStore, str, Session], Session | None] | None = None,
+        session_provisioner_cleanup: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(runner, session_store, session_id, default_timezone=default_timezone)
         self._task_preprocessor = task_preprocessor
+        self._session_provisioner = session_provisioner
+        self._session_provisioner_cleanup = session_provisioner_cleanup
 
     def run_task(
         self,
@@ -120,7 +125,15 @@ class ConversationService(ConversationSessionController):
         if self.active_session is None:
             raise RuntimeError("Cannot create an isolated handoff session without an active session.")
         source_session = self.active_session
-        isolated_session = self.session_store.create_session(f"Implement: {source_session.title}")
+        provisioned = False
+        title = f"Implement: {source_session.title}"
+        if self._session_provisioner is not None:
+            isolated_session = self._session_provisioner(self.session_store, title, source_session)
+            provisioned = isolated_session is not None
+        else:
+            isolated_session = None
+        if isolated_session is None:
+            isolated_session = self.session_store.create_session(title)
         paths = getattr(self.session_store, "paths", None)
         try:
             isolated_runtime = self.runner.empty_runtime(
@@ -130,7 +143,7 @@ class ConversationService(ConversationSessionController):
             )
             isolated_runtime.state.timezone = self.default_timezone
             isolated_runtime.save()
-            if paths is not None:
+            if paths is not None and not provisioned:
                 paths.ensure_session(isolated_session.session_id)
                 _copy_session_tree(
                     paths.session_workspace(source_session.session_id),
@@ -141,6 +154,11 @@ class ConversationService(ConversationSessionController):
                     paths.session_uploads(isolated_session.session_id),
                 )
         except Exception:
+            if provisioned and self._session_provisioner_cleanup is not None:
+                try:
+                    self._session_provisioner_cleanup(isolated_session.session_id)
+                except Exception:
+                    pass
             if paths is not None:
                 shutil.rmtree(paths.session_root(isolated_session.session_id), ignore_errors=True)
             raise

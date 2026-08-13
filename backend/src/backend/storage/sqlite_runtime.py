@@ -163,6 +163,8 @@ class SQLiteRuntimeMixin:
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Unknown session: {session_id}")
+        if session.local_only:
+            raise ValueError("Local-only sessions are excluded from cloud sync.")
         return {
             "schema_version": 3,
             "session": {
@@ -299,7 +301,7 @@ class SQLiteRuntimeMixin:
 
     def save(self, runtime, reason: str) -> None:
         self._save_state(runtime.state, reason)
-        if self._sync_listener is not None:
+        if self._sync_listener is not None and not self._is_local_only(runtime.state.session_id):
             self._sync_listener()
 
     def save_runtime(self, state: RuntimeState) -> None:
@@ -323,9 +325,7 @@ class SQLiteRuntimeMixin:
                 # attempt in the per-session run index before updating its
                 # status; otherwise the first durable event (and the final
                 # answer) is rejected as an unknown run.
-                existing_run = connection.execute(
-                    "SELECT 1 FROM session_runs WHERE run_id=?", (run.run_id,)
-                ).fetchone()
+                existing_run = connection.execute("SELECT 1 FROM session_runs WHERE run_id=?", (run.run_id,)).fetchone()
                 if existing_run is None:
                     provenance = run.provenance
                     connection.execute(
@@ -407,6 +407,7 @@ class SQLiteRuntimeMixin:
             str(row[4]) if row[4] is not None else None,
             str(row[5]) if row[5] is not None else None,
             str(row[6]) if row[6] is not None else None,
+            bool(row[7]) if len(row) > 7 else False,
         )
 
     @staticmethod

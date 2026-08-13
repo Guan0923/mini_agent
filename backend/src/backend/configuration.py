@@ -74,6 +74,12 @@ class ClientPaths:
         return self.root / "user.db"
 
     @property
+    def projects_db(self) -> Path:
+        """Local-only project index; never included in cloud snapshots."""
+
+        return self.root / "projects.db"
+
+    @property
     def runtime_dir(self) -> Path:
         """Runtime shared by Web and TUI; no client-type directory is used."""
 
@@ -201,7 +207,7 @@ class ClientPaths:
             if directory.exists() and not directory.is_dir():
                 raise ConfigurationError(f"User data path must be a directory: {directory}")
             directory.mkdir(parents=True, exist_ok=True)
-        for file in (self.config_file, self.user_db, self.mcp_file, self.mcp_trust_file):
+        for file in (self.config_file, self.user_db, self.projects_db, self.mcp_file, self.mcp_trust_file):
             if file.is_symlink():
                 raise ConfigurationError(f"User data file cannot be a symbolic link: {file}")
             if file.exists() and not file.is_file():

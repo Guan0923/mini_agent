@@ -44,6 +44,7 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
 
     from .auth import router as auth_router
     from .chat import router as chat_router
+    from .projects import router as projects_router
     from .sessions import router as sessions_router
     from .shared.benchmark import create_benchmark_app
     from .shared.info import router as info_router
@@ -51,6 +52,7 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(chat_router, dependencies=[Depends(require_user)])
+    app.include_router(projects_router, dependencies=[Depends(require_user)])
     app.include_router(info_router, dependencies=[Depends(require_user)])
     app.include_router(sessions_router, dependencies=[Depends(require_user)])
     app.include_router(sync_router, dependencies=[Depends(require_user)])

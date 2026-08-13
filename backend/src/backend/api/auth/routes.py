@@ -352,10 +352,17 @@ def guest_import(
         raise HTTPException(status_code=403, detail="游客身份不能导入游客会话。")
     pending = request.app.state.web.auth.pending_guest_import(identity.id)
     if pending is None:
-        return {"status": "none", "imported": [], "skipped": [], "count": 0}
+        return {"status": "none", "imported": [], "skipped": [], "count": 0, "sync_count": 0, "projects_imported": []}
     if body.decision == "dismiss":
         request.app.state.web.auth.finish_guest_import(identity.id, "dismiss")
-        return {"status": "dismissed", "imported": [], "skipped": [], "count": 0}
+        return {
+            "status": "dismissed",
+            "imported": [],
+            "skipped": [],
+            "count": 0,
+            "sync_count": 0,
+            "projects_imported": [],
+        }
     from .. import user_data
 
     source_identity = request.app.state.web.auth.user_by_id(str(pending["guest_id"]))
@@ -378,7 +385,7 @@ def guest_import(
     except (RuntimeError, OSError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     request.app.state.web.auth.finish_guest_import(identity.id, "import")
-    if result["count"]:
+    if result.get("sync_count", result["count"]):
         marker = request.app.state.web.settings
         mark_dirty = getattr(marker, "mark_dirty", None)
         if callable(mark_dirty):

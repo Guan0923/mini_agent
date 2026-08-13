@@ -13,6 +13,9 @@ export interface SessionInfo {
   archived_at?: string | null;
   deleted_at?: string | null;
   last_node_id?: string | null;
+  local_only?: boolean;
+  project_id?: string | null;
+  project_available?: boolean | null;
 }
 
 export interface SessionMessage {
@@ -48,11 +51,12 @@ export async function createSession(
   title?: string,
   clientId?: string,
   messages: Array<Pick<ChatMessage, "role" | "content">> = [],
+  projectId?: string,
 ): Promise<SessionInfo> {
   return requestJson<SessionInfo>("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: title?.trim() || null, client_id: clientId, messages }),
+    body: JSON.stringify({ title: title?.trim() || null, client_id: clientId, messages, project_id: projectId }),
   });
 }
 

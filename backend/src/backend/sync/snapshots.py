@@ -369,6 +369,8 @@ class SnapshotManager:
             state_db = session / "state.db"
             if state_db.is_symlink() or not state_db.is_file():
                 raise ValueError(f"Runtime session has no regular state.db: {session.name}")
+            if self._session_is_local_only(state_db):
+                continue
             target_state_db = target / "state.db"
             self._backup_sqlite(state_db, target_state_db)
             for name in ("workspace", "uploads"):
@@ -397,6 +399,18 @@ class SnapshotManager:
         (staging / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
         )
+
+    @staticmethod
+    def _session_is_local_only(database: Path) -> bool:
+        connection = sqlite3.connect(database)
+        try:
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(session_meta)")}
+            if "local_only" not in columns:
+                return False
+            row = connection.execute("SELECT local_only FROM session_meta LIMIT 1").fetchone()
+            return bool(row and int(row[0]))
+        finally:
+            connection.close()
 
     @staticmethod
     def _copy_tree(
@@ -580,7 +594,7 @@ class SnapshotManager:
                 # bytes are downloaded or decrypted. A bad key, checksum, or
                 # manifest must still leave a usable recovery copy.
                 recovery.mkdir(parents=True, exist_ok=False)
-                self._copy_owned_components(paths.root, recovery)
+                self._copy_owned_components(paths.root, recovery, include_local_runtime=True)
                 self._update(job, phase="download", progress=5, status="running")
                 self.settings.set_sync_status(job.user_id, "restoring")
                 metadata, chunks = self.repository.download(job.user_id, snapshot_id)
@@ -612,6 +626,10 @@ class SnapshotManager:
                 assert recovery is not None and paths is not None
                 try:
                     self._replace_payload(extracted, paths.root)
+                    # Project sessions are deliberately absent from the cloud
+                    # archive. Restore them from the local recovery copy after
+                    # replacing the sync-owned runtime payload.
+                    self._restore_local_runtime_sessions(recovery / "runtime", paths.runtime_dir)
                 except Exception as replace_error:
                     try:
                         self._replace_payload(recovery, paths.root)
@@ -689,22 +707,82 @@ class SnapshotManager:
             else:
                 shutil.copy2(source_item, target_item)
 
+    @classmethod
+    def _restore_local_runtime_sessions(cls, source: Path, target: Path) -> None:
+        if not source.exists():
+            return
+        if source.is_symlink() or not source.is_dir():
+            raise ValueError("Local recovery runtime is not a regular directory.")
+        target.mkdir(parents=True, exist_ok=True)
+        for session in source.iterdir():
+            if session.is_symlink() or not session.is_dir():
+                raise ValueError(f"Local recovery runtime contains an invalid session: {session.name}")
+            state_db = session / "state.db"
+            if not state_db.is_file() or state_db.is_symlink() or not cls._session_is_local_only(state_db):
+                continue
+            destination = target / session.name
+            if destination.exists():
+                if destination.is_symlink() or not destination.is_dir():
+                    raise ValueError(f"Runtime restore target is invalid: {destination}")
+                shutil.rmtree(destination)
+            # Local project sessions are outside the cloud snapshot contract.
+            # Their recovery copy must therefore not apply the snapshot's
+            # cache/log/node_modules filters: uploads are user data and must
+            # survive a cloud restore byte-for-byte (subject to the same
+            # symlink/special-file safety checks).
+            cls._copy_exact_tree(session, destination)
+
     @staticmethod
-    def _copy_owned_components(source: Path, target: Path) -> None:
+    def _copy_exact_tree(source: Path, target: Path) -> None:
+        """Copy a local recovery tree without snapshot content filtering."""
+
+        if source.is_symlink() or not source.is_dir():
+            raise ValueError(f"Recovery source is not a regular directory: {source}")
+        if target.is_symlink() or (target.exists() and not target.is_dir()):
+            raise ValueError(f"Recovery target is not a regular directory: {target}")
+        target.mkdir(parents=True, exist_ok=True)
+        for item in source.rglob("*"):
+            relative = item.relative_to(source)
+            destination = target / relative
+            if item.is_symlink() or destination.is_symlink():
+                raise ValueError(f"Recovery tree contains a symbolic link: {item}")
+            if item.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+            elif item.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if item.name in {"user.db", "state.db"}:
+                    SnapshotManager._backup_sqlite(item, destination)
+                else:
+                    shutil.copy2(item, destination)
+            else:
+                raise ValueError(f"Recovery tree contains an unsupported file: {item}")
+
+    @staticmethod
+    def _copy_owned_components(source: Path, target: Path, *, include_local_runtime: bool = False) -> None:
         for name in ("config.toml", "user.db", "skills", "rag", "plugins", "mcp", "runtime"):
             item = source / name
+            if name == "runtime" and not include_local_runtime:
+                # Callers that only need sync-owned recovery can omit runtime;
+                # restore recovery opts in to preserve local-only sessions.
+                continue
             if item.is_symlink():
                 raise ValueError(f"Snapshot source contains a symbolic link: {item}")
             if not item.exists():
                 continue
             destination = target / name
             if item.is_dir():
-                SnapshotManager._copy_tree(
-                    item,
-                    destination,
-                    exclude_rag_cache=name == "rag",
-                    reject_symlinks=True,
-                )
+                if name == "runtime" and include_local_runtime:
+                    # Recovery is local-only and must retain every file in a
+                    # project session, including names that the cloud
+                    # snapshot filter intentionally excludes.
+                    SnapshotManager._copy_exact_tree(item, destination)
+                else:
+                    SnapshotManager._copy_tree(
+                        item,
+                        destination,
+                        exclude_rag_cache=name == "rag",
+                        reject_symlinks=True,
+                    )
             else:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if item.name in {"user.db", "state.db"}:

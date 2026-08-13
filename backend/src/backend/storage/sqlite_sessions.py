@@ -21,16 +21,25 @@ from .codec import normalize_session_title
 
 
 class SQLiteSessionMixin:
-    def create_session(self, title: str | None = None, *, client_id: str | None = None) -> Session:
-        session = Session(new_session_id(), normalize_session_title(title), utc_now(), utc_now(), client_id=client_id)
+    def create_session(
+        self, title: str | None = None, *, client_id: str | None = None, local_only: bool = False
+    ) -> Session:
+        session = Session(
+            new_session_id(),
+            normalize_session_title(title),
+            utc_now(),
+            utc_now(),
+            client_id=client_id,
+            local_only=local_only,
+        )
         root_path = self.paths.session_root(session.session_id)
         root_existed = root_path.exists()
         root = self.paths.ensure_session(session.session_id)
         try:
             with self._connection(session.session_id) as connection:
                 connection.execute(
-                    "INSERT INTO session_meta(session_id,title,owner_device_id,created_at,updated_at,client_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO session_meta(session_id,title,owner_device_id,created_at,updated_at,client_id,local_only) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         session.session_id,
                         session.title,
@@ -38,6 +47,7 @@ class SQLiteSessionMixin:
                         session.created_at,
                         session.updated_at,
                         session.client_id,
+                        int(session.local_only),
                     ),
                 )
                 self._queue(connection, session.session_id)
@@ -55,7 +65,7 @@ class SQLiteSessionMixin:
             return None
         with self._connection(session_id) as connection:
             row = connection.execute(
-                "SELECT session_id, title, created_at, updated_at, client_id, archived_at, deleted_at FROM session_meta"
+                "SELECT session_id, title, created_at, updated_at, client_id, archived_at, deleted_at, local_only FROM session_meta"
             ).fetchone()
         return self._session(row) if row else None
 
@@ -78,7 +88,7 @@ class SQLiteSessionMixin:
                     ORDER BY n.timestamp DESC, n.id DESC LIMIT 1),
                 (SELECT run_id FROM session_runs ORDER BY updated_at DESC, run_id DESC LIMIT 1),
                 (SELECT status FROM session_runs ORDER BY updated_at DESC, run_id DESC LIMIT 1),
-                m.client_id, m.archived_at, m.deleted_at
+                m.client_id, m.archived_at, m.deleted_at, m.local_only
                 FROM session_meta AS m"""
             ).fetchone()
         if row is None:
@@ -95,6 +105,7 @@ class SQLiteSessionMixin:
             client_id=str(row[8]) if row[8] is not None else None,
             archived_at=str(row[9]) if row[9] is not None else None,
             deleted_at=str(row[10]) if row[10] is not None else None,
+            local_only=bool(row[11]),
         )
 
     def list_sessions(self, *, state: str = "active") -> list[SessionSummary]:
@@ -181,6 +192,17 @@ class SQLiteSessionMixin:
             raise ValueError(f"Unknown session: {session_id}")
         return session
 
+    def mark_local_only(self, session_id: str) -> Session:
+        """Make a newly-created session local-only before any remote sync."""
+
+        with self._connection_for_existing(session_id) as connection:
+            connection.execute("UPDATE session_meta SET local_only=1 WHERE session_id=?", (session_id,))
+            connection.execute("DELETE FROM sync_outbox")
+        session = self.get_session(session_id)
+        if session is None:
+            raise ValueError(f"Unknown session: {session_id}")
+        return session
+
     def import_conversation(
         self,
         title: str | None,
@@ -188,6 +210,7 @@ class SQLiteSessionMixin:
         *,
         client_id: str | None = None,
         force_new: bool = False,
+        local_only: bool = False,
     ) -> Session:
         """Create an idle session seeded with text-only legacy Web history."""
 
@@ -196,7 +219,7 @@ class SQLiteSessionMixin:
             if existing is not None:
                 return existing
         parsed = [message_from_dict(item) for item in messages if item.get("role") in {"user", "assistant"}]
-        session = self.create_session(title, client_id=client_id)
+        session = self.create_session(title, client_id=client_id, local_only=local_only)
         try:
             import_run_id = f"import_{uuid4().hex}"
             timestamp = utc_now()
@@ -269,8 +292,9 @@ class SQLiteSessionMixin:
             row = connection.execute("SELECT deleted_at FROM session_meta").fetchone()
             if row is None or row[0] is None:
                 raise ValueError("Only deleted sessions can be permanently removed.")
+        local_only = self._is_local_only(session_id)
         shutil.rmtree(self.paths.session_root(session_id), ignore_errors=False)
-        if self._sync_listener is not None:
+        if self._sync_listener is not None and not local_only:
             self._sync_listener()
 
     def _set_lifecycle(

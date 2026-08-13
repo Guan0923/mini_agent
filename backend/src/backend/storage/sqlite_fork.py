@@ -15,6 +15,16 @@ from .codec import decode_runtime_state
 class SQLiteForkMixin:
     """Create locally owned sessions from terminal durable run snapshots."""
 
+    def find_run_session(self, run_id: str):
+        """Return the session owning a run without creating a fork."""
+
+        for summary in self.list_sessions(state="all"):
+            with self._connection(summary.session_id) as source:
+                row = source.execute("SELECT 1 FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            if row is not None:
+                return summary
+        return None
+
     def list_forkable_runs(self) -> list[dict[str, str]]:
         result: list[dict[str, str]] = []
         for summary in self.list_sessions(state="all"):
@@ -48,7 +58,7 @@ class SQLiteForkMixin:
             state = decode_runtime_state(str(row[1]))
             if state.current_run is None:
                 raise ValueError("Run snapshot cannot be forked.")
-            target = self.create_session(f"Fork: {summary.title}")
+            target = self.create_session(f"Fork: {summary.title}", local_only=summary.local_only)
             state.session_id = target.session_id
             state.current_run.run_id = new_run_id()
             state.current_run.provenance = RunProvenance(
@@ -74,10 +84,11 @@ class SQLiteForkMixin:
             try:
                 self._save_state(state, "forked")
                 self.paths.ensure_session(target.session_id)
-                _copy_tree_without_symlinks(
-                    self.paths.session_workspace(summary.session_id),
-                    self.paths.session_workspace(target.session_id),
-                )
+                if not summary.local_only:
+                    _copy_tree_without_symlinks(
+                        self.paths.session_workspace(summary.session_id),
+                        self.paths.session_workspace(target.session_id),
+                    )
                 _copy_tree_without_symlinks(
                     self.paths.session_uploads(summary.session_id),
                     self.paths.session_uploads(target.session_id),

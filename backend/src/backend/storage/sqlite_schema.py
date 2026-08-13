@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS session_meta (
     session_id TEXT PRIMARY KEY, title TEXT NOT NULL, owner_device_id TEXT NOT NULL,
     remote_revision INTEGER NOT NULL DEFAULT 0, read_only INTEGER NOT NULL DEFAULT 0,
     schema_version INTEGER NOT NULL DEFAULT 3, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    client_id TEXT, archived_at TEXT, deleted_at TEXT
+    client_id TEXT, archived_at TEXT, deleted_at TEXT,
+    local_only INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS session_runs (
     run_id TEXT PRIMARY KEY, task TEXT NOT NULL, status TEXT NOT NULL, workflow_id TEXT,
@@ -98,6 +99,7 @@ class SQLiteSchemaMixin:
             ("client_id", "TEXT"),
             ("archived_at", "TEXT"),
             ("deleted_at", "TEXT"),
+            ("local_only", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if name not in meta_columns:
                 connection.execute(f"ALTER TABLE session_meta ADD COLUMN {name} {definition}")
@@ -132,3 +134,9 @@ class SQLiteSchemaMixin:
             meta = connection.execute("SELECT session_id,read_only FROM session_meta").fetchone()
             if meta is not None and not int(meta[1]):
                 self._queue(connection, str(meta[0]))
+        # A database created by an older client may already have an outbox
+        # entry before the local project binding is imported.  Once the
+        # session is marked local-only, remove that stale payload immediately.
+        local_only = connection.execute("SELECT local_only FROM session_meta LIMIT 1").fetchone()
+        if local_only is not None and int(local_only[0]):
+            connection.execute("DELETE FROM sync_outbox")

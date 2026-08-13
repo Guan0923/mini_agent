@@ -33,6 +33,8 @@ export interface ComposerProps {
   onCloseSettings: () => void;
   onStop: () => void;
   onSend: () => void;
+  disabled?: boolean;
+  disabledReason?: string;
 }
 
 export default function Composer(props: ComposerProps) {
@@ -47,9 +49,9 @@ export default function Composer(props: ComposerProps) {
     <div className="composer">
       {props.commandMenuVisible && <div className="command-menu">{props.filteredCommands.map((command, index) => <button key={command.name} className={`command-item${index === props.activeCommandIndex ? " selected" : ""}`} onMouseEnter={() => props.onActiveCommandChange(index)} onClick={() => props.onComplete(index)}><span className="command-name">{command.name}</span><span className="command-desc">{command.label} · {command.description}</span></button>)}</div>}
       <div className="composer-box">
-        <Input.TextArea className="composer-input" ref={props.taRef} value={props.input} onChange={(event) => props.onInputChange(event.target.value)} onKeyDown={props.onKeyDown} placeholder="输入任务，按 Enter 发送" autoSize={{ minRows: 1, maxRows: 8 }} />
+        <Input.TextArea className="composer-input" ref={props.taRef} value={props.input} disabled={props.disabled} onChange={(event) => props.onInputChange(event.target.value)} onKeyDown={props.onKeyDown} placeholder={props.disabledReason || "输入任务，按 Enter 发送"} autoSize={{ minRows: 1, maxRows: 8 }} />
         <div className="composer-toolbar">{props.isMobile ? <IconAction className="run-settings-trigger" label="运行设置" icon={<SettingOutlined />} disabled={props.busy} onClick={props.onOpenSettings} /> : settingsControls}</div>
-        {props.busy ? <Tooltip title="停止"><Button className="send-btn stop" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /></Tooltip> : <Tooltip title="发送"><Button className="send-btn" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送" onClick={props.onSend} disabled={!props.input.trim()} /></Tooltip>}
+        {props.busy ? <Tooltip title="停止"><Button className="send-btn stop" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /> </Tooltip> : <Tooltip title={props.disabledReason || "发送"}><Button className="send-btn" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送" onClick={props.onSend} disabled={props.disabled || !props.input.trim()} /></Tooltip>}
       </div>
       <Drawer className="run-settings-drawer" title="运行设置" placement="bottom" open={props.settingsOpen} onClose={props.onCloseSettings}>{settingsControls}</Drawer>
     </div>

@@ -38,3 +38,8 @@ class SQLiteBaseMixin:
 
     def set_sync_listener(self, listener) -> None:
         self._sync_listener = listener
+
+    def _is_local_only(self, session_id: str) -> bool:
+        with self._connection(session_id) as connection:
+            row = connection.execute("SELECT local_only FROM session_meta LIMIT 1").fetchone()
+        return bool(row and int(row[0]))

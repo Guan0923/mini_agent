@@ -104,6 +104,13 @@ export function summaryToConversation(summary: SessionInfo, existing?: Conversat
     messagesLoaded: existing?.messagesLoaded ?? false,
     lastNodeId: summary.last_node_id ?? existing?.lastNodeId,
     runtimeNodes: existing?.runtimeNodes,
+    // When the API explicitly returns null, it is authoritative: clear a
+    // stale browser-only project binding instead of hiding an ordinary
+    // conversation under a project group.  Only an omitted field preserves
+    // compatibility with older backends.
+    projectId: summary.project_id !== undefined ? summary.project_id ?? undefined : existing?.projectId,
+    localOnly: summary.local_only !== undefined ? summary.local_only : existing?.localOnly,
+    projectAvailable: summary.project_available !== undefined ? summary.project_available ?? undefined : existing?.projectAvailable,
   };
 }
 

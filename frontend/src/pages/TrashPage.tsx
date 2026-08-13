@@ -1,14 +1,17 @@
 import { Alert, App as AntApp, Button, Empty, List, Modal, Space, Typography } from "antd";
 import { DeleteOutlined, InfoCircleOutlined, UndoOutlined } from "@ant-design/icons";
 import type { Conversation } from "../types";
+import type { ProjectInfo } from "../api";
 
 interface Props {
   conversations: Conversation[];
+  projects?: ProjectInfo[];
   onRestore: (id: string) => void | Promise<void>;
   onDelete: (id: string) => void | Promise<void>;
+  onRestoreProject?: (id: string) => void | Promise<void>;
 }
 
-export default function TrashPage({ conversations, onRestore, onDelete }: Props) {
+export default function TrashPage({ conversations, projects = [], onRestore, onDelete, onRestoreProject }: Props) {
   const { modal } = AntApp.useApp();
   const confirmModal = modal && typeof modal.confirm === "function" ? modal.confirm.bind(modal) : Modal.confirm;
 
@@ -80,6 +83,25 @@ export default function TrashPage({ conversations, onRestore, onDelete }: Props)
           )}
         />
       )}
+      {projects.length > 0 ? (
+        <>
+          <Typography.Title level={3} style={{ marginTop: 32 }}>已移除项目</Typography.Title>
+          <List
+            bordered
+            dataSource={projects}
+            renderItem={(project) => (
+              <List.Item
+                key={project.project_id}
+                actions={[
+                  <Button key="restore" icon={<UndoOutlined />} onClick={() => void onRestoreProject?.(project.project_id)}>恢复项目</Button>,
+                ]}
+              >
+                <List.Item.Meta title={project.name} description={`${project.cwd} · ${project.conversation_count} 条本机对话`} />
+              </List.Item>
+            )}
+          />
+        </>
+      ) : null}
     </section>
   );
 }
