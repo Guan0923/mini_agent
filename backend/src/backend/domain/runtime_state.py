@@ -24,13 +24,17 @@ from threading import RLock
 from typing import Any, Literal, Protocol, TypeAlias
 from uuid import uuid4
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 DEFAULT_COMPACTION_RETENTION = 8
 
 NodeStatus: TypeAlias = Literal["failed", "success", "abort"]
 TerminalErrorCategory: TypeAlias = Literal["unknown", "tool", "agent", "user", "network"]
-NodeDataType: TypeAlias = Literal["message", "thinking_level_change", "model_change", "compaction"]
+NodeDataType: TypeAlias = Literal["message", "compaction"]
 MessageRole: TypeAlias = Literal["user", "assistant", "tool_result", "bash"]
+ReasoningEffort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max"]
+ThinkingMode: TypeAlias = Literal["enable", "disable"]
+PermissionMode: TypeAlias = Literal["approval_for_me", "full_access"]
+RunningMode: TypeAlias = Literal["agent", "plan"]
 ContentBlockType: TypeAlias = Literal[
     "text",
     "reasoning",
@@ -45,7 +49,20 @@ ContentBlockType: TypeAlias = Literal[
 ]
 
 NODE_STATUSES = frozenset({"failed", "success", "abort"})
-NODE_DATA_TYPES = frozenset({"message", "thinking_level_change", "model_change", "compaction"})
+NODE_DATA_TYPES = frozenset({"message", "compaction"})
+REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+THINKING_MODES = frozenset({"enable", "disable"})
+PERMISSION_MODES = frozenset({"approval_for_me", "full_access"})
+RUNNING_MODES = frozenset({"agent", "plan"})
+DEFAULT_MODEL: dict[str, Any] = {
+    "reasoning_effort": "medium",
+    "current_model": "unknown",
+    "context_length": 128000,
+    "output_length": 8192,
+    "thinking": "enable",
+    "temperature": 1.0,
+}
+USAGE_FIELDS = ("input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "total_tokens")
 CONTENT_BLOCK_TYPES = frozenset(
     {
         "text",
@@ -232,14 +249,6 @@ def terminal_error_text(error: Mapping[str, Any]) -> str:
     return f"{message}\n\nDetails: {detail}" if detail else message
 
 
-def change_payload(kind: Literal["thinking_level_change", "model_change"], **values: Any) -> dict[str, Any]:
-    """Build a validated model/thinking configuration node payload."""
-
-    if not values:
-        raise RuntimeStateValidationError(f"{kind} requires at least one value.")
-    return {"type": kind, **_json_safe(values, kind)}
-
-
 def compaction_payload(summary: str, *, source_ids: Sequence[str] = ()) -> dict[str, Any]:
     if not isinstance(summary, str):
         raise RuntimeStateValidationError("compaction summary must be a string.")
@@ -248,12 +257,23 @@ def compaction_payload(summary: str, *, source_ids: Sequence[str] = ()) -> dict[
     return {"type": "compaction", "summary": summary, "source_ids": list(source_ids)}
 
 
+def change_payload(kind: str, **values: Any) -> dict[str, Any]:
+    """Reject the removed configuration-node protocol explicitly.
+
+    Runtime configuration is now represented by top-level node fields.  The
+    name remains importable for older integrations so they receive a clear
+    protocol error instead of an import failure.
+    """
+
+    raise RuntimeStateValidationError(f"{kind!r} is no longer a RuntimeState data type; use top-level configuration fields.")
+
+
 def validate_data(data: Mapping[str, Any]) -> dict[str, Any]:
     """Validate a node's discriminated union and return a detached copy.
 
-    ``{}`` is accepted for a create placeholder.  A writer can fill it before
-    the final delete frame; completed domain entries should use one of the
-    four explicit types.
+    ``{}`` is accepted only for a create placeholder.  A writer fills it on
+    the dynamic copy before the terminal replacement; completed entries use
+    one of the two explicit types.
     """
 
     payload = _mapping(data, "data")
@@ -283,16 +303,6 @@ def validate_data(data: Mapping[str, Any]) -> dict[str, Any]:
         # Metadata is deliberately JSON-only, but never accept a second
         # provider wire payload under a message node.
         payload["message"] = message
-    elif data_type == "thinking_level_change":
-        if "level" not in payload and isinstance(payload.get("thinking_level"), str):
-            payload["level"] = payload["thinking_level"]
-        if not isinstance(payload.get("level"), str) or not payload["level"]:
-            raise RuntimeStateValidationError("thinking_level_change requires a non-empty level.")
-    elif data_type == "model_change":
-        if not isinstance(payload.get("model"), str) or not payload["model"]:
-            raise RuntimeStateValidationError("model_change requires a non-empty model.")
-        if "provider" in payload and not isinstance(payload["provider"], str):
-            raise RuntimeStateValidationError("model_change.provider must be a string.")
     elif data_type == "compaction":
         if "summary" not in payload:
             payload["summary"] = ""
@@ -318,6 +328,69 @@ def _normalize_cwd(cwd: str) -> str:
         raise RuntimeStateValidationError("cwd must be a valid path.") from exc
 
 
+def _normalize_model(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Validate the provider-neutral model snapshot stored on every node."""
+
+    raw = dict(DEFAULT_MODEL)
+    if value is not None:
+        supplied = _mapping(value, "model")
+        unknown = set(supplied) - set(DEFAULT_MODEL)
+        if unknown:
+            raise RuntimeStateValidationError(f"Unsupported model fields: {', '.join(sorted(unknown))}.")
+        raw.update(supplied)
+    else:
+        unknown = set()
+    effort = raw.get("reasoning_effort")
+    if effort not in REASONING_EFFORTS:
+        raise RuntimeStateValidationError("model.reasoning_effort must be low, medium, high, xhigh, or max.")
+    thinking = raw.get("thinking")
+    if thinking not in THINKING_MODES:
+        raise RuntimeStateValidationError("model.thinking must be enable or disable.")
+    if thinking == "disable":
+        # Keep the canonical field in the persisted snapshot for round-trip
+        # stability, but callers must omit reasoning_effort when constructing
+        # the provider request (the adapter enforces that boundary).
+        raw["reasoning_effort"] = effort
+    current_model = raw.get("current_model")
+    if not isinstance(current_model, str) or not current_model:
+        raise RuntimeStateValidationError("model.current_model must be a non-empty string.")
+    context_length = raw.get("context_length")
+    output_length = raw.get("output_length")
+    if isinstance(context_length, bool) or not isinstance(context_length, int) or context_length < 1:
+        raise RuntimeStateValidationError("model.context_length must be a positive integer.")
+    if isinstance(output_length, bool) or not isinstance(output_length, int) or output_length < 1:
+        raise RuntimeStateValidationError("model.output_length must be a positive integer.")
+    if context_length <= output_length:
+        raise RuntimeStateValidationError("model.context_length must be greater than model.output_length.")
+    temperature = raw.get("temperature")
+    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not 0 <= temperature <= 2:
+        raise RuntimeStateValidationError("model.temperature must be between 0 and 2.")
+    result = {
+        "reasoning_effort": effort,
+        "current_model": current_model,
+        "context_length": context_length,
+        "output_length": output_length,
+        "thinking": thinking,
+        "temperature": float(temperature),
+    }
+    return _json_safe(result, "model")
+
+
+def _normalize_usage(value: Mapping[str, Any] | None) -> dict[str, int | None]:
+    raw = {name: None for name in USAGE_FIELDS}
+    if value is not None:
+        supplied = _mapping(value, "usage")
+        unknown = set(supplied) - set(USAGE_FIELDS)
+        if unknown:
+            raise RuntimeStateValidationError(f"Unsupported usage fields: {', '.join(sorted(unknown))}.")
+        raw.update(supplied)
+    for name in USAGE_FIELDS:
+        item = raw[name]
+        if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0):
+            raise RuntimeStateValidationError(f"usage.{name} must be a non-negative integer or null.")
+    return {name: raw[name] for name in USAGE_FIELDS}
+
+
 @dataclass
 class RuntimeState:
     """One serializable node in the RuntimeState message tree.
@@ -336,14 +409,18 @@ class RuntimeState:
     first_kept_entry_id: str | None = None
     compaction_idx: str | None = None
     user: str = ""
-    provider: str = ""
+    provider_name: str = ""
+    model: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_MODEL))
+    permission_mode: PermissionMode = "approval_for_me"
+    running_mode: RunningMode = "agent"
+    usage: dict[str, int | None] = field(default_factory=lambda: {name: None for name in USAGE_FIELDS})
     cwd: str = ""
     timestamp: str = field(default_factory=utc_iso)
     status: NodeStatus = "failed"
     data: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for name in ("session_id", "parent_session_id", "id", "parent_id", "version", "user", "provider"):
+        for name in ("session_id", "parent_session_id", "id", "parent_id", "version", "user", "provider_name"):
             value = getattr(self, name)
             if not isinstance(value, str):
                 raise RuntimeStateValidationError(f"{name} must be a string.")
@@ -366,7 +443,15 @@ class RuntimeState:
         if parsed_timestamp.utcoffset() != timedelta(0):
             raise RuntimeStateValidationError("timestamp must be expressed in UTC.")
         object.__setattr__(self, "cwd", _normalize_cwd(self.cwd))
+        if not isinstance(self.permission_mode, str) or self.permission_mode not in PERMISSION_MODES:
+            raise RuntimeStateValidationError("permission_mode must be approval_for_me or full_access.")
+        if not isinstance(self.running_mode, str) or self.running_mode not in RUNNING_MODES:
+            raise RuntimeStateValidationError("running_mode must be agent or plan.")
+        object.__setattr__(self, "model", _normalize_model(self.model))
+        object.__setattr__(self, "usage", _normalize_usage(self.usage))
         object.__setattr__(self, "data", validate_data(self.data))
+        if not self.data and self.status != "failed":
+            raise RuntimeStateValidationError("A complete runtime node must contain message or compaction data.")
         if self.first_kept_entry_id in {None, ""}:
             object.__setattr__(self, "first_kept_entry_id", self.id)
         if self.compaction_idx in {None, ""}:
@@ -395,6 +480,16 @@ class RuntimeState:
     @property
     def key(self) -> tuple[str, str]:
         return self.session_id, self.id
+
+    @property
+    def provider(self) -> str:
+        """Compatibility accessor for internal adapters; the wire key is provider_name."""
+
+        return self.provider_name
+
+    @provider.setter
+    def provider(self, value: str) -> None:
+        self.provider_name = value
 
     @property
     def is_terminal(self) -> bool:
@@ -450,7 +545,11 @@ class RuntimeState:
             "firstKeptEntryId": self.firstKeptEntryId,
             "compactionIdx": self.compactionIdx,
             "user": self.user,
-            "provider": self.provider,
+            "provider_name": self.provider_name,
+            "model": _clone(self.model),
+            "permission_mode": self.permission_mode,
+            "running_mode": self.running_mode,
+            "usage": _clone(self.usage),
             "cwd": self.cwd,
             "timestamp": self.timestamp,
             "status": self.status,
@@ -474,7 +573,11 @@ class RuntimeState:
             "firstKeptEntryId",
             "compactionIdx",
             "user",
-            "provider",
+            "provider_name",
+            "model",
+            "permission_mode",
+            "running_mode",
+            "usage",
             "cwd",
             "timestamp",
             "status",
@@ -501,7 +604,11 @@ class RuntimeState:
             first_kept_entry_id=first_kept,
             compaction_idx=compaction,
             user=_string_field(raw, "user"),
-            provider=_string_field(raw, "provider"),
+            provider_name=_string_field(raw, "provider_name"),
+            model=_mapping(raw.get("model"), "model"),
+            permission_mode=raw.get("permission_mode", "approval_for_me"),  # type: ignore[arg-type]
+            running_mode=raw.get("running_mode", "agent"),  # type: ignore[arg-type]
+            usage=_mapping(raw.get("usage"), "usage"),
             cwd=_string_field(raw, "cwd"),
             timestamp=timestamp,
             status=raw.get("status", "failed"),  # type: ignore[arg-type]
@@ -517,7 +624,12 @@ class RuntimeState:
         parent_session_id: str | None = None,
         parent_id: str | None = None,
         user: str = "",
-        provider: str = "",
+        provider_name: str | None = None,
+        provider: str | None = None,
+        model: Mapping[str, Any] | None = None,
+        permission_mode: PermissionMode | None = None,
+        running_mode: RunningMode | None = None,
+        usage: Mapping[str, Any] | None = None,
         cwd: str = "",
         data: Mapping[str, Any] | None = None,
         first_kept_entry_id: str | None = None,
@@ -544,7 +656,15 @@ class RuntimeState:
             first_kept_entry_id=first_kept_entry_id,
             compaction_idx=compaction_idx,
             user=user,
-            provider=provider,
+            # ``provider_name`` is the public, persisted identity.  Keep the
+            # legacy ``provider`` keyword as a fallback for older adapters,
+            # but never let it overwrite an explicitly selected name (even
+            # when that explicit value is the empty placeholder identity).
+            provider_name=provider_name if provider_name is not None else (provider or ""),
+            model=dict(model or DEFAULT_MODEL),
+            permission_mode=permission_mode or "approval_for_me",
+            running_mode=running_mode or "agent",
+            usage=dict(usage or {name: None for name in USAGE_FIELDS}),
             cwd=cwd,
             timestamp=timestamp or utc_iso(),
             data=dict(data or {}),
@@ -715,7 +835,12 @@ class RuntimeStateTree:
         parent: RuntimeState | tuple[str, str] | None = None,
         data: Mapping[str, Any] | None = None,
         user: str | None = None,
+        provider_name: str | None = None,
         provider: str | None = None,
+        model: Mapping[str, Any] | None = None,
+        permission_mode: PermissionMode | None = None,
+        running_mode: RunningMode | None = None,
+        usage: Mapping[str, Any] | None = None,
         cwd: str | None = None,
         **kwargs: Any,
     ) -> RuntimeState:
@@ -728,7 +853,21 @@ class RuntimeStateTree:
             parent=parent_node,
             data=data,
             user=user if user is not None else (parent_node.user if parent_node else ""),
-            provider=provider if provider is not None else (parent_node.provider if parent_node else ""),
+            provider_name=(provider_name if provider_name is not None else provider)
+            if (provider_name is not None or provider is not None)
+            else (parent_node.provider_name if parent_node else ""),
+            model=model if model is not None else (parent_node.model if parent_node else None),
+            permission_mode=(
+                permission_mode
+                if permission_mode is not None
+                else (parent_node.permission_mode if parent_node else "approval_for_me")
+            ),
+            running_mode=(
+                running_mode if running_mode is not None else (parent_node.running_mode if parent_node else "agent")
+            ),
+            # Usage belongs to the node's own model turn; it is never copied
+            # from a parent message.
+            usage=usage,
             cwd=cwd if cwd is not None else (parent_node.cwd if parent_node else ""),
             **kwargs,
         )
@@ -746,7 +885,11 @@ class RuntimeStateTree:
             first_kept_entry_id=source_node.firstKeptEntryId,
             compaction_idx=source_node.compactionIdx,
             user=kwargs.pop("user", source_node.user),
-            provider=kwargs.pop("provider", source_node.provider),
+            provider_name=kwargs.pop("provider_name", kwargs.pop("provider", source_node.provider_name)),
+            model=kwargs.pop("model", source_node.model),
+            permission_mode=kwargs.pop("permission_mode", source_node.permission_mode),
+            running_mode=kwargs.pop("running_mode", source_node.running_mode),
+            usage=kwargs.pop("usage", None),
             cwd=kwargs.pop("cwd", source_node.cwd),
             **kwargs,
         )
@@ -781,7 +924,31 @@ class RuntimeStateTree:
         current = source if isinstance(source, RuntimeState) else self.get(*source)
         if not self.is_leaf(current.session_id, current.id):
             raise RuntimeStateValidationError("Compaction must start from a leaf node.")
-        path = self.ancestors(current.session_id, current.id)
+        # ``source`` may be the in-memory dynamic clone while the tree holds
+        # only its failed placeholder.  Build the ancestry from durable
+        # parent links and replace that identity before creating the summary;
+        # calling ``ancestors`` first would fail because the dynamic node is
+        # intentionally not inserted into the durable tree.
+        if isinstance(source, RuntimeState) and self.try_get(source.session_id, source.id) is None:
+            path: list[RuntimeState] = []
+            cursor = source.clone()
+            seen: set[tuple[str, str]] = set()
+            while True:
+                if cursor.key in seen:
+                    raise RuntimeStateValidationError("RuntimeState parent chain contains a cycle.")
+                seen.add(cursor.key)
+                path.append(cursor)
+                if not cursor.parent_id:
+                    break
+                parent = self.try_get(cursor.parent_session_id, cursor.parent_id)
+                if parent is None:
+                    break
+                cursor = parent
+            path.reverse()
+        else:
+            path = self.ancestors(current.session_id, current.id)
+            if isinstance(source, RuntimeState) and path and path[-1].key == source.key:
+                path[-1] = source.clone()
         kept = path[max(0, len(path) - retention)]
         old_compaction_index = next(
             (index for index, item in enumerate(path) if item.id == current.compactionIdx),
@@ -796,7 +963,11 @@ class RuntimeStateTree:
             parent=current,
             data=payload,
             user=kwargs.pop("user", current.user),
-            provider=kwargs.pop("provider", current.provider),
+            provider_name=kwargs.pop("provider_name", kwargs.pop("provider", current.provider_name)),
+            model=kwargs.pop("model", current.model),
+            permission_mode=kwargs.pop("permission_mode", current.permission_mode),
+            running_mode=kwargs.pop("running_mode", current.running_mode),
+            usage=kwargs.pop("usage", None),
             cwd=kwargs.pop("cwd", current.cwd),
             first_kept_entry_id=kept.id,
             compaction_idx=None,  # set to this node's id below
@@ -815,8 +986,52 @@ class RuntimeStateTree:
         are never deleted from the tree.
         """
 
+        # ``source`` is normally the dynamic sidecar created by ``NodeWriter``.
+        # The durable tree still contains a failed, empty placeholder with the
+        # same identity until the run commits.  Build the ancestry from the
+        # durable tree, then replace that one identity with the supplied
+        # dynamic copy before doing any compaction/window processing.
         current = source if isinstance(source, RuntimeState) else self.get(*source)
-        path = self.ancestors(current.session_id, current.id)
+        # The dynamic leaf is authoritative during a run.  A failed
+        # persistence placeholder with the same identity is never sent to a
+        # provider; callers may pass the dynamic copy directly.
+        if isinstance(source, RuntimeState) and self.try_get(source.session_id, source.id) is None:
+            # A caller may hold a dynamic sidecar before it has ever been
+            # inserted into a transient tree.  Walk its durable parent links
+            # from the tree and append the sidecar as the authoritative leaf.
+            path = []
+            cursor = source.clone()
+            seen: set[tuple[str, str]] = set()
+            while True:
+                if cursor.key in seen:
+                    raise RuntimeStateValidationError("RuntimeState parent chain contains a cycle.")
+                seen.add(cursor.key)
+                path.append(cursor)
+                if not cursor.parent_id:
+                    break
+                parent = self.try_get(cursor.parent_session_id, cursor.parent_id)
+                if parent is None:
+                    break
+                cursor = parent
+            path.reverse()
+        else:
+            path = self.ancestors(current.session_id, current.id)
+            if isinstance(source, RuntimeState) and path and path[-1].key == source.key:
+                path[-1] = source.clone()
+
+        # A fork can make a path cross sessions and malformed imports can
+        # contain the same identity more than once.  Provider context is a
+        # sequence, not a database dump: keep one entry per identity and let
+        # the dynamic source win over its persisted placeholder.
+        unique: dict[tuple[str, str], RuntimeState] = {}
+        for item in path:
+            unique[item.key] = item
+        path = list(unique.values())
+        # An unresolved failed placeholder has no message to send.  It is a
+        # recovery marker only; never expose its empty ``data`` object to a
+        # provider.  Standalone adapter calls retain their historical error
+        # rendering, while this model-context boundary drops the marker.
+        path = [item for item in path if item.data]
         compaction_positions = [i for i, item in enumerate(path) if item.data.get("type") == "compaction"]
         if not compaction_positions:
             return path
@@ -891,7 +1106,12 @@ class NodeWriter:
         parent_id: str = "",
         data: Mapping[str, Any] | None = None,
         user: str = "",
-        provider: str = "",
+        provider_name: str | None = None,
+        provider: str | None = None,
+        model: Mapping[str, Any] | None = None,
+        permission_mode: PermissionMode | None = None,
+        running_mode: RunningMode | None = None,
+        usage: Mapping[str, Any] | None = None,
         cwd: str = "",
         first_kept_entry_id: str | None = None,
         compaction_idx: str | None = None,
@@ -909,7 +1129,9 @@ class NodeWriter:
                 if compaction_idx is None:
                     compaction_idx = parent_node.compactionIdx
                 user = user or parent_node.user
-                provider = provider or parent_node.provider
+                if provider_name is None:
+                    provider_name = provider if provider is not None else parent_node.provider_name
+                provider = None
                 cwd = cwd or parent_node.cwd
             node = RuntimeState.create(
                 session_id=session_id,
@@ -921,13 +1143,32 @@ class NodeWriter:
                 compaction_idx=compaction_idx,
                 data=data,
                 user=user,
-                provider=provider,
+                # The compatibility ``provider`` keyword is only a fallback;
+                # a node's explicit provider_name remains authoritative.
+                provider_name=provider_name if provider_name is not None else (provider or ""),
+                model=model if model is not None else (parent_node.model if parent_node else None),
+                permission_mode=(
+                    permission_mode
+                    if permission_mode is not None
+                    else (parent_node.permission_mode if parent_node else "approval_for_me")
+                ),
+                running_mode=(
+                    running_mode if running_mode is not None else (parent_node.running_mode if parent_node else "agent")
+                ),
+                usage=usage,
                 cwd=cwd,
             )
             # Persistence receives only an empty failed placeholder.  The
             # fully populated copy is kept in the writer's dynamic sidecar
             # until the terminal delete atomically seals the leaf.
-            self.store.create_node(node.with_data({}))
+            placeholder = node.with_data({})
+            # A persisted placeholder is a recovery marker, not a partial
+            # provider accounting record.  It keeps the complete top-level
+            # runtime configuration so a crash can be resumed with the same
+            # provider/model/policy, while usage remains empty until the
+            # dynamic copy is atomically finalized.
+            placeholder.usage = {name: None for name in USAGE_FIELDS}
+            self.store.create_node(placeholder)
             self._dynamic[node.key] = node.clone()
             self.emit(NodeFrame("node.create", node.clone()))
             return node.clone()
@@ -945,6 +1186,11 @@ class NodeWriter:
         node_id: str,
         *,
         data: Mapping[str, Any] | None = None,
+        provider_name: str | None = None,
+        model: Mapping[str, Any] | None = None,
+        permission_mode: PermissionMode | None = None,
+        running_mode: RunningMode | None = None,
+        usage: Mapping[str, Any] | None = None,
         status: NodeStatus | None = None,
     ) -> RuntimeState:
         with self._lock:
@@ -953,6 +1199,26 @@ class NodeWriter:
                 raise RuntimeStateValidationError("Only a leaf dynamic node can be updated.")
             if data is not None:
                 node.data = validate_data(data)
+            if provider_name is not None:
+                if not isinstance(provider_name, str):
+                    raise RuntimeStateValidationError("provider_name must be a string.")
+                node.provider_name = provider_name
+            if model is not None:
+                # Runtime-config PATCH requests are partial.  Merge them with
+                # the dynamic node snapshot before validating so changing one
+                # field cannot reset the provider/model fields selected by the
+                # user earlier in the run.
+                node.model = _normalize_model({**node.model, **dict(model)})
+            if permission_mode is not None:
+                if permission_mode not in PERMISSION_MODES:
+                    raise RuntimeStateValidationError("permission_mode must be approval_for_me or full_access.")
+                node.permission_mode = permission_mode
+            if running_mode is not None:
+                if running_mode not in RUNNING_MODES:
+                    raise RuntimeStateValidationError("running_mode must be agent or plan.")
+                node.running_mode = running_mode
+            if usage is not None:
+                node.usage = _normalize_usage(usage)
             if status is not None:
                 if not isinstance(status, str) or status != "failed":
                     raise RuntimeStateValidationError(
@@ -965,6 +1231,28 @@ class NodeWriter:
 
     def update_data(self, node: RuntimeState, data: Mapping[str, Any]) -> RuntimeState:
         return self.update(node.session_id, node.id, data=data)
+
+    def update_config(
+        self,
+        node: RuntimeState,
+        *,
+        provider_name: str | None = None,
+        model: Mapping[str, Any] | None = None,
+        permission_mode: PermissionMode | None = None,
+        running_mode: RunningMode | None = None,
+        usage: Mapping[str, Any] | None = None,
+    ) -> RuntimeState:
+        """Apply a running configuration change to the dynamic leaf."""
+
+        return self.update(
+            node.session_id,
+            node.id,
+            provider_name=provider_name,
+            model=model,
+            permission_mode=permission_mode,
+            running_mode=running_mode,
+            usage=usage,
+        )
 
     def append_content(self, node: RuntimeState, block: Mapping[str, Any]) -> RuntimeState:
         """Append one canonical content block and emit a full replacement."""
@@ -1112,6 +1400,16 @@ __all__ = [
     "RuntimeState",
     "RuntimeStateTree",
     "RuntimeStateValidationError",
+    "DEFAULT_MODEL",
+    "PERMISSION_MODES",
+    "PermissionMode",
+    "REASONING_EFFORTS",
+    "ReasoningEffort",
+    "RUNNING_MODES",
+    "RunningMode",
+    "THINKING_MODES",
+    "ThinkingMode",
+    "USAGE_FIELDS",
     "change_payload",
     "compaction_payload",
     "message_payload",

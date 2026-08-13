@@ -66,6 +66,7 @@ class AgentRunner:
         workspace_root: str | None = None,
         subagents: object | None = None,
         resources: tuple[object, ...] = (),
+        provider_config_resolver=None,
     ) -> None:
         self.planner = planner
         self.tools = tools
@@ -74,6 +75,7 @@ class AgentRunner:
         self.workspace_root = workspace_root
         self.subagents = subagents
         self._resources = resources
+        self.provider_config_resolver = provider_config_resolver
         self._closed = False
         if max_actions is not None and max_tool_calls is not None:
             raise ValueError("max_actions and max_tool_calls cannot be used together.")
@@ -117,6 +119,13 @@ class AgentRunner:
             messages=list(messages or []),
             runtime_store=runtime_store,
         )
+        # ``mode`` is the initial runtime configuration for a new turn.  Keep
+        # it in the state snapshot as well as on ``RunState`` so the dynamic
+        # message-tree configuration and the legacy runner start from the same
+        # value.  Without this assignment the state default (``agent``) would
+        # overwrite an explicitly requested Plan run at dispatch time.
+        if mode in {"agent", "plan"}:
+            runtime.state.running_mode = mode
         history = runtime.state.messages
         turn_start_index = len(history)
         history.append(UserMessage(content=task))
@@ -161,6 +170,7 @@ class AgentRunner:
             runtime_store=runtime_store,  # type: ignore[arg-type]
             hooks=self.hooks,
             subagents=self.subagents,
+            provider_config_resolver=self.provider_config_resolver,
         )
         return AgentRuntime(state=state, services=services)
 
@@ -174,6 +184,7 @@ class AgentRunner:
         runtime.services.skill_auto_select = self.skill_auto_select
         runtime.services.hooks = self.hooks
         runtime.services.subagents = self.subagents
+        runtime.services.provider_config_resolver = self.provider_config_resolver
         runtime.state.runner_settings = self.settings
         return runtime
 
@@ -209,6 +220,12 @@ class AgentRunner:
         runtime.services.publish = RunEventPublisher(runtime)
         runtime.services.interrupt = runtime.services.interrupt or self._default_interrupt(runtime)
         run = runtime.run
+        # The active dynamic node is the authoritative workflow mode.  A
+        # running PATCH may change it between model/tool decision boundaries;
+        # refresh the RunState mode before routing so prompt/tool selection
+        # observes the same value that is exposed at the node top level.
+        if runtime.state.running_mode in {"agent", "plan"}:
+            run.mode = runtime.state.running_mode  # type: ignore[assignment]
         run.history = runtime.state.messages
         publish = runtime.services.publish
         context = RunHookContext(RunHookInfo(runtime.state.session_id, run.run_id, run.task, run.mode))
@@ -267,6 +284,7 @@ class AgentRunner:
             self._reactive.run(runtime)
 
     def _dispatch(self, runtime: AgentRuntime) -> None:
+        runtime.apply_pending_runtime_config()
         runtime.run.add_event("run_started", "Run started")
         assert runtime.services.publish is not None
         settings = runtime.state.runner_settings

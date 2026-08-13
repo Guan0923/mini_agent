@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 from backend.domain import RunProvenance, Session, new_run_id
-from backend.domain.state import utc_now
+from backend.domain.runtime_state import NodeWriter, message_payload
 from backend.runtime.core.context import text_messages
 
 from .codec import decode_runtime_state
@@ -50,39 +50,116 @@ class SQLiteForkMixin:
         # source session has been archived or soft-deleted.
         for summary in self.list_sessions(state="all"):
             with self._connection(summary.session_id) as source:
-                row = source.execute("SELECT status, state_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
+                row = source.execute(
+                    "SELECT s.status, s.task, r.state_json FROM session_runs AS s "
+                    "LEFT JOIN runs AS r ON r.run_id=s.run_id WHERE s.run_id=?",
+                    (run_id,),
+                ).fetchone()
             if row is None:
                 continue
             if row[0] == "running":
                 raise ValueError("A running run cannot be forked.")
-            state = decode_runtime_state(str(row[1]))
-            if state.current_run is None:
-                raise ValueError("Run snapshot cannot be forked.")
+            nodes = self.load_nodes(summary.session_id)
+            if not nodes:
+                # A v4 database can still contain a run created by a legacy
+                # embedding caller that has not emitted a message-tree node.
+                # Keep that run forkable through the non-authoritative
+                # execution projection; newly-created conversations always
+                # use the node path below.
+                if row[2] is None:
+                    raise ValueError("Session has no RuntimeState nodes to fork.")
+                state = decode_runtime_state(str(row[2]))
+                if state.current_run is None:
+                    raise ValueError("Run snapshot cannot be forked.")
+                target = self.create_session(f"Fork: {summary.title}", local_only=summary.local_only)
+                state.session_id = target.session_id
+                state.current_run.run_id = new_run_id()
+                state.current_run.provenance = RunProvenance(
+                    workflow_id=state.current_run.provenance.workflow_id,
+                    trigger="legacy",
+                    source_session_id=summary.session_id,
+                    source_run_id=run_id,
+                )
+                self.start_turn(
+                    target.session_id,
+                    state.current_run.run_id,
+                    state.current_run.task,
+                    state.current_run.provenance,
+                    append_user_message=False,
+                )
+                try:
+                    # Legacy embedding callers may have persisted only the
+                    # execution projection.  Rebuild its text transcript as
+                    # canonical v4 nodes before saving the fork.  The target
+                    # starts a new tree: there is no source node to reference
+                    # and no legacy row is allowed to become model context.
+                    writer = NodeWriter(self)
+                    parent = None
+                    for item in text_messages(state.messages):
+                        node = writer.create(
+                            session_id=target.session_id,
+                            parent=parent,
+                            data=message_payload(item["role"], item["content"]),
+                            provider_name=state.provider_name or state.provider,
+                            model=state.model_snapshot,
+                            permission_mode=state.permission_mode,
+                            running_mode=state.running_mode,
+                            cwd=state.workspace_root or "",
+                        )
+                        parent = writer.delete(node.session_id, node.id)
+                    self._save_state(state, "forked")
+                    self.paths.ensure_session(target.session_id)
+                    _copy_tree_without_symlinks(
+                        self.paths.session_workspace(summary.session_id),
+                        self.paths.session_workspace(target.session_id),
+                    )
+                    _copy_tree_without_symlinks(
+                        self.paths.session_uploads(summary.session_id),
+                        self.paths.session_uploads(target.session_id),
+                    )
+                except Exception:
+                    shutil.rmtree(self.paths.session_root(target.session_id), ignore_errors=True)
+                    raise
+                return target
+            source_leaf = max(nodes, key=lambda item: (item.timestamp, item.id))
             target = self.create_session(f"Fork: {summary.title}", local_only=summary.local_only)
-            state.session_id = target.session_id
-            state.current_run.run_id = new_run_id()
-            state.current_run.provenance = RunProvenance(
-                workflow_id=state.current_run.provenance.workflow_id,
+            writer = NodeWriter(self)
+            root = writer.create(
+                session_id=target.session_id,
+                parent=(source_leaf.session_id, source_leaf.id),
+                data=source_leaf.data,
+                user=source_leaf.user,
+                provider_name=source_leaf.provider_name,
+                model=source_leaf.model,
+                permission_mode=source_leaf.permission_mode,
+                running_mode=source_leaf.running_mode,
+                cwd=source_leaf.cwd,
+                first_kept_entry_id=source_leaf.firstKeptEntryId,
+                compaction_idx=source_leaf.compactionIdx,
+            )
+            writer.delete(root.session_id, root.id)
+            new_id = new_run_id()
+            provenance = RunProvenance(
+                workflow_id=new_id,
                 trigger="legacy",
                 source_session_id=summary.session_id,
                 source_run_id=run_id,
             )
             self.start_turn(
                 target.session_id,
-                state.current_run.run_id,
-                state.current_run.task,
-                state.current_run.provenance,
+                new_id,
+                str(row[1]),
+                provenance,
                 append_user_message=False,
             )
-            with self._connection(target.session_id) as connection:
-                timestamp = utc_now()
-                for message in text_messages(state.messages):
-                    connection.execute(
-                        "INSERT INTO session_messages(run_id,role,content,created_at) VALUES (?,?,?,?)",
-                        (state.current_run.run_id, message["role"], message["content"], timestamp),
-                    )
+            if row[2] is not None:
+                state = decode_runtime_state(str(row[2]))
+                if state.current_run is not None:
+                    state.session_id = target.session_id
+                    state.current_run.run_id = new_id
+                    state.current_run.provenance = provenance
+                    self._save_state(state, "forked")
             try:
-                self._save_state(state, "forked")
                 self.paths.ensure_session(target.session_id)
                 if not summary.local_only:
                     _copy_tree_without_symlinks(

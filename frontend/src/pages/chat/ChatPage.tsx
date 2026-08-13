@@ -4,6 +4,7 @@ import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
   compactSession,
   listSkills,
+  patchRuntimeConfig,
   streamChat,
   streamResume,
   submitDecision,
@@ -24,6 +25,8 @@ import type {
   Page,
   PermissionMode,
   ReasoningEffort,
+  RuntimeNodeModel,
+  RuntimeStateNode,
   StreamMessage,
 } from "../../types";
 
@@ -60,8 +63,19 @@ interface ChatRunRequest {
   mode: ChatMode;
   permissionMode: PermissionMode;
   reasoningEffort: ReasoningEffort;
+  providerName?: string;
+  model?: RuntimeNodeModel;
   sourceNodeId?: string;
 }
+
+const DEFAULT_RUNTIME_MODEL: RuntimeNodeModel = {
+  reasoning_effort: "medium",
+  current_model: "unknown",
+  context_length: 128000,
+  output_length: 8192,
+  thinking: "enable",
+  temperature: 1,
+};
 
 function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
   return ref?.resizableTextArea?.textArea ?? null;
@@ -93,6 +107,8 @@ export default function ChatPage({
   const [localBusy, setLocalBusy] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("approval_for_me");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
+  const [providerName, setProviderName] = useState("unknown");
+  const [runtimeModel, setRuntimeModel] = useState<RuntimeNodeModel>(DEFAULT_RUNTIME_MODEL);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [openSettingsSelect, setOpenSettingsSelect] = useState<SettingsSelectKey | null>(null);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
@@ -111,9 +127,67 @@ export default function ChatPage({
   const commandMenuVisible = !busy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
   const display = configuredDisplayMode ?? "medium";
 
+  const activeRuntimeNode = (() => {
+    const nodes = conversation?.runtimeNodes ?? [];
+    if (!nodes.length) return undefined;
+    if (conversation?.lastNodeId) {
+      const selected = nodes.find((node) => node.id === conversation.lastNodeId && node.session_id === conversation.sessionId);
+      if (selected) return selected;
+    }
+    const sorted = [...nodes].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
+    return sorted[sorted.length - 1];
+  })();
+
   useEffect(() => {
-    if (busy) setOpenSettingsSelect(null);
-  }, [busy]);
+    const node = activeRuntimeNode;
+    if (!node) return;
+    setProviderName(node.provider_name || "unknown");
+    setRuntimeModel({ ...DEFAULT_RUNTIME_MODEL, ...node.model });
+    setPermissionMode(node.permission_mode);
+    setReasoningEffort(node.model.reasoning_effort);
+    if (node.running_mode !== mode) onModeChange(node.running_mode);
+  }, [activeRuntimeNode?.id, activeRuntimeNode?.provider_name, activeRuntimeNode?.model, activeRuntimeNode?.permission_mode, activeRuntimeNode?.running_mode]);
+
+  function nearestUsage(node: RuntimeStateNode | undefined): { total: number; context: number } | undefined {
+    if (!node) return undefined;
+    const nodes = conversation?.runtimeNodes ?? [];
+    const byKey = new Map(nodes.map((item) => [`${item.session_id}:${item.id}`, item] as const));
+    let current: RuntimeStateNode | undefined = node;
+    const seen = new Set<string>();
+    while (current && !seen.has(`${current.session_id}:${current.id}`)) {
+      seen.add(`${current.session_id}:${current.id}`);
+      const total = current.usage?.total_tokens;
+      const context = current.model?.context_length;
+      if (typeof total === "number" && typeof context === "number" && context > 0) return { total, context };
+      current = current.parent_id ? byKey.get(`${current.parent_session_id}:${current.parent_id}`) : undefined;
+    }
+    return undefined;
+  }
+
+  const activeUsage = nearestUsage(activeRuntimeNode);
+  const usagePercent = activeUsage ? Math.max(0, Math.min(100, (activeUsage.total / activeUsage.context) * 100)) : 0;
+  const requestProviderName = providerName && providerName !== "unknown" ? providerName : undefined;
+  const requestModel = runtimeModel.current_model && runtimeModel.current_model !== "unknown" ? runtimeModel : undefined;
+
+  async function updateRuntimeConfig(patch: {
+    provider_name?: string;
+    model?: Partial<RuntimeNodeModel>;
+    permission_mode?: PermissionMode;
+    running_mode?: ChatMode;
+  }) {
+    if (!conversation?.sessionId || !activeRuntimeNode) return;
+    try {
+      await patchRuntimeConfig(conversation.sessionId, {
+        node_id: activeRuntimeNode.id,
+        provider_name: patch.provider_name,
+        model: patch.model,
+        permission_mode: patch.permission_mode,
+        running_mode: patch.running_mode,
+      });
+    } catch (error) {
+      setLast({ error: `运行配置更新失败：${String((error as Error).message ?? error)}` });
+    }
+  }
 
   useEffect(() => {
     if (pendingCaretRef.current !== null) {
@@ -254,8 +328,11 @@ export default function ChatPage({
               permissionMode,
               reasoningEffort,
               resumeSourceNodeId,
+              requestProviderName,
+              requestModel,
+              mode,
             )
-          : await streamResume(sessionId, onMessage, controller.signal, permissionMode, reasoningEffort);
+          : await streamResume(sessionId, onMessage, controller.signal, permissionMode, reasoningEffort, undefined, requestProviderName, requestModel, mode);
         if (result === "aborted") setLast({
           running: false,
           status: "已停止",
@@ -281,9 +358,14 @@ export default function ChatPage({
         const chatSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
         const options = chatSourceNodeId
           ? (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, reasoningEffort, sourceNodeId: chatSourceNodeId }
-            : { sessionId, sourceNodeId: chatSourceNodeId })
-          : (enhancedChatOptions ? { sessionId, mode, permissionMode, reasoningEffort } : sessionId);
+            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId }
+            : { sessionId, sourceNodeId: chatSourceNodeId, providerName: requestProviderName, model: requestModel, mode, permissionMode, reasoningEffort })
+          // An empty tree has no dynamic runtime configuration to submit. Keep
+          // the stable positional call for clients embedding ChatPage while
+          // all established sessions use the explicit v0.3 config object.
+          : (enhancedChatOptions
+            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel }
+            : sessionId);
         const result = await streamChat(
           prompt ?? "",
           onMessage,
@@ -335,6 +417,8 @@ export default function ChatPage({
         mode,
         permissionMode,
         reasoningEffort,
+        providerName: requestProviderName,
+        model: requestModel,
         sourceNodeId: sourceNodeId ?? undefined,
       });
       return;
@@ -583,6 +667,11 @@ export default function ChatPage({
         mode={mode}
         permissionMode={permissionMode}
         reasoningEffort={reasoningEffort}
+        providerName={providerName}
+        currentModel={runtimeModel.current_model}
+        usagePercent={usagePercent}
+        usageTotalTokens={activeUsage?.total ?? null}
+        usageContextLength={activeUsage?.context}
         openSettingsSelect={openSettingsSelect}
         settingsOpen={settingsOpen}
         taRef={taRef}
@@ -590,9 +679,11 @@ export default function ChatPage({
         onKeyDown={handleComposerKeyDown}
         onComplete={completeCommand}
         onActiveCommandChange={setActiveCommandIndex}
-        onModeChange={(value) => { onModeChange(value); setOpenSettingsSelect(null); }}
-        onPermissionChange={(value) => { setPermissionMode(value); setOpenSettingsSelect(null); }}
-        onReasoningChange={(value) => { setReasoningEffort(value); setOpenSettingsSelect(null); }}
+        onModeChange={(value) => { onModeChange(value); void updateRuntimeConfig({ running_mode: value }); setOpenSettingsSelect(null); }}
+        onPermissionChange={(value) => { setPermissionMode(value); void updateRuntimeConfig({ permission_mode: value }); setOpenSettingsSelect(null); }}
+        onReasoningChange={(value) => { setReasoningEffort(value); setRuntimeModel((current) => ({ ...current, reasoning_effort: value })); void updateRuntimeConfig({ model: { reasoning_effort: value } }); setOpenSettingsSelect(null); }}
+        onProviderChange={(value) => { setProviderName(value); void updateRuntimeConfig({ provider_name: value }); }}
+        onModelChange={(value) => { setRuntimeModel((current) => ({ ...current, current_model: value })); void updateRuntimeConfig({ model: { current_model: value } }); }}
         onSettingsSelectChange={setOpenSettingsSelect}
         onOpenSettings={() => setSettingsOpen(true)}
         onCloseSettings={() => setSettingsOpen(false)}

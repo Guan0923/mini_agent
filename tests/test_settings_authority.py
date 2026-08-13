@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from backend.configuration import UserConfigStore
 from backend.domain import SystemMessage, ToolSpec, UserMessage
 from backend.providers import (
@@ -195,3 +196,33 @@ def test_legacy_preferences_fill_an_empty_database_field_without_overwriting_nam
 
     reopened = UserSettingsStore(root / "user.db")
     assert reopened.profile_for_user(user_id) == {"display_name": "自定义名", "agent_preferences": "旧偏好"}
+
+def test_provider_names_are_case_insensitive_unique_and_renamable(tmp_path) -> None:
+    user_id = str(uuid4())
+    store = UserSettingsStore(tmp_path / user_id / "user.db")
+    first = store.update_provider_config(
+        user_id,
+        {
+            "provider_name": "Work-OpenAI",
+            "provider": "openai",
+            "base_url": "https://example.test/v1",
+            "model": "demo",
+            "api_key": "secret-key",
+        },
+    )
+    second = store.add_provider_config(
+        user_id,
+        {
+            "provider_name": "Anthropic-Work",
+            "provider": "anthropic",
+            "base_url": "https://anthropic.test/v1",
+            "model": "claude",
+        },
+    )
+
+    with pytest.raises(ValueError, match="already exists"):
+        store.update_provider_config_by_id(user_id, second["id"], {"provider_name": "work-openai"})
+
+    renamed = store.update_provider_config_by_id(user_id, first["id"], {"provider_name": "work-openai-v2"})
+    assert renamed["provider_name"] == "work-openai-v2"
+    assert store.model_config_for_provider_name(user_id, "WORK-OPENAI-V2").model == "demo"

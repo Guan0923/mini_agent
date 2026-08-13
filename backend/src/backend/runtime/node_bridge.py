@@ -19,13 +19,15 @@ from backend.domain.runtime_state import (
     NodeWriter,
     RuntimeNodeStore,
     RuntimeState,
+    RuntimeStateTree,
+    RuntimeStateValidationError,
     TerminalErrorCategory,
-    change_payload,
     compaction_payload,
     message_payload,
     terminal_error_payload,
     terminal_error_text,
 )
+from backend.providers.token_usage import normalize_provider_usage
 
 _NETWORK_ERROR_TYPES = frozenset(
     {
@@ -63,7 +65,11 @@ class RuntimeEventNodeBridge:
         source_node_id: str | None = None,
         user: str = "",
         provider: str = "unknown",
+        provider_name: str | None = None,
         model: str = "unknown",
+        model_config: Mapping[str, Any] | None = None,
+        permission_mode: str = "approval_for_me",
+        running_mode: str = "agent",
         cwd: str = "",
         thinking_level: str = "medium",
         emit: Callable[[NodeFrame], None],
@@ -73,8 +79,22 @@ class RuntimeEventNodeBridge:
         self.prompt = prompt
         self.source_node_id = source_node_id
         self.user = user
+        # ``provider_name`` is the user-owned configuration identity.  Keep
+        # the internal adapter kind in ``provider`` so a named configuration
+        # such as ``work-openai`` never masquerades as a protocol provider.
+        self.provider_name = provider_name or provider or "unknown"
         self.provider = provider or "unknown"
         self.model = model or "unknown"
+        snapshot = dict(model_config or {})
+        snapshot.setdefault("current_model", self.model)
+        snapshot.setdefault("reasoning_effort", thinking_level or "medium")
+        snapshot.setdefault("thinking", "enable")
+        snapshot.setdefault("context_length", 128000)
+        snapshot.setdefault("output_length", 8192)
+        snapshot.setdefault("temperature", 1.0)
+        self.model_config = snapshot
+        self.permission_mode = permission_mode
+        self.running_mode = running_mode
         self.cwd = cwd
         self.thinking_level = thinking_level or "medium"
         self.writer = NodeWriter(store, emit=emit)
@@ -87,8 +107,199 @@ class RuntimeEventNodeBridge:
         self.abort_category: TerminalErrorCategory | None = None
         self.abort_code = ""
         self.terminal_error: dict[str, str] | None = None
+        # ``True`` means the dynamic copy could not be atomically sealed.  The
+        # durable failed placeholder is intentionally left untouched so a
+        # subsequent resume can recover the turn without pretending that the
+        # streamed contents were durably committed.
+        self.persistence_failed = False
         self.started = False
         self.closed = False
+        self.runtime = None
+
+    def bind_runtime(self, runtime: Any) -> None:
+        """Connect the node bridge to the ephemeral AgentRuntime sidecar."""
+
+        self.runtime = runtime
+        runtime.state.provider_name = self.provider_name
+        runtime.state.provider = self.provider
+        runtime.state.model = str(self.model_config.get("current_model") or self.model)
+        runtime.state.model_snapshot = dict(self.model_config)
+        runtime.state.permission_mode = self.permission_mode
+        runtime.state.running_mode = self.running_mode
+        # Model requests must read the canonical path, not the legacy
+        # RuntimeState.messages transcript.  The callback is intentionally
+        # lazy: the dynamic assistant sidecar changes while a response/tool
+        # call is in flight and every subsequent boundary must observe it.
+        runtime.services.runtime_node_context = self.model_context
+
+    def model_context(self) -> list[RuntimeState]:
+        """Return durable ancestors plus the authoritative dynamic leaf."""
+
+        current = self._dynamic_current() or self.last_node
+        if current is None:
+            return []
+        path = self._ancestor_path(current)
+        dynamic = self._dynamic_current() or self.last_node
+        if dynamic is not None:
+            for index, item in enumerate(path):
+                if item.key == dynamic.key:
+                    path[index] = dynamic.clone()
+                    break
+            else:
+                path.append(dynamic.clone())
+        # The same identity can occur as a persisted failed placeholder and a
+        # dynamic sidecar.  Keep one entry and let the sidecar win.
+        unique: dict[tuple[str, str], RuntimeState] = {}
+        for item in path:
+            unique[item.key] = item
+        # Reuse the domain compaction/window algorithm so an automatic or
+        # manual summary node supersedes older raw ancestors consistently for
+        # every provider protocol.
+        values = list(unique.values())
+        try:
+            context = RuntimeStateTree(values).model_input(dynamic)
+        except (KeyError, RuntimeError, ValueError):
+            context = values
+        result: list[RuntimeState] = []
+        for item in context:
+            if not item.data:
+                continue
+            # The assistant placeholder exists so a running PATCH has a
+            # dynamic target, but an empty assistant message is not a model
+            # turn and must not be serialized into the next request.
+            if item.data.get("type") == "message":
+                message = item.data.get("message")
+                if (
+                    isinstance(message, Mapping)
+                    and message.get("role") == "assistant"
+                    and not message.get("content")
+                    and not message.get("error")
+                ):
+                    continue
+            result.append(item)
+        return result
+
+    def _dynamic_current(self) -> RuntimeState | None:
+        """Read the mutable assistant sidecar after a writer update."""
+
+        if self.assistant is None:
+            return None
+        try:
+            return self.writer.current(self.assistant.session_id, self.assistant.id)
+        except KeyError:
+            return self.assistant.clone()
+
+    @staticmethod
+    def _usage_snapshot(raw: Mapping[str, Any]) -> dict[str, int | None]:
+        """Map provider-specific usage keys to the five node fields."""
+        return normalize_provider_usage(raw)
+
+    def _apply_usage(self, raw: Any) -> None:
+        if not isinstance(raw, Mapping):
+            return
+        target = self.assistant
+        if target is None:
+            return
+        # A provider may report usage in more than one event (for example a
+        # streamed response followed by a final response envelope).  Merge
+        # only fields that are actually known so a later partial payload never
+        # erases an earlier authoritative value with null.
+        normalized = self._usage_snapshot(raw)
+        current = self.writer.current(target.session_id, target.id).usage
+        merged = {
+            key: (value if value is not None else current.get(key))
+            for key, value in normalized.items()
+        }
+        self.writer.update_config(target, usage=merged)
+
+    def apply_runtime_config(self, config: Mapping[str, Any]) -> RuntimeState | None:
+        """Apply the latest user-selected config at a safe event boundary."""
+
+        # Stage and validate the whole candidate before mutating either the
+        # bridge or the dynamic node.  A malformed partial PATCH must be
+        # atomic: it cannot poison the bridge's next-boundary configuration.
+        raw_provider = config.get("provider_name")
+        if raw_provider is not None and (not isinstance(raw_provider, str) or not raw_provider.strip()):
+            raise RuntimeStateValidationError("provider_name must be a non-empty string.")
+        candidate_provider_name = self.provider_name if raw_provider is None else str(raw_provider).strip()
+        provider_changed = candidate_provider_name.casefold() != self.provider_name.casefold()
+        candidate_model = dict(self.model_config)
+        if provider_changed:
+            # A provider name identifies a complete saved configuration.  Do
+            # not carry model limits or thinking settings across a switch,
+            # even for an embedding caller without an authenticated resolver.
+            candidate_model = {
+                "reasoning_effort": "medium",
+                "current_model": "unknown",
+                "context_length": 128000,
+                "output_length": 8192,
+                "thinking": "enable",
+                "temperature": 1.0,
+            }
+            resolver = getattr(getattr(self.runtime, "services", None), "provider_config_resolver", None)
+            if callable(resolver):
+                resolved = resolver(candidate_provider_name)
+                candidate_model.update(
+                    {
+                        "current_model": getattr(resolved, "model", None) or "unknown",
+                        "context_length": int(getattr(resolved, "context_size", None) or 128000),
+                        "output_length": int(getattr(resolved, "max_tokens", None) or 8192),
+                    }
+                )
+        if isinstance(config.get("model"), Mapping):
+            candidate_model.update(dict(config["model"]))
+        candidate_permission = (
+            self.permission_mode
+            if config.get("permission_mode") is None
+            else str(config["permission_mode"])
+        )
+        candidate_running = self.running_mode if config.get("running_mode") is None else str(config["running_mode"])
+        if candidate_permission not in {"approval_for_me", "full_access"}:
+            raise RuntimeStateValidationError("permission_mode must be approval_for_me or full_access.")
+        if candidate_running not in {"agent", "plan"}:
+            raise RuntimeStateValidationError("running_mode must be agent or plan.")
+        updated: RuntimeState | None = self.last_node
+        if self.assistant is not None:
+            updated = self.writer.update_config(
+                self.assistant,
+                provider_name=candidate_provider_name,
+                model=candidate_model,
+                permission_mode=candidate_permission,
+                running_mode=candidate_running,
+            )
+        else:
+            # Before ``start`` there is no dynamic leaf to update.  Construct a
+            # throwaway domain node solely to apply the same protocol checks.
+            RuntimeState.create(
+                session_id=self.session_id,
+                provider_name=candidate_provider_name,
+                model=candidate_model,
+                permission_mode=candidate_permission,
+                running_mode=candidate_running,
+            )
+        self.provider_name = candidate_provider_name
+        # Keep a detached, fully validated snapshot on the bridge.  A caller
+        # may mutate the PATCH dictionary after this method returns.
+        self.model_config = dict(updated.model) if updated is not None else dict(candidate_model)
+        self.model = str(candidate_model.get("current_model") or self.model)
+        self.permission_mode = candidate_permission
+        self.running_mode = candidate_running
+        if self.runtime is not None:
+            # PATCH requests carry partial fields.  Keep a merged pending
+            # snapshot so two quick updates (for example reasoning followed by
+            # permission) cannot cause the first update to disappear before
+            # the next model/tool boundary consumes it.
+            pending = dict(self.runtime.services.pending_runtime_config or {})
+            pending_model = pending.get("model")
+            incoming_model = config.get("model")
+            if isinstance(pending_model, Mapping) or isinstance(incoming_model, Mapping):
+                pending["model"] = {
+                    **(dict(pending_model) if isinstance(pending_model, Mapping) else {}),
+                    **(dict(incoming_model) if isinstance(incoming_model, Mapping) else {}),
+                }
+            pending.update({key: value for key, value in config.items() if key != "model"})
+            self.runtime.services.pending_runtime_config = pending
+        return updated
 
     def start(self) -> RuntimeState:
         if self.started:
@@ -112,42 +323,43 @@ class RuntimeEventNodeBridge:
                     leaves = [item for item in existing if (item.session_id, item.id) not in parent_keys]
                     if leaves:
                         self.parent = max(leaves, key=lambda item: (item.timestamp, item.id))
+        # A continuation request may carry the dynamic leaf id while the
+        # durable database still contains only its failed placeholder.  The
+        # placeholder is intentionally used as the parent reference; its
+        # contents are replaced by the writer's dynamic copy at the next
+        # provider boundary and are never sent as an empty message.
         if self.parent is not None and self.store.list_children(self.parent.session_id, self.parent.id):
             raise ValueError("The continuation parent must be a leaf node.")
         if self.parent is None and self.source_node_id is None:
-            # A new session records configuration changes before its first
-            # user message.  Existing sessions keep their current pointers.
-            model_node = self.writer.create(
-                session_id=self.session_id,
-                data=change_payload("model_change", model=self.model, provider=self.provider),
-                user=self.user,
-                provider=self.provider,
-                cwd=self.cwd,
-            )
-            self.writer.delete(model_node.session_id, model_node.id)
-            thinking_node = self.writer.create(
-                session_id=self.session_id,
-                parent=model_node,
-                data=change_payload("thinking_level_change", level=self.thinking_level),
-            )
-            self.writer.delete(thinking_node.session_id, thinking_node.id)
-            self.parent = thinking_node
+            # Configuration is part of the user node now; no synthetic change
+            # nodes are written into the history.
+            self.parent = None
         if self.parent is not None and not self.prompt:
             # ``/resume`` has no new user text.  Continue directly from the
             # paused/failed leaf instead of persisting an empty user message.
+            # Resume configuration is represented by the next assistant node;
+            # avoid mutating a sealed historical parent.
             self.last_node = self.parent
             self.started = True
+            self._ensure_assistant()
             return self.last_node
         user_node = self.writer.create(
             session_id=self.session_id,
             parent=self.parent,
             data=message_payload("user", self.prompt),
             user=self.user,
-            provider=self.provider,
+            provider_name=self.provider_name,
+            model=self.model_config,
+            permission_mode=self.permission_mode,
+            running_mode=self.running_mode,
             cwd=self.cwd,
         )
         self.last_node = self.writer.delete(user_node.session_id, user_node.id)
         self.started = True
+        # Create the assistant sidecar before the first provider boundary so
+        # runtime-config updates always target a dynamic leaf.  Its durable
+        # placeholder is filtered from model context until it has content.
+        self._ensure_assistant()
         return self.last_node
 
     def _ensure_assistant(self) -> RuntimeState:
@@ -157,7 +369,10 @@ class RuntimeEventNodeBridge:
                 parent=self.last_node,
                 data=message_payload("assistant", [], **({"run_id": self.run_id} if self.run_id else {})),
                 user=self.user,
-                provider=self.provider,
+                provider_name=self.provider_name,
+                model=self.model_config,
+                permission_mode=self.permission_mode,
+                running_mode=self.running_mode,
                 cwd=self.cwd,
             )
             self.assistant_blocks = []
@@ -344,6 +559,56 @@ class RuntimeEventNodeBridge:
         self.closed = False
         self.start()
 
+    def begin_turn(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        running_mode: str | None = None,
+    ) -> None:
+        """Start a fresh canonical turn after a workflow handoff.
+
+        A plan review and its Agent implementation may share one SSE bridge.
+        The normal ``response_start`` session-switch path is too late for a
+        same-session handoff and would otherwise append the implementation
+        answer to the plan assistant sidecar.  Seal the previous dynamic leaf
+        first, reset the per-turn projection, and create a new user/assistant
+        pair before the next execution boundary.
+        """
+
+        if self.closed:
+            raise RuntimeError("Cannot begin a turn on a closed node bridge.")
+        if running_mode is not None:
+            if running_mode not in {"agent", "plan"}:
+                raise RuntimeStateValidationError("running_mode must be agent or plan.")
+            self.running_mode = running_mode
+        if self.assistant is not None:
+            self._seal_assistant("success")
+        emit = self.writer.emit
+        same_session = session_id == self.session_id
+        if not same_session:
+            self.writer = NodeWriter(self.store, emit=emit)
+            self.parent = None
+        else:
+            # ``_seal_assistant`` leaves ``last_node`` as the new durable
+            # parent, which is exactly what a same-session continuation needs.
+            self.parent = self.last_node
+        self.session_id = session_id
+        self.prompt = prompt
+        self.source_node_id = None
+        self.assistant = None
+        self.last_node = self.parent if same_session else None
+        self.assistant_blocks = []
+        self.response_text = ""
+        self.run_id = ""
+        self.abort_category = None
+        self.abort_code = ""
+        self.terminal_error = None
+        self.persistence_failed = False
+        self.started = False
+        self.closed = False
+        self.start()
+
     def handle(self, event: Any) -> None:
         if self.closed or not self.started:
             return
@@ -357,7 +622,19 @@ class RuntimeEventNodeBridge:
             self._switch_session(event_session_id, str(data.get("task") or self.prompt))
         if isinstance(data.get("run_id"), str) and data["run_id"]:
             self.run_id = str(data["run_id"])
-        if kind in {"response_start", "thinking_start"}:
+        # Runtime configuration events are intentionally top-level updates on
+        # the active dynamic node, never synthetic data.type nodes.
+        config = data.get("runtime_config") or data.get("config")
+        if isinstance(config, Mapping):
+            self.apply_runtime_config(config)
+        # ``node_usage`` is the already reconciled five-field projection.  It
+        # is authoritative for the dynamic node (including tiktoken fallback
+        # totals when a provider omitted usage); raw ``usage`` remains useful
+        # for legacy event consumers and is used as a fallback.
+        usage = data.get("node_usage") if isinstance(data.get("node_usage"), Mapping) else data.get("usage")
+        if isinstance(usage, Mapping):
+            self._apply_usage(usage)
+        if kind in {"model_request", "response_start", "thinking_start"}:
             self._ensure_assistant()
         elif kind in {"response_delta", "response"} and message:
             self._ensure_assistant()
@@ -392,22 +669,28 @@ class RuntimeEventNodeBridge:
                 self.assistant_blocks = blocks
                 self.response_text = str(raw.get("content") or "")
                 self._update_assistant()
+                self._apply_usage(raw.get("node_usage") or raw.get("usage"))
         elif kind == "tool_call":
             self._ensure_assistant()
             tool_name = str(data.get("tool") or data.get("name") or message or "unknown")
+            call_id = str(data.get("call_id") or "call_unknown")
             replay_safe = data.get("replay_safe")
             if replay_safe is None:
                 lowered = tool_name.lower()
                 replay_safe = not any(token in lowered for token in ("bash", "shell", "command", "write", "mcp"))
-            self.assistant_blocks.append(
-                {
-                    "type": "tool_call",
-                    "call_id": str(data.get("call_id") or "call_unknown"),
-                    "name": tool_name,
-                    "arguments": dict(data.get("arguments") or {}),
-                    "replay_safe": bool(replay_safe),
-                }
-            )
+            if not any(
+                block.get("type") == "tool_call" and str(block.get("call_id") or "") == call_id
+                for block in self.assistant_blocks
+            ):
+                self.assistant_blocks.append(
+                    {
+                        "type": "tool_call",
+                        "call_id": call_id,
+                        "name": tool_name,
+                        "arguments": dict(data.get("arguments") or {}),
+                        "replay_safe": bool(replay_safe),
+                    }
+                )
             self._update_assistant()
         elif kind in {"tool_result", "tool_failed"}:
             if self.assistant is not None:
@@ -433,7 +716,10 @@ class RuntimeEventNodeBridge:
                 session_id=self.session_id,
                 parent=self.last_node,
                 data=message_payload("tool_result", result_block, **({"run_id": self.run_id} if self.run_id else {})),
-                provider=self.provider,
+                provider_name=self.provider_name,
+                model=self.model_config,
+                permission_mode=self.permission_mode,
+                running_mode=self.running_mode,
                 cwd=self.cwd,
             )
             self.last_node = self.writer.delete(
@@ -512,7 +798,10 @@ class RuntimeEventNodeBridge:
                 session_id=self.session_id,
                 parent=self.last_node,
                 data=compaction_payload(summary, source_ids=[str(item) for item in source_ids]),
-                provider=self.provider,
+                provider_name=self.provider_name,
+                model=self.model_config,
+                permission_mode=self.permission_mode,
+                running_mode=self.running_mode,
                 cwd=self.cwd,
                 first_kept_entry_id=first_kept,
                 # An empty explicit value tells RuntimeState to point the
@@ -568,16 +857,48 @@ class RuntimeEventNodeBridge:
             self.assistant_blocks.append({"type": "text", "text": final_answer})
             self._update_assistant()
         if self.assistant is not None:
-            self._seal_assistant(status)
+            try:
+                self._seal_assistant(status)
+            except Exception:
+                # ``NodeWriter.delete`` performs the durable replacement in a
+                # transaction.  If that transaction or its final persistence
+                # hook fails, retain the original empty failed placeholder;
+                # the stream still receives a deterministic terminal error.
+                self.persistence_failed = True
+                self.terminal_error = terminal_error_payload(
+                    "failed", code="runtime_node_persistence_failed"
+                )
+                self.closed = True
+                return None
         self.closed = True
         return self.last_node
+
+    def preserve_placeholder(self, *, code: str = "runtime_exception") -> RuntimeState | None:
+        """Close a stream without replacing its failed persistence marker.
+
+        This is used for an uncaught/unknown worker exception.  The dynamic
+        sidecar is process-local and must not be promoted to history merely
+        because the error handler ran after the exception.
+        """
+
+        self.terminal_error = terminal_error_payload("failed", code=code)
+        self.closed = True
+        if self.assistant is None:
+            # ``last_node`` may be an already sealed user/tool node.  Returning
+            # it would make the SSE layer report a successful terminal state
+            # for an exception that has no active assistant placeholder.
+            return None
+        try:
+            return self.store.get_node(self.assistant.session_id, self.assistant.id)
+        except Exception:
+            return None
 
     def finish_exception(self, error: BaseException) -> RuntimeState | None:
         """Finish an uncaught worker exception without losing its category."""
 
         category = self.abort_category or self._exception_category(error)
         if category is None:
-            return self.finish("failed")
+            return self.preserve_placeholder(code=error.__class__.__name__ or "runtime_exception")
         return self.finish(
             "abort",
             str(error),

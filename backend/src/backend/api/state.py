@@ -6,6 +6,7 @@ import os
 import time
 from collections.abc import Callable
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from backend.configuration import ClientPaths, validate_identity_id
@@ -47,6 +48,19 @@ class WebAppState:
         self.benchmark_root = self.data_root.parent / ".mini_agent-cache" / "benchmark"
         self.cloud_client = cloud_client
         self.project_picker = project_picker
+        # Process-local active dynamic-node configuration registry.  It is
+        # intentionally not persisted; the durable node remains the source of
+        # truth and a crashed run leaves its failed placeholder recoverable.
+        # Registries are scoped by both identity and session.  A session id is
+        # only unique inside one user's settings/runtime root, so using it as
+        # the sole key could let one authenticated user observe or mutate
+        # another user's active run in a shared process.
+        self.active_runtime_configs: dict[tuple[str, str], dict[str, object]] = {}
+        self.active_runtime_bridges: dict[tuple[str, str], object] = {}
+        # A PATCH and the worker's next-boundary consumption can arrive on
+        # different threads.  Serialize those transitions per active session
+        # so a partial update can never be interleaved with another update.
+        self.active_runtime_config_locks: dict[tuple[str, str], RLock] = {}
         self.snapshot_manager = None
         if auth_repository is not None:
             self.auth = auth_repository
@@ -239,6 +253,10 @@ class WebAppState:
 
     def model_config_for_user(self, user_id: str):
         return self.settings.model_config_for_user(user_id)
+
+    def model_config_for_provider_name(self, user_id: str, provider_name: str | None):
+        resolver = getattr(self.settings, "model_config_for_provider_name", None)
+        return resolver(user_id, provider_name) if callable(resolver) else self.model_config_for_user(user_id)
 
     def agent_config_for_user(self, user_id: str) -> dict[str, object]:
         return self.settings.agent_config_for_user(user_id)

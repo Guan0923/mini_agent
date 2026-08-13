@@ -26,7 +26,7 @@ SUPPORTED_DISPLAY_MODES = frozenset({"minimal", "medium", "verbose", "developer"
 DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
     "id": "",
     "is_active": False,
-    "provider": "deepseek",
+    "provider_name": "deepseek",
     "protocol": "chat_completions",
     "base_url": "",
     "model": "",
@@ -70,7 +70,14 @@ def normalize_provider_config(current: Mapping[str, object], values: Mapping[str
     protocol = str(values.get("protocol", current.get("protocol", "chat_completions")) or "").strip().lower()
     if protocol not in {"chat_completions", "responses", "messages"}:
         raise ValueError("protocol must be chat_completions, responses, or messages")
-    provider = str(values.get("provider", current.get("provider", "deepseek")) or "deepseek").strip().lower()
+    explicit_name = values.get("provider_name")
+    fallback_name = current.get("provider_name") or current.get("provider") or values.get("provider") or "deepseek"
+    provider_name = str(explicit_name if explicit_name is not None else fallback_name or "deepseek").strip()
+    if not provider_name:
+        raise ValueError("provider_name is required")
+    provider = str(
+        values.get("provider_type", values.get("provider", current.get("provider", "deepseek"))) or "deepseek"
+    ).strip().lower()
     base_url = str(values.get("base_url", current.get("base_url", "")) or "").strip()
     model = str(values.get("model", current.get("model", "")) or "").strip()
     tokenizer_model = str(
@@ -89,6 +96,7 @@ def normalize_provider_config(current: Mapping[str, object], values: Mapping[str
         raise ValueError("base_url and model are required")
     return {
         "provider": provider,
+        "provider_name": provider_name,
         "protocol": protocol,
         "base_url": base_url,
         "model": model,

@@ -34,6 +34,7 @@ class ModelConfig:
     timeout_seconds: int = 45
     max_tokens: int = 8192
     provider: str = "deepseek"
+    provider_name: str = "deepseek"
     context_size: int = 1_024_000
     tokenizer_model: str = "deepseek-ai/DeepSeek-V3"
     protocol: str | None = None
@@ -52,6 +53,8 @@ class ModelConfig:
             raise ModelConfigurationError("Invalid model token limits.")
         object.__setattr__(self, "protocol", protocol)
         object.__setattr__(self, "protocol_explicit", protocol_explicit)
+        if self.provider_name == "deepseek" and self.provider != "deepseek":
+            object.__setattr__(self, "provider_name", self.provider)
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, object]) -> ModelConfig:
@@ -63,6 +66,7 @@ class ModelConfig:
                 timeout_seconds=int(values.get("timeout_seconds", 45)),
                 max_tokens=int(values.get("max_tokens", 8192)),
                 provider=str(values.get("provider") or "deepseek"),
+                provider_name=str(values.get("provider_name") or values.get("provider") or "deepseek"),
                 context_size=int(values.get("context_size", 1_024_000)),
                 tokenizer_model=str(values.get("tokenizer_model") or "deepseek-ai/DeepSeek-V3"),
                 protocol=str(values.get("protocol") or "chat_completions"),
@@ -87,6 +91,7 @@ class ModelConfig:
             values["MODEL"],
             max_tokens=max_tokens,
             provider=values.get("PROVIDER", "deepseek").strip().lower(),
+            provider_name=values.get("PROVIDER_NAME", values.get("PROVIDER", "deepseek")).strip(),
             context_size=context_size,
             tokenizer_model=values.get("TOKENIZER_MODEL", "deepseek-ai/DeepSeek-V3").strip(),
             protocol=values.get("PROTOCOL", "chat_completions").strip().lower(),
@@ -107,6 +112,7 @@ class ModelConfig:
                 str(values["model"]),
                 max_tokens=int(values.get("max_tokens", 8192)),
                 provider=str(values.get("provider", "deepseek")).strip().lower(),
+                provider_name=str(values.get("provider_name", values.get("provider", "deepseek"))).strip(),
                 context_size=int(values.get("context_size", 1_024_000)),
                 tokenizer_model=str(values.get("tokenizer_model", "deepseek-ai/DeepSeek-V3")).strip(),
                 protocol=str(values.get("protocol", "chat_completions")).strip().lower(),

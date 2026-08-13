@@ -15,11 +15,15 @@ function node(content: string, status: RuntimeStateNode["status"] = "failed"): R
     parent_session_id: "session-1",
     id: "assistant-node",
     parent_id: "user-node",
-    version: "0.2.0",
+    version: "0.3.0",
     firstKeptEntryId: "assistant-node",
     compactionIdx: "assistant-node",
     user: "",
-    provider: "",
+    provider_name: "",
+    model: { reasoning_effort: "medium", current_model: "demo", context_length: 128000, output_length: 8192, thinking: "enable", temperature: 1 },
+    permission_mode: "approval_for_me",
+    running_mode: "agent",
+    usage: { input_tokens: null, cached_tokens: null, output_tokens: null, reasoning_tokens: null, total_tokens: null },
     cwd: "",
     timestamp: "2026-01-01T00:00:00+00:00",
     status,
@@ -168,7 +172,7 @@ describe("RuntimeState streaming projection", () => {
     const toolNode: RuntimeStateNode = {
       ...node("工具输出", "success"),
       id: "tool-node",
-      data: { type: "model_change", model: "demo" },
+      data: { type: "compaction", summary: "demo" },
     };
     mocks.streamChat.mockImplementation(async (_prompt: string, onMessage: (message: StreamMessage) => void) => {
       onMessage({ type: "node.update", node: toolNode });

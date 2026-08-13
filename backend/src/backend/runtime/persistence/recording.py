@@ -100,6 +100,14 @@ def model_response_data(state: RuntimeState, exchange: RuntimeExchange, response
         "usage": response.usage,
         "message": _message_to_record(response.message),
     }
+    # ``TokenUsageTracker`` reconciles provider usage (or a local tiktoken
+    # estimate when the provider omitted usage) before this event is emitted.
+    # Keep that canonical five-field projection alongside the raw provider
+    # payload so the message-tree bridge can update the dynamic assistant even
+    # when ``response.usage`` is ``None``.
+    node_usage = exchange.context.get("node_usage")
+    if isinstance(node_usage, Mapping):
+        data["node_usage"] = dict(node_usage)
     token_usage = state.token_usage.get("requests", {}).get(exchange.exchange_id)
     if isinstance(token_usage, dict):
         data["usage_accounting"] = dict(token_usage)

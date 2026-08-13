@@ -1,4 +1,4 @@
-import type { ChatMode, PermissionMode, ReasoningEffort } from "../types";
+import type { ChatMode, PermissionMode, ReasoningEffort, RuntimeConfigModel } from "../types";
 
 export interface ChatRunRequest {
   conversationId: string;
@@ -8,6 +8,8 @@ export interface ChatRunRequest {
   mode: ChatMode;
   permissionMode: PermissionMode;
   reasoningEffort: ReasoningEffort;
+  providerName?: string;
+  model?: RuntimeConfigModel;
   sourceNodeId?: string;
 }
 

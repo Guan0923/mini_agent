@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from time import perf_counter
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -36,10 +36,13 @@ class LLMClient:
         session: requests.Session | None = None,
         transport: JsonHttpTransport | None = None,
         adapter: ProviderAdapter | None = None,
+        config_resolver: Callable[[str], ModelConfig] | None = None,
     ) -> None:
         if session is not None and transport is not None:
             raise ValueError("Provide either session or transport, not both.")
         self.config = config
+        self._adapter_override = adapter is not None
+        self._config_resolver = config_resolver
         self.llm = adapter or self._create_llm(config)
         self.transport = transport or JsonHttpTransport(session)
         self._last_request_diagnostics: dict[str, Any] = {}
@@ -61,6 +64,69 @@ class LLMClient:
             )
         return estimate(messages, tools, request_parameters)
 
+    def set_config_resolver(self, resolver: Callable[[str], ModelConfig] | None) -> None:
+        """Attach the authenticated provider lookup used by dynamic runs."""
+
+        self._config_resolver = resolver
+
+    def prepare_runtime(self, runtime: AgentRuntime, snapshot: dict[str, Any] | None = None) -> None:
+        """Resolve the provider selected at this model-request boundary.
+
+        ``snapshot`` is supplied by :class:`ModelRequestExecutor` after it
+        captures the dynamic leaf.  It is important that a later PATCH cannot
+        swap the adapter or credentials for a request already in flight.
+        """
+
+        captured = snapshot if isinstance(snapshot, dict) else None
+        selected = str(
+            (captured or {}).get("provider_name")
+            or getattr(runtime.state, "provider_name", "")
+            or ""
+        ).strip()
+        if self._config_resolver is not None and selected and selected.casefold() != "unknown":
+            resolved = self._config_resolver(selected)
+            if not isinstance(resolved, ModelConfig):
+                raise ModelConfigurationError("Provider resolver returned an invalid model configuration.")
+            if not self._adapter_override and resolved != self.config:
+                self.config = resolved
+                self.llm = self._create_llm(resolved)
+        # The runtime starts with an empty state for a new session.  Seed it
+        # from the configured provider without overwriting a user selection.
+        if not selected or selected.casefold() == "unknown":
+            runtime.state.provider_name = self.config.provider_name
+            selected = runtime.state.provider_name
+        # Fill only missing fields from the selected provider.  The dynamic
+        # node is authoritative: a partial runtime-config update must survive
+        # the provider lookup and must not be replaced by provider defaults.
+        model_snapshot = (
+            captured.get("model_snapshot")
+            if captured is not None and isinstance(captured.get("model_snapshot"), dict)
+            else runtime.state.model_snapshot
+        )
+        explicit_model = (
+            str((captured or {}).get("model") or "")
+            if captured is not None
+            else (runtime.state.model if runtime.state.model not in {"", "unknown"} else "")
+        )
+        model_snapshot.setdefault("reasoning_effort", "medium")
+        model_snapshot.setdefault("current_model", explicit_model or self.config.model)
+        model_snapshot.setdefault("context_length", self.config.context_size)
+        model_snapshot.setdefault("output_length", self.config.max_tokens)
+        model_snapshot.setdefault("thinking", "enable")
+        model_snapshot.setdefault("temperature", 1.0)
+        if captured is None:
+            runtime.state.model = str(model_snapshot["current_model"])
+        elif not runtime.state.model or runtime.state.model == "unknown":
+            # Seed an initially empty runtime for callers that invoke the
+            # client directly; never overwrite a newer dynamic PATCH.
+            runtime.state.model = str(model_snapshot["current_model"])
+        # ``provider`` is retained only as the internal adapter kind.  The
+        # user-facing/provider-selection identity is always provider_name.
+        # ``provider`` is the internal adapter kind used by diagnostics and
+        # legacy runtime records.  It must follow the resolved named
+        # provider even when this request was captured from a dynamic PATCH.
+        runtime.state.provider = self.config.provider
+
     def estimate_input_tokens(
         self,
         messages: list[ChatMessage],
@@ -73,16 +139,37 @@ class LLMClient:
         return self.estimate_tokens(messages, tools, request_parameters)
 
     def run(self, runtime: AgentRuntime) -> PreparedResponse:
-        runtime.state.provider = self.config.provider
-        runtime.state.model = self.config.model
-        runtime.state.request_parameters.setdefault("max_tokens", self.config.max_tokens)
+        existing_snapshot = runtime.exchange.context.get("runtime_config_snapshot")
+        if isinstance(existing_snapshot, dict):
+            config_snapshot = copy.deepcopy(existing_snapshot)
+            # The executor already consumed pending configuration at the
+            # boundary.  Do not consume a concurrent PATCH here.
+            self.prepare_runtime(runtime, config_snapshot)
+        else:
+            runtime.apply_pending_runtime_config()
+            self.prepare_runtime(runtime)
+            config_snapshot = runtime.request_config()
+            runtime.exchange.context["runtime_config_snapshot"] = copy.deepcopy(config_snapshot)
+        request_parameters = config_snapshot.get("request_parameters")
+        if isinstance(request_parameters, dict):
+            request_parameters.setdefault(
+                "max_tokens",
+                (config_snapshot.get("model_snapshot") or {}).get("output_length", self.config.max_tokens),
+            )
+            # ``request_config`` returns a detached snapshot.  Persist the
+            # completed copy back into the exchange so adapters invoked
+            # directly (without ModelRequestExecutor) see the same defaults
+            # as the executor path.  This also freezes max_tokens for an
+            # already in-flight request when a concurrent PATCH arrives.
+            config_snapshot["request_parameters"] = request_parameters
+            runtime.exchange.context["runtime_config_snapshot"] = copy.deepcopy(config_snapshot)
         if runtime.exchange.exchange_id is None:
             runtime.exchange.exchange_id = runtime.next_exchange_id()
         publish = runtime.services.publish or (lambda _event: None)
         max_retries = runtime.state.runner_settings.max_transport_retries
         for attempt in range(max_retries + 1):
             try:
-                prepared = self._run_once(runtime, attempt=attempt + 1)
+                prepared = self._run_once(runtime, attempt=attempt + 1, config_snapshot=config_snapshot)
                 self._last_request_diagnostics["transport_attempts"] = attempt + 1
                 return prepared
             except ModelOutputError as exc:
@@ -122,11 +209,15 @@ class LLMClient:
             )
         )
 
-    def _run_once(self, runtime: AgentRuntime, *, attempt: int) -> PreparedResponse:
+    def _run_once(
+        self,
+        runtime: AgentRuntime,
+        *,
+        attempt: int,
+        config_snapshot: dict[str, Any] | None = None,
+    ) -> PreparedResponse:
         self._last_request_diagnostics = {}
-        runtime.state.provider = self.config.provider
-        runtime.state.model = self.config.model
-        runtime.state.request_parameters.setdefault("max_tokens", self.config.max_tokens)
+        self.prepare_runtime(runtime, config_snapshot)
         if runtime.exchange.exchange_id is None:
             runtime.exchange.exchange_id = runtime.next_exchange_id()
         publish = runtime.services.publish or (lambda _event: None)

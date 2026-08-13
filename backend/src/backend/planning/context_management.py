@@ -105,6 +105,7 @@ class ContextManager:
         runtime: AgentRuntime,
         system: SystemMessage,
         *,
+        history: list[ChatMessage] | None = None,
         extra: list[UserMessage] | None = None,
         tools: list[ToolSpec] | None = None,
         request_parameters: dict[str, Any] | None = None,
@@ -115,15 +116,16 @@ class ContextManager:
         suffix = list(extra or [])
         exposed_tools = list(tools or [])
         parameters = dict(request_parameters or {})
-        messages = [system, *runtime.state.messages, *suffix]
+        source_history = list(history) if history is not None else list(runtime.state.messages)
+        messages = [system, *source_history, *suffix]
         estimated_before = self._estimate_input_tokens(messages, exposed_tools, parameters)
         self._publish_usage(runtime, estimated_before, phase="before_compaction")
         if estimated_before < self.target_tokens:
             runtime.exchange.context["estimated_input_tokens"] = estimated_before
             return messages
 
-        boundary = min(max(runtime.run.turn_start_index, 0), len(runtime.state.messages))
-        completed_history = runtime.state.messages[:boundary]
+        boundary = min(max(runtime.run.turn_start_index, 0), len(source_history))
+        completed_history = source_history[:boundary]
         if not completed_history:
             if estimated_before >= self.estimator.context_size:
                 raise PlanningError(
@@ -135,7 +137,7 @@ class ContextManager:
         summary, compressed, estimated_after = self._summarize_candidate(
             runtime,
             source=completed_history,
-            retained=runtime.state.messages[boundary:],
+            retained=source_history[boundary:],
             summarize=summarize,
             trigger="automatic",
             estimated_before=estimated_before,
@@ -143,8 +145,13 @@ class ContextManager:
                 [system, *candidate, *suffix], exposed_tools, parameters
             ),
         )
-        previous_messages = len(runtime.state.messages)
-        self._replace_history(runtime, compressed, 1)
+        previous_messages = len(source_history)
+        # Legacy runtimes still own the mutable ChatMessage transcript.  A
+        # canonical tree caller keeps its dynamic path authoritative and lets
+        # the bridge persist the compaction node; mutating the legacy list here
+        # would reintroduce a second source of truth.
+        if history is None:
+            self._replace_history(runtime, compressed, 1)
         self._record(
             runtime,
             "context_compaction_completed",
@@ -162,7 +169,7 @@ class ContextManager:
         runtime.save()
         self._publish_usage(runtime, estimated_after, phase="after_compaction")
         runtime.exchange.context["estimated_input_tokens"] = estimated_after
-        return [system, *runtime.state.messages, *suffix]
+        return [system, *compressed, *suffix]
 
     def _summarize_candidate(
         self,

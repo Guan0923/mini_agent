@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+import copy
+import json
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import uuid4
@@ -12,11 +14,13 @@ from backend.domain import (
     AssistantMessage,
     ChatMessage,
     RunState,
+    ToolMessage,
     ToolSpec,
     UserMessage,
     message_to_dict,
 )
 from backend.domain.messages import messages_from_dicts
+from backend.domain.runtime_state import RuntimeState as RuntimeTreeNode
 from backend.domain.state import utc_now
 
 from .config import RunnerSettings
@@ -59,6 +63,10 @@ class RuntimeState:
     messages: list[ChatMessage] = field(default_factory=list)
     provider: str = "unknown"
     model: str = "unknown"
+    provider_name: str = "unknown"
+    model_snapshot: dict[str, Any] = field(default_factory=dict)
+    permission_mode: str = "approval_for_me"
+    running_mode: str = "agent"
     request_parameters: dict[str, Any] = field(default_factory=dict)
     runner_settings: RunnerSettings = field(default_factory=RunnerSettings)
     tool_specs: list[ToolSpec] = field(default_factory=list)
@@ -81,6 +89,10 @@ class RuntimeState:
             "messages": [message_to_dict(message) for message in self.messages],
             "provider": self.provider,
             "model": self.model,
+            "provider_name": self.provider_name,
+            "model_snapshot": self.model_snapshot,
+            "permission_mode": self.permission_mode,
+            "running_mode": self.running_mode,
             "request_parameters": self.request_parameters,
             "runner_settings": {
                 "max_retries": self.runner_settings.max_retries,
@@ -135,6 +147,10 @@ class RuntimeState:
             messages=messages_from_dicts([dict(item) for item in data.get("messages", [])]),
             provider=str(data.get("provider") or "unknown"),
             model=str(data.get("model") or "unknown"),
+            provider_name=str(data.get("provider_name") or data.get("provider") or "unknown"),
+            model_snapshot=dict(data.get("model_snapshot") or {}),
+            permission_mode=str(data.get("permission_mode") or "approval_for_me"),
+            running_mode=str(data.get("running_mode") or "agent"),
             request_parameters=dict(data.get("request_parameters") or {}),
             runner_settings=RunnerSettings(**settings),
             tool_specs=[
@@ -221,6 +237,101 @@ def new_exchange_id() -> str:
     return f"exchange_{uuid4().hex}"
 
 
+def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMessage]:
+    """Project canonical message-tree nodes into the legacy planner port."""
+
+    result: list[ChatMessage] = []
+    tool_calls: dict[str, tuple[AssistantMessage, int]] = {}
+
+    def block_text(block: Mapping[str, Any]) -> str:
+        value = block.get("text")
+        return value if isinstance(value, str) else str(value or "")
+
+    for node in nodes:
+        data = node.data
+        if not isinstance(data, Mapping):
+            continue
+        if data.get("type") == "compaction":
+            summary = data.get("summary")
+            if isinstance(summary, str) and summary:
+                result.append(UserMessage(content=f"[compaction]\n{summary}"))
+            continue
+        if data.get("type") != "message":
+            continue
+        raw_message = data.get("message")
+        if not isinstance(raw_message, Mapping):
+            continue
+        role = str(raw_message.get("role") or "")
+        blocks = raw_message.get("content")
+        blocks = [item for item in blocks if isinstance(item, Mapping)] if isinstance(blocks, list) else []
+        if role == "user":
+            text = "".join(block_text(item) for item in blocks if item.get("type") in {"text", "bash"})
+            result.append(UserMessage(content=text))
+            continue
+        if role == "bash":
+            text = "".join(block_text(item) for item in blocks)
+            result.append(UserMessage(content=text))
+            continue
+        if role == "tool_result":
+            for block in blocks:
+                if block.get("type") != "tool_result":
+                    continue
+                call_id = str(block.get("call_id") or "")
+                target = tool_calls.get(call_id)
+                content = block.get("content")
+                text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+                status = "failed" if block.get("status") == "failed" else "succeeded"
+                if target is not None:
+                    assistant, index = target
+                    assistant.tool_messages[index].content = text
+                    assistant.tool_messages[index].status = status  # type: ignore[assignment]
+                elif call_id:
+                    # A recovered tree may contain a result without its
+                    # assistant placeholder.  Preserve it as a standalone
+                    # assistant tool message rather than dropping evidence.
+                    orphan = AssistantMessage(
+                        content=None,
+                        tool_messages=[
+                            ToolMessage(
+                                name=str(block.get("tool") or "unknown"),
+                                call_id=call_id,
+                                arguments={},
+                                content=text,
+                                status=status,  # type: ignore[arg-type]
+                            )
+                        ],
+                    )
+                    result.append(orphan)
+            continue
+        if role != "assistant":
+            continue
+        text_parts = [block_text(item) for item in blocks if item.get("type") in {"text", "bash"}]
+        reasoning_parts = [block_text(item) for item in blocks if item.get("type") == "reasoning"]
+        tools: list[ToolMessage] = []
+        for block in blocks:
+            if block.get("type") != "tool_call":
+                continue
+            call_id = str(block.get("call_id") or "")
+            if not call_id:
+                continue
+            tool = ToolMessage(
+                name=str(block.get("name") or block.get("tool") or "unknown"),
+                call_id=call_id,
+                arguments=dict(block.get("arguments") or {}) if isinstance(block.get("arguments"), Mapping) else {},
+                status="pending",
+            )
+            tools.append(tool)
+        assistant = AssistantMessage(
+            content="".join(text_parts) or None,
+            reasoning="".join(reasoning_parts) or None,
+            tool_messages=tools,
+        )
+        result.append(assistant)
+        for index, tool in enumerate(tools):
+            tool_calls[tool.call_id] = (assistant, index)
+    return result
+
+
 @dataclass
 class RuntimeServices:
     """Non-serializable dependencies rebound when a session is opened."""
@@ -242,6 +353,15 @@ class RuntimeServices:
     publish: EventHandler | None = None
     hooks: HookManager = field(default_factory=HookManager)
     subagents: object | None = None
+    # Optional authenticated-provider resolver.  It deliberately lives on the
+    # non-serializable service bundle so provider credentials never enter a
+    # RuntimeState/node or a sync snapshot.
+    provider_config_resolver: Callable[[str], object] | None = None
+    pending_runtime_config: dict[str, Any] | None = None
+    # Canonical message-tree context provider.  It is deliberately a callback
+    # rather than a persisted field: the bridge owns the dynamic sidecar and
+    # can replace a failed placeholder immediately before every model request.
+    runtime_node_context: Callable[[], Sequence[RuntimeTreeNode]] | None = None
 
 
 @dataclass
@@ -266,6 +386,169 @@ class AgentRuntime:
 
     def next_exchange_id(self) -> str:
         return new_exchange_id()
+
+    def model_nodes(self) -> list[RuntimeTreeNode]:
+        """Return the canonical provider context when a message-tree bridge is active.
+
+        The callback returns the *path* already resolved by the active bridge,
+        including the dynamic leaf.  Keeping this method on ``AgentRuntime``
+        gives planners and token estimators one stable boundary and prevents
+        individual providers from accidentally reading a durable empty
+        placeholder.
+        """
+
+        provider = self.services.runtime_node_context
+        if not callable(provider):
+            return []
+        try:
+            values = provider()
+        except (KeyError, RuntimeError, ValueError):
+            # A stream may close between a final node replacement and a late
+            # UI event.  Falling back to the in-memory transcript is safer
+            # than making an otherwise completed request fail during cleanup.
+            return []
+        return [item.clone() for item in values if isinstance(item, RuntimeTreeNode)]
+
+    def model_messages(self, *, current_turn_only: bool = False) -> list[ChatMessage]:
+        """Convert canonical nodes to provider-neutral chat messages.
+
+        ``RuntimeState`` intentionally stores provider-neutral content blocks,
+        while the existing planner/provider ports use ``ChatMessage`` objects.
+        This adapter is the only compatibility seam between those contracts.
+        Tool calls remain on their assistant message; independent
+        ``tool_result`` nodes are merged back by ``call_id`` so all three wire
+        protocols receive the same logical conversation.
+        """
+
+        nodes = self.model_nodes()
+        if not nodes:
+            messages = list(self.state.messages)
+        else:
+            messages = _chat_messages_from_nodes(nodes)
+        if not current_turn_only or not nodes:
+            return messages
+        boundary = max((index for index, item in enumerate(messages) if isinstance(item, UserMessage)), default=0)
+        return messages[boundary:]
+
+    def request_config(self) -> dict[str, Any]:
+        """Return the immutable configuration captured for this model call."""
+
+        snapshot = self.exchange.context.get("runtime_config_snapshot")
+        if isinstance(snapshot, dict):
+            return copy.deepcopy(snapshot)
+        return {
+            "provider_name": self.state.provider_name,
+            "model": self.state.model,
+            "model_snapshot": copy.deepcopy(self.state.model_snapshot),
+            "permission_mode": self.state.permission_mode,
+            "running_mode": self.state.running_mode,
+            "request_parameters": copy.deepcopy(self.state.request_parameters),
+        }
+
+    def apply_pending_runtime_config(self) -> bool:
+        """Apply a UI configuration change at an execution boundary.
+
+        The bridge publishes the node update immediately, but this method is
+        called immediately before a model/tool/decision boundary.  Therefore an
+        in-flight request keeps its captured parameters while the next one sees
+        the new provider, model, permission and mode.
+        """
+
+        pending = self.services.pending_runtime_config
+        if not isinstance(pending, dict) or not pending:
+            return False
+        self.services.pending_runtime_config = None
+        provider_name = pending.get("provider_name")
+        provider_changed = False
+        if provider_name is not None:
+            selected_provider = str(provider_name)
+            provider_changed = selected_provider.casefold() != self.state.provider_name.casefold()
+            self.state.provider_name = selected_provider
+            resolver = self.services.provider_config_resolver
+            if callable(resolver):
+                resolved = resolver(selected_provider)
+                # ``provider_name`` is a user-owned configuration identity;
+                # ``provider`` remains the internal protocol/adapter kind.
+                # Keep the latter out of nodes, but keep it correct for
+                # diagnostics and legacy runtime consumers.
+                resolved_provider = getattr(resolved, "provider", None)
+                if isinstance(resolved_provider, str) and resolved_provider:
+                    self.state.provider = resolved_provider
+                config_model = getattr(resolved, "model", None)
+                config_context = getattr(resolved, "context_size", None)
+                config_output = getattr(resolved, "max_tokens", None)
+                if provider_changed:
+                    # A named provider is a complete model configuration.  A
+                    # switch must not inherit reasoning/thinking/temperature
+                    # or token limits from the previous provider; only the
+                    # explicit model patch below may override these defaults.
+                    self.state.model_snapshot = {
+                        "reasoning_effort": "medium",
+                        "current_model": config_model if isinstance(config_model, str) and config_model else "unknown",
+                        "context_length": config_context if isinstance(config_context, int) and config_context > 0 else 128000,
+                        "output_length": config_output if isinstance(config_output, int) and config_output > 0 else 8192,
+                        "thinking": "enable",
+                        "temperature": 1.0,
+                    }
+                else:
+                    if isinstance(config_model, str) and config_model:
+                        self.state.model_snapshot["current_model"] = config_model
+                    if isinstance(config_context, int) and config_context > 0:
+                        self.state.model_snapshot["context_length"] = config_context
+                    if isinstance(config_output, int) and config_output > 0:
+                        self.state.model_snapshot["output_length"] = config_output
+            elif provider_changed:
+                # Without an authenticated resolver there is no provider
+                # record to load, but stale model fields still must not leak
+                # across a named-provider switch.
+                self.state.model_snapshot = {
+                    "reasoning_effort": "medium",
+                    "current_model": "unknown",
+                    "context_length": 128000,
+                    "output_length": 8192,
+                    "thinking": "enable",
+                    "temperature": 1.0,
+                }
+        model = pending.get("model")
+        if isinstance(model, dict):
+            self.state.model_snapshot = {**self.state.model_snapshot, **model}
+            current_model = self.state.model_snapshot.get("current_model")
+            if isinstance(current_model, str) and current_model:
+                self.state.model = current_model
+            output_length = self.state.model_snapshot.get("output_length")
+            if isinstance(output_length, int) and output_length > 0:
+                self.state.request_parameters["max_tokens"] = output_length
+            temperature = self.state.model_snapshot.get("temperature")
+            if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
+                self.state.request_parameters["temperature"] = temperature
+            thinking = self.state.model_snapshot.get("thinking")
+            if thinking == "disable":
+                self.state.request_parameters.pop("reasoning_effort", None)
+                self.state.request_parameters["thinking"] = {"type": "disabled"}
+            elif thinking == "enable":
+                effort = self.state.model_snapshot.get("reasoning_effort")
+                if effort is not None:
+                    self.state.request_parameters["reasoning_effort"] = effort
+                self.state.request_parameters["thinking"] = {"type": "enabled"}
+        elif provider_changed:
+            # Keep non-managed provider extensions intact while replacing
+            # parameters controlled by the new model snapshot.
+            self.state.model = str(self.state.model_snapshot.get("current_model") or "unknown")
+            output_length = self.state.model_snapshot.get("output_length")
+            if isinstance(output_length, int) and output_length > 0:
+                self.state.request_parameters["max_tokens"] = output_length
+            self.state.request_parameters["temperature"] = self.state.model_snapshot.get("temperature", 1.0)
+            self.state.request_parameters["reasoning_effort"] = self.state.model_snapshot.get("reasoning_effort", "medium")
+            self.state.request_parameters["thinking"] = {"type": "enabled"}
+        permission_mode = pending.get("permission_mode")
+        if permission_mode is not None:
+            self.state.permission_mode = str(permission_mode)
+        running_mode = pending.get("running_mode")
+        if running_mode is not None:
+            self.state.running_mode = str(running_mode)
+            if self.state.current_run is not None:
+                self.state.current_run.mode = str(running_mode)  # type: ignore[assignment]
+        return True
 
     def save(self) -> None:
         self.touch()
@@ -292,6 +575,8 @@ class AgentRuntime:
                 runner_settings=settings or RunnerSettings(),
                 provider=provider,
                 model=model,
+                provider_name=provider,
+                model_snapshot={"current_model": model},
                 tool_specs=list(tool_specs or []),
             ),
             services=RuntimeServices(planner=planner, tools=tools),

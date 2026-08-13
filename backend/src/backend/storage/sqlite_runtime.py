@@ -11,7 +11,6 @@ from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState
 
 from .codec import (
-    assistant_content,
     decode_message_data,
     decode_runtime_state,
     encode_message_data,
@@ -42,9 +41,9 @@ class SQLiteRuntimeMixin:
             connection.execute(
                 """INSERT INTO runtime_nodes (
                     session_id, parent_session_id, id, parent_id, version,
-                    first_kept_entry_id, compaction_idx, user, provider, cwd,
-                    timestamp, status, data_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    first_kept_entry_id, compaction_idx, user, provider_name, model_json,
+                    permission_mode, running_mode, usage_json, cwd, timestamp, status, data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 self._node_values(node),
             )
             connection.execute("UPDATE session_meta SET updated_at=?", (node.timestamp,))
@@ -53,7 +52,7 @@ class SQLiteRuntimeMixin:
     def get_node(self, session_id: str, node_id: str) -> TreeRuntimeState | None:
         with self._connection(session_id) as connection:
             row = connection.execute(
-                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider,cwd,timestamp,status,data_json "
+                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json "
                 "FROM runtime_nodes WHERE session_id=? AND id=?",
                 (session_id, node_id),
             ).fetchone()
@@ -67,7 +66,7 @@ class SQLiteRuntimeMixin:
             return []
         with self._connection(parent_session_id) as connection:
             rows = connection.execute(
-                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider,cwd,timestamp,status,data_json "
+                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json "
                 "FROM runtime_nodes WHERE parent_session_id=? AND parent_id=? ORDER BY timestamp,id",
                 (parent_session_id, parent_id),
             ).fetchall()
@@ -86,7 +85,7 @@ class SQLiteRuntimeMixin:
                 continue
             with self._connection(directory.name) as connection:
                 rows = connection.execute(
-                    "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider,cwd,timestamp,status,data_json "
+                    "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json "
                     "FROM runtime_nodes WHERE parent_session_id=? AND parent_id=? ORDER BY timestamp,id",
                     (parent_session_id, parent_id),
                 ).fetchall()
@@ -96,7 +95,7 @@ class SQLiteRuntimeMixin:
     def load_nodes(self, session_id: str) -> list[TreeRuntimeState]:
         with self._connection(session_id) as connection:
             rows = connection.execute(
-                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider,cwd,timestamp,status,data_json "
+                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json "
                 "FROM runtime_nodes ORDER BY timestamp,id"
             ).fetchall()
         result = {node.key: node for node in (self._node_from_row(row) for row in rows)}
@@ -136,8 +135,9 @@ class SQLiteRuntimeMixin:
                 raise ValueError("Only a leaf runtime node can be finalized.")
             connection.execute(
                 """UPDATE runtime_nodes SET parent_session_id=?, parent_id=?, version=?,
-                    first_kept_entry_id=?, compaction_idx=?, user=?, provider=?, cwd=?,
-                    timestamp=?, status=?, data_json=? WHERE session_id=? AND id=?""",
+                    first_kept_entry_id=?, compaction_idx=?, user=?, provider_name=?, model_json=?,
+                    permission_mode=?, running_mode=?, usage_json=?, cwd=?, timestamp=?, status=?, data_json=?
+                    WHERE session_id=? AND id=?""",
                 (
                     node.parent_session_id,
                     node.parent_id,
@@ -145,7 +145,11 @@ class SQLiteRuntimeMixin:
                     node.firstKeptEntryId,
                     node.compactionIdx,
                     node.user,
-                    node.provider,
+                    node.provider_name,
+                    json.dumps(node.model, ensure_ascii=False, separators=(",", ":")),
+                    node.permission_mode,
+                    node.running_mode,
+                    json.dumps(node.usage, ensure_ascii=False, separators=(",", ":")),
                     node.cwd,
                     node.timestamp,
                     node.status,
@@ -166,7 +170,7 @@ class SQLiteRuntimeMixin:
         if session.local_only:
             raise ValueError("Local-only sessions are excluded from cloud sync.")
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "session": {
                 "session_id": session.session_id,
                 "title": session.title,
@@ -188,7 +192,11 @@ class SQLiteRuntimeMixin:
             node.firstKeptEntryId,
             node.compactionIdx,
             node.user,
-            node.provider,
+            node.provider_name,
+            json.dumps(node.model, ensure_ascii=False, separators=(",", ":")),
+            node.permission_mode,
+            node.running_mode,
+            json.dumps(node.usage, ensure_ascii=False, separators=(",", ":")),
             node.cwd,
             node.timestamp,
             node.status,
@@ -207,11 +215,15 @@ class SQLiteRuntimeMixin:
                 "firstKeptEntryId": row[5],
                 "compactionIdx": row[6],
                 "user": row[7],
-                "provider": row[8],
-                "cwd": row[9],
-                "timestamp": row[10],
-                "status": row[11],
-                "data": json.loads(str(row[12])),
+                "provider_name": row[8],
+                "model": json.loads(str(row[9])),
+                "permission_mode": row[10],
+                "running_mode": row[11],
+                "usage": json.loads(str(row[12])),
+                "cwd": row[13],
+                "timestamp": row[14],
+                "status": row[15],
+                "data": json.loads(str(row[16])),
             }
         )
 
@@ -232,10 +244,7 @@ class SQLiteRuntimeMixin:
             if meta is None:
                 raise ValueError(f"Unknown session: {session_id}")
             title = str(meta[0])
-            if (
-                title == DEFAULT_SESSION_TITLE
-                and connection.execute("SELECT 1 FROM session_messages LIMIT 1").fetchone() is None
-            ):
+            if title == DEFAULT_SESSION_TITLE and connection.execute("SELECT 1 FROM runtime_nodes LIMIT 1").fetchone() is None:
                 title = normalize_session_title(task)
             connection.execute(
                 """INSERT INTO session_runs VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
@@ -252,11 +261,6 @@ class SQLiteRuntimeMixin:
                     timestamp,
                 ),
             )
-            if append_user_message:
-                connection.execute(
-                    "INSERT INTO session_messages(run_id, role, content, created_at) SELECT ?, 'user', ?, ? WHERE NOT EXISTS (SELECT 1 FROM session_messages WHERE run_id=? AND role='user')",
-                    (run_id, task, timestamp, run_id),
-                )
             connection.execute("UPDATE session_meta SET title=?, updated_at=?", (title, timestamp))
             self._queue(connection, session_id)
 
@@ -266,10 +270,6 @@ class SQLiteRuntimeMixin:
             if connection.execute("SELECT 1 FROM session_runs WHERE run_id=?", (run_id,)).fetchone() is None:
                 raise ValueError(f"Unknown session run: {run_id}")
             timestamp = utc_now()
-            connection.execute(
-                "INSERT INTO session_messages(run_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
-                (run_id, content, timestamp),
-            )
             connection.execute("UPDATE session_meta SET updated_at=?", (timestamp,))
             self._queue(connection, session_id)
 
@@ -284,18 +284,6 @@ class SQLiteRuntimeMixin:
                 == 0
             ):
                 raise ValueError(f"Unknown session run: {run_id}")
-            content = assistant_content(status, answer)
-            if (
-                connection.execute(
-                    "UPDATE session_messages SET content=?, created_at=? WHERE run_id=? AND role='assistant'",
-                    (content, timestamp, run_id),
-                ).rowcount
-                == 0
-            ):
-                connection.execute(
-                    "INSERT INTO session_messages(run_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
-                    (run_id, content, timestamp),
-                )
             connection.execute("UPDATE session_meta SET updated_at=?", (timestamp,))
             self._queue(connection, session_id)
 

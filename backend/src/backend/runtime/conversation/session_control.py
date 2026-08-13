@@ -9,7 +9,6 @@ from backend.domain import (
     DEFAULT_TIME_ZONE,
     Session,
     SessionSummary,
-    message_from_dict,
     validate_time_zone,
 )
 
@@ -151,10 +150,8 @@ class ConversationSessionController:
         assert self.session_store is not None
         state = self.session_store.load_runtime(session_id)
         if state is None:
-            legacy = [message_from_dict(item) for item in self.session_store.load_conversation(session_id)]
             self.runtime = self.runner.empty_runtime(
                 session_id=session_id,
-                messages=legacy,
                 runtime_store=self.session_store,
             )
             self.runtime.state.timezone = self.default_timezone

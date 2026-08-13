@@ -95,6 +95,9 @@ export function createRunController(callbacks: RunControllerCallbacks) {
             request.permissionMode,
             request.reasoningEffort,
             request.sourceNodeId,
+            request.providerName,
+            request.model,
+            request.mode,
           )
         : await streamChat(request.prompt ?? "", onMessage, controller.signal, {
             sessionId: request.sessionId,
@@ -102,6 +105,8 @@ export function createRunController(callbacks: RunControllerCallbacks) {
             mode: request.mode,
             permissionMode: request.permissionMode,
             reasoningEffort: request.reasoningEffort,
+            providerName: request.providerName,
+            model: request.model,
           });
       if (result === "aborted") {
         callbacks.updateLastMessage(request.conversationId, (item) => ({

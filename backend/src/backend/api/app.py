@@ -26,7 +26,7 @@ from .state import DEFAULT_DATA_ROOT, WebAppState  # noqa: E402
 
 
 def create_app(state: WebAppState | None = None) -> FastAPI:
-    app = FastAPI(title="Mini-Agent Web", version="0.2.0")
+    app = FastAPI(title="Mini-Agent Web", version="0.3.0")
     resolved = state or WebAppState(DEFAULT_DATA_ROOT)
     app.state.web = resolved
 

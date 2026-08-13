@@ -24,7 +24,23 @@ export interface ToolEvent {
 }
 
 export type RuntimeNodeStatus = "failed" | "success" | "abort";
-export type RuntimeNodeDataType = "message" | "thinking_level_change" | "model_change" | "compaction";
+export type RuntimeNodeDataType = "message" | "compaction";
+export type ThinkingMode = "enable" | "disable";
+export interface RuntimeNodeModel {
+  reasoning_effort: ReasoningEffort;
+  current_model: string;
+  context_length: number;
+  output_length: number;
+  thinking: ThinkingMode;
+  temperature: number;
+}
+export interface RuntimeNodeUsage {
+  input_tokens: number | null;
+  cached_tokens: number | null;
+  output_tokens: number | null;
+  reasoning_tokens: number | null;
+  total_tokens: number | null;
+}
 
 /** Canonical persisted node shared by API, TUI and the web reducer. */
 export interface RuntimeStateNode {
@@ -36,7 +52,11 @@ export interface RuntimeStateNode {
   firstKeptEntryId: string;
   compactionIdx: string;
   user: string;
-  provider: string;
+  provider_name: string;
+  model: RuntimeNodeModel;
+  permission_mode: PermissionMode;
+  running_mode: ChatMode;
+  usage: RuntimeNodeUsage;
   cwd: string;
   timestamp: string;
   status: RuntimeNodeStatus;
@@ -88,6 +108,15 @@ export interface Conversation {
   projectId?: string;
   localOnly?: boolean;
   projectAvailable?: boolean;
+}
+
+export interface RuntimeConfigModel {
+  reasoning_effort: ReasoningEffort;
+  current_model: string;
+  context_length: number;
+  output_length: number;
+  thinking: ThinkingMode;
+  temperature: number;
 }
 
 export interface DecisionOption {

@@ -134,6 +134,23 @@ export async function getSessionLeaves(sessionId: string): Promise<RuntimeStateN
   return requestJson<RuntimeStateNode[]>(`/api/sessions/${encodeURIComponent(sessionId)}/leaves`);
 }
 
+export async function patchRuntimeConfig(
+  sessionId: string,
+  values: {
+    node_id: string;
+    provider_name?: string;
+    model?: Record<string, unknown>;
+    permission_mode?: "approval_for_me" | "full_access";
+    running_mode?: "agent" | "plan";
+  },
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(`/api/sessions/${encodeURIComponent(sessionId)}/runtime-config`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(values),
+  });
+}
+
 export async function getSessionTranscript(sessionId: string): Promise<SessionMessage[]> {
   return requestJson<SessionMessage[]>(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
 }

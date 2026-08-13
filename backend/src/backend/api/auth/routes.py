@@ -87,7 +87,7 @@ class AgentConfigPayload(BaseModel):
 
 
 class ProviderConfigPayload(BaseModel):
-    provider: str = Field(default="deepseek", min_length=1, max_length=80)
+    provider_name: str = Field(min_length=1, max_length=80)
     protocol: str = Field(default="chat_completions", min_length=1, max_length=40)
     base_url: str = Field(default="", max_length=2000)
     model: str = Field(default="", max_length=300)
@@ -98,13 +98,14 @@ class ProviderConfigPayload(BaseModel):
 
 
 class ProviderConfigPatch(BaseModel):
+    provider_name: str | None = Field(default=None, min_length=1, max_length=80)
     model: str | None = Field(default=None, max_length=300)
     api_key: str | None = Field(default=None, max_length=4096)
 
 
 class ProviderModelDiscoveryPayload(BaseModel):
     config_id: str | None = Field(default=None, max_length=160)
-    provider: str = Field(default="deepseek", min_length=1, max_length=80)
+    provider_name: str = Field(default="deepseek", min_length=1, max_length=80)
     protocol: str = Field(default="chat_completions", min_length=1, max_length=40)
     base_url: str = Field(default="", max_length=2000)
     api_key: str | None = Field(default=None, max_length=4096)
@@ -531,13 +532,11 @@ def discover_provider_models(
             raise HTTPException(status_code=503, detail="提供商密钥暂时不可用，请重新配置。") from exc
         if config is None:
             raise HTTPException(status_code=404, detail="provider configuration not found")
-        provider = str(config.get("provider") or "deepseek")
         protocol = str(config.get("protocol") or "chat_completions")
         base_url = str(config.get("base_url") or "")
         api_key = str(body.api_key or "").strip() or str(config.get("api_key") or "")
     else:
-        provider, protocol, base_url, api_key = (
-            body.provider,
+        protocol, base_url, api_key = (
             body.protocol,
             body.base_url,
             str(body.api_key or "").strip(),
@@ -550,7 +549,7 @@ def discover_provider_models(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     headers = {"Accept": "application/json"}
     if api_key:
-        if protocol == "messages" or provider.lower() == "anthropic":
+        if protocol == "messages":
             headers.update({"x-api-key": api_key, "anthropic-version": "2023-06-01"})
         else:
             headers["Authorization"] = f"Bearer {api_key}"

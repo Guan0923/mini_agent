@@ -55,7 +55,6 @@ _EXPORTS = {
     "NodeFrame": ("state_tree", "NodeFrame"),
     "NodeWriter": ("state_tree", "NodeWriter"),
     "RuntimeNodeStore": ("state_tree", "RuntimeNodeStore"),
-    "change_payload": ("state_tree", "change_payload"),
     "compaction_payload": ("state_tree", "compaction_payload"),
     "message_payload": ("state_tree", "message_payload"),
     "recoverable": ("state_tree", "recoverable"),

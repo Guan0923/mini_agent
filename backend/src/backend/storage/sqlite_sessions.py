@@ -6,7 +6,6 @@ import shutil
 import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from uuid import uuid4
 
 from backend.domain import (
     Session,
@@ -15,7 +14,6 @@ from backend.domain import (
     new_session_id,
 )
 from backend.domain.state import utc_now
-from backend.runtime.core.context import RuntimeState
 
 from .codec import normalize_session_title
 
@@ -76,9 +74,7 @@ class SQLiteSessionMixin:
         with self._connection(session_id) as connection:
             row = connection.execute(
                 """SELECT m.session_id, m.title, m.created_at, m.updated_at,
-                (SELECT CASE WHEN EXISTS (SELECT 1 FROM runtime_nodes)
-                    THEN (SELECT COUNT(*) FROM runtime_nodes)
-                    ELSE (SELECT COUNT(*) FROM session_messages) END),
+                (SELECT COUNT(*) FROM runtime_nodes),
                 (SELECT n.id FROM runtime_nodes AS n
                     WHERE n.session_id = m.session_id
                     AND NOT EXISTS (
@@ -134,34 +130,16 @@ class SQLiteSessionMixin:
 
     def load_conversation(self, session_id: str) -> list[dict[str, str]]:
         nodes = getattr(self, "load_nodes", lambda _session_id: [])(session_id)
-        projected = self._node_messages(nodes)
-        if projected:
-            return projected
-        with self._connection(session_id) as connection:
-            rows = connection.execute("SELECT role, content FROM session_messages ORDER BY id").fetchall()
-        return [{"role": str(row[0]), "content": str(row[1])} for row in rows]
+        # RuntimeState nodes are the only durable conversation source in
+        # protocol v0.3.  Legacy session_messages rows are intentionally not
+        # replayed; old databases are rebuilt rather than migrated.
+        return self._node_messages(nodes)
 
     def load_conversation_records(self, session_id: str) -> list[dict[str, str | int | None]]:
         """Return the durable transcript with stable row and run identifiers."""
 
         nodes = getattr(self, "load_nodes", lambda _session_id: [])(session_id)
-        projected = self._node_records(nodes)
-        if projected:
-            return projected
-        with self._connection(session_id) as connection:
-            rows = connection.execute(
-                "SELECT id, run_id, role, content, created_at FROM session_messages ORDER BY id"
-            ).fetchall()
-        return [
-            {
-                "id": int(row[0]),
-                "run_id": None if str(row[1]).startswith("import_") else str(row[1]),
-                "role": str(row[2]),
-                "content": str(row[3]),
-                "created_at": str(row[4]),
-            }
-            for row in rows
-        ]
+        return self._node_records(nodes)
 
     def find_session_by_client_id(self, client_id: str, *, include_deleted: bool = False) -> Session | None:
         """Find a Web-owned session without assuming a global metadata database."""
@@ -221,19 +199,19 @@ class SQLiteSessionMixin:
         parsed = [message_from_dict(item) for item in messages if item.get("role") in {"user", "assistant"}]
         session = self.create_session(title, client_id=client_id, local_only=local_only)
         try:
-            import_run_id = f"import_{uuid4().hex}"
-            timestamp = utc_now()
-            with self._connection(session.session_id) as connection:
+            if parsed:
+                from backend.domain.runtime_state import NodeWriter, message_payload
+
+                writer = NodeWriter(self)
+                parent = None
                 for message in parsed:
                     role = "assistant" if getattr(message, "role", "") == "assistant" else "user"
-                    content = str(getattr(message, "content", "") or "")
-                    connection.execute(
-                        "INSERT INTO session_messages(run_id,role,content,created_at) VALUES (?,?,?,?)",
-                        (import_run_id, role, content, timestamp),
+                    node = writer.create(
+                        session_id=session.session_id,
+                        parent=parent,
+                        data=message_payload(role, str(getattr(message, "content", "") or "")),
                     )
-            if parsed:
-                runtime = self._empty_import_runtime(session.session_id, parsed)
-                self.save_runtime(runtime)
+                    parent = writer.delete(node.session_id, node.id)
         except Exception:
             shutil.rmtree(self.paths.session_root(session.session_id), ignore_errors=True)
             raise
@@ -344,10 +322,6 @@ class SQLiteSessionMixin:
             raise RuntimeError("The session has a running turn.")
 
     @staticmethod
-    def _empty_import_runtime(session_id: str, messages: list) -> RuntimeState:
-        return RuntimeState(session_id=session_id, messages=list(messages))
-
-    @staticmethod
     def _node_messages(nodes: list) -> list[dict[str, str]]:
         result: list[dict[str, str]] = []
         for node in nodes:
@@ -404,12 +378,11 @@ class SQLiteSessionMixin:
     ) -> tuple[list[dict[str, str]], int | None]:
         if limit < 1:
             raise ValueError("limit must be positive")
-        with self._connection(session_id) as connection:
-            query = "SELECT id, role, content FROM session_messages"
-            values: tuple[object, ...] = () if before_id is None else (before_id,)
-            if before_id is not None:
-                query += " WHERE id < ?"
-            rows = connection.execute(query + " ORDER BY id DESC LIMIT ?", (*values, limit + 1)).fetchall()
-        page = rows[:limit]
-        next_before = int(page[-1][0]) if len(rows) > limit and page else None
-        return ([{"role": str(row[1]), "content": str(row[2])} for row in reversed(page)], next_before)
+        records = self.load_conversation_records(session_id)
+        # Node ids are opaque strings in v0.3; retain a simple offset cursor
+        # for the old endpoint shape without consulting session_messages.
+        if before_id is not None:
+            records = records[: max(0, before_id)]
+        page = records[-limit:]
+        next_before = max(0, len(records) - limit) if len(records) > limit else None
+        return ([{"role": str(item["role"]), "content": str(item["content"])} for item in page], next_before)

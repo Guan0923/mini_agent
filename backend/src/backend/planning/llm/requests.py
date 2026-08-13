@@ -23,6 +23,27 @@ class RequestMixin:
     ) -> list:
         system = self._with_user_preferences(system)
         system = self._with_active_skills(runtime, system)
+        canonical_nodes = runtime.model_nodes()
+        canonical = runtime.model_messages() if canonical_nodes else []
+        if canonical_nodes:
+            # The RuntimeState tree is authoritative while a node bridge is
+            # active.  In particular, the current dynamic leaf replaces the
+            # durable failed placeholder with the same identity.
+            if self._context_manager is None:
+                return [system, *canonical, *(extra or [])]
+            parameters = dict(runtime.state.request_parameters)
+            overrides = runtime.exchange.context.get("request_parameters")
+            if isinstance(overrides, dict):
+                parameters.update(overrides)
+            return self._context_manager.prepare(
+                runtime,
+                system,
+                history=canonical,
+                extra=extra,
+                tools=tools,
+                request_parameters=parameters,
+                summarize=lambda transcript: self._summarize_history(runtime, transcript),
+            )
         if self._context_manager is None:
             return [system, *runtime.state.messages, *(extra or [])]
         parameters = dict(runtime.state.request_parameters)
@@ -49,6 +70,10 @@ class RequestMixin:
 
         system = self._with_user_preferences(system)
         system = self._with_active_skills(runtime, system)
+        canonical_nodes = runtime.model_nodes()
+        canonical = runtime.model_messages(current_turn_only=True) if canonical_nodes else []
+        if canonical_nodes:
+            return [system, *canonical, *(extra or [])]
         boundary = min(max(runtime.run.turn_start_index, 0), len(runtime.state.messages))
         return [system, *runtime.state.messages[boundary:], *(extra or [])]
 

@@ -1,4 +1,4 @@
-import type { ChatMode, PermissionMode, ReasoningEffort, StreamMessage } from "../types";
+import type { ChatMode, PermissionMode, ReasoningEffort, RuntimeConfigModel, StreamMessage } from "../types";
 import { apiUrl } from "./base";
 import { ApiError, errorFrom, notifyUnauthorized } from "./request";
 
@@ -8,6 +8,8 @@ export interface StreamOptions {
   mode?: ChatMode;
   permissionMode?: PermissionMode;
   reasoningEffort?: ReasoningEffort;
+  providerName?: string;
+  model?: RuntimeConfigModel;
 }
 
 async function streamEndpoint(
@@ -98,8 +100,11 @@ export async function streamChat(
       session_id: normalized.sessionId,
       source_node_id: normalized.sourceNodeId,
       mode: normalized.mode ?? "agent",
+      ...(normalized.mode ? { running_mode: normalized.mode } : {}),
       permission_mode: normalized.permissionMode,
       reasoning_effort: normalized.reasoningEffort,
+      provider_name: normalized.providerName,
+      model: normalized.model,
       interactive: normalized.permissionMode != null,
     },
     onMessage,
@@ -114,10 +119,21 @@ export async function streamResume(
   permissionMode: PermissionMode,
   reasoningEffort: ReasoningEffort = "medium",
   sourceNodeId?: string,
+  providerName?: string,
+  model?: RuntimeConfigModel,
+  mode?: ChatMode,
 ): Promise<"completed" | "aborted"> {
   return streamEndpoint(
     `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
-    { permission_mode: permissionMode, reasoning_effort: reasoningEffort, source_node_id: sourceNodeId },
+    {
+      permission_mode: permissionMode,
+      reasoning_effort: reasoningEffort,
+      source_node_id: sourceNodeId,
+      provider_name: providerName,
+      model,
+      ...(mode ? { mode } : {}),
+      ...(mode ? { running_mode: mode } : {}),
+    },
     onMessage,
     signal,
   );

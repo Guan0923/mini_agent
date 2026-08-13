@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import shutil
+from threading import RLock
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS
-from backend.domain.runtime_state import NodeWriter
+from backend.domain.runtime_state import NodeWriter, RuntimeStateValidationError
+from backend.providers import ModelConfigurationError
 from backend.runtime import build_application as _default_build_application
+from backend.storage.auth.crypto import SecretDecryptionError
 
 from ..auth.dependencies import require_user
 from ..auth.types import UserIdentity
@@ -58,6 +61,54 @@ class BranchRequest(BaseModel):
 
 class TimezoneBody(BaseModel):
     timezone: str
+
+
+class RuntimeConfigPatch(BaseModel):
+    node_id: str = Field(min_length=1, max_length=200)
+    provider_name: str | None = Field(default=None, min_length=1, max_length=80)
+    model: dict[str, object] | None = None
+    permission_mode: Literal["approval_for_me", "full_access"] | None = None
+    running_mode: Literal["agent", "plan"] | None = None
+
+    @property
+    def has_update(self) -> bool:
+        return any(value is not None for value in (self.provider_name, self.model, self.permission_mode, self.running_mode))
+
+
+def _provider_model_snapshot(config, public_record: dict[str, object], *, explicit: dict[str, object] | None = None) -> dict[str, object]:
+    """Build the canonical node model for a provider switch.
+
+    A provider name identifies a complete saved configuration.  The model
+    carried by the active node may contain overrides from a different
+    provider, so it must never be used as the base when the name changes.
+    Only fields explicitly supplied in this PATCH are applied on top of the
+    newly loaded provider defaults.
+    """
+
+    defaults: dict[str, object] = {
+        "reasoning_effort": "medium",
+        "current_model": getattr(config, "model", None) or public_record.get("model") or "unknown",
+        "context_length": int(
+            getattr(config, "context_size", None) or public_record.get("context_size") or 128000
+        ),
+        "output_length": int(getattr(config, "max_tokens", None) or public_record.get("max_tokens") or 8192),
+        "thinking": "enable",
+        "temperature": 1.0,
+    }
+    if explicit:
+        defaults.update(explicit)
+    return defaults
+
+
+def _runtime_config_bridge(state: WebAppState, identity: UserIdentity, session_id: str):
+    bridges = getattr(state, "active_runtime_bridges", {})
+    owner_key = (identity.id, session_id)
+    # Session identifiers are scoped to an authenticated user.  Never fall
+    # back to the pre-v0.3 session-only registry key: doing so could let a
+    # user mutate a same-named session owned by another account in a shared
+    # process.
+    return bridges.get(owner_key)
+
 
 
 def _store(state: WebAppState, user_id: str):
@@ -220,6 +271,128 @@ def _require_session_workspace(state: WebAppState, user_id: str, session_id: str
         state.session_workspace(user_id, session_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.patch("/sessions/{session_id}/runtime-config")
+def patch_runtime_config(
+    session_id: str,
+    body: RuntimeConfigPatch,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict:
+    """Update the active dynamic leaf configuration for the current user."""
+
+    state: WebAppState = request.app.state.web
+    store = _store(state, identity.id)
+    summary = _require_active(store, session_id)
+    if summary.last_run_status != "running":
+        raise HTTPException(status_code=409, detail="当前会话没有正在运行的任务")
+    if not body.has_update:
+        raise HTTPException(status_code=422, detail="至少需要一个运行配置字段")
+    node = store.get_node(session_id, body.node_id)
+    if node is None:
+        raise HTTPException(status_code=409, detail="node_id 不属于当前会话")
+    if node.session_id != session_id:
+        raise HTTPException(status_code=409, detail="node_id 不属于当前会话")
+    children = store.list_children(node.session_id, node.id)
+    if children:
+        raise HTTPException(status_code=409, detail="node_id 不是活动叶节点")
+    # The stream owns the dynamic sidecar; publish a config event to its input
+    # channel where the bridge applies it and emits the full node.update frame.
+    registry = getattr(state, "active_runtime_configs", None)
+    if registry is None:
+        registry = state.active_runtime_configs = {}
+    owner_key = (identity.id, session_id)
+    lock_registry = getattr(state, "active_runtime_config_locks", {})
+    lock = lock_registry.setdefault(owner_key, RLock())
+    with lock:
+        previous_registry = dict(registry.get(owner_key, {}))
+        current = dict(previous_registry)
+        patch_values = body.model_dump(exclude_none=True)
+        current.update(patch_values)
+        bridge = _runtime_config_bridge(state, identity, session_id)
+        if bridge is None:
+            raise HTTPException(status_code=409, detail="当前运行尚未注册动态节点")
+        # Only the mutable assistant sidecar is addressable while a run is
+        # active.  ``last_node`` is often a sealed user/tool node between
+        # workflow boundaries and must never be treated as a PATCH target.
+        active = getattr(bridge, "assistant", None)
+        if active is None or str(getattr(active, "id", "")) != body.node_id:
+            raise HTTPException(status_code=409, detail="node_id 与活动动态节点不匹配")
+        try:
+            live = bridge.writer.current(active.session_id, active.id)
+        except (AttributeError, KeyError) as exc:
+            raise HTTPException(status_code=409, detail="活动动态节点已结束") from exc
+        # The registry only contains fields waiting for the next boundary and
+        # is normally empty after each immediate update.  Seed a new partial
+        # patch from the live dynamic node so changing one field (for example
+        # permission or reasoning) never resets the other model fields to
+        # provider defaults.  A real provider switch below deliberately
+        # discards this model snapshot and loads the selected provider's
+        # complete defaults instead.
+        if not previous_registry:
+            current = {
+                "provider_name": live.provider_name,
+                "model": dict(live.model),
+                "permission_mode": live.permission_mode,
+                "running_mode": live.running_mode,
+                **patch_values,
+            }
+        if body.provider_name:
+            providers_reader = getattr(state.settings, "provider_configs_for_user", None)
+            providers = providers_reader(identity.id) if callable(providers_reader) else []
+            match = next(
+                (
+                    item
+                    for item in providers
+                    if str(item.get("provider_name") or item.get("provider") or "").casefold()
+                    == body.provider_name.casefold()
+                ),
+                None,
+            )
+            if match is None:
+                raise HTTPException(status_code=404, detail="provider_name 不存在")
+            try:
+                resolved = state.model_config_for_provider_name(identity.id, body.provider_name)
+            except SecretDecryptionError as exc:
+                raise HTTPException(status_code=409, detail="提供商密钥无法解密，请重新配置") from exc
+            except ModelConfigurationError as exc:
+                raise HTTPException(status_code=422, detail=f"提供商配置无效：{exc}") from exc
+            current["provider_name"] = str(
+                getattr(resolved, "provider_name", None)
+                or match.get("provider_name")
+                or body.provider_name
+            )
+            old_provider = str(getattr(bridge, "provider_name", "") or "")
+            provider_changed = old_provider.casefold() != body.provider_name.casefold()
+            explicit_model = body.model if isinstance(body.model, dict) else None
+            if provider_changed or not isinstance(current.get("model"), dict):
+                # Do not merge a prior registry model into a newly selected
+                # provider.  The only permitted override is this request's
+                # explicit ``model`` object.
+                current["model"] = _provider_model_snapshot(resolved, match, explicit=explicit_model)
+            elif explicit_model:
+                current["model"] = {**current["model"], **explicit_model}
+        registry[owner_key] = current
+        # Apply immediately so the stream emits a complete node.update frame;
+        # request boundaries still decide when the provider consumes the change.
+        try:
+            updated = bridge.apply_runtime_config(current)
+        except (RuntimeStateValidationError, ValueError) as exc:
+            # A rejected candidate must be atomic.  Preserve a previously
+            # queued valid patch so a transient bad request cannot erase a
+            # user's earlier update waiting for the next execution boundary.
+            if previous_registry:
+                registry[owner_key] = previous_registry
+            else:
+                registry.pop(owner_key, None)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        registry.pop(owner_key, None)
+    return {
+        "session_id": session_id,
+        "node_id": body.node_id,
+        **(updated.to_dict() if updated is not None else current),
+    }
 
 
 @router.get("/sessions/{session_id}")
@@ -487,7 +660,7 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
             root = writer.create(
                 session_id=target.session_id,
                 parent=(source_node.session_id, source_node.id),
-                provider=source_node.provider,
+                provider_name=source_node.provider_name,
                 user=source_node.user,
                 cwd=source_node.cwd,
                 first_kept_entry_id=source_node.firstKeptEntryId,

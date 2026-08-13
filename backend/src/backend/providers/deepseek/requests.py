@@ -130,16 +130,35 @@ def _validated_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
 def _prepare_request(runtime: AgentRuntime) -> dict[str, Any]:
     """Convert provider-neutral runtime state into a DeepSeek request payload."""
 
-    parameters = dict(runtime.state.request_parameters)
+    config = runtime.request_config()
+    parameters = dict(config.get("request_parameters") or {})
     overrides = runtime.exchange.context.get("request_parameters")
     if overrides is not None and not isinstance(overrides, Mapping):
         raise ModelRequestError("DeepSeek exchange request_parameters must be an object.")
     parameters.update(dict(overrides or {}))
+    # The active dynamic node is the authoritative request configuration.
+    snapshot = config.get("model_snapshot") or {}
+    if isinstance(snapshot, Mapping):
+        if snapshot.get("output_length") is not None:
+            parameters["max_tokens"] = snapshot.get("output_length")
+        if snapshot.get("temperature") is not None:
+            parameters["temperature"] = snapshot.get("temperature")
+        if snapshot.get("thinking") is not None:
+            parameters["thinking"] = {"type": "enabled" if snapshot.get("thinking") == "enable" else "disabled"}
+        if snapshot.get("thinking") != "disable" and snapshot.get("reasoning_effort") is not None:
+            # A runtime snapshot may be incomplete while older callers still
+            # provide the documented request parameter explicitly.  Do not
+            # replace that value with ``None`` merely because the snapshot has
+            # not been populated yet.
+            parameters["reasoning_effort"] = snapshot.get("reasoning_effort")
+        elif snapshot.get("thinking") == "disable":
+            parameters.pop("reasoning_effort", None)
     validated = _validated_parameters(parameters)
-    if not isinstance(runtime.state.model, str) or not runtime.state.model:
+    model = config.get("model") or snapshot.get("current_model")
+    if not isinstance(model, str) or not model:
         raise ModelRequestError("DeepSeek model must be a non-empty string.")
     payload: dict[str, Any] = {
-        "model": runtime.state.model,
+        "model": model,
         "messages": _wire_messages(runtime),
         "stream": runtime.exchange.stream,
     }

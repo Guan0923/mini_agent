@@ -41,7 +41,7 @@ export interface AgentConfig {
 export interface ProviderConfig {
   id: string;
   is_active: boolean;
-  provider: string;
+  provider_name: string;
   protocol: "chat_completions" | "responses" | "messages";
   base_url: string;
   model: string;
@@ -81,7 +81,7 @@ export async function updateAgentConfig(config: AgentConfig): Promise<AgentConfi
 }
 
 export async function updateProviderConfig(
-  config: Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { api_key?: string },
+  config: Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { provider_type?: string; api_key?: string },
 ): Promise<ProviderConfig> {
   return requestJson<ProviderConfig>("/api/auth/provider-config", {
     method: "PUT",
@@ -91,7 +91,7 @@ export async function updateProviderConfig(
 }
 
 export async function addProviderConfig(
-  config: Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { api_key?: string },
+  config: Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { provider_type?: string; api_key?: string },
 ): Promise<ProviderConfig> {
   return requestJson<ProviderConfig>("/api/auth/provider-configs", {
     method: "POST",
@@ -102,7 +102,7 @@ export async function addProviderConfig(
 
 export async function updateProviderConfigById(
   id: string,
-  values: { model?: string; api_key?: string },
+  values: { provider_name?: string; model?: string; api_key?: string },
 ): Promise<ProviderConfig> {
   return requestJson<ProviderConfig>(`/api/auth/provider-configs/${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -126,7 +126,8 @@ export async function deleteProviderConfig(id: string): Promise<ProviderConfig[]
 
 export async function discoverProviderModels(values: {
   config_id?: string;
-  provider: string;
+  provider_name: string;
+  provider_type?: string;
   protocol: ProviderConfig["protocol"];
   base_url: string;
   api_key?: string;

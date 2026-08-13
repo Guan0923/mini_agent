@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from backend.api.sessions.projection import project_node_transcript
@@ -20,6 +21,7 @@ from backend.domain.runtime_state import (
     recoverable,
 )
 from backend.providers.canonical import to_chat_completions, to_messages, to_responses
+from backend.providers.token_usage import normalize_provider_usage
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.storage.sqlite import SQLiteSessionStore
@@ -37,7 +39,11 @@ def test_node_json_shape_and_stable_timestamp() -> None:
         "firstKeptEntryId",
         "compactionIdx",
         "user",
-        "provider",
+        "provider_name",
+        "model",
+        "permission_mode",
+        "running_mode",
+        "usage",
         "cwd",
         "timestamp",
         "status",
@@ -46,6 +52,53 @@ def test_node_json_shape_and_stable_timestamp() -> None:
     assert encoded["version"] == APP_VERSION
     assert encoded["firstKeptEntryId"] == node.id
     assert RuntimeState.from_dict(json.loads(node.to_json())).timestamp == node.timestamp
+
+
+def test_runtime_model_and_usage_validation_and_removed_data_types() -> None:
+    node = RuntimeState.create(
+        session_id="session_a",
+        model={
+            "reasoning_effort": "high",
+            "current_model": "gpt-x",
+            "context_length": 128000,
+            "output_length": 16000,
+            "thinking": "enable",
+            "temperature": 1.0,
+        },
+        usage={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+    )
+    assert RuntimeState.from_dict(node.to_dict()).to_dict() == node.to_dict()
+    with pytest.raises(RuntimeStateValidationError):
+        RuntimeState.create(session_id="s", model={"context_length": 10, "output_length": 10})
+    with pytest.raises(RuntimeStateValidationError):
+        RuntimeState.create(session_id="s", usage={"total_tokens": -1})
+    with pytest.raises(RuntimeStateValidationError):
+        RuntimeState.create(session_id="s", data={"type": "model_change", "model": "old"})
+
+
+def test_provider_usage_aliases_and_partial_fields_are_normalized() -> None:
+    assert normalize_provider_usage(
+        {
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "input_tokens_details": {"cached_tokens": 3},
+            "output_tokens_details": {"reasoning_tokens": 2},
+        }
+    ) == {
+        "input_tokens": 10,
+        "cached_tokens": 3,
+        "output_tokens": 4,
+        "reasoning_tokens": 2,
+        "total_tokens": 14,
+    }
+    assert normalize_provider_usage({"cache_creation_input_tokens": 7})["cached_tokens"] == 7
+    assert normalize_provider_usage({"prompt_tokens": 3}) == {
+        "input_tokens": 3,
+        "cached_tokens": None,
+        "output_tokens": None,
+        "reasoning_tokens": None,
+        "total_tokens": None,
+    }
 
 
 def test_parent_reference_and_fork() -> None:
@@ -81,6 +134,120 @@ def test_create_persists_empty_placeholder_until_delete() -> None:
     assert writer.current("s", node.id).data["type"] == "message"
     sealed = writer.delete("s", node.id)
     assert sealed.data["message"]["content"][0]["text"] == "dynamic"
+
+
+def test_runtime_config_updates_dynamic_node_without_touching_placeholder() -> None:
+    store = InMemoryNodeStore()
+    frames: list[NodeFrame] = []
+    writer = NodeWriter(store, emit=frames.append)
+    node = writer.create(
+        session_id="s",
+        data=message_payload("assistant", "draft"),
+        model={
+            "reasoning_effort": "medium",
+            "current_model": "old-model",
+            "context_length": 128000,
+            "output_length": 8192,
+            "thinking": "enable",
+            "temperature": 1.0,
+        },
+    )
+    updated = writer.update_config(
+        node,
+        provider_name="work-openai",
+        model={"current_model": "new-model", "reasoning_effort": "high"},
+        permission_mode="full_access",
+        running_mode="plan",
+    )
+    placeholder = store.get_node("s", node.id)
+    assert placeholder is not None and placeholder.data == {}
+    assert placeholder.provider_name == ""
+    assert updated.provider_name == "work-openai"
+    assert updated.model["current_model"] == "new-model"
+    assert updated.model["reasoning_effort"] == "high"
+    assert updated.permission_mode == "full_access"
+    assert updated.running_mode == "plan"
+    assert frames[-1].type == "node.update"
+
+
+def test_runtime_config_updates_merge_pending_partial_fields() -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(store, session_id="s", prompt="hello", emit=lambda _frame: None)
+    bridge.start()
+    runtime = SimpleNamespace(
+        state=SimpleNamespace(),
+        services=SimpleNamespace(pending_runtime_config=None),
+    )
+    bridge.bind_runtime(runtime)
+
+    bridge.apply_runtime_config({"model": {"reasoning_effort": "high"}})
+    bridge.apply_runtime_config({"permission_mode": "full_access"})
+
+    assert runtime.services.pending_runtime_config == {
+        "model": {"reasoning_effort": "high"},
+        "permission_mode": "full_access",
+    }
+
+
+def test_runtime_config_rejects_invalid_provider_policy_without_mutation() -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(store, session_id="s", prompt="hello", emit=lambda _frame: None)
+    bridge.start()
+    current = bridge.writer.current("s", bridge.assistant.id)
+
+    with pytest.raises(RuntimeStateValidationError):
+        bridge.apply_runtime_config({"permission_mode": "root"})
+    with pytest.raises(RuntimeStateValidationError):
+        bridge.apply_runtime_config({"running_mode": "interactive"})
+    with pytest.raises(RuntimeStateValidationError):
+        bridge.apply_runtime_config({"provider_name": "   "})
+
+    assert bridge.writer.current("s", bridge.assistant.id).to_dict() == current.to_dict()
+
+
+def test_model_context_replaces_same_id_failed_placeholder_with_dynamic_leaf() -> None:
+    store = InMemoryNodeStore()
+    writer = NodeWriter(store)
+    parent = writer.create(session_id="s", data=message_payload("user", "hello"))
+    parent = writer.delete("s", parent.id)
+    dynamic = writer.create(session_id="s", parent=parent, data=message_payload("assistant", "streamed"))
+    tree = RuntimeStateTree(store.load_nodes("s"))
+
+    context = tree.model_input(dynamic)
+
+    assert [(item.id, item.data) for item in context] == [
+        (parent.id, parent.data),
+        (dynamic.id, dynamic.data),
+    ]
+    assert context[-1].data["message"]["content"][0]["text"] == "streamed"
+
+
+def test_compaction_accepts_a_dynamic_leaf_before_durable_finalization() -> None:
+    store = InMemoryNodeStore()
+    writer = NodeWriter(store)
+    parent = writer.create(session_id="s", data=message_payload("user", "hello"))
+    parent = writer.delete("s", parent.id)
+    dynamic = writer.create(session_id="s", parent=parent, data=message_payload("assistant", "streamed"))
+    tree = RuntimeStateTree(store.load_nodes("s"))
+
+    summary = tree.compact(dynamic, "summary")
+
+    assert summary.data["type"] == "compaction"
+    assert summary.parent_id == dynamic.id
+    context = tree.model_input(summary)
+    assert any(item.id == summary.id and item.data["summary"] == "summary" for item in context)
+    assert all(item.data for item in context)
+
+
+def test_provider_adapters_deduplicate_dynamic_leaf_and_drop_placeholder() -> None:
+    placeholder = RuntimeState.create(session_id="s", id="node", data={})
+    dynamic = RuntimeState.create(
+        session_id="s",
+        id="node",
+        data=message_payload("assistant", "streamed"),
+    )
+    assert to_chat_completions([placeholder, dynamic]) == [{"role": "assistant", "content": "streamed"}]
+    assert to_chat_completions([placeholder]) == []
 
 
 def test_failed_and_abort_lifecycle() -> None:
@@ -218,6 +385,22 @@ def test_bridge_keeps_known_uncaught_exception_categories(error_type: str, categ
     assert terminal.data["message"]["error"]["category"] == category
 
 
+def test_unknown_uncaught_exception_keeps_empty_failed_placeholder() -> None:
+    store = InMemoryNodeStore()
+    frames: list[NodeFrame] = []
+    bridge = RuntimeEventNodeBridge(store, session_id="s", prompt="hello", emit=frames.append)
+    bridge.start()
+    dynamic = bridge.assistant
+    assert dynamic is not None
+
+    terminal = bridge.finish_exception(RuntimeError("unexpected"))
+
+    persisted = store.get_node("s", dynamic.id)
+    assert terminal is not None
+    assert persisted is not None and persisted.status == "failed" and persisted.data == {}
+    assert not any(frame.type == "node.delete" and frame.node.id == dynamic.id for frame in frames)
+
+
 def test_compaction_retains_recent_window_without_deleting_ancestors() -> None:
     tree = RuntimeStateTree()
     current = tree.create_child(session_id="s", data=message_payload("user", "0"))
@@ -299,11 +482,17 @@ def test_sqlite_node_atomic_finalization_and_snapshot(tmp_path: Path) -> None:
     writer.update(node.session_id, node.id, data=message_payload("user", "hello"))
     writer.delete(node.session_id, node.id)
     snapshot = store.export_runtime_node_snapshot(session.session_id)
-    assert snapshot["schema_version"] == 3
+    assert snapshot["schema_version"] == 4
     assert len(snapshot["nodes"]) == 1
     assert "runtime" not in snapshot
     queued = store.pending_sync_operations()
     assert queued and queued[-1]["snapshot"]["nodes"]
+
+
+def test_old_runtime_snapshot_is_rejected(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "mini-agent"), "device")
+    with pytest.raises(ValueError, match="schema_version=4"):
+        store.apply_runtime_node_snapshot({"schema_version": 3}, local_device_id="device")
 
 
 def test_legacy_execution_bridge_emits_only_node_lifecycle_frames(tmp_path: Path) -> None:
@@ -342,6 +531,31 @@ def test_bridge_switches_to_handoff_session_without_mixing_nodes() -> None:
     assert source_answers[-1].content[0]["text"] == "proposal"
     assert handoff_answers[-1].content[0]["text"] == "done"
     assert all(frame.node.session_id in {"source", "handoff"} for frame in frames)
+
+
+def test_bridge_starts_a_new_agent_turn_after_same_session_plan_handoff() -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(
+        store,
+        session_id="s",
+        prompt="plan",
+        running_mode="plan",
+        emit=lambda _frame: None,
+    )
+    bridge.start()
+    bridge.handle(RuntimeEvent("response_delta", "proposal"))
+    plan_assistant_id = bridge.assistant.id
+
+    bridge.begin_turn("s", "implement", running_mode="agent")
+    assert bridge.running_mode == "agent"
+    assert bridge.assistant is not None and bridge.assistant.id != plan_assistant_id
+    bridge.handle(RuntimeEvent("response_delta", "implementation"))
+    bridge.finish("success", "implementation")
+
+    assistants = [node for node in store.all_nodes("s") if node.role == "assistant"]
+    assert [node.content[0]["text"] for node in assistants] == ["proposal", "implementation"]
+    assert assistants[0].running_mode == "plan"
+    assert assistants[1].running_mode == "agent"
 
 
 def test_bridge_projects_control_events_into_canonical_content_blocks() -> None:

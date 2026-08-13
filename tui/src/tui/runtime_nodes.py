@@ -6,6 +6,22 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 NodeFrameType = Literal["node.create", "node.update", "node.delete"]
+USAGE_FIELDS = ("input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "total_tokens")
+
+
+def _default_model() -> dict[str, Any]:
+    return {
+        "reasoning_effort": "medium",
+        "current_model": "unknown",
+        "context_length": 128000,
+        "output_length": 8192,
+        "thinking": "enable",
+        "temperature": 1.0,
+    }
+
+
+def _default_usage() -> dict[str, int | None]:
+    return {name: None for name in USAGE_FIELDS}
 
 
 @dataclass
@@ -18,7 +34,11 @@ class RuntimeNodeView:
     firstKeptEntryId: str
     compactionIdx: str
     user: str
-    provider: str
+    provider_name: str
+    model: dict[str, Any]
+    permission_mode: str
+    running_mode: str
+    usage: dict[str, int | None]
     cwd: str
     timestamp: str
     status: str
@@ -35,7 +55,11 @@ class RuntimeNodeView:
             firstKeptEntryId=str(value.get("firstKeptEntryId", "")),
             compactionIdx=str(value.get("compactionIdx", "")),
             user=str(value.get("user", "")),
-            provider=str(value.get("provider", "")),
+            provider_name=str(value.get("provider_name", "")),
+            model={**_default_model(), **dict(value.get("model") or {})},
+            permission_mode=str(value.get("permission_mode", "approval_for_me")),
+            running_mode=str(value.get("running_mode", "agent")),
+            usage={**_default_usage(), **dict(value.get("usage") or {})},
             cwd=str(value.get("cwd", "")),
             timestamp=str(value.get("timestamp", "")),
             status=str(value.get("status", "failed")),

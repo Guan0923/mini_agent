@@ -76,6 +76,20 @@ def build_user_application(
         store = getattr(application, "session_store", None) or getattr(application, "store", None)
         if callable(getattr(store, "set_sync_listener", None)):
             store.set_sync_listener(lambda: state.mark_sync_dirty(user_id))
+    # Provider credentials are resolved lazily for each model boundary.  The
+    # selected provider name comes from the dynamic node; this callback keeps
+    # secrets in the per-user settings database and out of RuntimeState.
+    runner = getattr(application, "runner", None)
+    if runner is not None:
+        def resolver(provider_name: str):
+            return state.model_config_for_provider_name(user_id, provider_name)
+
+        setattr(runner, "provider_config_resolver", resolver)
+        planner = getattr(runner, "planner", None)
+        client = getattr(planner, "client", None)
+        setter = getattr(client, "set_config_resolver", None)
+        if callable(setter):
+            setter(resolver)
     return application
 
 

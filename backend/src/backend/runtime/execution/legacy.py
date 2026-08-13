@@ -56,6 +56,12 @@ class LegacyAgentRunner(AgentRunner):
             else:
                 turn_start_index = len(runtime.state.messages)
                 runtime.state.messages.append(UserMessage(content=handoff.task))
+                # ``AgentRunner._run_attempt`` treats the canonical runtime
+                # mode as authoritative at every dispatch boundary.  Keep
+                # the compatibility facade's in-place handoff in sync with
+                # the new RunState, otherwise the previous Plan value would
+                # overwrite this Agent handoff immediately before execution.
+                runtime.state.running_mode = handoff.mode
                 runtime.state.current_run = RunState(
                     task=handoff.task,
                     mode=handoff.mode,

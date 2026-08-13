@@ -35,10 +35,47 @@ def _payload(value: RuntimeState | Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _messages(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    result: list[Mapping[str, Any]] = []
+    # A running node has two representations: a durable failed placeholder
+    # and a dynamic copy with the same ``(session_id, id)``.  Provider context
+    # must contain one logical message.  Preserve path order while allowing a
+    # non-empty dynamic copy to replace its empty placeholder in place.
+    ordered: list[RuntimeState | Mapping[str, Any]] = []
+    positions: dict[tuple[str, str], int] = {}
     for value in values:
+        raw_value = value.to_dict() if isinstance(value, RuntimeState) else value
+        raw = raw_value if isinstance(raw_value, Mapping) else {}
+        key = (
+            str(raw.get("session_id")),
+            str(raw.get("id")),
+        ) if raw.get("session_id") and raw.get("id") else None
+        data = raw.get("data") if "data" in raw else raw
+        empty_placeholder = isinstance(data, Mapping) and not data and key is not None
+        if empty_placeholder:
+            # A durable failed marker is not a model message.  Keep it only as
+            # a slot so a following dynamic copy can replace it without
+            # changing the ordering of the ancestor path.
+            if key not in positions:
+                positions[key] = len(ordered)
+                ordered.append(value)
+            continue
+        if key is not None and key in positions:
+            ordered[positions[key]] = value
+        else:
+            if key is not None:
+                positions[key] = len(ordered)
+            ordered.append(value)
+
+    result: list[Mapping[str, Any]] = []
+    for value in ordered:
         raw = value.to_dict() if isinstance(value, RuntimeState) else value
         data = raw.get("data") if isinstance(raw, Mapping) and "data" in raw else raw
+        if isinstance(data, Mapping) and not data:
+            # No dynamic replacement arrived for this identity; do not send a
+            # failed persistence placeholder (including its empty data) to a
+            # provider.  Untagged legacy mappings remain handled below for
+            # compatibility with terminal-error rendering.
+            if isinstance(raw, Mapping) and raw.get("session_id") and raw.get("id"):
+                continue
         status = _status(value)
         if _is_message(value):
             message = dict(_payload(value))
@@ -47,15 +84,20 @@ def _messages(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[Mappin
                 # a crash left the message content empty.  Keep the reason in
                 # a regular text block so every provider adapter can transmit
                 # it without a vendor-specific error field.
+                blocks = [dict(item) for item in message.get("content", []) if isinstance(item, Mapping)]
                 raw_error = message.get("error")
                 if isinstance(raw_error, Mapping):
                     reason = terminal_error_text(raw_error)
                 elif isinstance(raw_error, str) and raw_error:
                     reason = raw_error
-                else:
+                elif not blocks:
                     reason = terminal_error_text(terminal_error_payload(status))
-                blocks = [dict(item) for item in message.get("content", []) if isinstance(item, Mapping)]
-                if not any(item.get("type") == "text" and item.get("text") == reason for item in blocks):
+                else:
+                    # Dynamic streaming nodes carry status="failed" until
+                    # their final replacement.  Their non-empty content is
+                    # live model context, not a terminal error.
+                    reason = ""
+                if reason and not any(item.get("type") == "text" and item.get("text") == reason for item in blocks):
                     blocks.append({"type": "text", "text": reason})
                 message["content"] = blocks
             result.append(message)
@@ -70,6 +112,23 @@ def _messages(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[Mappin
             reason = terminal_error_text(terminal_error_payload(status))
             result.append({"role": "assistant", "content": [{"type": "text", "text": reason}]})
     return result
+
+
+def model_parameters(value: RuntimeState | Mapping[str, Any]) -> dict[str, Any]:
+    """Return request parameters from a node without leaking protocol fields."""
+
+    raw = value.to_dict() if isinstance(value, RuntimeState) else value
+    model = raw.get("model") if isinstance(raw, Mapping) else None
+    if not isinstance(model, Mapping):
+        return {}
+    result = {
+        "model": model.get("current_model"),
+        "max_tokens": model.get("output_length"),
+        "temperature": model.get("temperature"),
+    }
+    if model.get("thinking") != "disable":
+        result["reasoning_effort"] = model.get("reasoning_effort")
+    return {key: value for key, value in result.items() if value is not None}
 
 
 def _is_message(value: RuntimeState | Mapping[str, Any]) -> bool:
@@ -436,4 +495,5 @@ __all__ = [
     "to_chat_completions",
     "to_messages",
     "to_responses",
+    "model_parameters",
 ]

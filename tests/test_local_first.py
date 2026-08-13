@@ -149,6 +149,14 @@ def test_sync_ack_remote_read_only_and_fork(tmp_path: Path) -> None:
     snapshot = dict(operation["snapshot"])
     snapshot["session"] = {**snapshot["session"], "session_id": "session_remote"}
     snapshot["runtime"] = {**snapshot["runtime"], "session_id": "session_remote"}
+    snapshot["nodes"] = [
+        {
+            **node,
+            "session_id": "session_remote",
+            "parent_session_id": "session_remote" if node.get("parent_id") else node.get("parent_session_id", ""),
+        }
+        for node in snapshot.get("nodes", [])
+    ]
     store.apply_remote_snapshot(
         {"session_id": "session_remote", "owner_device_id": "device_b", "revision": 2, "snapshot": snapshot},
         local_device_id="device_a",

@@ -8,11 +8,15 @@ function node(data: RuntimeStateNode["data"]): RuntimeStateNode {
     parent_session_id: "s",
     id: "n",
     parent_id: "p",
-    version: "0.2.0",
+    version: "0.3.0",
     firstKeptEntryId: "n",
     compactionIdx: "n",
     user: "",
-    provider: "",
+    provider_name: "",
+    model: { reasoning_effort: "medium", current_model: "demo", context_length: 128000, output_length: 8192, thinking: "enable", temperature: 1 },
+    permission_mode: "approval_for_me",
+    running_mode: "agent",
+    usage: { input_tokens: null, cached_tokens: null, output_tokens: null, reasoning_tokens: null, total_tokens: null },
     cwd: "",
     timestamp: "2026-01-01T00:00:00+00:00",
     status: "success",
@@ -40,7 +44,7 @@ describe("RuntimeState message projection", () => {
   });
 
   it("ignores configuration and user nodes", () => {
-    expect(assistantContentFromRuntimeNode(node({ type: "model_change", model: "demo" }))).toBeNull();
+    expect(assistantContentFromRuntimeNode(node({ type: "compaction", summary: "demo" }))).toBeNull();
     expect(assistantContentFromRuntimeNode(node({
       type: "message",
       message: { role: "user", content: [{ type: "text", text: "问题" }] },

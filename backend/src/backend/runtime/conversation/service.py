@@ -27,6 +27,7 @@ from ..core.context import text_messages
 from ..core.contracts import CancellationHandler, EventHandler, InterruptHandler, SteeringHandler
 from ..core.events import RuntimeEvent
 from ..execution import RuntimeRunner
+from ..node_bridge import RuntimeEventNodeBridge
 from .ports import SessionStore, TaskPreprocessor
 from .recovery.resuming import prepare_resume
 from .recovery.resuming import resume_session as resume_conversation
@@ -52,6 +53,109 @@ class ConversationService(ConversationSessionController):
         self._task_preprocessor = task_preprocessor
         self._session_provisioner = session_provisioner
         self._session_provisioner_cleanup = session_provisioner_cleanup
+        # Web streaming installs its bridge before invoking this service so it
+        # can expose the active leaf to PATCH /runtime-config.  Local TUI and
+        # embedding callers leave this unset; ``_run_single_turn`` then owns a
+        # bridge and projects the same canonical node lifecycle internally.
+        self.runtime_node_bridge: RuntimeEventNodeBridge | None = None
+        self._node_bridge_events_external = False
+
+    def attach_runtime_node_bridge(
+        self,
+        bridge: RuntimeEventNodeBridge,
+        *,
+        events_external: bool = True,
+    ) -> None:
+        """Attach a caller-owned bridge for the next execution.
+
+        The Web SSE layer needs to register the bridge before the worker
+        starts, while the local service creates one lazily.  Marking event
+        ownership prevents the Web sink from receiving the same event twice.
+        """
+
+        self.runtime_node_bridge = bridge
+        self._node_bridge_events_external = events_external
+
+    def _node_bridge_for_runtime(self, prompt: str) -> RuntimeEventNodeBridge | None:
+        """Create a local bridge from the latest durable node configuration."""
+
+        if self.session_store is None or not callable(getattr(self.session_store, "create_node", None)):
+            return None
+        session = self.active_session
+        if session is None or self.runtime is None:
+            return None
+        store = self.session_store
+        # Prefer the latest durable leaf's top-level runtime settings.  This
+        # preserves a provider/model/permission change across turns even when
+        # the legacy RuntimeState checkpoint still has older compatibility
+        # fields.  A provider client supplies defaults for an empty session.
+        latest = None
+        loader = getattr(store, "load_nodes", None)
+        if callable(loader):
+            nodes = list(loader(session.session_id))
+            if nodes:
+                parent_keys = {(node.parent_session_id, node.parent_id) for node in nodes if node.parent_id}
+                leaves = [node for node in nodes if (node.session_id, node.id) not in parent_keys]
+                if leaves:
+                    latest = max(leaves, key=lambda node: (node.timestamp, node.id))
+
+        client = getattr(getattr(self.runtime.services, "planner", None), "client", None)
+        config = getattr(client, "config", None)
+        provider_name = str(
+            (latest.provider_name if latest is not None else "")
+            or getattr(self.runtime.state, "provider_name", "")
+            or getattr(config, "provider_name", None)
+            or getattr(config, "provider", None)
+            or "unknown"
+        )
+        model_config = dict(latest.model) if latest is not None else dict(self.runtime.state.model_snapshot or {})
+        model_config.setdefault("current_model", getattr(config, "model", None) or self.runtime.state.model or "unknown")
+        model_config.setdefault("context_length", getattr(config, "context_size", 128000))
+        model_config.setdefault("output_length", getattr(config, "max_tokens", 8192))
+        model_config.setdefault("reasoning_effort", "medium")
+        model_config.setdefault("thinking", "enable")
+        model_config.setdefault("temperature", 1.0)
+        permission_mode = latest.permission_mode if latest is not None else self.runtime.state.permission_mode
+        running_mode = latest.running_mode if latest is not None else self.runtime.state.running_mode
+        return RuntimeEventNodeBridge(
+            store,
+            session_id=session.session_id,
+            prompt=prompt,
+            user=str(getattr(self.runtime.state, "user", "") or ""),
+            provider_name=provider_name,
+            model=str(model_config.get("current_model") or "unknown"),
+            model_config=model_config,
+            permission_mode=permission_mode,
+            running_mode=running_mode,
+            cwd=str(getattr(self.runtime.state, "workspace_root", "") or ""),
+            emit=lambda _frame: None,
+        )
+
+    def _bind_node_bridge(self, prompt: str, on_event: EventHandler | None) -> None:
+        """Bind a bridge to the runtime and compose its local event sink."""
+
+        bridge = self.runtime_node_bridge
+        if bridge is None or bridge.closed:
+            bridge = self._node_bridge_for_runtime(prompt)
+            self.runtime_node_bridge = bridge
+            self._node_bridge_events_external = False
+        if bridge is None or self.runtime is None:
+            return
+        bridge.bind_runtime(self.runtime)
+        if not bridge.started:
+            bridge.start()
+        if self._node_bridge_events_external:
+            # The caller (Web SSE) already invokes bridge.handle from its
+            # transport sink and owns frame publication/active registration.
+            return
+        previous = on_event
+
+        def sink(event: RuntimeEvent) -> None:
+            bridge.handle(event)
+            if previous is not None:
+                previous(event)
+
+        self.runtime.services.on_event = sink
 
     def run_task(
         self,
@@ -86,6 +190,19 @@ class ConversationService(ConversationSessionController):
         )
         if handoff.new_session:
             self._start_isolated_handoff_session(handoff)
+        # A bridge owned by the Web SSE transport spans the plan review and
+        # the implementation run.  Reset it explicitly at this boundary so
+        # same-session handoffs do not append to the plan assistant node and
+        # every new node records the handoff's effective running mode.
+        bridge = self.runtime_node_bridge
+        if bridge is not None and not bridge.closed:
+            bridge.begin_turn(
+                self.active_session.session_id if self.active_session is not None else self.runtime.state.session_id,
+                handoff.task,
+                running_mode=handoff.mode,
+            )
+            if self.runtime is not None:
+                bridge.bind_runtime(self.runtime)
         follow_up = self._run_single_turn(
             handoff.task,
             mode=handoff.mode,
@@ -230,11 +347,29 @@ class ConversationService(ConversationSessionController):
         if request_parameters:
             self.runtime.state.request_parameters.update(dict(request_parameters))
         runtime = self.runner.bind(self.runtime)
+        # The canonical message-tree bridge is installed for local TUI and
+        # embedding executions as well as Web SSE.  Web attaches a bridge
+        # ahead of time so it can expose the active dynamic leaf to PATCH;
+        # local callers get an equivalent bridge here.
+        self._bind_node_bridge(prepared, on_event)
         try:
             state = self.runner.run(runtime)
         except Exception as exc:
+            bridge = self.runtime_node_bridge
+            if bridge is not None and not self._node_bridge_events_external:
+                bridge.finish_exception(exc)
             self._record_unexpected_failure(exc)
             raise
+        bridge = self.runtime_node_bridge
+        if bridge is not None and not self._node_bridge_events_external:
+            if state.status in {"completed", "success"}:
+                bridge.finish("success", state.final_answer or "")
+            elif state.status == "cancelled":
+                bridge.finish("abort", state.final_answer or "", category="user", code="user_cancelled")
+            elif bridge.abort_category is not None:
+                bridge.finish("abort", state.final_answer or "", category=bridge.abort_category, code=bridge.abort_code)
+            else:
+                bridge.finish("failed", state.final_answer or "")
         if self.session_store is not None and self.active_session is not None:
             self.session_store.finish_turn(
                 self.active_session.session_id,
@@ -244,6 +379,12 @@ class ConversationService(ConversationSessionController):
             )
             self._reload_active_session()
         self.conversation = text_messages(runtime.state.messages)
+        # A bridge is scoped to one turn.  Keep the final durable tree in the
+        # store, but do not let a closed dynamic sidecar receive a later turn's
+        # configuration or events.
+        if bridge is not None and bridge.closed:
+            self.runtime_node_bridge = None
+            self._node_bridge_events_external = False
         return state
 
     def prepare_resume(self, session_id: str | None = None) -> ResumePreview:

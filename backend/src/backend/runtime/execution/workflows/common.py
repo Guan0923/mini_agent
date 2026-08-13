@@ -122,16 +122,20 @@ def _publish_assistant_message(
 ) -> None:
     """Publish one transient boundary after a completed assistant response."""
 
+    data = {
+        "message": message_to_dict(message),
+        "exchange_id": runtime.exchange.exchange_id,
+        "reasoning_streamed": streamed.reasoning,
+        "content_streamed": streamed.content,
+    }
+    normalized_usage = runtime.exchange.context.get("node_usage")
+    if isinstance(normalized_usage, dict):
+        data["usage"] = dict(normalized_usage)
     _publish(
         runtime,
         RuntimeEvent(
             "assistant_message",
-            data={
-                "message": message_to_dict(message),
-                "exchange_id": runtime.exchange.exchange_id,
-                "reasoning_streamed": streamed.reasoning,
-                "content_streamed": streamed.content,
-            },
+            data=data,
         ),
     )
 

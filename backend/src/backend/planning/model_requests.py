@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Protocol
 
 from backend.domain import ToolSpec
@@ -32,7 +33,30 @@ class ModelRequestExecutor:
         operation_tools: list[ToolSpec] | None = None,
         stream: bool | None = None,
     ) -> PreparedResponse:
+        runtime.apply_pending_runtime_config()
+        if runtime.state.current_run is not None and runtime.state.running_mode in {"agent", "plan"}:
+            runtime.state.current_run.mode = runtime.state.running_mode  # type: ignore[assignment]
+        prepare_runtime = getattr(self._client, "prepare_runtime", None)
+        if callable(prepare_runtime):
+            prepare_runtime(runtime)
         exchange = runtime.exchange
+        # Capture dynamic provider/model/permission/mode values once.  A UI
+        # PATCH may arrive while transport is in flight, but it must only be
+        # consumed at the next model/tool decision boundary.
+        # This is the request boundary.  Everything below, including adapter
+        # selection and payload construction, must use this detached copy.
+        # A PATCH may update the dynamic node while transport is in flight,
+        # but that change belongs to the next boundary.
+        exchange.context["runtime_config_snapshot"] = copy.deepcopy(
+            {
+                "provider_name": runtime.state.provider_name,
+                "model": runtime.state.model,
+                "model_snapshot": runtime.state.model_snapshot,
+                "permission_mode": runtime.state.permission_mode,
+                "running_mode": runtime.state.running_mode,
+                "request_parameters": runtime.state.request_parameters,
+            }
+        )
         exchange.operation = operation  # type: ignore[assignment]
         exchange.output_mode = output_mode  # type: ignore[assignment]
         exchange.messages = messages
@@ -43,7 +67,21 @@ class ModelRequestExecutor:
         )
         exchange.exchange_id = runtime.next_exchange_id()
 
-        parameters = dict(runtime.state.request_parameters)
+        config = runtime.request_config()
+        parameters = dict(config.get("request_parameters") or {})
+        snapshot = config.get("model_snapshot", {})
+        if isinstance(snapshot, dict):
+            if snapshot.get("output_length") is not None:
+                parameters["max_tokens"] = snapshot.get("output_length")
+            if snapshot.get("temperature") is not None:
+                parameters["temperature"] = snapshot.get("temperature")
+            if snapshot.get("thinking") != "disable":
+                parameters["thinking"] = {"type": "enabled"}
+                if snapshot.get("reasoning_effort") is not None:
+                    parameters["reasoning_effort"] = snapshot.get("reasoning_effort")
+            else:
+                parameters.pop("reasoning_effort", None)
+                parameters["thinking"] = {"type": "disabled"}
         overrides = exchange.context.get("request_parameters")
         if isinstance(overrides, dict):
             parameters.update(overrides)

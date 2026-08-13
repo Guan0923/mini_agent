@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-agent-cloud"
-version = "0.2.0"
+version = "0.3.0"
 description = "Mini-Agent cloud account and encrypted snapshot service."
 requires-python = ">=3.11"
 dependencies = [

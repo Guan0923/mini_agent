@@ -219,10 +219,11 @@ class AuthSettingsMixin:
 
     @staticmethod
     def _public_provider(record: Mapping[str, object]) -> dict[str, object]:
+        provider_name = str(record.get("provider_name") or record.get("provider") or "deepseek")
         return {
             "id": str(record.get("id") or ""),
             "is_active": bool(record.get("is_active")),
-            "provider": str(record.get("provider") or "deepseek"),
+            "provider_name": provider_name,
             "protocol": str(record.get("protocol") or "chat_completions"),
             "base_url": str(record.get("base_url") or ""),
             "model": str(record.get("model") or ""),
@@ -249,6 +250,28 @@ class AuthSettingsMixin:
                 records = []
             if isinstance(records, list) and records:
                 return [dict(item) for item in records if isinstance(item, dict) and item.get("id")]
+            # Databases created before the multi-provider JSON column was
+            # introduced still contain one complete provider in the explicit
+            # columns.  Preserve that configuration instead of silently
+            # falling back to the built-in defaults; the next write upgrades
+            # it into the normal records list.
+            if row["provider"] or row["base_url"] or row["model"] or row["api_key_ciphertext"]:
+                provider = str(row["provider"] or "deepseek")
+                return [
+                    {
+                        "id": "provider-legacy",
+                        "is_active": True,
+                        "provider": provider,
+                        "provider_name": provider,
+                        "protocol": str(row["protocol"] or "chat_completions"),
+                        "base_url": str(row["base_url"] or ""),
+                        "model": str(row["model"] or ""),
+                        "max_tokens": int(row["max_tokens"] or 8192),
+                        "context_size": int(row["context_size"] or 1024000),
+                        "tokenizer_model": str(row["tokenizer_model"] or "deepseek-ai/DeepSeek-V3"),
+                        "api_key_ciphertext": str(row["api_key_ciphertext"] or ""),
+                    }
+                ]
             return []
 
         if connection is None:
@@ -322,6 +345,18 @@ class AuthSettingsMixin:
         if config_store is not None:
             config_store.update({"providers": {"active_id": str(active.get("id") or "")}})
 
+    @staticmethod
+    def _assert_unique_provider_name(
+        records: list[dict[str, object]], provider_name: str, *, exclude_id: str | None = None
+    ) -> None:
+        folded = provider_name.casefold()
+        for item in records:
+            if exclude_id is not None and str(item.get("id")) == exclude_id:
+                continue
+            candidate = str(item.get("provider_name") or item.get("provider") or "")
+            if candidate.casefold() == folded:
+                raise ValueError("provider_name already exists for this user")
+
     def update_provider_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, object]:
         current = self.provider_config_for_user(user_id)
         normalized = normalize_provider_config(current, values)
@@ -337,6 +372,7 @@ class AuthSettingsMixin:
                 "is_active": True,
                 "api_key_ciphertext": ciphertext,
             }
+            self._assert_unique_provider_name(records, str(record["provider_name"]), exclude_id=str(record["id"]))
             records = [record if item.get("id") == record["id"] else {**item, "is_active": False} for item in records]
             if not any(item.get("id") == record["id"] for item in records):
                 records.append(record)
@@ -358,6 +394,7 @@ class AuthSettingsMixin:
         }
         with self._connection(immediate=True) as connection:
             records = self._provider_records_for_user(user_id, connection)
+            self._assert_unique_provider_name(records, str(record["provider_name"]))
             records.append(record)
             self._write_provider_records(user_id, records, connection)
         return self._public_provider(record)
@@ -375,6 +412,7 @@ class AuthSettingsMixin:
             if isinstance(values.get("api_key"), str) and str(values["api_key"]).strip():
                 key = _encrypt_secret(str(values["api_key"]).strip(), user_id)
             updated = {**current, **normalized, "api_key_ciphertext": key}
+            self._assert_unique_provider_name(records, str(updated["provider_name"]), exclude_id=config_id)
             self._write_provider_records(
                 user_id,
                 [updated if str(item.get("id")) == config_id else item for item in records],
@@ -404,16 +442,32 @@ class AuthSettingsMixin:
         return [self._public_provider(item) for item in records]
 
     def model_config_for_user(self, user_id: str):
+        return self.model_config_for_provider_name(user_id, None)
+
+    def model_config_for_provider_name(self, user_id: str, provider_name: str | None):
         from backend.providers import ModelConfig
 
-        values = self.provider_config_for_user(user_id)
         record = self._provider_with_secret(user_id)
+        if provider_name:
+            folded = provider_name.casefold()
+            record = next(
+                (
+                    item
+                    for item in self._provider_records_for_user(user_id)
+                    if str(item.get("provider_name") or item.get("provider") or "").casefold() == folded
+                ),
+                None,
+            )
+        # Keep the adapter kind and credentials internal.  The public
+        # provider_name is a user-owned identity and is the only provider key
+        # persisted on RuntimeState nodes or returned by settings endpoints.
+        values = dict(record) if record is not None else dict(DEFAULT_PROVIDER_CONFIG)
         api_key = (
             _decrypt_secret(str(record.get("api_key_ciphertext")), user_id)
             if record and record.get("api_key_ciphertext")
             else ""
         )
-        return ModelConfig.from_mapping({**values, "api_key": api_key})
+        return ModelConfig.from_mapping({**values, "api_key": api_key, "provider_name": values.get("provider_name")})
 
     def settings_for_user(self, user_id: str, *, email: str = "") -> dict[str, object]:
         return {

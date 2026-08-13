@@ -32,7 +32,10 @@ class ToolStepExecutor:
     """Execute runtime.state.active_message.tool_messages[active_tool_index]."""
 
     def execute(self, runtime: AgentRuntime) -> ToolStepResult:
+        runtime.apply_pending_runtime_config()
         run = runtime.run
+        if runtime.state.running_mode in {"agent", "plan"}:
+            run.mode = runtime.state.running_mode  # type: ignore[assignment]
         message = runtime.state.active_message
         index = runtime.state.active_tool_index
         if message is None or index is None or not 0 <= index < len(message.tool_messages):
@@ -45,6 +48,11 @@ class ToolStepExecutor:
             if run.mode == "plan" and not tools.is_read_only(tool):
                 return self._failure(runtime, tool, f"Read-only Plan mode blocked tool: {tool}")
             requires_confirmation = tools.requires_confirmation(tool)
+            # Permission is read at every tool boundary.  A full-access update
+            # bypasses approval even when the run was started in approval mode;
+            # switching back to approval is handled by the same live check.
+            if runtime.state.permission_mode == "full_access":
+                requires_confirmation = False
             retryable = tools.is_retryable(tool)
         except ToolError as exc:
             return self._failure(runtime, tool, str(exc))

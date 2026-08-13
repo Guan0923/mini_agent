@@ -77,7 +77,8 @@ class ResponsesAdapter:
     estimate_input_tokens = estimate_tokens
 
     def prepare_request(self, runtime: AgentRuntime) -> dict[str, Any]:
-        parameters = dict(runtime.state.request_parameters)
+        config = runtime.request_config()
+        parameters = dict(config.get("request_parameters") or {})
         overrides = runtime.exchange.context.get("request_parameters")
         if isinstance(overrides, Mapping):
             parameters.update(overrides)
@@ -107,12 +108,19 @@ class ResponsesAdapter:
                                 "output": tool.content,
                             }
                         )
+        model_snapshot = config.get("model_snapshot") if isinstance(config.get("model_snapshot"), Mapping) else {}
         payload: dict[str, Any] = {
-            "model": runtime.state.model or self.config.model,
+            "model": str(config.get("model") or model_snapshot.get("current_model") or self.config.model),
             "input": items,
             "stream": runtime.exchange.stream,
             "max_output_tokens": int(parameters.get("max_tokens", self.config.max_tokens)),
         }
+        if parameters.get("temperature") is not None:
+            payload["temperature"] = parameters["temperature"]
+        if parameters.get("reasoning_effort") is not None:
+            payload["reasoning"] = {"effort": parameters["reasoning_effort"]}
+        if parameters.get("thinking") == {"type": "disabled"}:
+            payload.pop("reasoning", None)
         tools = runtime.exchange.allowed_tools
         if tools:
             payload["tools"] = [
@@ -276,7 +284,8 @@ class MessagesAdapter:
     estimate_input_tokens = estimate_tokens
 
     def prepare_request(self, runtime: AgentRuntime) -> dict[str, Any]:
-        parameters = dict(runtime.state.request_parameters)
+        config = runtime.request_config()
+        parameters = dict(config.get("request_parameters") or {})
         overrides = runtime.exchange.context.get("request_parameters")
         if isinstance(overrides, Mapping):
             parameters.update(overrides)
@@ -307,12 +316,18 @@ class MessagesAdapter:
                         )
                 if blocks:
                     messages.append({"role": "assistant", "content": blocks})
+        model_snapshot = config.get("model_snapshot") if isinstance(config.get("model_snapshot"), Mapping) else {}
         payload: dict[str, Any] = {
-            "model": runtime.state.model or self.config.model,
+            "model": str(config.get("model") or model_snapshot.get("current_model") or self.config.model),
             "messages": messages,
             "max_tokens": int(parameters.get("max_tokens", self.config.max_tokens)),
             "stream": runtime.exchange.stream,
         }
+        if parameters.get("temperature") is not None:
+            payload["temperature"] = parameters["temperature"]
+        thinking = parameters.get("thinking")
+        if isinstance(thinking, Mapping) and thinking.get("type") == "enabled":
+            payload["thinking"] = {"type": "enabled"}
         if system:
             payload["system"] = system
         if runtime.exchange.allowed_tools:

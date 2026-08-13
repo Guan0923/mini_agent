@@ -45,7 +45,8 @@ import type { AuthUser } from "../types";
 type SettingsSection = "profile" | "agent" | "provider_add" | "provider_manage" | "cloud";
 
 type ProviderDraft = {
-  provider: string;
+  provider_name: string;
+  provider_type: string;
   protocol: ProviderConfig["protocol"];
   base_url: string;
   model: string;
@@ -77,7 +78,7 @@ const defaultAgent: AgentConfig = {
 const defaultProvider: ProviderConfig = {
   id: "",
   is_active: false,
-  provider: "deepseek",
+  provider_name: "deepseek",
   protocol: "chat_completions",
   base_url: "",
   model: "",
@@ -88,7 +89,8 @@ const defaultProvider: ProviderConfig = {
 };
 
 const defaultProviderDraft: ProviderDraft = {
-  provider: defaultProvider.provider,
+  provider_name: defaultProvider.provider_name,
+  provider_type: "deepseek",
   protocol: defaultProvider.protocol,
   base_url: defaultProvider.base_url,
   model: defaultProvider.model,
@@ -133,8 +135,8 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
   const [locationError, setLocationError] = useState("");
   const [providerAddDraft, setProviderAddDraft] = useState<ProviderDraft>(defaultProviderDraft);
   const [savedProviderAddDraft, setSavedProviderAddDraft] = useState<ProviderDraft>(defaultProviderDraft);
-  const [providerDrafts, setProviderDrafts] = useState<Record<string, { model: string; api_key: string }>>({});
-  const [savedProviderDrafts, setSavedProviderDrafts] = useState<Record<string, { model: string; api_key: string }>>({});
+  const [providerDrafts, setProviderDrafts] = useState<Record<string, { provider_name: string; model: string; api_key: string }>>({});
+  const [savedProviderDrafts, setSavedProviderDrafts] = useState<Record<string, { provider_name: string; model: string; api_key: string }>>({});
   const [modelOptions, setModelOptions] = useState<Record<string, string[]>>({});
   const [modelsLoading, setModelsLoading] = useState<Record<string, boolean>>({});
   const [syncJob, setSyncJob] = useState<SyncJob | null>(null);
@@ -149,7 +151,14 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
     void getSettings()
       .then((next) => {
         if (!mounted) return;
-        const providers = next.provider_configs ?? (next.provider_config?.id ? [next.provider_config] : []);
+        // v0.3 responses use provider_name.  Accepting the pre-v0.3 provider
+        // key at this UI boundary keeps older cached settings renderable while
+        // all writes continue to use the new provider_name contract.
+        const rawProviders = next.provider_configs ?? (next.provider_config?.id ? [next.provider_config] : []);
+        const providers = rawProviders.map((provider) => ({
+          ...provider,
+          provider_name: provider.provider_name || (provider as ProviderConfig & { provider?: string }).provider || "",
+        }));
         const currentProvider = providers.find((provider) => provider.is_active)
           ?? (next.provider_config?.id ? next.provider_config : defaultProvider);
         const normalized = {
@@ -159,7 +168,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
           sync_preferences: next.sync_preferences ?? defaultSyncPreferences,
           sync_state: next.sync_state ?? defaultSyncState,
         };
-        const drafts = Object.fromEntries(providers.map((provider) => [provider.id, { model: provider.model, api_key: "" }]));
+        const drafts = Object.fromEntries(providers.map((provider) => [provider.id, { provider_name: provider.provider_name, model: provider.model, api_key: "" }]));
         setSettings(normalized);
         setSaved(normalized);
         setProviderAddDraft(defaultProviderDraft);
@@ -329,7 +338,8 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
         onAgentConfigUpdate?.(agent);
       } else if (section === "provider_add") {
         const provider = await addProviderConfig({
-          provider: providerAddDraft.provider,
+          provider_name: providerAddDraft.provider_name,
+          provider_type: providerAddDraft.provider_type,
           protocol: providerAddDraft.protocol,
           base_url: providerAddDraft.base_url,
           model: providerAddDraft.model,
@@ -392,11 +402,11 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
     });
   }
 
-  function updateProviderDraft(id: string, patch: Partial<{ model: string; api_key: string }>) {
-    setProviderDrafts((current) => ({ ...current, [id]: { ...(current[id] ?? { model: "", api_key: "" }), ...patch } }));
+  function updateProviderDraft(id: string, patch: Partial<{ provider_name: string; model: string; api_key: string }>) {
+    setProviderDrafts((current) => ({ ...current, [id]: { ...(current[id] ?? { provider_name: "", model: "", api_key: "" }), ...patch } }));
   }
 
-  async function discoverModels(id: string, values: { provider: string; protocol: ProviderConfig["protocol"]; base_url: string; api_key?: string }) {
+  async function discoverModels(id: string, values: { provider_name: string; provider_type?: string; protocol: ProviderConfig["protocol"]; base_url: string; api_key?: string }) {
     setModelsLoading((current) => ({ ...current, [id]: true }));
     setError("");
     try {
@@ -411,11 +421,12 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
   }
 
   async function saveManagedProvider(provider: ProviderConfig) {
-    const draft = providerDrafts[provider.id] ?? { model: provider.model, api_key: "" };
+    const draft = providerDrafts[provider.id] ?? { provider_name: provider.provider_name, model: provider.model, api_key: "" };
     setSaving(true);
     setError("");
     try {
       const updated = await updateProviderConfigById(provider.id, {
+        provider_name: draft.provider_name,
         model: draft.model,
         ...(draft.api_key.trim() ? { api_key: draft.api_key } : {}),
       });
@@ -426,7 +437,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
         provider_configs: providers,
         provider_config: updated.is_active ? updated : current.provider_config,
       } : current));
-      const nextDraft = { model: updated.model, api_key: "" };
+      const nextDraft = { provider_name: updated.provider_name, model: updated.model, api_key: "" };
       setProviderDrafts((current) => ({ ...current, [updated.id]: nextDraft }));
       setSavedProviderDrafts((current) => ({ ...current, [updated.id]: nextDraft }));
     } catch (cause) {
@@ -438,7 +449,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
 
   function confirmDeleteProvider(provider: ProviderConfig) {
     modal.confirm({
-      title: `删除提供商 ${provider.provider}？`,
+      title: `删除提供商 ${provider.provider_name}？`,
       content: provider.is_active && (settings?.provider_configs.length ?? 0) > 1
         ? "当前提供商必须先切换后才能删除。"
         : "删除后将无法恢复该配置。",
@@ -624,8 +635,8 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
               </Form.Item>
               <Form.Item label="提供商" style={{ flex: 1 }}>
                 <Input
-                  value={providerAddDraft.provider}
-                  onChange={(event) => setProviderAddDraft((current) => ({ ...current, provider: event.target.value }))}
+                  value={providerAddDraft.provider_name}
+                  onChange={(event) => setProviderAddDraft((current) => ({ ...current, provider_name: event.target.value }))}
                 />
               </Form.Item>
             </Space.Compact>
@@ -646,7 +657,8 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
                 type="link"
                 loading={modelsLoading.new}
                 onClick={() => void discoverModels("new", {
-                  provider: providerAddDraft.provider,
+                  provider_name: providerAddDraft.provider_name,
+                  provider_type: providerAddDraft.provider_type,
                   protocol: providerAddDraft.protocol,
                   base_url: providerAddDraft.base_url,
                   api_key: providerAddDraft.api_key,
@@ -686,12 +698,13 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
             ) : (
               <Collapse
                 items={(settings.provider_configs ?? []).map((provider) => {
-                  const draft = providerDrafts[provider.id] ?? { model: provider.model, api_key: "" };
+                  const draft = providerDrafts[provider.id] ?? { provider_name: provider.provider_name, model: provider.model, api_key: "" };
                   return {
                     key: provider.id,
-                    label: <span>{provider.provider} · {provider.model || "未选择模型"} {provider.is_active ? <Tag color="green">当前使用</Tag> : null}</span>,
+                    label: <span>{provider.provider_name} · {provider.model || "未选择模型"} {provider.is_active ? <Tag color="green">当前使用</Tag> : null}</span>,
                     children: (
                       <Form layout="vertical">
+                        <Form.Item label="提供商名称"><Input value={draft.provider_name} onChange={(event) => updateProviderDraft(provider.id, { provider_name: event.target.value })} /></Form.Item>
                         <Form.Item label="Base URL"><Input value={provider.base_url} disabled /></Form.Item>
                         <Form.Item label="模型">
                           <AutoComplete
@@ -704,7 +717,8 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
                             type="link"
                             loading={modelsLoading[provider.id]}
                             onClick={() => void discoverModels(provider.id, {
-                              provider: provider.provider,
+                              provider_name: provider.provider_name,
+                              provider_type: "deepseek",
                               protocol: provider.protocol,
                               base_url: provider.base_url,
                               api_key: draft.api_key,
