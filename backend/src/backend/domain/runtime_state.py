@@ -1094,8 +1094,34 @@ class NodeWriter:
         self.emit = emit or (lambda _frame: None)
         self.id_factory = id_factory
         self.clock = clock
+        self._last_timestamp: datetime | None = None
         self._dynamic: dict[tuple[str, str], RuntimeState] = {}
         self._lock = RLock()
+
+    def _next_timestamp(self, parent: RuntimeState | None) -> str:
+        """Return a timestamp that preserves creation order within a writer.
+
+        Windows can return the same wall-clock value for several adjacent
+        nodes.  Runtime stores use ``(timestamp, id)`` for stable projections,
+        so equal values would let a random UUID reorder a parent and child.
+        Keep protocol timestamps in UTC ISO 8601 while advancing ties by one
+        microsecond.
+        """
+
+        raw = self.clock()
+        try:
+            current = datetime.fromisoformat(raw)
+        except (TypeError, ValueError):
+            # RuntimeState remains the single source of timestamp validation.
+            return raw
+        floor = self._last_timestamp
+        if parent is not None:
+            parent_timestamp = datetime.fromisoformat(parent.timestamp)
+            floor = parent_timestamp if floor is None or parent_timestamp > floor else floor
+        if floor is not None and current <= floor:
+            current = floor + timedelta(microseconds=1)
+        self._last_timestamp = current
+        return current.isoformat()
 
     def create(
         self,
@@ -1138,7 +1164,7 @@ class NodeWriter:
                 parent_session_id=parent_session_id,
                 parent_id=parent_id,
                 id=self.id_factory(),
-                timestamp=self.clock(),
+                timestamp=self._next_timestamp(parent_node),
                 first_kept_entry_id=first_kept_entry_id,
                 compaction_idx=compaction_idx,
                 data=data,

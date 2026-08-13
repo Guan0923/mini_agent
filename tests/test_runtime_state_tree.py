@@ -558,6 +558,19 @@ def test_bridge_starts_a_new_agent_turn_after_same_session_plan_handoff() -> Non
     assert assistants[1].running_mode == "agent"
 
 
+def test_node_writer_orders_parent_and_child_when_clock_values_tie() -> None:
+    store = InMemoryNodeStore()
+    writer = NodeWriter(store, clock=lambda: "2026-08-13T00:00:00+00:00")
+
+    parent = writer.create(session_id="s", data=message_payload("user", "first"))
+    parent = writer.delete(parent.session_id, parent.id)
+    child = writer.create(session_id="s", parent=parent, data=message_payload("assistant", "second"))
+    writer.delete(child.session_id, child.id)
+
+    assert [node.role for node in store.all_nodes("s")] == ["user", "assistant"]
+    assert datetime.fromisoformat(child.timestamp) > datetime.fromisoformat(parent.timestamp)
+
+
 def test_bridge_projects_control_events_into_canonical_content_blocks() -> None:
     store = InMemoryNodeStore()
     frames: list[NodeFrame] = []
