@@ -65,7 +65,7 @@ const settings = {
   },
 };
 
-function renderModal(onClose = vi.fn(), onUserUpdate = vi.fn()) {
+function renderModal(onClose = vi.fn(), onUserUpdate = vi.fn(), onProviderConfigUpdate = vi.fn()) {
   return render(
     <AntApp>
       <UserSettingsModal
@@ -73,6 +73,7 @@ function renderModal(onClose = vi.fn(), onUserUpdate = vi.fn()) {
         user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "user@example.com" }}
         onClose={onClose}
         onUserUpdate={onUserUpdate}
+        onProviderConfigUpdate={onProviderConfigUpdate}
       />
     </AntApp>,
   );
@@ -118,7 +119,7 @@ describe("UserSettingsModal", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "添加提供商" }));
     expect(screen.getByText("Base URL")).toBeInTheDocument();
     expect(screen.getByText("Chat Completions")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("menuitem", { name: "提供商管理" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
     expect(screen.getByText(/openai/)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("menuitem", { name: "云同步" }));
@@ -185,5 +186,36 @@ describe("UserSettingsModal", () => {
     }));
     expect(onUserUpdate).toHaveBeenCalledWith({ display_name: "新名字", agent_preferences: "" });
     expect(screen.getByDisplayValue("新名字")).toBeInTheDocument();
+  });
+
+  it("switches the current Provider and model from user settings", async () => {
+    const nextProvider = {
+      ...settings.provider_config,
+      id: "provider-2",
+      is_active: false,
+      provider: "anthropic",
+      provider_name: "anthropic",
+      protocol: "messages" as const,
+      model: "claude-settings",
+    };
+    api.getSettings.mockResolvedValue({
+      ...structuredClone(settings),
+      provider_configs: [structuredClone(settings.provider_config), nextProvider],
+    });
+    api.activateProviderConfig.mockResolvedValue({ ...nextProvider, is_active: true });
+    const onProviderConfigUpdate = vi.fn();
+    renderModal(vi.fn(), vi.fn(), onProviderConfigUpdate);
+
+    await screen.findByDisplayValue("user@example.com");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
+    await userEvent.click(screen.getByText(/anthropic · claude-settings/));
+    await userEvent.click(screen.getByRole("button", { name: "设为当前使用" }));
+
+    await waitFor(() => expect(api.activateProviderConfig).toHaveBeenCalledWith("provider-2"));
+    expect(onProviderConfigUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      provider_name: "anthropic",
+      model: "claude-settings",
+      is_active: true,
+    }));
   });
 });

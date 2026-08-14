@@ -1,5 +1,6 @@
 import type { ChatMessage, Conversation, RuntimeNodeFrame, RuntimeStateNode, ToolEvent } from "../types";
 import { applyRuntimeNodeFrame } from "./runtimeNodeReducer";
+import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
 function nodeKey(node: RuntimeStateNode): string {
   return `${node.session_id}:${node.id}`;
@@ -156,7 +157,10 @@ function projectMessageNodes(
 
 export function integrateRuntimeNodeFrame(conversation: Conversation, frame: RuntimeNodeFrame): Conversation {
   const current = new Map<string, RuntimeStateNode>(
-    (conversation.runtimeNodes ?? []).map((node) => [nodeKey(node), node] as const),
+    (conversation.runtimeNodes ?? []).map((node) => {
+      const normalized = normalizeRuntimeNode(node);
+      return [nodeKey(normalized), normalized] as const;
+    }),
   );
   const next = applyRuntimeNodeFrame(current, frame);
   const projection = projectRuntimeNode(frame.node, frame.type === "node.delete");

@@ -4,8 +4,9 @@ from pathlib import Path
 from backend.domain import AgentAction, RunState, StrategySelection
 from backend.runtime import AgentRunner
 from backend.tools import ToolRegistry
-from tests.local_store import session_store
 from tui.cli import TerminalApp
+
+from tests.local_store import session_store
 
 
 def test_sqlite_session_store_persists_multi_turn_conversation(tmp_path: Path) -> None:

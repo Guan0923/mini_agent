@@ -9,6 +9,7 @@ import {
   streamResume,
   submitDecision,
 } from "../../api";
+import type { ProviderConfig } from "../../api";
 import { HELP_TEXT, parseCommand } from "../../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../../commands/completion";
 import MarkdownContent from "../../components/MarkdownContent";
@@ -16,6 +17,7 @@ import { AssistantMessage, MessageActions } from "./messageParts";
 import Composer, { type SettingsSelectKey } from "./Composer";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "../../app/runtimeDetailProjection";
+import { DEFAULT_RUNTIME_NODE_MODEL, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
 import type {
   ChatMessage,
   ChatMode,
@@ -33,6 +35,7 @@ import type {
 interface Props {
   conversation: Conversation | null;
   displayMode?: DisplayMode;
+  providerConfig?: ProviderConfig | null;
   mode?: ChatMode;
   onModeChange?: (mode: ChatMode) => void;
   onUpdate: (id: string, updater: (conversation: Conversation) => Conversation) => void;
@@ -68,15 +71,6 @@ interface ChatRunRequest {
   sourceNodeId?: string;
 }
 
-const DEFAULT_RUNTIME_MODEL: RuntimeNodeModel = {
-  reasoning_effort: "medium",
-  current_model: "unknown",
-  context_length: 128000,
-  output_length: 8192,
-  thinking: "enable",
-  temperature: 1,
-};
-
 function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
   return ref?.resizableTextArea?.textArea ?? null;
 }
@@ -84,6 +78,7 @@ function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
 export default function ChatPage({
   conversation,
   displayMode: configuredDisplayMode,
+  providerConfig,
   mode: selectedMode,
   onModeChange = () => undefined,
   onUpdate,
@@ -108,7 +103,7 @@ export default function ChatPage({
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("approval_for_me");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
   const [providerName, setProviderName] = useState("unknown");
-  const [runtimeModel, setRuntimeModel] = useState<RuntimeNodeModel>(DEFAULT_RUNTIME_MODEL);
+  const [runtimeModel, setRuntimeModel] = useState<RuntimeNodeModel>(DEFAULT_RUNTIME_NODE_MODEL);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [openSettingsSelect, setOpenSettingsSelect] = useState<SettingsSelectKey | null>(null);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
@@ -141,11 +136,12 @@ export default function ChatPage({
   useEffect(() => {
     const node = activeRuntimeNode;
     if (!node) return;
+    const model = normalizeRuntimeNodeModel(node.model);
     setProviderName(node.provider_name || "unknown");
-    setRuntimeModel({ ...DEFAULT_RUNTIME_MODEL, ...node.model });
-    setPermissionMode(node.permission_mode);
-    setReasoningEffort(node.model.reasoning_effort);
-    if (node.running_mode !== mode) onModeChange(node.running_mode);
+    setRuntimeModel(model);
+    setPermissionMode(node.permission_mode || "approval_for_me");
+    setReasoningEffort(model.reasoning_effort);
+    if (node.running_mode && node.running_mode !== mode) onModeChange(node.running_mode);
   }, [activeRuntimeNode?.id, activeRuntimeNode?.provider_name, activeRuntimeNode?.model, activeRuntimeNode?.permission_mode, activeRuntimeNode?.running_mode]);
 
   function nearestUsage(node: RuntimeStateNode | undefined): { total: number; context: number } | undefined {
@@ -165,9 +161,24 @@ export default function ChatPage({
   }
 
   const activeUsage = nearestUsage(activeRuntimeNode);
+  const activeRuntimeModel = normalizeRuntimeNodeModel(activeRuntimeNode?.model);
   const usagePercent = activeUsage ? Math.max(0, Math.min(100, (activeUsage.total / activeUsage.context) * 100)) : 0;
-  const requestProviderName = providerName && providerName !== "unknown" ? providerName : undefined;
-  const requestModel = runtimeModel.current_model && runtimeModel.current_model !== "unknown" ? runtimeModel : undefined;
+  const configuredProviderName = providerConfig?.provider_name?.trim();
+  const requestProviderName = configuredProviderName || (providerName && providerName !== "unknown" ? providerName : undefined);
+  const requestModel = (() => {
+    if (providerConfig?.model) {
+      return {
+        ...runtimeModel,
+        reasoning_effort: reasoningEffort,
+        current_model: providerConfig.model,
+        context_length: providerConfig.context_size,
+        output_length: providerConfig.max_tokens,
+      };
+    }
+    return runtimeModel.current_model && runtimeModel.current_model !== "unknown"
+      ? { ...runtimeModel, reasoning_effort: reasoningEffort }
+      : undefined;
+  })();
 
   async function updateRuntimeConfig(patch: {
     provider_name?: string;
@@ -188,6 +199,31 @@ export default function ChatPage({
       setLast({ error: `运行配置更新失败：${String((error as Error).message ?? error)}` });
     }
   }
+
+  useEffect(() => {
+    if (!busy || !activeRuntimeNode || !configuredProviderName || !requestModel) return;
+    if (
+      activeRuntimeNode.provider_name === configuredProviderName
+      && activeRuntimeModel.current_model === requestModel.current_model
+      && activeRuntimeModel.context_length === requestModel.context_length
+      && activeRuntimeModel.output_length === requestModel.output_length
+    ) return;
+    void updateRuntimeConfig({
+      provider_name: configuredProviderName,
+      model: requestModel,
+    });
+  }, [
+    busy,
+    activeRuntimeNode?.id,
+    activeRuntimeNode?.provider_name,
+    activeRuntimeModel.current_model,
+    activeRuntimeModel.context_length,
+    activeRuntimeModel.output_length,
+    configuredProviderName,
+    requestModel?.current_model,
+    requestModel?.context_length,
+    requestModel?.output_length,
+  ]);
 
   useEffect(() => {
     if (pendingCaretRef.current !== null) {
@@ -433,6 +469,10 @@ export default function ChatPage({
     onUpdate(conversationId, (current) => ({
       ...current,
       title: current.title === "新对话" ? prompt.slice(0, 18) + (prompt.length > 18 ? "…" : "") : current.title,
+      messageCount:
+        (current.messages.length > 0
+          ? current.messages.filter((message) => message.role === "user" || message.role === "assistant").length
+          : current.messageCount ?? 0) + 2,
       messages: [...current.messages, userMessage, assistantMessage],
     }));
     await dispatchRun(
@@ -667,8 +707,6 @@ export default function ChatPage({
         mode={mode}
         permissionMode={permissionMode}
         reasoningEffort={reasoningEffort}
-        providerName={providerName}
-        currentModel={runtimeModel.current_model}
         usagePercent={usagePercent}
         usageTotalTokens={activeUsage?.total ?? null}
         usageContextLength={activeUsage?.context}
@@ -682,8 +720,6 @@ export default function ChatPage({
         onModeChange={(value) => { onModeChange(value); void updateRuntimeConfig({ running_mode: value }); setOpenSettingsSelect(null); }}
         onPermissionChange={(value) => { setPermissionMode(value); void updateRuntimeConfig({ permission_mode: value }); setOpenSettingsSelect(null); }}
         onReasoningChange={(value) => { setReasoningEffort(value); setRuntimeModel((current) => ({ ...current, reasoning_effort: value })); void updateRuntimeConfig({ model: { reasoning_effort: value } }); setOpenSettingsSelect(null); }}
-        onProviderChange={(value) => { setProviderName(value); void updateRuntimeConfig({ provider_name: value }); }}
-        onModelChange={(value) => { setRuntimeModel((current) => ({ ...current, current_model: value })); void updateRuntimeConfig({ model: { current_model: value } }); }}
         onSettingsSelectChange={setOpenSettingsSelect}
         onOpenSettings={() => setSettingsOpen(true)}
         onCloseSettings={() => setSettingsOpen(false)}

@@ -3,13 +3,15 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./ChatPage";
 import { copyText } from "./chat/messageParts";
-import type { ChatMode, Conversation, PermissionMode, ReasoningEffort, StreamMessage } from "../types";
+import type { ChatMode, Conversation, PermissionMode, ReasoningEffort, RuntimeConfigModel, StreamMessage } from "../types";
+import type { ProviderConfig } from "../api";
 
 const mocks = vi.hoisted(() => ({
   streamChat: vi.fn(),
   listSessions: vi.fn(),
   listSkills: vi.fn(),
   listTools: vi.fn(),
+  patchRuntimeConfig: vi.fn(),
 }));
 
 vi.mock("../api", () => mocks);
@@ -29,22 +31,30 @@ function Harness({
   onRewind,
   onRun,
   onStopRun,
+  onConversationUpdate,
+  providerConfig,
 }: {
   initial?: Conversation | null;
   onEnsureSession?: (id: string) => Promise<string>;
   onFork?: (conversationId: string, messageId: string) => Promise<void>;
   onRewind?: (conversationId: string, messageId: string) => Promise<{ content: string; sessionId: string } | string | undefined>;
-  onRun?: (request: { conversationId: string; sessionId: string; prompt: string | null; resume: boolean; mode: ChatMode; permissionMode: PermissionMode; reasoningEffort: ReasoningEffort }) => Promise<void>;
+  onRun?: (request: { conversationId: string; sessionId: string; prompt: string | null; resume: boolean; mode: ChatMode; permissionMode: PermissionMode; reasoningEffort: ReasoningEffort; providerName?: string; model?: RuntimeConfigModel }) => Promise<void>;
   onStopRun?: (conversationId: string) => void;
+  onConversationUpdate?: (conversation: Conversation) => void;
+  providerConfig?: ProviderConfig | null;
 }) {
   const [conversation, setConversation] = React.useState<Conversation | null>(initial);
 
   return (
     <ChatPage
       conversation={conversation}
-      onUpdate={(id, updater) =>
-        setConversation((current) => (current?.id === id ? updater(current) : current))
-      }
+      providerConfig={providerConfig}
+      onUpdate={(id, updater) => setConversation((current) => {
+        if (current?.id !== id) return current;
+        const next = updater(current);
+        onConversationUpdate?.(next);
+        return next;
+      })}
       onNew={() => {
         const next = baseConversation();
         next.id = "conversation-new";
@@ -140,12 +150,14 @@ describe("ChatPage run lifecycle", () => {
       },
     );
 
+    let latest: Conversation | undefined;
     const user = userEvent.setup();
-    render(<Harness initial={null} />);
+    render(<Harness initial={null} onConversationUpdate={(conversation) => { latest = conversation; }} />);
     await user.type(screen.getByPlaceholderText("输入任务，按 Enter 发送"), "第一次");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("首次回答")).toBeInTheDocument();
+    expect(latest?.messageCount).toBe(2);
   });
 
   it("aborts the stream when the chat page is unmounted", async () => {
@@ -236,6 +248,9 @@ describe("ChatPage run lifecycle", () => {
     const user = userEvent.setup();
     render(<Harness />);
 
+    expect(screen.queryByRole("textbox", { name: "提供商" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "模型" })).not.toBeInTheDocument();
+
     await user.click(screen.getByRole("combobox", { name: "权限模式" }));
     await user.click(screen.getByRole("option", { name: /完全访问/ }));
     expect(screen.getByText(/完全访问/)).toBeInTheDocument();
@@ -243,6 +258,67 @@ describe("ChatPage run lifecycle", () => {
     await user.click(screen.getByRole("combobox", { name: "思考等级" }));
     await user.click(screen.getByRole("option", { name: "high" }));
     expect(screen.getAllByText("high", { exact: true }).length).toBeGreaterThan(0);
+  });
+
+  it("uses the Provider and model selected in user settings for the next run", async () => {
+    const onRun = vi.fn().mockResolvedValue(undefined);
+    const configuredProvider: ProviderConfig = {
+      id: "provider-settings",
+      is_active: true,
+      provider_name: "work-openai",
+      protocol: "responses",
+      base_url: "https://example.test/v1",
+      model: "gpt-settings",
+      max_tokens: 16000,
+      context_size: 128000,
+      tokenizer_model: "gpt-settings",
+      api_key_configured: true,
+    };
+    const user = userEvent.setup();
+    render(<Harness providerConfig={configuredProvider} onRun={onRun} />);
+
+    await user.type(screen.getByPlaceholderText("输入任务，按 Enter 发送"), "使用设置模型");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
+      providerName: "work-openai",
+      model: expect.objectContaining({
+        current_model: "gpt-settings",
+        context_length: 128000,
+        output_length: 16000,
+      }),
+    }));
+  });
+
+  it("renders when a cached runtime node has no v0.3 model fields", () => {
+    const legacyNode = {
+      session_id: "session-legacy",
+      parent_session_id: "",
+      id: "node-legacy",
+      parent_id: "",
+      version: "0.3.0",
+      firstKeptEntryId: "node-legacy",
+      compactionIdx: "node-legacy",
+      user: "",
+      provider_name: "",
+      permission_mode: "approval_for_me",
+      running_mode: "agent",
+      cwd: "",
+      timestamp: "2026-08-14T00:00:00+00:00",
+      status: "success",
+      data: { type: "message", message: { role: "assistant", content: [] } },
+    } as unknown as NonNullable<Conversation["runtimeNodes"]>[number];
+    const initial: Conversation = {
+      ...baseConversation(),
+      sessionId: "session-legacy",
+      lastNodeId: "node-legacy",
+      runtimeNodes: [legacyNode],
+    };
+
+    render(<Harness initial={initial} />);
+
+    expect(screen.getByPlaceholderText("输入任务，按 Enter 发送")).toBeInTheDocument();
+    expect(screen.getAllByText("medium", { exact: true }).length).toBeGreaterThan(0);
   });
 
   it("edits a user message in place, rewinds, and starts a replacement run", async () => {

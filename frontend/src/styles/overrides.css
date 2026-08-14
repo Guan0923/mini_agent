@@ -166,6 +166,7 @@
 .composer-settings-controls {
   display: flex;
   align-items: center;
+  gap: 6px !important;
   width: 100%;
   max-width: 100%;
 }

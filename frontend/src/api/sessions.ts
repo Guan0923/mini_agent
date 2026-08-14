@@ -1,4 +1,5 @@
 import type { ChatMessage, RuntimeStateNode } from "../types";
+import { normalizeRuntimeNode } from "../app/runtimeNodeNormalization";
 import { jsonBody, requestJson } from "./request";
 
 export interface SessionInfo {
@@ -127,11 +128,13 @@ export async function getSessionMessages(sessionId: string): Promise<SessionMess
 }
 
 export async function getSessionNodes(sessionId: string): Promise<RuntimeStateNode[]> {
-  return requestJson<RuntimeStateNode[]>(`/api/sessions/${encodeURIComponent(sessionId)}/nodes`);
+  const nodes = await requestJson<RuntimeStateNode[]>(`/api/sessions/${encodeURIComponent(sessionId)}/nodes`);
+  return nodes.map(normalizeRuntimeNode);
 }
 
 export async function getSessionLeaves(sessionId: string): Promise<RuntimeStateNode[]> {
-  return requestJson<RuntimeStateNode[]>(`/api/sessions/${encodeURIComponent(sessionId)}/leaves`);
+  const nodes = await requestJson<RuntimeStateNode[]>(`/api/sessions/${encodeURIComponent(sessionId)}/leaves`);
+  return nodes.map(normalizeRuntimeNode);
 }
 
 export async function patchRuntimeConfig(

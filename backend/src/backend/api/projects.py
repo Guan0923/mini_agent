@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from backend.storage.projects import Project, ProjectStore
 
@@ -27,6 +27,17 @@ class _PickerBusyError(RuntimeError):
 class ProjectSessionRequest(BaseModel):
     title: str | None = Field(default="新对话", max_length=120)
     client_id: str | None = Field(default=None, max_length=200)
+
+
+class ProjectRenameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("项目名称不能为空。")
+        return value
 
 
 def _project_payload(project: Project, store: ProjectStore | None = None) -> dict[str, object]:
@@ -80,6 +91,33 @@ def _pick_directory(request: Request) -> Path | None:
 
 def _project_store(request: Request, identity: UserIdentity) -> ProjectStore:
     return request.app.state.web.projects(identity.id)
+
+
+def _ensure_project_idle(request: Request, identity: UserIdentity, project_id: str) -> None:
+    """Reject project mutations that would invalidate a running cwd."""
+
+    projects = _project_store(request, identity)
+    session_store = _store(request.app.state.web, identity.id)
+    for summary in session_store.list_sessions(state="all"):
+        bound = projects.session_project(summary.session_id, include_removed=False)
+        if bound is None or bound.project_id != project_id:
+            continue
+        runtime = None
+        try:
+            runtime = session_store.load_runtime(summary.session_id)
+        except Exception:
+            # Durable summaries remain authoritative when an optional runtime
+            # projection cannot be loaded.
+            pass
+        runtime_running = bool(
+            runtime is not None
+            and (
+                getattr(runtime, "status", None) == "running"
+                or getattr(getattr(runtime, "current_run", None), "status", None) == "running"
+            )
+        )
+        if summary.last_run_status == "running" or runtime_running:
+            raise HTTPException(status_code=409, detail="项目中有正在运行的任务，请先停止。")
 
 
 @router.get("/projects")
@@ -178,32 +216,57 @@ def remove_project(
     identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
     projects = _project_store(request, identity)
-    session_store = _store(request.app.state.web, identity.id)
     project = projects.get(project_id, include_removed=False)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在或已移除。")
-    for summary in session_store.list_sessions(state="all"):
-        bound = projects.session_project(summary.session_id, include_removed=False)
-        if bound is not None and bound.project_id == project_id:
-            runtime = None
-            try:
-                runtime = session_store.load_runtime(summary.session_id)
-            except Exception:
-                # The summary already provides the durable run index.  A
-                # malformed optional runtime projection must not turn a
-                # removable idle project into an internal server error.
-                pass
-            runtime_running = bool(
-                runtime is not None
-                and (
-                    getattr(runtime.state, "status", None) == "running"
-                    or getattr(getattr(runtime.state, "current_run", None), "status", None) == "running"
-                )
-            )
-            if summary.last_run_status == "running" or runtime_running:
-                raise HTTPException(status_code=409, detail="项目中有正在运行的任务，请先停止。")
+    _ensure_project_idle(request, identity, project_id)
     try:
         return _project_payload(projects.remove(project_id), projects)
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+
+
+@router.patch("/projects/{project_id}")
+def rename_project(
+    project_id: str,
+    body: ProjectRenameRequest,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict[str, object]:
+    try:
+        project = _project_store(request, identity).rename(project_id, body.name)
+        return _project_payload(project, _project_store(request, identity))
+    except ValueError as exc:
+        raise _mutation_error(exc) from exc
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+
+
+@router.post("/projects/{project_id}/path", response_model=None)
+def change_project_path(
+    project_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> Response | dict[str, object]:
+    store = _project_store(request, identity)
+    project = store.get(project_id, include_removed=False)
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在或已移除。")
+    _ensure_project_idle(request, identity, project_id)
+    try:
+        selected = _pick_directory(request)
+    except _PickerBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if selected is None:
+        return Response(status_code=204)
+    _ensure_project_idle(request, identity, project_id)
+    try:
+        updated = store.update_cwd(project_id, selected)
+        return _project_payload(updated, store)
+    except ValueError as exc:
+        raise _mutation_error(exc) from exc
     except Exception as exc:
         raise _mutation_error(exc) from exc
 

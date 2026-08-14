@@ -13,7 +13,6 @@ import {
   Popover,
   Space,
   Spin,
-  Tooltip,
   Typography,
   type MenuProps,
 } from "antd";
@@ -30,11 +29,11 @@ import {
   UserOutlined,
   FolderOpenOutlined,
   WarningOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { AuthUser, Conversation, Page } from "../types";
 import type { ProjectInfo } from "../api";
-import IconAction from "./IconAction";
 
 interface AppSidebarProps {
   user: AuthUser | null;
@@ -44,10 +43,13 @@ interface AppSidebarProps {
   page: Page;
   onNew: () => void | Promise<unknown>;
   projects?: ProjectInfo[];
+  projectsLoaded?: boolean;
   projectLoading?: boolean;
   onNewProject?: () => void | Promise<unknown>;
   onNewProjectConversation?: (projectId: string) => void | Promise<unknown>;
   onRemoveProject?: (projectId: string) => void | Promise<unknown>;
+  onRenameProject?: (projectId: string, name: string) => void | Promise<unknown>;
+  onChangeProjectPath?: (projectId: string) => void | Promise<unknown>;
   onSelect: (id: string) => void;
   onNavigate: (page: Page) => void;
   onRename: (id: string, title: string) => Promise<void>;
@@ -235,9 +237,12 @@ function HistoryActions({ conversation, onRename, onArchive, onDelete }: History
   return (
     <>
       <Dropdown menu={menu} trigger={["click"]} placement="bottomRight">
-        <IconAction
-          label={`更多操作：${title}`}
+        <Button
+          className="icon-action"
+          type="text"
+          size="small"
           icon={<MoreOutlined />}
+          aria-label={`更多操作：${title}`}
           aria-haspopup="menu"
         />
       </Dropdown>
@@ -283,10 +288,124 @@ interface HistoryRowProps extends HistoryActionsProps {
   onSelect: (id: string) => void;
 }
 
+interface ProjectSettingsProps {
+  project: ProjectInfo;
+  onRenameProject?: (projectId: string, name: string) => void | Promise<unknown>;
+  onChangeProjectPath?: (projectId: string) => void | Promise<unknown>;
+  onConfirmRemove: (project: ProjectInfo) => void;
+}
+
+function ProjectSettings({ project, onRenameProject, onChangeProjectPath, onConfirmRemove }: ProjectSettingsProps) {
+  const [open, setOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [pathSaving, setPathSaving] = useState(false);
+  const [draftName, setDraftName] = useState(project.name);
+  const [renameError, setRenameError] = useState("");
+
+  useEffect(() => {
+    if (!renameOpen) setDraftName(project.name);
+  }, [project.name, renameOpen]);
+
+  async function saveName() {
+    const name = draftName.trim();
+    if (!name) {
+      setRenameError("项目名称不能为空。");
+      return;
+    }
+    if (name.length > 120) {
+      setRenameError("项目名称不能超过 120 个字符。");
+      return;
+    }
+    setRenameSaving(true);
+    setRenameError("");
+    try {
+      await onRenameProject?.(project.project_id, name);
+      setRenameOpen(false);
+    } catch (error) {
+      setRenameError(error instanceof Error ? error.message : "保存失败，请稍后重试。");
+    } finally {
+      setRenameSaving(false);
+    }
+  }
+
+  function openPathPicker() {
+    setOpen(false);
+    setPathSaving(true);
+    void Promise.resolve(onChangeProjectPath?.(project.project_id))
+      .catch(() => undefined)
+      .finally(() => setPathSaving(false));
+  }
+
+  const content = (
+    <List
+      size="small"
+      split={false}
+      dataSource={[
+        { key: "rename", label: "修改项目名称", onClick: () => { setOpen(false); setRenameError(""); setRenameOpen(true); } },
+        { key: "path", label: "修改项目路径", onClick: openPathPicker, disabled: pathSaving },
+        { key: "remove", label: "删除项目", danger: true, onClick: () => { setOpen(false); onConfirmRemove(project); } },
+      ]}
+      renderItem={(item) => (
+        <List.Item style={{ padding: 0 }}>
+          <Button
+            type="text"
+            block
+            danger={item.danger}
+            disabled={item.disabled}
+            loading={item.key === "path" && pathSaving}
+            onClick={item.onClick}
+            style={{ textAlign: "left" }}
+          >
+            {item.label}
+          </Button>
+        </List.Item>
+      )}
+    />
+  );
+
+  return (
+    <>
+      <Popover title="项目设置" content={content} trigger="click" open={open} onOpenChange={setOpen} placement="bottomRight">
+        <Button
+          type="text"
+          size="small"
+          icon={<SettingOutlined />}
+          aria-label={`项目设置 ${project.name}`}
+          onClick={(event) => event.stopPropagation()}
+        />
+      </Popover>
+      <Modal
+        title={`修改项目名称：${project.name}`}
+        open={renameOpen}
+        onCancel={() => { if (!renameSaving) setRenameOpen(false); }}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={renameSaving}
+        onOk={() => void saveName()}
+        destroyOnHidden
+      >
+        <Input
+          aria-label="项目名称"
+          autoFocus
+          maxLength={120}
+          value={draftName}
+          onChange={(event) => setDraftName(event.target.value)}
+          status={renameError ? "error" : undefined}
+        />
+        {renameError ? <Typography.Text type="danger">{renameError}</Typography.Text> : null}
+      </Modal>
+    </>
+  );
+}
+
 function HistoryRow({ conversation, selected, onSelect, onRename, onArchive, onDelete }: HistoryRowProps) {
   const title = conversation.title || "新对话";
   const running = conversation.messages.some((message) => message.running);
-  const messageCount = conversation.messageCount ?? conversation.messages.length;
+  const messageCount =
+    conversation.messages.length > 0
+      ? conversation.messages.filter((message) => message.role === "user" || message.role === "assistant").length
+      : conversation.messageCount ?? 0;
   const updatedAt = formatHistoryUpdatedAt(conversation.updatedAt);
   const meta = `${messageCount} 条消息${updatedAt ? ` · ${updatedAt}` : ""}`;
   const viewportRef = useRef<HTMLSpanElement>(null);
@@ -355,10 +474,13 @@ export default function AppSidebar({
   page,
   onNew,
   projects,
+  projectsLoaded = true,
   projectLoading,
   onNewProject,
   onNewProjectConversation,
   onRemoveProject,
+  onRenameProject,
+  onChangeProjectPath,
   onSelect,
   onNavigate,
   onRename,
@@ -372,6 +494,7 @@ export default function AppSidebar({
   const projectStorageKey = `mini-agent-project-collapse:${user?.id ?? "anonymous"}`;
   const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
   const loadedProjectStorageKey = useRef<string | null>(null);
+  const previousCurrentProjectId = useRef<string | undefined>(undefined);
   const currentProjectId = conversations.find((conversation) => conversation.id === currentId)?.projectId;
 
   useEffect(() => {
@@ -384,25 +507,33 @@ export default function AppSidebar({
   }, [expandedProjectIds, projectStorageKey]);
 
   useEffect(() => {
-    if (!currentProjectId || expandedProjectIds.includes(currentProjectId)) return;
-    setExpandedProjectIds((previous) => [...previous, currentProjectId]);
-  }, [currentProjectId, expandedProjectIds]);
-
-  useEffect(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem(projectStorageKey) ?? "[]");
-      const knownProjectIds = new Set((projects ?? []).map((project) => project.project_id));
-      setExpandedProjectIds(
+      const storedIds =
         Array.isArray(parsed)
-          ? parsed.filter((item): item is string => typeof item === "string" && knownProjectIds.has(item))
-          : [],
-      );
+          ? parsed.filter((item): item is string => typeof item === "string")
+          : [];
+      if (currentProjectId && !storedIds.includes(currentProjectId)) storedIds.push(currentProjectId);
+      setExpandedProjectIds(storedIds);
       loadedProjectStorageKey.current = projectStorageKey;
     } catch {
       setExpandedProjectIds([]);
       loadedProjectStorageKey.current = projectStorageKey;
     }
-  }, [projectStorageKey, projects]);
+  }, [projectStorageKey]);
+
+  useEffect(() => {
+    if (!projectsLoaded) return;
+    const knownProjectIds = new Set((projects ?? []).map((project) => project.project_id));
+    setExpandedProjectIds((previous) => previous.filter((projectId) => knownProjectIds.has(projectId)));
+  }, [projects, projectsLoaded]);
+
+  useEffect(() => {
+    if (previousCurrentProjectId.current === currentProjectId) return;
+    previousCurrentProjectId.current = currentProjectId;
+    if (!currentProjectId) return;
+    setExpandedProjectIds((previous) => previous.includes(currentProjectId) ? previous : [...previous, currentProjectId]);
+  }, [currentProjectId]);
 
   const confirmRemove = (project: ProjectInfo) => {
     const confirm = typeof modal?.confirm === "function" ? modal.confirm.bind(modal) : Modal.confirm;
@@ -415,6 +546,88 @@ export default function AppSidebar({
       onOk: () => onRemoveProject?.(project.project_id),
     });
   };
+
+  const projectItems = (projects ?? []).map((project) => ({
+    key: project.project_id,
+    label: (
+      <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{project.name}</span>
+        {!project.available ? <WarningOutlined aria-label="项目目录不可用" title="项目目录不可用" /> : null}
+      </span>
+    ),
+    extra: (
+      <span onClick={(event) => event.stopPropagation()}>
+        <Button
+          type="text"
+          size="small"
+          icon={<PlusOutlined />}
+          disabled={!project.available}
+          aria-label={`在项目 ${project.name} 中新建对话`}
+          onClick={() => void onNewProjectConversation?.(project.project_id)}
+        />
+        <ProjectSettings
+          project={project}
+          onRenameProject={onRenameProject}
+          onChangeProjectPath={onChangeProjectPath}
+          onConfirmRemove={confirmRemove}
+        />
+      </span>
+    ),
+    children: conversations.filter((conversation) => conversation.projectId === project.project_id).map((conversation) => (
+      <HistoryRow
+        key={conversation.id}
+        conversation={conversation}
+        selected={conversation.id === currentId && page === "chat"}
+        onSelect={onSelect}
+        onRename={onRename}
+        onArchive={onArchive}
+        onDelete={onDelete}
+      />
+    )),
+  }));
+
+  const projectHistory = (
+    <>
+      <Typography.Text type="secondary" style={{ margin: "20px 8px 8px", fontSize: 12 }}>
+        项目对话
+      </Typography.Text>
+      <div className="project-history-list" style={{ minHeight: 0, maxHeight: 360, overflowY: "auto" }}>
+        <Collapse
+          ghost
+          activeKey={expandedProjectIds}
+          onChange={(keys) => setExpandedProjectIds(Array.isArray(keys) ? keys.map(String) : [String(keys)])}
+          items={projectItems}
+        />
+      </div>
+    </>
+  );
+
+  const ordinaryHistory = (
+    <>
+      <Typography.Text type="secondary" style={{ margin: "12px 8px 8px", fontSize: 12 }}>
+        无项目对话
+      </Typography.Text>
+      <div style={{ minHeight: 0, flex: 1, overflowY: "auto" }}>
+        <List
+          size="small"
+          split={false}
+          dataSource={conversations.filter((conversation) => !conversation.projectId)}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无对话" /> }}
+          renderItem={(conversation) => (
+            <HistoryRow
+              key={conversation.id}
+              conversation={conversation}
+              selected={conversation.id === currentId && page === "chat"}
+              onSelect={onSelect}
+              onRename={onRename}
+              onArchive={onArchive}
+              onDelete={onDelete}
+            />
+          )}
+        />
+      </div>
+    </>
+  );
   return (
     <div
       className="app-sidebar"
@@ -450,87 +663,8 @@ export default function AppSidebar({
         新建项目
       </Button>
 
-      <Typography.Text type="secondary" style={{ margin: "20px 8px 8px", fontSize: 12 }}>
-        无项目对话
-      </Typography.Text>
-      <div style={{ minHeight: 0, flex: 1, overflowY: "auto" }}>
-        <List
-          size="small"
-          split={false}
-          dataSource={conversations.filter((conversation) => !conversation.projectId)}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无对话" /> }}
-          renderItem={(conversation) => {
-            const selected = conversation.id === currentId && page === "chat";
-            return (
-              <HistoryRow
-                key={conversation.id}
-                conversation={conversation}
-                selected={selected}
-                onSelect={onSelect}
-                onRename={onRename}
-                onArchive={onArchive}
-                onDelete={onDelete}
-              />
-            );
-          }}
-        />
-      </div>
-
-      <Typography.Text type="secondary" style={{ margin: "12px 8px 8px", fontSize: 12 }}>
-        项目对话
-      </Typography.Text>
-      <div className="project-history-list" style={{ minHeight: 0, maxHeight: 360, overflowY: "auto" }}>
-        <Collapse
-          ghost
-          activeKey={expandedProjectIds}
-          onChange={(keys) => {
-            const next = Array.isArray(keys) ? keys.map(String) : [String(keys)];
-            setExpandedProjectIds(next);
-          }}
-          items={(projects ?? []).map((project) => ({
-            key: project.project_id,
-            label: (
-              <Tooltip title={project.cwd}>
-                <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{project.name}</span>
-                {!project.available ? <WarningOutlined aria-label="项目目录不可用" title="项目目录不可用" /> : null}
-                </span>
-              </Tooltip>
-            ),
-            extra: (
-              <span onClick={(event) => event.stopPropagation()}>
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<PlusOutlined />}
-                  disabled={!project.available}
-                  aria-label={`在项目 ${project.name} 中新建对话`}
-                  onClick={() => void onNewProjectConversation?.(project.project_id)}
-                />
-                <Button
-                  type="text"
-                  size="small"
-                  danger
-                  icon={<DeleteOutlined />}
-                  aria-label={`移除项目 ${project.name}`}
-                  onClick={() => confirmRemove(project)}
-                />
-              </span>
-            ),
-            children: conversations.filter((conversation) => conversation.projectId === project.project_id).map((conversation) => (
-              <HistoryRow
-                key={conversation.id}
-                conversation={conversation}
-                selected={conversation.id === currentId && page === "chat"}
-                onSelect={onSelect}
-                onRename={onRename}
-                onArchive={onArchive}
-                onDelete={onDelete}
-              />
-            )),
-          }))}
-        />
-      </div>
+      {projectHistory}
+      {ordinaryHistory}
 
       <Divider style={{ margin: "12px 0" }} />
       <div className="sidebar-utility-links">

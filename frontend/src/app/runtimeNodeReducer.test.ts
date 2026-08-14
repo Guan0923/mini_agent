@@ -34,4 +34,12 @@ describe("runtime node reducer", () => {
   it("derives leaves from parent references", () => {
     expect(leafNodes([node("a"), node("b", "a")], "s").map((item) => item.id)).toEqual(["b"]);
   });
+
+  it("repairs cached partial nodes before exposing them to the UI", () => {
+    const partial = { ...node("legacy"), model: undefined, usage: undefined } as unknown as RuntimeStateNode;
+    const state = applyRuntimeNodeFrame(new Map(), { type: "node.create", node: partial });
+
+    expect(state.get("s:legacy")?.model.reasoning_effort).toBe("medium");
+    expect(state.get("s:legacy")?.usage.total_tokens).toBeNull();
+  });
 });

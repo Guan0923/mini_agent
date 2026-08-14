@@ -12,9 +12,10 @@ import {
   restoreSession,
   rewindSession,
   updateProfile,
+  type ProviderConfig,
   type SessionInfo,
 } from "../api";
-import { createProject, createProjectSession, listProjects, removeProject, restoreProject, type ProjectInfo } from "../api/projects";
+import { changeProjectPath, createProject, createProjectSession, listProjects, removeProject, renameProject, restoreProject, type ProjectInfo } from "../api/projects";
 import { useAuth } from "../auth/AuthProvider";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
 import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnreadArchived, summaryToConversation, transcriptToMessages, importableMessages, STORAGE_KEY, ARCHIVE_READ_KEY } from "./storage";
@@ -41,21 +42,27 @@ function AgentApp() {
   const [draftMode, setDraftMode] = useState<ChatMode>("agent");
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("medium");
+  const [providerConfig, setProviderConfig] = useState<ProviderConfig | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [removedProjects, setRemovedProjects] = useState<ProjectInfo[]>([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const activeRunsRef = useRef(new Map<string, import("./types").ActiveRun>());
 
   useEffect(() => {
     if (!user?.id) {
       setDisplayMode("medium");
+      setProviderConfig(null);
       return undefined;
     }
     let active = true;
     void getSettings()
       .then((settings) => {
-        if (active) setDisplayMode(effectiveDisplayMode(settings.agent_config.display_mode));
+        if (active) {
+          setDisplayMode(effectiveDisplayMode(settings.agent_config.display_mode));
+          setProviderConfig(settings.provider_config?.id ? settings.provider_config : null);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -113,6 +120,7 @@ function AgentApp() {
         // The local cache remains usable while the backend is unavailable.
       }
       if (disposed) return;
+      setProjectsLoaded(true);
 
       // The browser cache can predate project metadata.  The project index is
       // authoritative for session membership, so use its binding list to
@@ -394,6 +402,29 @@ function AgentApp() {
     }
   }
 
+  async function renameProjectFromSidebar(projectId: string, name: string): Promise<void> {
+    setActionError(null);
+    try {
+      const updated = await renameProject(projectId, name);
+      setProjects((previous) => previous.map((item) => item.project_id === projectId ? updated : item));
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+      throw error;
+    }
+  }
+
+  async function changeProjectPathFromSidebar(projectId: string): Promise<void> {
+    setActionError(null);
+    try {
+      const updated = await changeProjectPath(projectId);
+      if (!updated) return;
+      setProjects((previous) => previous.map((item) => item.project_id === projectId ? updated : item));
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+      throw error;
+    }
+  }
+
   async function restoreProjectFromTrash(projectId: string): Promise<void> {
     setActionError(null);
     try {
@@ -604,6 +635,7 @@ function AgentApp() {
       current={current}
       activeConversations={activeConversations}
       projects={projects}
+      projectsLoaded={projectsLoaded}
       removedProjects={removedProjects}
       projectLoading={projectLoading}
       archivedConversations={archivedConversations}
@@ -611,6 +643,7 @@ function AgentApp() {
       modeBySession={modeBySession}
       draftMode={draftMode}
       displayMode={displayMode}
+      providerConfig={providerConfig}
       actionError={actionError}
       settingsOpen={settingsOpen}
       setSettingsOpen={setSettingsOpen}
@@ -619,6 +652,8 @@ function AgentApp() {
       onNewProject={newProject}
       onNewProjectConversation={newProjectConversation}
       onRemoveProject={removeProjectFromSidebar}
+      onRenameProject={renameProjectFromSidebar}
+      onChangeProjectPath={changeProjectPathFromSidebar}
       onRestoreProject={restoreProjectFromTrash}
       onSelect={(id) => { setCurrentId(id); setPage("chat"); }}
       onNavigate={setPage}
@@ -643,6 +678,7 @@ function AgentApp() {
       onStopRun={stopConversation}
       onClearError={() => setActionError(null)}
       onDisplayModeUpdate={(config) => setDisplayMode(effectiveDisplayMode(config.display_mode))}
+      onProviderConfigUpdate={setProviderConfig}
     />
   );
 }

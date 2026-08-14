@@ -7,7 +7,11 @@ from pathlib import Path
 from backend.api.app import create_app
 from backend.api.chat import ChatRequest, ResumeRequest, _reasoning_parameters
 from backend.api.interrupts import make_interactive_interrupt, registry
+from backend.api.sessions.routes import _store
 from backend.api.state import WebAppState
+from backend.domain import NodeWriter, compaction_payload, message_payload
+from backend.domain import RuntimeState as RuntimeNode
+from backend.runtime.core.context import RuntimeState
 from backend.runtime.core.contracts import InterruptRequest, QuestionOption, UserQuestion
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.storage.auth import LocalAuthStore
@@ -215,3 +219,123 @@ def test_runtime_config_patch_rejects_a_sealed_node_even_when_it_is_a_leaf(tmp_p
         assert response.status_code == 409
     finally:
         client.close()
+
+
+def test_project_name_and_path_management_are_validated(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web")
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    with TestClient(create_app(state)) as client:
+        user = client.post("/api/auth/guest").json()["user"]
+        project = state.projects(user["id"]).create(first)
+
+        renamed = client.patch(f"/api/projects/{project.project_id}", json={"name": "  我的项目  "})
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json()["name"] == "我的项目"
+        assert client.patch(f"/api/projects/{project.project_id}", json={"name": " "}).status_code == 422
+
+        session_store = _store(state, user["id"])
+        session = session_store.create_session("已有历史", local_only=True)
+        state.projects(user["id"]).create_session(project.project_id, session.session_id)
+        session_store.save_runtime(RuntimeState(session_id=session.session_id))
+
+        state.project_picker = lambda: second
+        changed = client.post(f"/api/projects/{project.project_id}/path")
+        assert changed.status_code == 200, changed.text
+        assert changed.json()["cwd"] == str(second.resolve())
+        assert changed.json()["name"] == "我的项目"
+
+        state.project_picker = lambda: None
+        assert client.post(f"/api/projects/{project.project_id}/path").status_code == 204
+        assert client.post(f"/api/projects/{project.project_id}/remove").status_code == 200
+        assert client.patch(f"/api/projects/{project.project_id}", json={"name": "之后"}).status_code == 400
+
+
+def test_project_path_update_allows_duplicate_active_cwd(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web")
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    with TestClient(create_app(state)) as client:
+        user = client.post("/api/auth/guest").json()["user"]
+        state.projects(user["id"]).create(first)
+        other = state.projects(user["id"]).create(second)
+        state.project_picker = lambda: first
+        response = client.post(f"/api/projects/{other.project_id}/path")
+        assert response.status_code == 200, response.text
+        assert response.json()["cwd"] == str(first.resolve())
+
+
+def test_web_default_session_title_is_renamed_on_first_turn(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web")
+    with TestClient(create_app(state)) as client:
+        user = client.post("/api/auth/guest").json()["user"]
+        store = _store(state, user["id"])
+        session = store.create_session("新对话", local_only=True)
+
+        store.start_turn(session.session_id, "run_first", "检查项目中的测试失败")
+
+        summary = store.get_session_summary(session.session_id)
+        assert summary is not None
+        assert summary.title == "检查项目中的测试失败"
+
+
+def test_session_summary_counts_user_and_assistant_messages_not_runtime_nodes(
+    tmp_path: Path,
+) -> None:
+    state = WebAppState(tmp_path / "web")
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with TestClient(create_app(state)) as client:
+        user = client.post("/api/auth/guest").json()["user"]
+        store = _store(state, user["id"])
+        project = state.projects(user["id"]).create(project_dir)
+        session = store.create_session("两轮交互", local_only=True)
+        state.projects(user["id"]).create_session(project.project_id, session.session_id)
+
+        writer = NodeWriter(store)
+        parent: RuntimeNode | None = None
+        for turn in range(2):
+            user_node = writer.create(
+                session_id=session.session_id,
+                parent=parent,
+                data=message_payload("user", f"用户消息 {turn}"),
+            )
+            parent = writer.delete(user_node.session_id, user_node.id)
+            assistant_node = writer.create(
+                session_id=session.session_id,
+                parent=parent,
+                data=message_payload("assistant", f"回答 {turn}"),
+            )
+            parent = writer.delete(assistant_node.session_id, assistant_node.id)
+            tool_node = writer.create(
+                session_id=session.session_id,
+                parent=parent,
+                data=message_payload("tool_result", f"工具结果 {turn}"),
+            )
+            parent = writer.delete(tool_node.session_id, tool_node.id)
+            follow_up_node = writer.create(
+                session_id=session.session_id,
+                parent=parent,
+                data=message_payload("assistant", f"补充回答 {turn}"),
+            )
+            parent = writer.delete(follow_up_node.session_id, follow_up_node.id)
+            compaction_node = writer.create(
+                session_id=session.session_id,
+                parent=parent,
+                data=compaction_payload(f"摘要 {turn}"),
+            )
+            parent = writer.delete(compaction_node.session_id, compaction_node.id)
+
+        summary = store.get_session_summary(session.session_id)
+        assert summary is not None
+        assert len(store.load_nodes(session.session_id)) == 10
+        assert summary.message_count == 6
+
+        empty = store.create_session("空会话")
+        empty_summary = store.get_session_summary(empty.session_id)
+        assert empty_summary is not None
+        assert empty_summary.message_count == 0

@@ -9,11 +9,19 @@ from typing import Any
 from backend.domain import DEFAULT_SESSION_TITLE, RunStatus
 from backend.runtime.core.context import RuntimeState
 
+WEB_DEFAULT_SESSION_TITLE = "新对话"
+
 
 def normalize_session_title(title: str | None) -> str:
     """Return the bounded title shared by every session adapter."""
 
     return " ".join((title or "").split())[:80] or DEFAULT_SESSION_TITLE
+
+
+def is_default_session_title(title: str) -> bool:
+    """Return whether a persisted title is an uncustomized session placeholder."""
+
+    return title in {DEFAULT_SESSION_TITLE, WEB_DEFAULT_SESSION_TITLE}
 
 
 def assistant_content(status: RunStatus, answer: str | None) -> str:

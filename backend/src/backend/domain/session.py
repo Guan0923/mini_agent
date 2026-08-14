@@ -68,6 +68,7 @@ class SessionSummary:
     title: str
     created_at: str
     updated_at: str
+    # Sidebar count: only persisted user and assistant messages.
     message_count: int
     last_run_id: str | None = None
     last_run_status: str | None = None

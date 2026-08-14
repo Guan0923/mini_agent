@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import AppSidebar from "./AppSidebar";
@@ -10,6 +10,25 @@ const conversation: Conversation = {
   messages: [],
   messageCount: 3,
   updatedAt: "2026-08-05T10:20:00Z",
+};
+
+const projectConversation: Conversation = {
+  id: "project-c1",
+  title: "项目对话",
+  messages: [],
+  messageCount: 1,
+  projectId: "project-1",
+};
+
+const project = {
+  project_id: "project-1",
+  name: "示例项目",
+  cwd: "C:\\workspace\\example",
+  available: true,
+  created_at: "2026-08-05T10:20:00Z",
+  updated_at: "2026-08-05T10:20:00Z",
+  conversation_count: 1,
+  session_ids: ["project-c1"],
 };
 
 function renderSidebar(archivedCount = 0, conversations: Conversation[] = [conversation]) {
@@ -47,6 +66,85 @@ describe("AppSidebar utility navigation", () => {
     await user.click(screen.getByRole("button", { name: "Benchmark" }));
     expect(onNavigate).toHaveBeenNthCalledWith(1, "trash");
     expect(onNavigate).toHaveBeenNthCalledWith(2, "benchmark");
+  });
+
+  it("renders project history above ordinary history and keeps the selected project collapsible", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSidebar
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
+        conversations={[conversation, projectConversation]}
+        projects={[project]}
+        archivedCount={0}
+        currentId={projectConversation.id}
+        page="chat"
+        onNew={vi.fn()}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    const projectHeading = screen.getByText("项目对话", { selector: ".ant-typography" });
+    const ordinaryHeading = screen.getByText("无项目对话");
+    expect(projectHeading.compareDocumentPosition(ordinaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const item = document.querySelector(".ant-collapse-item");
+    expect(item).not.toBeNull();
+    await waitFor(() => expect(item).toHaveClass("ant-collapse-item-active"));
+    await user.click(item?.querySelector(".ant-collapse-header") as HTMLElement);
+    await waitFor(() => expect(item).not.toHaveClass("ant-collapse-item-active"));
+  });
+
+  it("shows project settings as list buttons and dispatches rename, path, and removal actions", async () => {
+    const user = userEvent.setup();
+    const onRenameProject = vi.fn().mockResolvedValue(undefined);
+    const onChangeProjectPath = vi.fn().mockResolvedValue(undefined);
+    const onRemoveProject = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AppSidebar
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
+        conversations={[projectConversation]}
+        projects={[project]}
+        archivedCount={0}
+        currentId={null}
+        page="chat"
+        onNew={vi.fn()}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onSignOut={vi.fn()}
+        onRenameProject={onRenameProject}
+        onChangeProjectPath={onChangeProjectPath}
+        onRemoveProject={onRemoveProject}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "项目设置 示例项目" }));
+    expect(screen.getByRole("button", { name: "修改项目名称" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "修改项目路径" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "删除项目" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "修改项目名称" }));
+    const nameInput = screen.getByRole("textbox", { name: "项目名称" });
+    await user.clear(nameInput);
+    await user.type(nameInput, "重命名项目");
+    await user.click(screen.getByRole("button", { name: /保.*存/ }));
+    await waitFor(() => expect(onRenameProject).toHaveBeenCalledWith("project-1", "重命名项目"));
+
+    await user.click(screen.getByRole("button", { name: "项目设置 示例项目" }));
+    await user.click(screen.getByRole("button", { name: "修改项目路径" }));
+    await waitFor(() => expect(onChangeProjectPath).toHaveBeenCalledWith("project-1"));
+
+    await user.click(screen.getByRole("button", { name: "项目设置 示例项目" }));
+    await user.click(screen.getByRole("button", { name: "删除项目" }));
+    await user.click(screen.getByRole("button", { name: /移.*除/ }));
+    await waitFor(() => expect(onRemoveProject).toHaveBeenCalledWith("project-1"));
   });
 
   it("does not render an archive badge when there are no unread archives", () => {

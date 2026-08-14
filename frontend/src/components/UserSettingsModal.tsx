@@ -62,6 +62,7 @@ interface UserSettingsModalProps {
   onClose: () => void;
   activeSessionId?: string;
   onAgentConfigUpdate?: (config: AgentConfig) => void;
+  onProviderConfigUpdate?: (config: ProviderConfig) => void;
   onUserUpdate: (user: Partial<AuthUser>) => void;
 }
 
@@ -124,7 +125,15 @@ function formatBytes(value: number): string {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export default function UserSettingsModal({ open, user, onClose, onUserUpdate, activeSessionId, onAgentConfigUpdate }: UserSettingsModalProps) {
+export default function UserSettingsModal({
+  open,
+  user,
+  onClose,
+  onUserUpdate,
+  activeSessionId,
+  onAgentConfigUpdate,
+  onProviderConfigUpdate,
+}: UserSettingsModalProps) {
   const { modal } = AntApp.useApp();
   const [section, setSection] = useState<SettingsSection>("profile");
   const [settings, setSettings] = useState<UserSettings | null>(null);
@@ -349,8 +358,16 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
           api_key: providerAddDraft.api_key,
         });
         const providers = [...(settings.provider_configs ?? []), provider];
-        updateSettings({ provider_configs: providers });
-        setSaved((current) => (current ? { ...current, provider_configs: providers } : current));
+        updateSettings({
+          provider_configs: providers,
+          ...(provider.is_active ? { provider_config: provider } : {}),
+        });
+        setSaved((current) => (current ? {
+          ...current,
+          provider_configs: providers,
+          ...(provider.is_active ? { provider_config: provider } : {}),
+        } : current));
+        if (provider.is_active) onProviderConfigUpdate?.(provider);
         setProviderAddDraft(defaultProviderDraft);
         setSavedProviderAddDraft(defaultProviderDraft);
         setModelOptions((current) => {
@@ -440,6 +457,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
       const nextDraft = { provider_name: updated.provider_name, model: updated.model, api_key: "" };
       setProviderDrafts((current) => ({ ...current, [updated.id]: nextDraft }));
       setSavedProviderDrafts((current) => ({ ...current, [updated.id]: nextDraft }));
+      if (updated.is_active) onProviderConfigUpdate?.(updated);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "保存提供商失败。");
     } finally {
@@ -461,6 +479,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
         const active = providers.find((item) => item.is_active) ?? defaultProvider;
         updateSettings({ provider_configs: providers, provider_config: active });
         setSaved((current) => (current ? { ...current, provider_configs: providers, provider_config: active } : current));
+        onProviderConfigUpdate?.(active);
         setProviderDrafts((current) => { const next = { ...current }; delete next[provider.id]; return next; });
         setSavedProviderDrafts((current) => { const next = { ...current }; delete next[provider.id]; return next; });
       },
@@ -475,6 +494,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
       const providers = (settings?.provider_configs ?? []).map((item) => ({ ...item, is_active: item.id === active.id }));
       updateSettings({ provider_configs: providers, provider_config: active });
       setSaved((current) => (current ? { ...current, provider_configs: providers, provider_config: active } : current));
+      onProviderConfigUpdate?.(active);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "切换当前提供商失败。");
     } finally {
@@ -486,7 +506,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
     { key: "profile", label: "个人简介" },
     { key: "agent", label: "Agent 配置" },
     { key: "provider_add", label: "添加提供商" },
-    { key: "provider_manage", label: "提供商管理" },
+    { key: "provider_manage", label: "Provider 与模型" },
     { key: "cloud", label: "云同步" },
   ];
 
@@ -692,7 +712,7 @@ export default function UserSettingsModal({ open, user, onClose, onUserUpdate, a
         )}
         {section === "provider_manage" && (
           <div className="provider-management">
-            <Typography.Title level={4}>提供商管理</Typography.Title>
+            <Typography.Title level={4}>Provider 与模型</Typography.Title>
             {(settings.provider_configs ?? []).length === 0 ? (
               <Typography.Text type="secondary">暂无提供商，请先在“添加提供商”中创建。</Typography.Text>
             ) : (

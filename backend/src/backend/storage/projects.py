@@ -199,6 +199,38 @@ class ProjectStore:
             connection.execute("UPDATE projects SET updated_at=? WHERE project_id=?", (utc_now(), project_id))
         return project
 
+    def rename(self, project_id: str, name: str) -> Project:
+        project = self.get(project_id, include_removed=False)
+        if project is None:
+            raise ValueError("项目不存在或已移除。")
+        cleaned_name = name.strip()
+        if not cleaned_name:
+            raise ValueError("项目名称不能为空。")
+        if len(cleaned_name) > 120:
+            raise ValueError("项目名称不能超过 120 个字符。")
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE projects SET name=?,updated_at=? WHERE project_id=?",
+                (cleaned_name, utc_now(), project_id),
+            )
+        result = self.get(project_id, include_removed=False)
+        assert result is not None
+        return result
+
+    def update_cwd(self, project_id: str, cwd: str | Path) -> Project:
+        project = self.get(project_id, include_removed=False)
+        if project is None:
+            raise ValueError("项目不存在或已移除。")
+        path, key = self.normalize_cwd(cwd)
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE projects SET cwd=?,cwd_key=?,updated_at=? WHERE project_id=?",
+                (str(path), key, utc_now(), project_id),
+            )
+        result = self.get(project_id, include_removed=False)
+        assert result is not None
+        return result
+
     def discard_session(self, session_id: str) -> None:
         """Remove a binding created by a failed fork/provisioning operation."""
 

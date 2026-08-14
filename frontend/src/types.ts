@@ -96,6 +96,7 @@ export interface Conversation {
   id: string;
   title: string;
   messages: ChatMessage[];
+  /** Number of persisted user and assistant messages shown in history. */
   messageCount?: number;
   updatedAt?: string;
   sessionId?: string;

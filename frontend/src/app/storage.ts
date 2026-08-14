@@ -1,5 +1,6 @@
 import type { SessionInfo, SessionMessage } from "../api";
 import type { ChatMessage, Conversation } from "../types";
+import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
 export const STORAGE_KEY = "mini-agent-conversations";
 export const ARCHIVE_READ_KEY = "mini-agent-archive-read";
@@ -47,8 +48,12 @@ export function loadConversations(key: string): Conversation[] {
       .map((conversation) => ({
         ...conversation,
         clientId: conversation.clientId ?? conversation.id,
-        messageCount: conversation.messageCount ?? conversation.messages.length,
+        messageCount:
+          conversation.messages.length > 0
+            ? conversation.messages.filter((message) => message.role === "user" || message.role === "assistant").length
+            : conversation.messageCount ?? 0,
         messagesLoaded: conversation.messagesLoaded ?? conversation.messages.length > 0,
+        runtimeNodes: conversation.runtimeNodes?.map(normalizeRuntimeNode),
         messages: conversation.messages.map((message) =>
           message.running
             ? { ...message, running: false, status: message.status ?? "上次运行已中断" }
@@ -95,7 +100,11 @@ export function summaryToConversation(summary: SessionInfo, existing?: Conversat
     id: existing?.id ?? summary.client_id ?? summary.session_id,
     title: summary.title || existing?.title || "新对话",
     messages: existing?.messages ?? [],
-    messageCount: summary.message_count ?? existing?.messageCount ?? existing?.messages.length ?? 0,
+    messageCount:
+      summary.message_count ??
+      (existing?.messages.length
+        ? existing.messages.filter((message) => message.role === "user" || message.role === "assistant").length
+        : existing?.messageCount ?? 0),
     updatedAt: summary.updated_at ?? existing?.updatedAt,
     sessionId: summary.session_id,
     clientId: summary.client_id ?? existing?.clientId ?? existing?.id ?? summary.session_id,

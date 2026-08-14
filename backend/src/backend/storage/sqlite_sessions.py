@@ -74,7 +74,9 @@ class SQLiteSessionMixin:
         with self._connection(session_id) as connection:
             row = connection.execute(
                 """SELECT m.session_id, m.title, m.created_at, m.updated_at,
-                (SELECT COUNT(*) FROM runtime_nodes),
+                (SELECT COUNT(*) FROM runtime_nodes
+                    WHERE json_extract(data_json, '$.type') = 'message'
+                    AND json_extract(data_json, '$.message.role') IN ('user', 'assistant')),
                 (SELECT n.id FROM runtime_nodes AS n
                     WHERE n.session_id = m.session_id
                     AND NOT EXISTS (

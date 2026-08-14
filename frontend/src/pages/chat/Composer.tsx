@@ -18,8 +18,6 @@ export interface ComposerProps {
   mode: ChatMode;
   permissionMode: PermissionMode;
   reasoningEffort: ReasoningEffort;
-  providerName: string;
-  currentModel: string;
   usagePercent?: number;
   usageTotalTokens?: number | null;
   usageContextLength?: number;
@@ -33,8 +31,6 @@ export interface ComposerProps {
   onModeChange: (mode: ChatMode) => void;
   onPermissionChange: (mode: PermissionMode) => void;
   onReasoningChange: (effort: ReasoningEffort) => void;
-  onProviderChange: (providerName: string) => void;
-  onModelChange: (model: string) => void;
   onSettingsSelectChange: (key: SettingsSelectKey | null) => void;
   onOpenSettings: () => void;
   onCloseSettings: () => void;
@@ -49,8 +45,6 @@ export default function Composer(props: ComposerProps) {
     <Space className="composer-settings-controls" size={[6, 6]} wrap>
       <Select className="mode-picker" placement="topLeft" open={props.openSettingsSelect === "mode"} aria-label="运行模式" disabled={false} value={props.mode} options={[{ value: "agent", label: "⚙ Agent" }, { value: "plan", label: "📋 Plan" }]} onChange={props.onModeChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "mode" : null)} />
       <Select className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "permission"} aria-label="权限模式" disabled={false} value={props.permissionMode} options={[{ value: "approval_for_me", label: "逐次审批" }, { value: "full_access", label: "完全访问" }]} onChange={props.onPermissionChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "permission" : null)} />
-      <Input size="small" aria-label="提供商" value={props.providerName} placeholder="Provider" onChange={(event) => props.onProviderChange(event.target.value)} />
-      <Input size="small" aria-label="模型" value={props.currentModel} placeholder="Model" onChange={(event) => props.onModelChange(event.target.value)} />
       <Space size={4} align="center">
         <Tooltip title={props.usageTotalTokens == null ? "暂无 token usage" : `${props.usageTotalTokens.toLocaleString()} / ${(props.usageContextLength ?? 0).toLocaleString()} tokens`}>
           <Progress type="circle" size={32} percent={Math.max(0, Math.min(100, props.usagePercent ?? 0))} format={() => props.usageTotalTokens == null ? "–" : props.usageTotalTokens >= 1000 ? `${(props.usageTotalTokens / 1000).toFixed(1)}k` : String(props.usageTotalTokens)} />

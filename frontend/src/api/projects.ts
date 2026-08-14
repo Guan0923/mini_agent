@@ -42,6 +42,24 @@ export async function removeProject(projectId: string): Promise<ProjectInfo> {
   return requestJson<ProjectInfo>(`/api/projects/${encodeURIComponent(projectId)}/remove`, { method: "POST" });
 }
 
+export async function renameProject(projectId: string, name: string): Promise<ProjectInfo> {
+  return requestJson<ProjectInfo>(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function changeProjectPath(projectId: string): Promise<ProjectInfo | null> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/path`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (response.status === 204) return null;
+  if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || `请求失败（${response.status}）`);
+  return response.json() as Promise<ProjectInfo>;
+}
+
 export async function restoreProject(projectId: string): Promise<ProjectInfo> {
   return requestJson<ProjectInfo>(`/api/projects/${encodeURIComponent(projectId)}/restore`, { method: "POST" });
 }

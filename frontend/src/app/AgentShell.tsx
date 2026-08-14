@@ -2,7 +2,7 @@ import { Alert, Button, Drawer, Grid, Layout } from "antd";
 import { CloseOutlined, MenuOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
 import type { AuthUser } from "../types";
-import type { AgentConfig } from "../api";
+import type { AgentConfig, ProviderConfig } from "../api";
 import type { ChatRunRequest } from "./types";
 import type { ChatMode, Conversation, DisplayMode, Page } from "../types";
 import type { ProjectInfo } from "../api";
@@ -19,6 +19,7 @@ export interface AgentShellProps {
   current: Conversation | null;
   activeConversations: Conversation[];
   projects: ProjectInfo[];
+  projectsLoaded?: boolean;
   removedProjects: ProjectInfo[];
   projectLoading?: boolean;
   archivedConversations: Conversation[];
@@ -26,6 +27,7 @@ export interface AgentShellProps {
   modeBySession: Record<string, ChatMode>;
   draftMode: ChatMode;
   displayMode: DisplayMode;
+  providerConfig: ProviderConfig | null;
   actionError: string | null;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
@@ -34,6 +36,8 @@ export interface AgentShellProps {
   onNewProject: () => Promise<void>;
   onNewProjectConversation: (projectId: string) => Promise<void>;
   onRemoveProject: (projectId: string) => Promise<void>;
+  onRenameProject: (projectId: string, name: string) => Promise<void>;
+  onChangeProjectPath: (projectId: string) => Promise<void>;
   onRestoreProject: (projectId: string) => Promise<void>;
   onSelect: (id: string) => void;
   onNavigate: (page: Page) => void;
@@ -55,6 +59,7 @@ export interface AgentShellProps {
   onStopRun: (conversationId: string) => void;
   onClearError: () => void;
   onDisplayModeUpdate: (config: AgentConfig) => void;
+  onProviderConfigUpdate: (config: ProviderConfig) => void;
 }
 
 export default function AgentShell(props: AgentShellProps) {
@@ -96,6 +101,7 @@ export default function AgentShell(props: AgentShellProps) {
       user={props.user}
       conversations={props.activeConversations}
       projects={props.projects}
+      projectsLoaded={props.projectsLoaded}
       projectLoading={props.projectLoading}
       archivedCount={props.unreadArchivedCount}
       currentId={props.current?.id ?? null}
@@ -104,6 +110,8 @@ export default function AgentShell(props: AgentShellProps) {
       onNewProject={createProject}
       onNewProjectConversation={createProjectConversation}
       onRemoveProject={props.onRemoveProject}
+      onRenameProject={props.onRenameProject}
+      onChangeProjectPath={props.onChangeProjectPath}
       onSelect={select}
       onNavigate={navigate}
       onRename={props.onRename}
@@ -130,6 +138,7 @@ export default function AgentShell(props: AgentShellProps) {
               conversation={props.current}
               mode={props.current ? props.modeBySession[props.current.sessionId ?? props.current.id] ?? "agent" : props.draftMode}
               displayMode={props.displayMode}
+              providerConfig={props.providerConfig}
               onModeChange={props.onModeChange}
               onUpdate={props.onUpdate}
               onNew={create}
@@ -154,6 +163,7 @@ export default function AgentShell(props: AgentShellProps) {
         onUserUpdate={props.onUserUpdate}
         activeSessionId={props.current?.sessionId}
         onAgentConfigUpdate={props.onDisplayModeUpdate}
+        onProviderConfigUpdate={props.onProviderConfigUpdate}
       />
     </Layout>
   );

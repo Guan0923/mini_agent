@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from backend.domain import DEFAULT_SESSION_TITLE, RunProvenance, RunStatus, RuntimeMessage, Session
+from backend.domain import RunProvenance, RunStatus, RuntimeMessage, Session
 from backend.domain.runtime_state import RuntimeState as TreeRuntimeState
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState
@@ -15,6 +15,7 @@ from .codec import (
     decode_runtime_state,
     encode_message_data,
     encode_runtime_state,
+    is_default_session_title,
     normalize_session_title,
 )
 
@@ -244,7 +245,10 @@ class SQLiteRuntimeMixin:
             if meta is None:
                 raise ValueError(f"Unknown session: {session_id}")
             title = str(meta[0])
-            if title == DEFAULT_SESSION_TITLE and connection.execute("SELECT 1 FROM runtime_nodes LIMIT 1").fetchone() is None:
+            if (
+                is_default_session_title(title)
+                and connection.execute("SELECT 1 FROM runtime_nodes LIMIT 1").fetchone() is None
+            ):
                 title = normalize_session_title(task)
             connection.execute(
                 """INSERT INTO session_runs VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)

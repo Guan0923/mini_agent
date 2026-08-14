@@ -1,4 +1,5 @@
 import type { NodeFrameType, RuntimeNodeFrame, RuntimeStateNode } from "../types";
+import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
 /**
  * Apply complete node lifecycle frames. Updates replace the dynamic view in
@@ -11,7 +12,7 @@ export function applyRuntimeNodeFrame(
   const next = new Map(nodes);
   const key = `${frame.node.session_id}:${frame.node.id}`;
   if (frame.type === "node.create" || frame.type === "node.update" || frame.type === "node.delete") {
-    next.set(key, JSON.parse(JSON.stringify(frame.node)) as RuntimeStateNode);
+    next.set(key, normalizeRuntimeNode(JSON.parse(JSON.stringify(frame.node)) as RuntimeStateNode));
   }
   return next;
 }
