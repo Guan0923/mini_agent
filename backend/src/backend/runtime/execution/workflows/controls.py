@@ -64,7 +64,6 @@ class PlanControlMixin:
         return plan
 
     @staticmethod
-    @staticmethod
     def _request_user_input(runtime: AgentRuntime, response: AssistantMessage) -> bool:
         _start_assistant(runtime, response)
         for tool in response.tool_messages:
@@ -157,7 +156,6 @@ class PlanControlMixin:
         _finish_assistant(runtime)
         return True
 
-    @staticmethod
     @staticmethod
     def _fail_user_input(runtime: AgentRuntime, tool: ToolMessage, error: str, *, retryable: bool) -> None:
         tool.status = "failed"

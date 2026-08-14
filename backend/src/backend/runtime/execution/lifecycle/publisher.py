@@ -8,6 +8,10 @@ from ...core.context import AgentRuntime
 from ...core.events import CHECKPOINT_EVENT_KINDS, RuntimeEvent
 from ...persistence.recording import persistent_event
 
+_HIDDEN_RECOVERABLE_EVENTS = frozenset(
+    {"tool_failed", "tool_recovery", "model_repair", "model_retry", "replan_requested"}
+)
+
 
 class RunEventPublisher:
     def __init__(self, runtime: AgentRuntime) -> None:
@@ -56,7 +60,7 @@ class RunEventPublisher:
             checkpoint.save(runtime, event.kind)
             if checkpoint is not runtime.services.runtime_store:
                 runtime.save()
-        if runtime.services.on_event is not None:
+        if runtime.services.on_event is not None and event.kind not in _HIDDEN_RECOVERABLE_EVENTS:
             runtime.services.on_event(enriched)
 
     def _record(self, event: RuntimeEvent) -> None:

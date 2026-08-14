@@ -106,7 +106,10 @@ def _publish_repairs(runtime: AgentRuntime, capabilities: PlannerCapabilities) -
             else "Malformed model output could not be repaired automatically."
         )
         runtime.run.add_event("model_repair", message, **repair)
-        _publish(runtime, RuntimeEvent("model_repair", message, repair))
+        # Keep repair diagnostics in the internal runtime/audit stream. The
+        # event publisher filters this kind from user-facing SSE and nodes,
+        # while the correction message remains in the next model request.
+        _publish(runtime, RuntimeEvent("model_repair", message, dict(repair)))
 
 
 def _record_reasoning(runtime: AgentRuntime, message: AssistantMessage, streamed: bool) -> None:
@@ -159,6 +162,28 @@ def _publish_tool_failure(runtime: AgentRuntime, tool: ToolMessage, error: str) 
     _publish(runtime, RuntimeEvent("tool_failed", error, {"tool": tool.name, "call_id": tool.call_id}))
 
 
+def _publish_tool_recovery(runtime: AgentRuntime, tool: ToolMessage, error: str) -> None:
+    """Record recoverable tool feedback without exposing it to the user stream."""
+
+    attempt = len(runtime.run.actions)
+    runtime.run.add_event(
+        "tool_recovery",
+        f"Recovering from {tool.name} failure",
+        tool=tool.name,
+        call_id=tool.call_id,
+        error=_truncate(error),
+        attempt=attempt,
+    )
+    _publish(
+        runtime,
+        RuntimeEvent(
+            "tool_recovery",
+            _truncate(error),
+            {"tool": tool.name, "call_id": tool.call_id, "attempt": attempt},
+        ),
+    )
+
+
 def _fail_pending_tools(runtime: AgentRuntime, message: AssistantMessage, error: str) -> None:
     """Close unexecuted tool calls after cancellation or steering."""
 
@@ -175,10 +200,6 @@ def _truncate(value: str) -> str:
         return value
     omitted = len(value) - _MAX_TOOL_CONTEXT_CHARS
     return f"{value[:_MAX_TOOL_CONTEXT_CHARS]}… ({omitted} characters omitted)"
-
-
-def _same_tool(first: ToolMessage, second: ToolMessage | None) -> bool:
-    return second is not None and first.name == second.name and first.arguments == second.arguments
 
 
 def _start_assistant(runtime: AgentRuntime, message: AssistantMessage) -> None:

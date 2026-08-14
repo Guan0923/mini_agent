@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, StrictBool, field_validator
+from pydantic import BaseModel, Field, StrictBool, StrictInt, field_validator
 
 from backend.cloud import CloudApiError, CloudAuthExpired, CloudConflict, CloudUnavailable
 from backend.domain import DEFAULT_TIME_ZONE, validate_time_zone
@@ -84,6 +84,10 @@ class AgentConfigPayload(BaseModel):
     @classmethod
     def supported_timezone(cls, value: str) -> str:
         return validate_time_zone(value)
+
+
+class RuntimeConfigPayload(BaseModel):
+    max_tool_calls: StrictInt = Field(default=32, ge=1, le=1000)
 
 
 class ProviderConfigPayload(BaseModel):
@@ -403,6 +407,19 @@ def update_agent_config(
     _origin_guard(request)
     try:
         return request.app.state.web.settings.update_agent_config(identity.id, body.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.put("/runtime-config")
+def update_runtime_config(
+    body: RuntimeConfigPayload,
+    request: Request,
+    identity: Annotated[UserIdentity, Depends(require_user)],
+) -> dict[str, object]:
+    _origin_guard(request)
+    try:
+        return request.app.state.web.settings.update_runtime_config(identity.id, body.model_dump(exclude_unset=True))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

@@ -49,18 +49,12 @@ class AgentRunner:
         self,
         planner: object,
         tools: object,
-        max_retries: int = 1,
-        max_tool_recoveries: int = 2,
-        max_actions: int | None = None,
-        max_replans: int = 2,
         strategy: str = "auto",
         log_full_messages: bool = True,
         checkpoints: CheckpointStore | None = None,
         hooks: Iterable[AgentHook] = (),
-        max_model_repairs: int = 2,
-        max_transport_retries: int = 2,
-        max_model_turns: int = 8,
         max_tool_calls: int | None = None,
+        max_transport_retries: int = 5,
         skill_catalog: object | None = None,
         skill_auto_select: bool = False,
         workspace_root: str | None = None,
@@ -77,18 +71,9 @@ class AgentRunner:
         self._resources = resources
         self.provider_config_resolver = provider_config_resolver
         self._closed = False
-        if max_actions is not None and max_tool_calls is not None:
-            raise ValueError("max_actions and max_tool_calls cannot be used together.")
-        resolved_tool_calls = max_actions if max_actions is not None else max_tool_calls
-
         self.settings = RunnerSettings(
-            max_retries=max_retries,
-            max_model_repairs=max_model_repairs,
             max_transport_retries=max_transport_retries,
-            max_tool_recoveries=max_tool_recoveries,
-            max_model_turns=max_model_turns,
-            max_tool_calls=32 if resolved_tool_calls is None else resolved_tool_calls,
-            max_replans=max_replans,
+            max_tool_calls=32 if max_tool_calls is None else max_tool_calls,
             strategy=strategy,  # type: ignore[arg-type]
             log_full_messages=log_full_messages,
         )
@@ -298,13 +283,8 @@ class AgentRunner:
                     "provider": runtime.state.provider,
                     "model": runtime.state.model,
                     "runner_settings": {
-                        "max_retries": settings.max_retries,
-                        "max_model_repairs": settings.max_model_repairs,
                         "max_transport_retries": settings.max_transport_retries,
-                        "max_tool_recoveries": settings.max_tool_recoveries,
-                        "max_model_turns": settings.max_model_turns,
                         "max_tool_calls": settings.max_tool_calls,
-                        "max_replans": settings.max_replans,
                         "strategy": settings.strategy,
                         "log_full_messages": settings.log_full_messages,
                     },

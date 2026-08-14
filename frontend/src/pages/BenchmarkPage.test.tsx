@@ -18,7 +18,7 @@ const task = (name: string): TaskInfo => ({
   description: "修复一个需要较长说明的适配任务",
   difficulty: "中等",
   prompt: "请修复这个适配任务并说明原因。",
-  budgets: { max_model_turns: 8, max_tool_calls: 32, max_replans: 2, max_retries: 1 },
+  budgets: { max_tool_calls: 32 },
   tags: ["适配"],
   source: {
     benchmark: "SWE-bench",

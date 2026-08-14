@@ -29,31 +29,36 @@ class RepairMixin:
         self._output_repairs.clear()
         correction: UserMessage | None = None
         repairs: list[dict[str, str | int]] = []
-        max_repairs = runtime.state.runner_settings.max_model_repairs
-        for attempt in range(max_repairs + 1):
+        attempt = 0
+        while True:
+            cancel_requested = runtime.services.cancel_requested
+            if cancel_requested is not None and cancel_requested():
+                for item in repairs:
+                    item["outcome"] = "cancelled"
+                self._output_repairs.extend(repairs)
+                raise ModelOutputError(
+                    "Model output repair cancelled by user.",
+                    operation=operation,
+                    diagnostics={"cancelled": True},
+                )
+            attempt += 1
             try:
                 result = request(correction)
             except ModelOutputError as exc:
                 repair: dict[str, str | int] = {
                     "phase": operation,
-                    "attempt": attempt + 1,
+                    "attempt": attempt,
                     "validation_error": exc.validation_error,
                     "invalid_output_preview": exc.invalid_output_preview,
                     "outcome": "retrying",
                 }
                 repairs.append(repair)
-                if attempt >= max_repairs:
-                    for item in repairs:
-                        item["outcome"] = "failed"
-                    self._output_repairs.extend(repairs)
-                    raise
                 correction = UserMessage(content=self._repair_instruction(exc))
                 continue
             for item in repairs:
                 item["outcome"] = "repaired"
             self._output_repairs.extend(repairs)
             return result
-        raise AssertionError("Model output repair loop ended without an outcome.")
 
     @staticmethod
     def _repair_instruction(error: ModelOutputError) -> str:

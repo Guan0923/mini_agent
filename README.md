@@ -46,18 +46,12 @@ mini-agent --resume session_xxx
 --workspace PATH
 --planner llm|rule
 --strategy auto|reactive|dynamic_replan
---max-model-turns N
 --max-tool-calls N
---max-retries N
---max-model-repairs N
---max-transport-retries N
---max-tool-recoveries N
---max-replans N
 --log-dir PATH
 --resume SESSION_ID
 ```
 
-`--max-actions` 仅作为 `--max-tool-calls` 的废弃兼容别名，不能与后者同时使用。
+`--max-tool-calls` 控制单次 Agent 工作流中允许进入执行流程的工具调用总数，范围为 `1–1000`，默认值为 `32`；成功、失败和重复调用都会计入。模型网络请求固定最多重试 5 次（最多 6 次请求），不可由 CLI 覆盖。
 
 ## 配置
 
@@ -75,6 +69,7 @@ tokenizer_model = "deepseek-ai/DeepSeek-V3"
 
 [runtime]
 log_full_messages = true
+max_tool_calls = 32
 
 [sync]
 # device_id 由客户端自动生成

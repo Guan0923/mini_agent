@@ -52,7 +52,7 @@ TASKS = (
             tool_used("grep"),
             tool_used("edit_file"),
         ),
-        budgets=Budgets(max_model_turns=8, max_tool_calls=16),
+        budgets=Budgets(max_tool_calls=16),
         planner_modes=frozenset({"llm"}),
     ),
     BenchmarkTask(
@@ -70,7 +70,7 @@ TASKS = (
             content_equals("data/numbers.txt", _NUMBERS),
             tool_used("run_command"),
         ),
-        budgets=Budgets(max_model_turns=6, max_tool_calls=12),
+        budgets=Budgets(max_tool_calls=12),
         planner_modes=frozenset({"llm"}),
     ),
 )

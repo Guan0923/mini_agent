@@ -88,7 +88,7 @@ class UserSettingsStore(AuthSettingsMixin):
                     "timezone": "Asia/Shanghai",
                     "location_enabled": False,
                 },
-                "runtime": {"log_full_messages": True},
+                "runtime": {"log_full_messages": True, "max_tool_calls": 32},
                 "capabilities": {"skills": True, "rag": False, "plugins": False, "mcp": False},
                 "providers": {"active_id": ""},
                 "sync": {
@@ -227,6 +227,7 @@ class PerUserSettingsRepository:
         {
             "update_profile",
             "update_agent_config",
+            "update_runtime_config",
             "update_provider_config",
             "add_provider_config",
             "update_provider_config_by_id",

@@ -101,6 +101,7 @@ export function projectRuntimeNode(node: RuntimeStateNode, terminal = true): Pro
       });
     } else if (kind === "tool_result") {
       const failed = block.status === "failed";
+      if (failed) continue;
       events.push({
         kind: failed ? "tool_failed" : "tool_result",
         message: textValue(block.content),
@@ -216,7 +217,7 @@ export function appendLegacyRuntimeEvent(message: ChatMessage, event: ToolEvent)
     if (index >= 0) events[index] = { ...events[index], data: { ...events[index].data, streaming: false } };
     return { ...message, events };
   }
-  if (["tool_call", "tool_result", "tool_failed"].includes(event.kind)) {
+  if (["tool_call", "tool_result"].includes(event.kind)) {
     return { ...message, events: [...message.events, event] };
   }
   return message;

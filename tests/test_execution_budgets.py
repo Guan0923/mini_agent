@@ -143,21 +143,20 @@ def test_over_budget_tool_batch_is_rejected_atomically_and_finalized() -> None:
     assert error.data["finalizer"] == "planner"
 
 
-def test_model_turn_budget_reserves_one_finalizer_call() -> None:
+def test_model_turns_are_metrics_without_a_model_turn_budget() -> None:
     planner = BatchedPlanner([1, 1])
     state = AgentRunner(
         planner,
         registry(),
         strategy="reactive",
-        max_model_turns=1,
     ).run("Inspect")
 
-    assert state.status == "failed"
-    assert state.model_turns == 1
-    assert len(state.actions) == 1
-    assert planner.decisions == 1
-    assert planner.finalizations == 1
-    assert state.final_answer == "Useful budget summary"
+    assert state.status == "completed"
+    assert state.model_turns == 3
+    assert len(state.actions) == 2
+    assert planner.decisions == 3
+    assert planner.finalizations == 0
+    assert state.final_answer == "Project summary"
 
 
 @pytest.mark.parametrize("planner", [NoFinalizerPlanner(), BrokenFinalizerPlanner()])
@@ -166,7 +165,7 @@ def test_budget_finalization_has_a_deterministic_fallback(planner) -> None:
         planner,
         registry(),
         strategy="reactive",
-        max_model_turns=1,
+        max_tool_calls=1,
     ).run("Inspect")
 
     assert state.status == "failed"
@@ -189,8 +188,8 @@ def test_dynamic_plan_over_tool_budget_finalizes_without_execution() -> None:
     ).run("Inspect")
 
     assert state.status == "failed"
-    assert state.actions == []
-    assert calls == []
+    assert len(state.actions) == 2
+    assert calls == ["inspect", "inspect"]
     assert planner.finalizations == 1
     assert state.final_answer == "Dynamic budget summary"
 
@@ -214,19 +213,35 @@ def test_dynamic_plan_that_exactly_uses_tool_budget_completes() -> None:
 def test_settings_serialize_new_budgets_and_load_legacy_max_actions() -> None:
     state = RuntimeState(
         session_id="session_budget",
-        runner_settings=RunnerSettings(max_model_turns=3, max_tool_calls=7),
+        runner_settings=RunnerSettings(max_tool_calls=7),
     )
     payload = state.to_dict()
 
-    assert payload["runner_settings"]["max_model_turns"] == 3
     assert payload["runner_settings"]["max_tool_calls"] == 7
     assert "max_actions" not in payload["runner_settings"]
 
-    payload["runner_settings"] = {"max_actions": 5}
+    payload["runner_settings"] = {
+        "max_actions": 5,
+        "max_retries": 1,
+        "max_tool_recoveries": 2,
+        "max_model_repairs": 3,
+        "max_model_turns": 4,
+        "max_replans": 5,
+    }
     restored = RuntimeState.from_dict(payload)
-    assert restored.runner_settings.max_model_turns == 8
     assert restored.runner_settings.max_tool_calls == 5
-    assert restored.runner_settings.max_actions == 5
+    assert restored.runner_settings.max_transport_retries == 5
+    assert not any(
+        hasattr(restored.runner_settings, name)
+        for name in (
+            "max_retries",
+            "max_tool_recoveries",
+            "max_model_repairs",
+            "max_model_turns",
+            "max_replans",
+            "max_actions",
+        )
+    )
 
 
 def test_run_state_model_turns_round_trip_and_legacy_default() -> None:
@@ -238,10 +253,10 @@ def test_run_state_model_turns_round_trip_and_legacy_default() -> None:
     assert RunState.from_dict(payload).model_turns == 0
 
 
-def test_old_and_new_tool_budget_arguments_conflict() -> None:
-    with pytest.raises(ValueError, match="cannot be used together"):
+def test_deleted_tool_budget_arguments_are_not_public_contract() -> None:
+    with pytest.raises(TypeError):
         RunnerSettings(max_actions=4, max_tool_calls=4)
-    with pytest.raises(ValueError, match="cannot be used together"):
+    with pytest.raises(TypeError):
         AgentRunner(NoFinalizerPlanner(), registry(), max_actions=4, max_tool_calls=4)
 
 
@@ -269,7 +284,7 @@ def test_llm_finalizer_uses_text_mode_without_tools() -> None:
     assert client.request == ("finalize", "text", [])
 
 
-def test_cli_rejects_old_and_new_tool_budget_flags_together(tmp_path, capsys) -> None:
+def test_cli_rejects_removed_tool_budget_flag(tmp_path, capsys) -> None:
     with pytest.raises(SystemExit) as exc_info:
         cli.main(
             [
@@ -279,10 +294,8 @@ def test_cli_rejects_old_and_new_tool_budget_flags_together(tmp_path, capsys) ->
                 "rule",
                 "--max-actions",
                 "4",
-                "--max-tool-calls",
-                "4",
             ]
         )
 
     assert exc_info.value.code == 2
-    assert "cannot be used together" in capsys.readouterr().err
+    assert "unrecognized arguments: --max-actions" in capsys.readouterr().err

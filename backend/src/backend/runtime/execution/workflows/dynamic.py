@@ -88,6 +88,8 @@ class DynamicReplanWorkflow(PlanWorkflow):
                 continue
 
             outcome = self._execute_step(runtime, step)
+            if runtime.run.status != "running":
+                return runtime.run
             if cancel_if_requested(runtime):
                 step.status = "completed" if outcome.success else "failed"
                 step.result = outcome.output if outcome.success else outcome.error
@@ -143,6 +145,8 @@ class DynamicReplanWorkflow(PlanWorkflow):
                     evaluation = capabilities.dynamic_replanner.evaluate_step(runtime)
                 except PlanningError as exc:
                     _publish_repairs(runtime, capabilities)
+                    if cancel_if_requested(runtime):
+                        return runtime.run
                     fail_run(runtime, f"Step evaluation failed: {exc}", **planning_failure_data(exc, capabilities.name))
                     return runtime.run
                 _publish_repairs(runtime, capabilities)
@@ -174,9 +178,6 @@ class DynamicReplanWorkflow(PlanWorkflow):
         assert current is not None and capabilities.dynamic_replanner is not None
         runtime.run.add_event("replan_requested", "Replan requested", revision=current.revision, reason=reason)
         _publish(runtime, RuntimeEvent("replan_requested", reason, {"revision": current.revision}))
-        if runtime.run.replan_count >= runtime.state.runner_settings.max_replans:
-            fail_run(runtime, f"Stopped after {runtime.state.runner_settings.max_replans} replans: {reason}")
-            return False
         runtime.exchange.context = {"plan": current, "reason": reason}
         if not _claim_model_turn(runtime, "replan"):
             return False
@@ -184,6 +185,8 @@ class DynamicReplanWorkflow(PlanWorkflow):
             replacement = capabilities.dynamic_replanner.replan(runtime)
         except PlanningError as exc:
             _publish_repairs(runtime, capabilities)
+            if cancel_if_requested(runtime):
+                return False
             fail_run(runtime, f"Replan failed: {exc}", **planning_failure_data(exc, capabilities.name))
             return False
         _publish_repairs(runtime, capabilities)

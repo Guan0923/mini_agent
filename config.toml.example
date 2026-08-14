@@ -13,6 +13,9 @@ tokenizer_model = "deepseek-ai/DeepSeek-V3"
 [runtime]
 # true stores complete recursively redacted bodies; false stores summaries.
 log_full_messages = true
+# Maximum number of model-requested tool calls in one Agent workflow.
+# Successful, failed, and repeated calls all consume one slot.
+max_tool_calls = 32
 
 [web]
 # Browser URL and CORS origins used by the FastAPI web client.

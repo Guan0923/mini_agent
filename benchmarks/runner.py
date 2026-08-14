@@ -50,19 +50,14 @@ def build_metrics(collector: EventCollector, state, duration_ms: float) -> RunMe
     )
 
 
-def apply_budget_overrides(
-    task: BenchmarkTask, *, max_model_turns: int | None, max_tool_calls: int | None
-) -> BenchmarkTask:
-    if max_model_turns is None and max_tool_calls is None:
+def apply_budget_overrides(task: BenchmarkTask, *, max_tool_calls: int | None) -> BenchmarkTask:
+    if max_tool_calls is None:
         return task
     budgets = task.budgets
     return replace(
         task,
         budgets=Budgets(
-            max_model_turns=max_model_turns or budgets.max_model_turns,
             max_tool_calls=max_tool_calls or budgets.max_tool_calls,
-            max_replans=budgets.max_replans,
-            max_retries=budgets.max_retries,
         ),
     )
 
@@ -94,7 +89,9 @@ def _error_result(
         error=safe_message,
         passed=False,
         attempt=attempt,
-        trace=collector.trace() if collector is not None else [
+        trace=collector.trace()
+        if collector is not None
+        else [
             {
                 "kind": diagnostic_event.kind,
                 "timestamp": diagnostic_event.timestamp,
@@ -112,7 +109,6 @@ def run_one_task(
     planner: str,
     sandbox: Sandbox,
     keep_workspaces: bool = False,
-    max_model_turns: int | None = None,
     max_tool_calls: int | None = None,
     attempt: int = 1,
 ) -> TaskResult:
@@ -125,7 +121,7 @@ def run_one_task(
             failure_phase="configuration",
         )
 
-    task = apply_budget_overrides(task, max_model_turns=max_model_turns, max_tool_calls=max_tool_calls)
+    task = apply_budget_overrides(task, max_tool_calls=max_tool_calls)
     workspace: Path | None = None
     app = None
     collector = EventCollector()
@@ -136,10 +132,7 @@ def run_one_task(
             trust_project_mcp(sandbox.paths, workspace)
 
         settings = RunnerSettings(
-            max_model_turns=task.budgets.max_model_turns,
             max_tool_calls=task.budgets.max_tool_calls,
-            max_replans=task.budgets.max_replans,
-            max_retries=task.budgets.max_retries,
             log_full_messages=True,
         )
         phase = "application"

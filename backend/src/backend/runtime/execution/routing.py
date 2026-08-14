@@ -30,19 +30,18 @@ class StrategyRouter:
                 selection = capabilities.strategy_selector.select_strategy(runtime)
             except ModelOutputError as exc:
                 _publish_repairs(runtime, capabilities)
-                attempts = settings.max_model_repairs + 1
+                if runtime.services.cancel_requested is not None and runtime.services.cancel_requested():
+                    return None
                 selection = StrategySelection(
                     "reactive",
-                    f"Strategy output remained invalid after {attempts} attempts; "
-                    f"defaulting to reactive: {exc.validation_error}",
+                    f"Strategy output remained invalid; defaulting to reactive: {exc.validation_error}",
                 )
                 source = "fallback"
-                fallback_data = {
-                    "validation_error": exc.validation_error,
-                    "attempts": attempts,
-                }
+                fallback_data = {"validation_error": exc.validation_error}
             except PlanningError as exc:
                 _publish_repairs(runtime, capabilities)
+                if runtime.services.cancel_requested is not None and runtime.services.cancel_requested():
+                    return None
                 fail_run(runtime, f"Strategy selection failed: {exc}", **planning_failure_data(exc, capabilities.name))
                 return None
             else:

@@ -5,7 +5,6 @@ import requests
 from backend.domain import (
     AssistantMessage,
     ModelOutputError,
-    PlanningError,
     SystemMessage,
     ToolMessage,
     ToolSpec,
@@ -550,9 +549,10 @@ def test_llm_planner_rejects_unknown_native_tool() -> None:
     )
     spec = ToolSpec("run_command", "Calculate")
     planner = LLMPlanner(client, [spec], [spec])
-    runtime = AgentRunner(planner, ToolRegistry(), max_model_repairs=0).new_runtime(task="run it")
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="run it")
+    runtime.services.cancel_requested = lambda: True
 
-    with pytest.raises(PlanningError, match="unavailable tool"):
+    with pytest.raises(ModelOutputError, match="cancelled"):
         planner.decide(runtime)
 
 
@@ -604,7 +604,7 @@ def test_llm_plan_repairs_invalid_json_once_without_polluting_history() -> None:
         ]
     )
     planner = LLMPlanner(client, [], [])
-    runtime = AgentRunner(planner, ToolRegistry(), max_model_repairs=1).new_runtime(task="answer")
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="answer")
 
     plan = planner.create_plan(runtime)
 
@@ -618,22 +618,26 @@ def test_llm_plan_repairs_invalid_json_once_without_polluting_history() -> None:
     assert "Model output correction" in (runtime.exchange.messages[-1].content or "")
 
 
-def test_llm_output_repair_stops_at_the_configured_limit() -> None:
+def test_llm_output_repair_continues_until_valid_output() -> None:
     client = ScriptedClient(
         [
             PreparedResponse(AssistantMessage(content="not-json")),
             PreparedResponse(AssistantMessage(content="still-not-json")),
+            PreparedResponse(AssistantMessage(content="also-not-json")),
+            PreparedResponse(
+                AssistantMessage(content=json.dumps({"goal": "Answer directly.", "steps": [], "final_answer": "Done."}))
+            ),
         ]
     )
     planner = LLMPlanner(client, [], [])
-    runtime = AgentRunner(planner, ToolRegistry(), max_model_repairs=1).new_runtime(task="answer")
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="answer")
 
-    with pytest.raises(ModelOutputError, match="valid JSON"):
-        planner.create_plan(runtime)
+    plan = planner.create_plan(runtime)
 
     repairs = planner.consume_output_repairs()
-    assert len(client.requests) == 2
-    assert [repair["outcome"] for repair in repairs] == ["failed", "failed"]
+    assert plan.final_answer == "Done."
+    assert len(client.requests) == 4
+    assert [repair["outcome"] for repair in repairs] == ["repaired", "repaired", "repaired"]
 
 
 def test_llm_json_parser_accepts_one_complete_json_code_fence() -> None:
@@ -655,12 +659,13 @@ def test_llm_json_parser_accepts_one_complete_json_code_fence() -> None:
     assert planner.consume_output_repairs() == []
 
 
-def test_runner_falls_back_to_reactive_after_strategy_repairs_are_exhausted() -> None:
+def test_runner_continues_strategy_repairs_until_valid_output() -> None:
     client = ScriptedClient(
         [
             PreparedResponse(AssistantMessage(content="   ", reasoning="Answer an old MCP question.")),
             PreparedResponse(AssistantMessage(content=" ", reasoning="Still answering the old question.")),
             PreparedResponse(AssistantMessage(content="", reasoning="No JSON was produced.")),
+            PreparedResponse(AssistantMessage(content='{"strategy":"reactive","reason":"Recovered response."}')),
             PreparedResponse(AssistantMessage(content="Recovered response.")),
         ]
     )
@@ -675,17 +680,18 @@ def test_runner_falls_back_to_reactive_after_strategy_repairs_are_exhausted() ->
     strategy_requests = [
         event for event in events if event.kind == "model_request" and event.data["operation"] == "strategy"
     ]
-    repair_events = [event for event in events if event.kind == "model_repair"]
+    repair_events = [event for event in state.events if event.kind == "model_repair"]
     assert state.status == "completed"
     assert state.strategy == "reactive"
     assert state.final_answer == "Recovered response."
-    assert strategy.data["source"] == "fallback"
-    assert strategy.data["attempts"] == 3
-    assert strategy.data["validation_error"] == "Model response did not contain JSON content."
-    assert len(strategy_requests) == 3
-    assert len({event.data["exchange_id"] for event in strategy_requests}) == 3
+    assert strategy.data["source"] == "llm"
+    assert "attempts" not in strategy.data
+    assert "validation_error" not in strategy.data
+    assert len(strategy_requests) == 4
+    assert len({event.data["exchange_id"] for event in strategy_requests}) == 4
     assert len(repair_events) == 3
-    assert all(event.data["outcome"] == "failed" for event in repair_events)
+    assert all(event.kind != "model_repair" for event in events)
+    assert len([event for event in state.events if event.kind == "model_repair"]) == 3
     assert all(event.kind != "error" for event in events)
 
 
@@ -704,7 +710,7 @@ def test_runner_repairs_two_empty_strategy_responses_before_success() -> None:
     state = runner.run(runner.new_runtime(task="hello", on_event=events.append))
 
     strategy = next(event for event in events if event.kind == "strategy")
-    repairs = [event for event in events if event.kind == "model_repair"]
+    repairs = [event for event in state.events if event.kind == "model_repair"]
     assert state.status == "completed"
     assert state.final_answer == "Done."
     assert strategy.data["source"] == "llm"
@@ -730,7 +736,7 @@ def test_strategy_requests_only_current_turn_and_repair_instruction() -> None:
         ]
     )
     planner = LLMPlanner(client, [], [])
-    runtime = AgentRunner(planner, ToolRegistry(), max_model_repairs=1).new_runtime(
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(
         task="hello",
         messages=history,
     )

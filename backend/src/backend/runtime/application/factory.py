@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 
-from backend.configuration import ClientPaths, initialize_config, section
+from backend.configuration import ClientPaths, initialize_config, load_config, section
 from backend.domain import DEFAULT_TIME_ZONE
 from backend.mcp.client import ExternalMcpResources, start_external_tools
 from backend.mcp.config import McpSettings, McpTrustStore, prepare_mcp_plan
@@ -62,7 +62,7 @@ def build_application(
                 config[name] = {**config[name], **value}
             else:
                 config[name] = value
-    resolved = _settings_for(resolved_paths, settings, config_override is not None)
+    resolved = _settings_for(resolved_paths, settings, config_override)
     device_id = str(section(config, "sync").get("device_id") or f"local_{resolved_paths.root.name}")
     store = SQLiteSessionStore(resolved_paths, device_id)
     files = WorkspaceFiles(workspace)
@@ -217,13 +217,8 @@ def _build_runner(
     return AgentRunner(
         planner=planner,
         tools=tools,
-        max_model_repairs=settings.max_model_repairs,
         max_transport_retries=settings.max_transport_retries,
-        max_retries=settings.max_retries,
-        max_tool_recoveries=settings.max_tool_recoveries,
-        max_model_turns=settings.max_model_turns,
         max_tool_calls=settings.max_tool_calls,
-        max_replans=settings.max_replans,
         strategy=settings.strategy,
         log_full_messages=settings.log_full_messages,
         checkpoints=checkpoints,
@@ -259,13 +254,25 @@ def _external_resources(
 def _settings_for(
     paths: ClientPaths,
     settings: RunnerSettings | None,
-    config_override: bool = False,
+    config_override: dict[str, object] | None = None,
 ) -> RunnerSettings:
     if settings is not None:
         return settings
-    if config_override:
-        return RunnerSettings(log_full_messages=True)
-    return RunnerSettings(log_full_messages=log_full_messages_from_toml(paths.config_file))
+    if config_override is not None:
+        runtime = config_override.get("runtime")
+        runtime_values = runtime if isinstance(runtime, dict) else {}
+        max_tool_calls = runtime_values.get("max_tool_calls", 32)
+        return RunnerSettings(
+            max_tool_calls=max_tool_calls,  # type: ignore[arg-type]
+            log_full_messages=bool(runtime_values.get("log_full_messages", True)),
+        )
+    config = load_config(paths.config_file)
+    runtime = section(config, "runtime")
+    max_tool_calls = runtime.get("max_tool_calls", 32)
+    return RunnerSettings(
+        max_tool_calls=max_tool_calls,  # type: ignore[arg-type]
+        log_full_messages=log_full_messages_from_toml(paths.config_file),
+    )
 
 
 def _build_sync_coordinator(config: dict[str, object], store: SQLiteSessionStore) -> SyncCoordinator | None:

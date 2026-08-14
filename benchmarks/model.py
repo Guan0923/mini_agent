@@ -17,10 +17,7 @@ Difficulty = Literal["easy", "medium", "hard"]
 class Budgets:
     """Per-task execution limits passed through to the runtime."""
 
-    max_model_turns: int = 8
     max_tool_calls: int = 32
-    max_replans: int = 2
-    max_retries: int = 1
 
 
 @dataclass(frozen=True)

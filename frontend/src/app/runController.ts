@@ -44,7 +44,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
         if (kind === "response_delta" && !nodeProtocol) {
           const content = (message.data?.content as string | undefined) ?? message.message ?? "";
           if (content) callbacks.updateLastMessage(request.conversationId, (item) => ({ ...item, content: item.content + content }));
-        } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result" || kind === "tool_failed") {
+        } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result") {
           callbacks.updateLastMessage(request.conversationId, (item) => appendLegacyRuntimeEvent(item, {
             kind,
             message: message.message ?? "",

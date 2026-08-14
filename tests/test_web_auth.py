@@ -181,3 +181,20 @@ def test_web_routes_keep_the_stable_local_contract(tmp_path: Path) -> None:
     assert "/api/sessions" in routes
     assert "/api/sync/snapshots" in routes
     assert "/api/ready" in routes
+
+
+def test_runtime_config_defaults_validates_and_persists_per_user(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    with TestClient(create_app(state)) as client:
+        login = client.post("/api/auth/guest")
+        assert login.status_code == 200
+        assert client.get("/api/auth/settings").json()["runtime_config"] == {"max_tool_calls": 32}
+
+        saved = client.put("/api/auth/runtime-config", json={"max_tool_calls": 1000})
+        assert saved.status_code == 200
+        assert saved.json() == {"max_tool_calls": 1000}
+        assert client.get("/api/auth/settings").json()["runtime_config"] == {"max_tool_calls": 1000}
+
+        for value in (0, 1001, True, "32"):
+            response = client.put("/api/auth/runtime-config", json={"max_tool_calls": value})
+            assert response.status_code == 422

@@ -15,7 +15,9 @@ The application selects this mode by default or through `/agent`. Execute end to
 ## Failure Recovery
 
 - Read the full error, identify the cause, and change the arguments or approach before retrying.
-- Do not automatically retry file mutations or commands, and do not repeat an identical action after an ambiguous result.
+- Tool failures are feedback, not a reason to stop. Choose whether to retry with corrected arguments, repeat a
+  side-effecting call, or use another tool based on the failure and the user's goal. Each proposed call is executed
+  at most once by the runtime and is counted against the workflow tool-call budget.
 - If the requested outcome cannot be completed within the available tools, permissions, or execution budget, preserve completed work and explain exactly what remains.
 
 ## Completion

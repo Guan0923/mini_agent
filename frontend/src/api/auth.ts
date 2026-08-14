@@ -56,12 +56,17 @@ export interface TimezoneOption {
   label: string;
 }
 
+export interface RuntimeConfig {
+  max_tool_calls: number;
+}
+
 export interface UserSettings {
   profile: UserProfile & { email: string };
   agent_config: AgentConfig;
   provider_config: ProviderConfig;
   provider_configs: ProviderConfig[];
   capability_config: Record<string, unknown>;
+  runtime_config: RuntimeConfig;
   timezone_options: TimezoneOption[];
   sync_preferences: SyncPreferences;
   sync_state: SyncState;
@@ -74,6 +79,14 @@ export async function getSettings(): Promise<UserSettings> {
 
 export async function updateAgentConfig(config: AgentConfig): Promise<AgentConfig> {
   return requestJson<AgentConfig>("/api/auth/agent-config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+}
+
+export async function updateRuntimeConfig(config: RuntimeConfig): Promise<RuntimeConfig> {
+  return requestJson<RuntimeConfig>("/api/auth/runtime-config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),

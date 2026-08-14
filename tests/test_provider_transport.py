@@ -528,7 +528,6 @@ def test_deepseek_invalid_tool_arguments_are_regenerated_before_execution() -> N
     runtime = AgentRunner(
         planner,
         ToolRegistry(),
-        max_model_repairs=1,
         max_transport_retries=0,
     ).new_runtime(task="run it")
 

@@ -8,6 +8,10 @@ from typing import Any
 
 from backend.domain import terminal_error_payload, terminal_error_text
 
+_HIDDEN_RECOVERABLE_EVENTS = frozenset(
+    {"tool_failed", "tool_recovery", "model_repair", "model_retry", "replan_requested"}
+)
+
 
 def _text(value: Any) -> str:
     if isinstance(value, str):
@@ -194,6 +198,8 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
                 )
             elif kind == "tool_result":
                 failed = block.get("status") == "failed" or node.status == "failed"
+                if failed:
+                    continue
                 current_assistant["events"].append(
                     {
                         "kind": "tool_failed" if failed else "tool_result",

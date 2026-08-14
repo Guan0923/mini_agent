@@ -38,6 +38,9 @@ router = APIRouter(prefix="/api")
 router.include_router(decisions_router)
 
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+_HIDDEN_RECOVERABLE_EVENTS = frozenset(
+    {"tool_failed", "tool_recovery", "model_repair", "model_retry", "replan_requested"}
+)
 
 
 class RuntimeModelRequest(BaseModel):
@@ -344,6 +347,8 @@ def _stream(
                     active_runtime_bridges.pop(old_key, None)
                     active_runtime_configs.pop(old_key, None)
             active_runtime_bridges[registry_key(bridge.session_id)] = bridge
+            return
+        if getattr(item, "kind", "") in _HIDDEN_RECOVERABLE_EVENTS:
             return
         payload = _event_payload(item)
         if item.kind == "run_finished":
