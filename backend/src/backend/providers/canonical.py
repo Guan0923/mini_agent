@@ -186,6 +186,18 @@ def _chat_content(blocks: Sequence[Mapping[str, Any]]) -> str | list[dict[str, A
     return rendered
 
 
+def _has_chat_content(value: str | list[dict[str, Any]] | None) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(
+            isinstance(part.get("text"), str) and bool(part["text"].strip())
+            for part in value
+            if isinstance(part, Mapping)
+        )
+    return False
+
+
 def to_chat_completions(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Convert canonical message nodes to OpenAI Chat Completions messages."""
 
@@ -227,6 +239,12 @@ def to_chat_completions(values: Iterable[RuntimeState | Mapping[str, Any]]) -> l
             item["tool_calls"] = calls
             if item["content"] is None:
                 item["content"] = ""
+        elif wire_role == "assistant":
+            content = item["content"]
+            if not _has_chat_content(content):
+                # Reasoning and control blocks are internal context, not a
+                # valid standalone Chat Completions assistant message.
+                continue
         output.append(item)
     return output
 

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 4
+from backend.domain.runtime_state import create_root_node, session_root_id
+
+SCHEMA_VERSION = 5
+RUNTIME_NODE_SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_meta (
     session_id TEXT PRIMARY KEY, title TEXT NOT NULL, owner_device_id TEXT NOT NULL,
     remote_revision INTEGER NOT NULL DEFAULT 0, read_only INTEGER NOT NULL DEFAULT 0,
-    schema_version INTEGER NOT NULL DEFAULT 4, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 5, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     client_id TEXT, archived_at TEXT, deleted_at TEXT,
     local_only INTEGER NOT NULL DEFAULT 0
 );
@@ -102,11 +105,13 @@ class SQLiteSchemaMixin:
         prior_version = (
             int(prior_version_row[0]) if prior_version_row is not None and prior_version_row[0] is not None else 1
         )
-        # RuntimeState 0.3 is a protocol break.  Even a table that happens to
-        # contain the new column names must not retain rows written by an older
-        # schema, because their data discriminator and lifecycle semantics are
-        # not compatible.  Rebuild the table before normal queries can see it.
-        if runtime_columns and (prior_version < SCHEMA_VERSION or not required_runtime_columns.issubset(runtime_columns)):
+        # RuntimeState 0.3 is a protocol break.  Preserve the existing one-way
+        # rebuild for pre-v4 databases, but v4 -> v5 only adds the formal
+        # session root and must retain the canonical message tree.
+        runtime_rebuild_required = runtime_columns and (
+            prior_version < RUNTIME_NODE_SCHEMA_VERSION or not required_runtime_columns.issubset(runtime_columns)
+        )
+        if runtime_rebuild_required:
             # Protocol 0.3 is a deliberate break: old message nodes are not
             # migrated.  Provider credentials live in the user settings DB and
             # are therefore unaffected by rebuilding this local table.
@@ -183,3 +188,94 @@ class SQLiteSchemaMixin:
         local_only = connection.execute("SELECT local_only FROM session_meta LIMIT 1").fetchone()
         if local_only is not None and int(local_only[0]):
             connection.execute("DELETE FROM sync_outbox")
+
+        # Every v5 session has a deterministic root.  This runs after the
+        # outbox columns are ready so a migrated cloud-backed session can queue
+        # the new canonical snapshot in the same transaction.
+        if self._ensure_session_root(connection):
+            meta = connection.execute("SELECT session_id,local_only,read_only FROM session_meta LIMIT 1").fetchone()
+            if meta is not None and not int(meta[1]) and not int(meta[2]):
+                self._queue(connection, str(meta[0]))
+
+    def _ensure_session_root(self, connection: sqlite3.Connection) -> bool:
+        """Create a root and reparent legacy local roots when needed."""
+
+        meta = connection.execute("SELECT session_id,created_at FROM session_meta LIMIT 1").fetchone()
+        if meta is None:
+            return False
+        session_id = str(meta[0])
+        root_id = session_root_id(session_id)
+        existing = connection.execute(
+            "SELECT data_json FROM runtime_nodes WHERE session_id=? AND id=?",
+            (session_id, root_id),
+        ).fetchone()
+        if existing is not None:
+            if '"type":"root"' not in str(existing[0]).replace(" ", ""):
+                raise ValueError(f"Reserved root id is already used by a non-root node: {root_id}.")
+            return False
+
+        all_local_nodes = connection.execute(
+            "SELECT id,parent_session_id,parent_id,json_extract(data_json,'$.type') "
+            "FROM runtime_nodes WHERE session_id=? ORDER BY timestamp,id",
+            (session_id,),
+        ).fetchall()
+        legacy_roots = [row for row in all_local_nodes if str(row[3]) == "root"]
+        legacy_root_ids = {str(row[0]) for row in legacy_roots}
+        local_roots = [
+            row
+            for row in all_local_nodes
+            if str(row[0]) not in legacy_root_ids and (not str(row[2]) or str(row[1]) != session_id)
+        ]
+        first_parent = None
+        parent_candidate = next((row for row in [*legacy_roots, *local_roots] if str(row[2])), None)
+        if parent_candidate is not None:
+            first_parent = (str(parent_candidate[1]), str(parent_candidate[2]))
+        root = create_root_node(session_id, parent=first_parent, timestamp=str(meta[1]))
+        connection.execute(
+            """INSERT INTO runtime_nodes(
+                session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,
+                compaction_idx,user,provider_name,model_json,permission_mode,running_mode,
+                usage_json,cwd,timestamp,status,data_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            self._node_values(root),
+        )
+        direct_children = [
+            row
+            for row in all_local_nodes
+            if str(row[1]) == session_id and str(row[2]) in legacy_root_ids
+        ]
+        root_keys = [str(row[0]) for row in local_roots] + [str(row[0]) for row in direct_children]
+        if root_keys:
+            placeholders = ",".join("?" for _ in root_keys)
+            connection.execute(
+                f"UPDATE runtime_nodes SET parent_session_id=?,parent_id=? "
+                f"WHERE session_id=? AND id IN ({placeholders})",
+                (session_id, root.id, session_id, *root_keys),
+            )
+        if legacy_root_ids:
+            placeholders = ",".join("?" for _ in legacy_root_ids)
+            connection.execute(
+                f"DELETE FROM runtime_nodes WHERE session_id=? AND id IN ({placeholders})",
+                (session_id, *legacy_root_ids),
+            )
+        return True
+
+    def _insert_session_root(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        *,
+        timestamp: str,
+        parent: tuple[str, str] | None = None,
+    ) -> None:
+        """Insert a new session root inside the session metadata transaction."""
+
+        root = create_root_node(session_id, parent=parent, timestamp=timestamp)
+        connection.execute(
+            """INSERT INTO runtime_nodes(
+                session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,
+                compaction_idx,user,provider_name,model_json,permission_mode,running_mode,
+                usage_json,cwd,timestamp,status,data_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            self._node_values(root),
+        )

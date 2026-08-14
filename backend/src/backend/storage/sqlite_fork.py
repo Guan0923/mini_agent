@@ -60,7 +60,8 @@ class SQLiteForkMixin:
             if row[0] == "running":
                 raise ValueError("A running run cannot be forked.")
             nodes = self.load_nodes(summary.session_id)
-            if not nodes:
+            meaningful_nodes = [node for node in nodes if node.data_type != "root"]
+            if not meaningful_nodes:
                 # A v4 database can still contain a run created by a legacy
                 # embedding caller that has not emitted a message-tree node.
                 # Keep that run forkable through the non-authoritative
@@ -94,7 +95,9 @@ class SQLiteForkMixin:
                     # starts a new tree: there is no source node to reference
                     # and no legacy row is allowed to become model context.
                     writer = NodeWriter(self)
-                    parent = None
+                    parent = self.get_session_root(target.session_id)
+                    if parent is None:
+                        raise RuntimeError("Fork target root was not created.")
                     for item in text_messages(state.messages):
                         node = writer.create(
                             session_id=target.session_id,
@@ -122,22 +125,11 @@ class SQLiteForkMixin:
                     raise
                 return target
             source_leaf = max(nodes, key=lambda item: (item.timestamp, item.id))
-            target = self.create_session(f"Fork: {summary.title}", local_only=summary.local_only)
-            writer = NodeWriter(self)
-            root = writer.create(
-                session_id=target.session_id,
-                parent=(source_leaf.session_id, source_leaf.id),
-                data=source_leaf.data,
-                user=source_leaf.user,
-                provider_name=source_leaf.provider_name,
-                model=source_leaf.model,
-                permission_mode=source_leaf.permission_mode,
-                running_mode=source_leaf.running_mode,
-                cwd=source_leaf.cwd,
-                first_kept_entry_id=source_leaf.firstKeptEntryId,
-                compaction_idx=source_leaf.compactionIdx,
+            target = self.create_session(
+                f"Fork: {summary.title}",
+                local_only=summary.local_only,
+                root_parent=(source_leaf.session_id, source_leaf.id),
             )
-            writer.delete(root.session_id, root.id)
             new_id = new_run_id()
             provenance = RunProvenance(
                 workflow_id=new_id,

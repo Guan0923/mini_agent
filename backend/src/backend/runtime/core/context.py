@@ -428,7 +428,7 @@ class AgentRuntime:
         """
 
         nodes = self.model_nodes()
-        if not nodes:
+        if not nodes or all(node.data.get("type") == "root" for node in nodes):
             messages = list(self.state.messages)
         else:
             messages = _chat_messages_from_nodes(nodes)

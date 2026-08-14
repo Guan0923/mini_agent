@@ -7,10 +7,12 @@ import sqlite3
 
 from backend.domain import RunProvenance, RunStatus, RuntimeMessage, Session
 from backend.domain.runtime_state import RuntimeState as TreeRuntimeState
+from backend.domain.runtime_state import session_root_id
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState
 
 from .codec import (
+    assistant_content,
     decode_message_data,
     decode_runtime_state,
     encode_message_data,
@@ -18,6 +20,7 @@ from .codec import (
     is_default_session_title,
     normalize_session_title,
 )
+from .sqlite_schema import SCHEMA_VERSION
 
 
 class SQLiteRuntimeMixin:
@@ -31,6 +34,8 @@ class SQLiteRuntimeMixin:
         :meth:`finalize_node` only for the terminal delete frame.
         """
 
+        if node.data_type == "root":
+            raise ValueError("Root nodes are created only with session metadata.")
         if node.status != "failed":
             raise ValueError("A runtime node must be created with status='failed'.")
         if node.parent_id and self.get_node(node.parent_session_id, node.parent_id) is None:
@@ -58,6 +63,11 @@ class SQLiteRuntimeMixin:
                 (session_id, node_id),
             ).fetchone()
         return self._node_from_row(row) if row is not None else None
+
+    def get_session_root(self, session_id: str) -> TreeRuntimeState | None:
+        """Return the deterministic root owned by a session."""
+
+        return self.get_node(session_id, session_root_id(session_id))
 
     def list_children(self, parent_session_id: str, parent_id: str) -> list[TreeRuntimeState]:
         """Query children using the cross-session parent reference."""
@@ -117,6 +127,8 @@ class SQLiteRuntimeMixin:
     def finalize_node(self, node: TreeRuntimeState) -> None:
         """Atomically replace a failed leaf with its final node."""
 
+        if node.data_type == "root":
+            raise ValueError("Root nodes are immutable.")
         if self.list_children(node.session_id, node.id):
             raise ValueError("Only a leaf runtime node can be finalized.")
         with self._connection(node.session_id) as connection:
@@ -171,13 +183,14 @@ class SQLiteRuntimeMixin:
         if session.local_only:
             raise ValueError("Local-only sessions are excluded from cloud sync.")
         return {
-            "schema_version": 4,
+            "schema_version": SCHEMA_VERSION,
             "session": {
                 "session_id": session.session_id,
                 "title": session.title,
                 "created_at": session.created_at,
                 "updated_at": session.updated_at,
                 "client_id": session.client_id,
+                "owner_device_id": self.device_id,
             },
             "nodes": [node.to_dict() for node in self.load_nodes(session_id) if node.session_id == session_id],
         }
@@ -247,7 +260,11 @@ class SQLiteRuntimeMixin:
             title = str(meta[0])
             if (
                 is_default_session_title(title)
-                and connection.execute("SELECT 1 FROM runtime_nodes LIMIT 1").fetchone() is None
+                and connection.execute(
+                    "SELECT 1 FROM runtime_nodes WHERE json_extract(data_json, '$.type') <> 'root' LIMIT 1"
+                ).fetchone()
+                is None
+                and connection.execute("SELECT 1 FROM session_messages LIMIT 1").fetchone() is None
             ):
                 title = normalize_session_title(task)
             connection.execute(
@@ -265,6 +282,13 @@ class SQLiteRuntimeMixin:
                     timestamp,
                 ),
             )
+            if append_user_message:
+                connection.execute(
+                    "INSERT INTO session_messages(run_id,role,content,created_at) "
+                    "SELECT ?, 'user', ?, ? WHERE NOT EXISTS "
+                    "(SELECT 1 FROM session_messages WHERE run_id=? AND role='user')",
+                    (run_id, task, timestamp, run_id),
+                )
             connection.execute("UPDATE session_meta SET title=?, updated_at=?", (title, timestamp))
             self._queue(connection, session_id)
 
@@ -274,6 +298,10 @@ class SQLiteRuntimeMixin:
             if connection.execute("SELECT 1 FROM session_runs WHERE run_id=?", (run_id,)).fetchone() is None:
                 raise ValueError(f"Unknown session run: {run_id}")
             timestamp = utc_now()
+            connection.execute(
+                "INSERT INTO session_messages(run_id,role,content,created_at) VALUES (?, 'user', ?, ?)",
+                (run_id, content, timestamp),
+            )
             connection.execute("UPDATE session_meta SET updated_at=?", (timestamp,))
             self._queue(connection, session_id)
 
@@ -288,6 +316,18 @@ class SQLiteRuntimeMixin:
                 == 0
             ):
                 raise ValueError(f"Unknown session run: {run_id}")
+            content = assistant_content(status, answer)
+            if (
+                connection.execute(
+                    "UPDATE session_messages SET content=?,created_at=? WHERE run_id=? AND role='assistant'",
+                    (content, timestamp, run_id),
+                ).rowcount
+                == 0
+            ):
+                connection.execute(
+                    "INSERT INTO session_messages(run_id,role,content,created_at) VALUES (?, 'assistant', ?, ?)",
+                    (run_id, content, timestamp),
+                )
             connection.execute("UPDATE session_meta SET updated_at=?", (timestamp,))
             self._queue(connection, session_id)
 

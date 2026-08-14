@@ -123,7 +123,7 @@ export default function ChatPage({
   const display = configuredDisplayMode ?? "medium";
 
   const activeRuntimeNode = (() => {
-    const nodes = conversation?.runtimeNodes ?? [];
+    const nodes = (conversation?.runtimeNodes ?? []).filter((node) => node.data.type !== "root");
     if (!nodes.length) return undefined;
     if (conversation?.lastNodeId) {
       const selected = nodes.find((node) => node.id === conversation.lastNodeId && node.session_id === conversation.sessionId);

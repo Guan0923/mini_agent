@@ -247,6 +247,12 @@ def _validate_source_node(store, session_id: str, source_node_id: str | None, *,
         raise HTTPException(status_code=409, detail="只能从 failed 或 abort 节点恢复")
 
 
+def _has_conversation_nodes(nodes: list[object]) -> bool:
+    """Treat a session root as an anchor, not as conversation history."""
+
+    return any(getattr(node, "data_type", None) != "root" for node in nodes)
+
+
 def _stream(
     state: WebAppState,
     prompt: str,
@@ -713,7 +719,8 @@ async def chat(
         if summary.last_run_status == "running":
             raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
         nodes = getattr(store, "load_nodes", lambda _session_id: [])(resolved_session_id)
-        if nodes:
+        has_history = _has_conversation_nodes(nodes)
+        if has_history:
             _require_explicit_runtime_config(
                 provider_name=body.provider_name,
                 model=body.model,
@@ -722,7 +729,7 @@ async def chat(
                 permission_mode_explicit="permission_mode" in body.model_fields_set,
                 running_mode_explicit="running_mode" in body.model_fields_set,
             )
-        if nodes and not body.source_node_id:
+        if has_history and not body.source_node_id:
             raise HTTPException(status_code=409, detail="续聊请求必须提交当前最后节点 ID。")
         _validate_source_node(store, resolved_session_id, body.source_node_id)
     else:
@@ -774,6 +781,8 @@ async def resume(
     if summary.last_run_status == "running":
         raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
     nodes = getattr(store, "load_nodes", lambda _session_id: [])(session_id)
+    if not _has_conversation_nodes(nodes):
+        raise HTTPException(status_code=409, detail="当前会话没有可恢复的运行节点。")
     _require_explicit_runtime_config(
         provider_name=body.provider_name,
         model=body.model,
@@ -783,7 +792,7 @@ async def resume(
         running_mode_explicit="running_mode" in body.model_fields_set,
         resume=True,
     )
-    if nodes and not body.source_node_id:
+    if not body.source_node_id:
         raise HTTPException(status_code=409, detail="恢复请求必须提交当前节点 ID。")
     _validate_source_node(store, session_id, body.source_node_id, resume=True)
 

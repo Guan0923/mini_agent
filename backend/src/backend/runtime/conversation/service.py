@@ -92,7 +92,7 @@ class ConversationService(ConversationSessionController):
         latest = None
         loader = getattr(store, "load_nodes", None)
         if callable(loader):
-            nodes = list(loader(session.session_id))
+            nodes = [node for node in loader(session.session_id) if getattr(node, "data_type", None) != "root"]
             if nodes:
                 parent_keys = {(node.parent_session_id, node.parent_id) for node in nodes if node.parent_id}
                 leaves = [node for node in nodes if (node.session_id, node.id) not in parent_keys]

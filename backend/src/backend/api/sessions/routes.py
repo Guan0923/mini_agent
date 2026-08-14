@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS
-from backend.domain.runtime_state import NodeWriter, RuntimeStateValidationError
+from backend.domain.runtime_state import RuntimeStateValidationError
 from backend.providers import ModelConfigurationError
 from backend.runtime import build_application as _default_build_application
 from backend.storage.auth.crypto import SecretDecryptionError
@@ -294,6 +294,8 @@ def patch_runtime_config(
         raise HTTPException(status_code=409, detail="node_id 不属于当前会话")
     if node.session_id != session_id:
         raise HTTPException(status_code=409, detail="node_id 不属于当前会话")
+    if getattr(node, "data_type", None) == "root":
+        raise HTTPException(status_code=409, detail="root 节点不可修改运行配置")
     children = store.list_children(node.session_id, node.id)
     if children:
         raise HTTPException(status_code=409, detail="node_id 不是活动叶节点")
@@ -659,18 +661,12 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
                 source_node = store.get_node(source.session_id, body.source_node_id)
             if source_node is None:
                 raise ValueError("指定的 source_node_id 不属于当前会话。")
-            target = store.create_session(title, client_id=client_id, local_only=source.local_only)
-            writer = NodeWriter(store)
-            root = writer.create(
-                session_id=target.session_id,
-                parent=(source_node.session_id, source_node.id),
-                provider_name=source_node.provider_name,
-                user=source_node.user,
-                cwd=source_node.cwd,
-                first_kept_entry_id=source_node.firstKeptEntryId,
-                compaction_idx=source_node.compactionIdx,
+            target = store.create_session(
+                title,
+                client_id=client_id,
+                local_only=source.local_only,
+                root_parent=(source_node.session_id, source_node.id),
             )
-            writer.delete(root.session_id, root.id)
         elif body.run_id:
             records = store.load_conversation_records(source.session_id)
             if not any(str(record["run_id"]) == body.run_id for record in records):

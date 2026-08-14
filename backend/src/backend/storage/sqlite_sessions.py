@@ -20,7 +20,12 @@ from .codec import normalize_session_title
 
 class SQLiteSessionMixin:
     def create_session(
-        self, title: str | None = None, *, client_id: str | None = None, local_only: bool = False
+        self,
+        title: str | None = None,
+        *,
+        client_id: str | None = None,
+        local_only: bool = False,
+        root_parent: tuple[str, str] | None = None,
     ) -> Session:
         session = Session(
             new_session_id(),
@@ -48,6 +53,12 @@ class SQLiteSessionMixin:
                         int(session.local_only),
                     ),
                 )
+                self._insert_session_root(
+                    connection,
+                    session.session_id,
+                    timestamp=session.created_at,
+                    parent=root_parent,
+                )
                 self._queue(connection, session.session_id)
         except Exception:
             # A failed schema/metadata initialization must not leave a
@@ -74,9 +85,13 @@ class SQLiteSessionMixin:
         with self._connection(session_id) as connection:
             row = connection.execute(
                 """SELECT m.session_id, m.title, m.created_at, m.updated_at,
-                (SELECT COUNT(*) FROM runtime_nodes
-                    WHERE json_extract(data_json, '$.type') = 'message'
-                    AND json_extract(data_json, '$.message.role') IN ('user', 'assistant')),
+                COALESCE(
+                    NULLIF((SELECT COUNT(*) FROM runtime_nodes
+                        WHERE json_extract(data_json, '$.type') = 'message'
+                        AND json_extract(data_json, '$.message.role') IN ('user', 'assistant')), 0),
+                    (SELECT COUNT(*) FROM session_messages
+                        WHERE role IN ('user', 'assistant'))
+                ),
                 (SELECT n.id FROM runtime_nodes AS n
                     WHERE n.session_id = m.session_id
                     AND NOT EXISTS (
@@ -133,15 +148,37 @@ class SQLiteSessionMixin:
     def load_conversation(self, session_id: str) -> list[dict[str, str]]:
         nodes = getattr(self, "load_nodes", lambda _session_id: [])(session_id)
         # RuntimeState nodes are the only durable conversation source in
-        # protocol v0.3.  Legacy session_messages rows are intentionally not
-        # replayed; old databases are rebuilt rather than migrated.
-        return self._node_messages(nodes)
+        # protocol v0.3.  Keep the legacy projection as a compatibility
+        # fallback for callers that still use start_turn/finish_turn directly;
+        # a real node tree remains authoritative whenever it has messages.
+        projected = self._node_messages(nodes)
+        if projected:
+            return projected
+        with self._connection(session_id) as connection:
+            rows = connection.execute("SELECT role,content FROM session_messages ORDER BY id").fetchall()
+        return [{"role": str(row[0]), "content": str(row[1])} for row in rows]
 
     def load_conversation_records(self, session_id: str) -> list[dict[str, str | int | None]]:
         """Return the durable transcript with stable row and run identifiers."""
 
         nodes = getattr(self, "load_nodes", lambda _session_id: [])(session_id)
-        return self._node_records(nodes)
+        projected = self._node_records(nodes)
+        if projected:
+            return projected
+        with self._connection(session_id) as connection:
+            rows = connection.execute(
+                "SELECT id,run_id,role,content,created_at FROM session_messages ORDER BY id"
+            ).fetchall()
+        return [
+            {
+                "id": int(row[0]),
+                "run_id": None if str(row[1]).startswith("import_") else str(row[1]),
+                "role": str(row[2]),
+                "content": str(row[3]),
+                "created_at": str(row[4]),
+            }
+            for row in rows
+        ]
 
     def find_session_by_client_id(self, client_id: str, *, include_deleted: bool = False) -> Session | None:
         """Find a Web-owned session without assuming a global metadata database."""
@@ -205,7 +242,9 @@ class SQLiteSessionMixin:
                 from backend.domain.runtime_state import NodeWriter, message_payload
 
                 writer = NodeWriter(self)
-                parent = None
+                parent = self.get_session_root(session.session_id)
+                if parent is None:
+                    raise RuntimeError("Session root was not created.")
                 for message in parsed:
                     role = "assistant" if getattr(message, "role", "") == "assistant" else "user"
                     node = writer.create(

@@ -24,7 +24,7 @@ export interface ToolEvent {
 }
 
 export type RuntimeNodeStatus = "failed" | "success" | "abort";
-export type RuntimeNodeDataType = "message" | "compaction";
+export type RuntimeNodeDataType = "message" | "compaction" | "root";
 export type ThinkingMode = "enable" | "disable";
 export interface RuntimeNodeModel {
   reasoning_effort: ReasoningEffort;

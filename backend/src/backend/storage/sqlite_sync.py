@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from backend.domain import DEFAULT_SESSION_TITLE
 from backend.domain.runtime_state import RuntimeState as TreeRuntimeState
+from backend.domain.runtime_state import ensure_session_root
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState, text_messages
 
@@ -19,7 +20,7 @@ class SQLiteSyncMixin:
 
     # These rows are a local execution/resume projection.  They are included
     # only in the durable outbox envelope for older local APIs; the canonical
-    # history remains the v4 ``nodes`` list and the public node snapshot never
+    # history remains the v5 ``nodes`` list and the public node snapshot never
     # exposes these fields.
     _LEGACY_SNAPSHOT_TABLES: dict[str, tuple[str, ...]] = {
         "session_runs": (
@@ -40,9 +41,11 @@ class SQLiteSyncMixin:
         "runtime_messages": ("run_id", "sequence", "kind", "message", "data_json", "created_at"),
     }
 
+    _SUPPORTED_NODE_SNAPSHOT_VERSIONS = frozenset({4, 5})
+
 
     def export_runtime_node_snapshot(self, session_id: str) -> dict[str, object]:
-        """Export only session metadata and canonical nodes (schema 4)."""
+        """Export only session metadata and canonical nodes (schema 5)."""
 
         session = self.get_session(session_id)
         if session is None:
@@ -74,10 +77,11 @@ class SQLiteSyncMixin:
         }
 
     def apply_runtime_node_snapshot(self, snapshot: dict[str, object], *, local_device_id: str) -> None:
-        """Import a schema-4 snapshot; older browser/tree snapshots are rejected."""
+        """Import a v4/v5 snapshot and persist the normalized v5 shape."""
 
-        if int(snapshot.get("schema_version", -1)) != SCHEMA_VERSION:
-            raise ValueError("Only RuntimeState node snapshots (schema_version=4) are supported.")
+        snapshot_version = int(snapshot.get("schema_version", -1))
+        if snapshot_version not in self._SUPPORTED_NODE_SNAPSHOT_VERSIONS:
+            raise ValueError("Only RuntimeState node snapshots (schema_version=4 or 5) are supported.")
         meta = snapshot.get("session")
         raw_nodes = snapshot.get("nodes")
         if not isinstance(meta, dict) or not isinstance(raw_nodes, list):
@@ -85,7 +89,7 @@ class SQLiteSyncMixin:
         if not all(isinstance(item, dict) for item in raw_nodes):
             raise ValueError("Node snapshot nodes must be objects.")
         session_id = str(meta.get("session_id") or "")
-        owner = str(meta.get("owner_device_id") or "")
+        owner = str(meta.get("owner_device_id") or local_device_id)
         if not session_id or not owner:
             raise ValueError("Node snapshot is missing session ownership metadata.")
         existing = self.get_session(session_id)
@@ -96,6 +100,11 @@ class SQLiteSyncMixin:
         nodes = [TreeRuntimeState.from_dict(item) for item in raw_nodes]
         if any(node.session_id != session_id for node in nodes):
             raise ValueError("Node snapshot contains a node from another session.")
+        nodes = ensure_session_root(
+            nodes,
+            session_id,
+            timestamp=str(meta.get("created_at") or utc_now()),
+        )
         # A remote session must satisfy the same local directory contract as
         # a newly created session.  ``_connection`` initializes SQLite but
         # deliberately does not create workspace/uploads, which would make a
@@ -106,11 +115,12 @@ class SQLiteSyncMixin:
             connection.execute(
                 """INSERT INTO session_meta(session_id,title,owner_device_id,remote_revision,read_only,
                     schema_version,created_at,updated_at,client_id,archived_at,deleted_at)
-                    VALUES (?,?,?,0,1,4,?,?,?,?,?)""",
+                    VALUES (?,?,?,0,1,?,?,?,?,?,?)""",
                 (
                     session_id,
                     str(meta.get("title") or DEFAULT_SESSION_TITLE),
                     owner,
+                    SCHEMA_VERSION,
                     str(meta.get("created_at") or utc_now()),
                     str(meta.get("updated_at") or utc_now()),
                     str(meta["client_id"]) if meta.get("client_id") is not None else None,
@@ -128,7 +138,7 @@ class SQLiteSyncMixin:
                     self._node_values(node),
                 )
             # Rebuild only the non-authoritative local execution projection;
-            # malformed/legacy envelopes are still rejected by the v4 checks
+            # malformed/legacy envelopes are still rejected by the checks
             # above and never become message-tree nodes.
             self._restore_snapshot_tables(connection, snapshot, snapshot.get("runtime"))
 
@@ -215,13 +225,19 @@ class SQLiteSyncMixin:
             raise ValueError("Remote snapshot is missing session metadata.")
         if meta.get("session_id") not in {None, session_id}:
             raise ValueError("Remote snapshot session id does not match its envelope.")
-        if int(snapshot.get("schema_version", -1)) != SCHEMA_VERSION or not isinstance(snapshot.get("nodes"), list):
-            raise ValueError("Remote snapshot must use schema_version=4 and contain a nodes list.")
+        snapshot_version = int(snapshot.get("schema_version", -1))
+        if snapshot_version not in self._SUPPORTED_NODE_SNAPSHOT_VERSIONS or not isinstance(snapshot.get("nodes"), list):
+            raise ValueError("Remote snapshot must use schema_version=4 or 5 and contain a nodes list.")
         if not all(isinstance(item, dict) for item in snapshot["nodes"]):
             raise ValueError("Remote snapshot nodes must be objects.")
         nodes = [TreeRuntimeState.from_dict(item) for item in snapshot["nodes"]]
         if any(node.session_id != session_id for node in nodes):
             raise ValueError("Remote snapshot contains a node from another session.")
+        nodes = ensure_session_root(
+            nodes,
+            session_id,
+            timestamp=str(meta.get("created_at") or utc_now()),
+        )
         self.paths.ensure_session(session_id)
         with self._connection(session_id) as connection:
             self._clear_snapshot_tables(connection)
@@ -234,7 +250,7 @@ class SQLiteSyncMixin:
                     str(meta.get("title") or DEFAULT_SESSION_TITLE),
                     owner_device_id,
                     revision,
-                    int(snapshot.get("schema_version", SCHEMA_VERSION)),
+                    SCHEMA_VERSION,
                     str(meta.get("created_at") or utc_now()),
                     str(meta.get("updated_at") or utc_now()),
                     str(meta["client_id"]) if meta.get("client_id") is not None else None,
@@ -274,7 +290,7 @@ class SQLiteSyncMixin:
         snapshot: dict[str, object],
         runtime: object,
     ) -> None:
-        """Restore optional local execution rows carried by a v4 envelope.
+        """Restore optional local execution rows carried by a v5 envelope.
 
         The helper intentionally does not synthesize or alter ``runtime_nodes``
         and is a no-op for the public compact node snapshot.  It exists so a

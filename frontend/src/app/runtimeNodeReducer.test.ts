@@ -35,6 +35,15 @@ describe("runtime node reducer", () => {
     expect(leafNodes([node("a"), node("b", "a")], "s").map((item) => item.id)).toEqual(["b"]);
   });
 
+  it("does not expose the persistent root as a conversation leaf", () => {
+    const root: RuntimeStateNode = {
+      ...node("root", "", "success"),
+      data: { type: "root" },
+      model: { reasoning_effort: "max", current_model: "unknown", context_length: 128000, output_length: 8192, thinking: "enable", temperature: 0.7 },
+    };
+    expect(leafNodes([root], "s")).toEqual([]);
+  });
+
   it("repairs cached partial nodes before exposing them to the UI", () => {
     const partial = { ...node("legacy"), model: undefined, usage: undefined } as unknown as RuntimeStateNode;
     const state = applyRuntimeNodeFrame(new Map(), { type: "node.create", node: partial });

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,14 +12,17 @@ from backend.configuration import ClientPaths
 from backend.domain.runtime_state import (
     APP_VERSION,
     FAILED_TERMINAL_MESSAGE,
+    ROOT_MODEL,
     InMemoryNodeStore,
     NodeFrame,
     NodeWriter,
     RuntimeState,
     RuntimeStateTree,
     RuntimeStateValidationError,
+    create_root_node,
     message_payload,
     recoverable,
+    session_root_id,
 )
 from backend.providers.canonical import to_chat_completions, to_messages, to_responses
 from backend.providers.token_usage import normalize_provider_usage
@@ -74,6 +78,101 @@ def test_runtime_model_and_usage_validation_and_removed_data_types() -> None:
         RuntimeState.create(session_id="s", usage={"total_tokens": -1})
     with pytest.raises(RuntimeStateValidationError):
         RuntimeState.create(session_id="s", data={"type": "model_change", "model": "old"})
+
+
+def test_session_root_is_deterministic_and_uses_neutral_runtime_defaults() -> None:
+    first = create_root_node("session_root")
+    second = create_root_node("session_root")
+
+    assert first.id == second.id == session_root_id("session_root")
+    assert first.status == "success"
+    assert first.data == {"type": "root"}
+    assert first.model == {
+        **ROOT_MODEL,
+    }
+    assert first.firstKeptEntryId == first.id
+    assert first.compactionIdx == first.id
+    assert RuntimeState.from_dict(first.to_dict()).to_dict() == first.to_dict()
+
+
+def test_root_payload_rejects_extra_fields() -> None:
+    with pytest.raises(RuntimeStateValidationError):
+        RuntimeState.create(session_id="s", data={"type": "root", "message": "unexpected"}, status="success")
+
+
+def test_root_is_immutable_and_empty_sessions_expose_it_as_the_leaf(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "store"), "device")
+    session = store.create_session()
+    root = store.get_session_root(session.session_id)
+
+    assert root is not None
+    assert store.get_session_summary(session.session_id).last_node_id == root.id  # type: ignore[union-attr]
+    assert store.get_session_summary(session.session_id).message_count == 0  # type: ignore[union-attr]
+    with pytest.raises(RuntimeStateValidationError, match="immutable"):
+        root.with_status("abort")
+    with pytest.raises(RuntimeStateValidationError, match="immutable"):
+        root.with_data({"type": "root", "changed": True})
+    with pytest.raises(RuntimeStateValidationError, match="session store"):
+        NodeWriter(store).create(session_id=session.session_id, parent=root, data={"type": "root"})
+
+
+def test_v4_database_migration_adds_root_without_losing_message_tree(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "store"), "device")
+    session = store.create_session("legacy")
+    writer = NodeWriter(store)
+    root = store.get_session_root(session.session_id)
+    assert root is not None
+    user = writer.create(session_id=session.session_id, parent=root, data=message_payload("user", "hello"))
+    user = writer.delete(user.session_id, user.id)
+
+    with sqlite3.connect(store.paths.session_db(session.session_id)) as connection:
+        connection.execute("UPDATE session_meta SET schema_version=4")
+        connection.execute(
+            "UPDATE runtime_nodes SET parent_session_id='',parent_id='' WHERE session_id=? AND id=?",
+            (session.session_id, user.id),
+        )
+        connection.execute("DELETE FROM runtime_nodes WHERE session_id=? AND id=?", (session.session_id, root.id))
+
+    reopened = SQLiteSessionStore(ClientPaths(tmp_path / "store"), "device")
+    migrated_root = reopened.get_session_root(session.session_id)
+    migrated_user = reopened.get_node(session.session_id, user.id)
+    assert migrated_root is not None
+    assert migrated_root.id == session_root_id(session.session_id)
+    assert migrated_user is not None
+    assert (migrated_user.parent_session_id, migrated_user.parent_id) == migrated_root.key
+    assert reopened.get_session_summary(session.session_id).message_count == 1  # type: ignore[union-attr]
+    with sqlite3.connect(reopened.paths.session_db(session.session_id)) as connection:
+        assert connection.execute("SELECT schema_version FROM session_meta").fetchone() == (5,)
+
+
+def test_v4_snapshot_import_adds_root_and_writes_v5(tmp_path: Path) -> None:
+    source = SQLiteSessionStore(ClientPaths(tmp_path / "source"), "device_a")
+    session = source.create_session("snapshot")
+    writer = NodeWriter(source)
+    root = source.get_session_root(session.session_id)
+    assert root is not None
+    user = writer.create(session_id=session.session_id, parent=root, data=message_payload("user", "hello"))
+    user = writer.delete(user.session_id, user.id)
+    snapshot = source.export_runtime_node_snapshot(session.session_id)
+    snapshot["schema_version"] = 4
+    snapshot["nodes"] = [
+        {
+            **node,
+            "parent_session_id": "",
+            "parent_id": "",
+        }
+        for node in snapshot["nodes"]
+        if node["data"].get("type") != "root"
+    ]
+
+    replica = SQLiteSessionStore(ClientPaths(tmp_path / "replica"), "device_b")
+    replica.apply_runtime_node_snapshot(snapshot, local_device_id="device_b")
+    restored_root = replica.get_session_root(session.session_id)
+    restored_user = replica.get_node(session.session_id, user.id)
+    assert restored_root is not None
+    assert restored_user is not None
+    assert (restored_user.parent_session_id, restored_user.parent_id) == restored_root.key
+    assert replica.export_runtime_node_snapshot(session.session_id)["schema_version"] == 5
 
 
 def test_provider_usage_aliases_and_partial_fields_are_normalized() -> None:
@@ -220,6 +319,16 @@ def test_model_context_replaces_same_id_failed_placeholder_with_dynamic_leaf() -
         (dynamic.id, dynamic.data),
     ]
     assert context[-1].data["message"]["content"][0]["text"] == "streamed"
+
+
+def test_root_is_not_returned_as_model_context_or_transcript_message() -> None:
+    root = create_root_node("s")
+    tree = RuntimeStateTree([root])
+    user = tree.create_child(session_id="s", parent=root, data=message_payload("user", "hello"))
+
+    assert [node.id for node in tree.model_input(user)] == [user.id]
+    assert project_node_transcript([root, user])[0]["role"] == "user"
+    assert project_node_transcript([root, user])[0]["source_node_id"] == root.id
 
 
 def test_compaction_accepts_a_dynamic_leaf_before_durable_finalization() -> None:
@@ -436,6 +545,39 @@ def test_provider_adapters_share_canonical_message() -> None:
     assert any(block["type"] == "tool_use" for item in messages for block in item["content"])
 
 
+def test_chat_completions_omits_control_only_assistant_messages() -> None:
+    control = RuntimeState.create(
+        session_id="s",
+        data=message_payload(
+            "assistant",
+            [{"type": "question", "event": "decision_requested", "text": "Choose one"}],
+        ),
+    )
+    reasoning = RuntimeState.create(
+        session_id="s",
+        data=message_payload("assistant", [{"type": "reasoning", "text": "Internal reasoning"}]),
+    )
+    answer = RuntimeState.create(session_id="s", data=message_payload("assistant", "Visible answer"))
+    multi_part = RuntimeState.create(
+        session_id="s",
+        data=message_payload(
+            "assistant",
+            [{"type": "text", "text": "Part one"}, {"type": "text", "text": "Part two"}],
+        ),
+    )
+
+    assert to_chat_completions([control, reasoning, answer, multi_part]) == [
+        {"role": "assistant", "content": "Visible answer"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Part one"},
+                {"type": "text", "text": "Part two"},
+            ],
+        },
+    ]
+
+
 def test_invalid_status_and_children_key_are_rejected() -> None:
     with pytest.raises(RuntimeStateValidationError):
         RuntimeState.create(session_id="s", data={}, id="x", parent_id="p")
@@ -482,8 +624,9 @@ def test_sqlite_node_atomic_finalization_and_snapshot(tmp_path: Path) -> None:
     writer.update(node.session_id, node.id, data=message_payload("user", "hello"))
     writer.delete(node.session_id, node.id)
     snapshot = store.export_runtime_node_snapshot(session.session_id)
-    assert snapshot["schema_version"] == 4
-    assert len(snapshot["nodes"]) == 1
+    assert snapshot["schema_version"] == 5
+    assert len(snapshot["nodes"]) == 2
+    assert sum(node["data"].get("type") == "message" for node in snapshot["nodes"]) == 1
     assert "runtime" not in snapshot
     queued = store.pending_sync_operations()
     assert queued and queued[-1]["snapshot"]["nodes"]
@@ -491,7 +634,7 @@ def test_sqlite_node_atomic_finalization_and_snapshot(tmp_path: Path) -> None:
 
 def test_old_runtime_snapshot_is_rejected(tmp_path: Path) -> None:
     store = SQLiteSessionStore(ClientPaths(tmp_path / "mini-agent"), "device")
-    with pytest.raises(ValueError, match="schema_version=4"):
+    with pytest.raises(ValueError, match="schema_version=4 or 5"):
         store.apply_runtime_node_snapshot({"schema_version": 3}, local_device_id="device")
 
 
@@ -618,10 +761,12 @@ def test_sqlite_fork_loads_cross_session_ancestors(tmp_path: Path) -> None:
     writer = NodeWriter(store)
     source_node = writer.create(session_id=source.session_id, data=message_payload("user", "root"))
     source_node = writer.delete(source_node.session_id, source_node.id)
-    fork = store.create_session()
+    fork = store.create_session(root_parent=(source_node.session_id, source_node.id))
+    target_root = store.get_session_root(fork.session_id)
+    assert target_root is not None
     fork_node = writer.create(
         session_id=fork.session_id,
-        parent=(source_node.session_id, source_node.id),
+        parent=target_root,
         data=message_payload("user", "fork"),
     )
     writer.delete(fork_node.session_id, fork_node.id)
@@ -629,5 +774,6 @@ def test_sqlite_fork_loads_cross_session_ancestors(tmp_path: Path) -> None:
     loaded = store.load_nodes(fork.session_id)
     assert [(node.session_id, node.id) for node in loaded] == [
         (source_node.session_id, source_node.id),
+        (target_root.session_id, target_root.id),
         (fork_node.session_id, fork_node.id),
     ]

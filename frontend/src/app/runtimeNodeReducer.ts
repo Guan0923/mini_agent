@@ -22,7 +22,9 @@ export function nodeFrame(message: { type: NodeFrameType; node?: RuntimeStateNod
 }
 
 export function leafNodes(nodes: Iterable<RuntimeStateNode>, sessionId?: string): RuntimeStateNode[] {
-  const all = [...nodes].filter((node) => !sessionId || node.session_id === sessionId);
+  const all = [...nodes].filter(
+    (node) => node.data.type !== "root" && (!sessionId || node.session_id === sessionId),
+  );
   const parentKeys = new Set(all.map((node) => `${node.parent_session_id}:${node.parent_id}`));
   return all.filter((node) => !parentKeys.has(`${node.session_id}:${node.id}`));
 }

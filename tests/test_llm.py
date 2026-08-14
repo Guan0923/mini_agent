@@ -69,6 +69,24 @@ def test_prepare_request_expands_nested_tool_messages() -> None:
     assert result == {"role": "tool", "tool_call_id": "call_1", "content": "4"}
 
 
+def test_prepare_request_omits_empty_assistant_history() -> None:
+    messages = [
+        UserMessage(content="Start"),
+        AssistantMessage(),
+        AssistantMessage(content=" \n", reasoning="Internal reasoning"),
+        UserMessage(content="Continue"),
+    ]
+    runtime = runtime_for(messages=messages)
+    runtime.exchange.messages = messages
+
+    payload = deepseek_for_test().prepare_request(runtime)
+
+    assert payload["messages"] == [
+        {"role": "user", "content": "Start"},
+        {"role": "user", "content": "Continue"},
+    ]
+
+
 def test_prepare_request_supports_documented_deepseek_parameters() -> None:
     messages = [UserMessage(name="alice", content="Use a tool.")]
     runtime = runtime_for(messages=messages)

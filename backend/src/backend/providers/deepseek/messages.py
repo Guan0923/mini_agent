@@ -95,6 +95,16 @@ def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
         if prefix and position != len(source) - 1:
             raise ModelRequestError("DeepSeek assistant prefix is only valid on the last input message.")
         if not message.tool_messages:
+            # Runtime history may contain an in-flight placeholder or a
+            # reasoning/control-only assistant node.  Those are valid inside
+            # Mini-Agent, but OpenAI-compatible providers require assistant
+            # messages to contain either visible content or tool_calls.
+            # Omitting the non-wire turn preserves the surrounding history
+            # without inventing user-visible text.
+            if not isinstance(message.content, str) or not message.content.strip():
+                if prefix:
+                    raise ModelRequestError("DeepSeek assistant prefix requires non-empty content.")
+                continue
             assistant: dict[str, Any] = {"role": "assistant", "content": message.content}
             assistant.update(_optional_name(message))
             if "prefix" in options:

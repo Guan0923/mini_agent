@@ -22,14 +22,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal, Protocol, TypeAlias
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 APP_VERSION = "0.3.0"
 DEFAULT_COMPACTION_RETENTION = 8
 
 NodeStatus: TypeAlias = Literal["failed", "success", "abort"]
 TerminalErrorCategory: TypeAlias = Literal["unknown", "tool", "agent", "user", "network"]
-NodeDataType: TypeAlias = Literal["message", "compaction"]
+NodeDataType: TypeAlias = Literal["message", "compaction", "root"]
 MessageRole: TypeAlias = Literal["user", "assistant", "tool_result", "bash"]
 ReasoningEffort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max"]
 ThinkingMode: TypeAlias = Literal["enable", "disable"]
@@ -49,7 +49,7 @@ ContentBlockType: TypeAlias = Literal[
 ]
 
 NODE_STATUSES = frozenset({"failed", "success", "abort"})
-NODE_DATA_TYPES = frozenset({"message", "compaction"})
+NODE_DATA_TYPES = frozenset({"message", "compaction", "root"})
 REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 THINKING_MODES = frozenset({"enable", "disable"})
 PERMISSION_MODES = frozenset({"approval_for_me", "full_access"})
@@ -61,6 +61,11 @@ DEFAULT_MODEL: dict[str, Any] = {
     "output_length": 8192,
     "thinking": "enable",
     "temperature": 1.0,
+}
+ROOT_MODEL: dict[str, Any] = {
+    **DEFAULT_MODEL,
+    "reasoning_effort": "max",
+    "temperature": 0.7,
 }
 USAGE_FIELDS = ("input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "total_tokens")
 CONTENT_BLOCK_TYPES = frozenset(
@@ -107,6 +112,14 @@ def new_node_id() -> str:
 
 def new_session_id() -> str:
     return f"session_{uuid4().hex}"
+
+
+def session_root_id(session_id: str) -> str:
+    """Return the deterministic root id for a session."""
+
+    if not isinstance(session_id, str) or not session_id:
+        raise RuntimeStateValidationError("session_id must not be empty.")
+    return f"root_{uuid5(NAMESPACE_URL, f'mini-agent/session-root/{session_id}').hex}"
 
 
 def _clone(value: Any) -> Any:
@@ -257,6 +270,12 @@ def compaction_payload(summary: str, *, source_ids: Sequence[str] = ()) -> dict[
     return {"type": "compaction", "summary": summary, "source_ids": list(source_ids)}
 
 
+def root_payload() -> dict[str, str]:
+    """Build the provider-neutral payload for a session root node."""
+
+    return {"type": "root"}
+
+
 def change_payload(kind: str, **values: Any) -> dict[str, Any]:
     """Reject the removed configuration-node protocol explicitly.
 
@@ -311,6 +330,9 @@ def validate_data(data: Mapping[str, Any]) -> dict[str, Any]:
         source_ids = payload.get("source_ids", [])
         if not isinstance(source_ids, list) or any(not isinstance(item, str) for item in source_ids):
             raise RuntimeStateValidationError("compaction.source_ids must be an array of ids.")
+    elif data_type == "root":
+        if set(payload) != {"type"}:
+            raise RuntimeStateValidationError("root data may only contain the type discriminator.")
     return _json_safe(payload, "data")
 
 
@@ -460,6 +482,19 @@ class RuntimeState:
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise RuntimeStateValidationError(f"{name} must be a non-empty node id.")
+        if self.data_type == "root":
+            if self.status != "success":
+                raise RuntimeStateValidationError("Root nodes must have status='success'.")
+            if self.model != _normalize_model(ROOT_MODEL):
+                raise RuntimeStateValidationError("Root nodes must use the fixed neutral model snapshot.")
+            if self.user or self.provider_name or self.cwd:
+                raise RuntimeStateValidationError("Root nodes must not carry user, provider, or cwd state.")
+            if self.permission_mode != "approval_for_me" or self.running_mode != "agent":
+                raise RuntimeStateValidationError("Root nodes must use the default permission and agent modes.")
+            if any(value is not None for value in self.usage.values()):
+                raise RuntimeStateValidationError("Root nodes must have empty usage fields.")
+            if self.firstKeptEntryId != self.id or self.compactionIdx != self.id:
+                raise RuntimeStateValidationError("Root ancestry pointers must refer to the root itself.")
 
     @property
     def firstKeptEntryId(self) -> str:  # noqa: N802 - protocol key spelling
@@ -522,6 +557,8 @@ class RuntimeState:
     def with_data(self, data: Mapping[str, Any]) -> RuntimeState:
         """Return a dynamic copy with unchanged identity/timestamp/pointers."""
 
+        if self.data_type == "root" and dict(data) != root_payload():
+            raise RuntimeStateValidationError("Root nodes are immutable.")
         result = self.clone()
         result.data = validate_data(data)
         return result
@@ -529,6 +566,8 @@ class RuntimeState:
     def with_status(self, status: NodeStatus) -> RuntimeState:
         if not isinstance(status, str) or status not in NODE_STATUSES:
             raise RuntimeStateValidationError(f"Unsupported node status: {status!r}.")
+        if self.data_type == "root" and status != "success":
+            raise RuntimeStateValidationError("Root nodes are immutable.")
         result = self.clone()
         result.status = status
         return result
@@ -636,6 +675,7 @@ class RuntimeState:
         compaction_idx: str | None = None,
         id: str | None = None,
         timestamp: str | None = None,
+        status: NodeStatus = "failed",
     ) -> RuntimeState:
         """Create a node and derive ancestry pointers for normal children."""
 
@@ -667,8 +707,101 @@ class RuntimeState:
             usage=dict(usage or {name: None for name in USAGE_FIELDS}),
             cwd=cwd,
             timestamp=timestamp or utc_iso(),
+            status=status,
             data=dict(data or {}),
         )
+
+
+def create_root_node(
+    session_id: str,
+    *,
+    parent: tuple[str, str] | None = None,
+    timestamp: str | None = None,
+) -> RuntimeState:
+    """Create the immutable session anchor used by the persisted tree."""
+
+    return RuntimeState.create(
+        session_id=session_id,
+        parent=parent,
+        id=session_root_id(session_id),
+        model=ROOT_MODEL,
+        timestamp=timestamp,
+        status="success",
+        data=root_payload(),
+    )
+
+
+def reparent_node(node: RuntimeState, parent: RuntimeState) -> RuntimeState:
+    """Return a validated copy with a new parent reference."""
+
+    raw = node.to_dict()
+    raw["parent_session_id"] = parent.session_id
+    raw["parent_id"] = parent.id
+    return RuntimeState.from_dict(raw)
+
+
+def ensure_session_root(
+    nodes: Sequence[RuntimeState],
+    session_id: str,
+    *,
+    timestamp: str | None = None,
+) -> list[RuntimeState]:
+    """Add a deterministic root and attach legacy local roots to it.
+
+    ``nodes`` may include cross-session ancestors.  Only nodes owned by
+    ``session_id`` are reparented; the first local root supplies the new
+    root's external parent when a branch already has one.
+    """
+
+    values = list(nodes)
+    root_id = session_root_id(session_id)
+    existing = [node for node in values if node.session_id == session_id and node.id == root_id]
+    if existing:
+        if existing[0].data_type != "root":
+            raise RuntimeStateValidationError(f"Reserved root id is already used by a non-root node: {root_id}.")
+        if len(existing) > 1:
+            raise RuntimeStateValidationError(f"Session contains duplicate root nodes: {root_id}.")
+        return values
+
+    legacy_roots = [node for node in values if node.session_id == session_id and node.data_type == "root"]
+    legacy_root_keys = {node.key for node in legacy_roots}
+
+    local_roots = [
+        node
+        for node in values
+        if node.session_id == session_id
+        and node.key not in legacy_root_keys
+        and (not node.parent_id or node.parent_session_id != session_id)
+    ]
+    parent = None
+    parent_candidates = [*legacy_roots, *local_roots]
+    parent_candidate = next((node for node in parent_candidates if node.parent_id), None)
+    if parent_candidate is not None:
+        parent = (parent_candidate.parent_session_id, parent_candidate.parent_id)
+    root = create_root_node(session_id, parent=parent, timestamp=timestamp)
+
+    # A v4 snapshot has no formal root.  A malformed/intermediate v5
+    # snapshot may contain a root whose id was generated before the session
+    # id was rewritten during import.  In both cases, attach the old local
+    # starting entries to the deterministic root.  Drop a stale root payload
+    # itself; it carries no conversation content and must not survive as a
+    # second anchor.
+    direct_children_of_legacy_root = {
+        node.key
+        for node in values
+        if node.session_id == session_id
+        and node.parent_id
+        and (node.parent_session_id, node.parent_id) in legacy_root_keys
+    }
+    local_root_keys = {node.key for node in local_roots} | direct_children_of_legacy_root
+    retained = [node for node in values if node.key not in legacy_root_keys]
+    return [
+        root,
+        *[
+            reparent_node(node, root) if node.key in local_root_keys else node
+            for node in retained
+        ],
+    ]
 
 
 class RuntimeNodeStore(Protocol):
@@ -1031,7 +1164,10 @@ class RuntimeStateTree:
         # recovery marker only; never expose its empty ``data`` object to a
         # provider.  Standalone adapter calls retain their historical error
         # rendering, while this model-context boundary drops the marker.
-        path = [item for item in path if item.data]
+        # The root is a durable tree anchor only.  It deliberately carries a
+        # complete neutral node shape for persistence, but must never become a
+        # provider message or a compaction/token input.
+        path = [item for item in path if item.data and item.data.get("type") != "root"]
         compaction_positions = [i for i, item in enumerate(path) if item.data.get("type") == "compaction"]
         if not compaction_positions:
             return path
@@ -1143,6 +1279,8 @@ class NodeWriter:
         compaction_idx: str | None = None,
     ) -> RuntimeState:
         with self._lock:
+            if isinstance(data, Mapping) and data.get("type") == "root":
+                raise RuntimeStateValidationError("Root nodes must be created by the session store.")
             parent_node: RuntimeState | None = parent if isinstance(parent, RuntimeState) else None
             if isinstance(parent, tuple):
                 parent_node = self.store.get_node(*parent)
@@ -1224,6 +1362,8 @@ class NodeWriter:
             if self.store.list_children(session_id, node_id):
                 raise RuntimeStateValidationError("Only a leaf dynamic node can be updated.")
             if data is not None:
+                if isinstance(data, Mapping) and data.get("type") == "root":
+                    raise RuntimeStateValidationError("Root nodes cannot be created or updated by NodeWriter.")
                 node.data = validate_data(data)
             if provider_name is not None:
                 if not isinstance(provider_name, str):
@@ -1298,6 +1438,10 @@ class NodeWriter:
             if not isinstance(status, str) or status not in NODE_STATUSES:
                 raise RuntimeStateValidationError(f"Unsupported node status: {status!r}.")
             node = self.current(session_id, node_id)
+            if node.data_type == "root":
+                raise RuntimeStateValidationError("Root nodes are immutable.")
+            if status == "success" and not node.data:
+                raise RuntimeStateValidationError("A successful runtime node must contain typed data.")
             node.status = status
             # finalize_node performs the leaf check and replaces the static
             # placeholder in one store transaction.
@@ -1412,6 +1556,7 @@ __all__ = [
     "CONTENT_BLOCK_TYPES",
     "ContentBlockType",
     "DEFAULT_COMPACTION_RETENTION",
+    "DEFAULT_MODEL",
     "InMemoryNodeStore",
     "MESSAGE_ROLES",
     "MessageRole",
@@ -1426,7 +1571,7 @@ __all__ = [
     "RuntimeState",
     "RuntimeStateTree",
     "RuntimeStateValidationError",
-    "DEFAULT_MODEL",
+    "ROOT_MODEL",
     "PERMISSION_MODES",
     "PermissionMode",
     "REASONING_EFFORTS",
@@ -1438,12 +1583,17 @@ __all__ = [
     "USAGE_FIELDS",
     "change_payload",
     "compaction_payload",
+    "create_root_node",
+    "ensure_session_root",
     "message_payload",
     "new_node_id",
     "new_session_id",
     "normalize_content",
     "parent_reference",
     "recoverable",
+    "reparent_node",
+    "root_payload",
+    "session_root_id",
     "utc_iso",
     "validate_data",
 ]

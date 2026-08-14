@@ -211,7 +211,10 @@ def test_runtime_config_patch_validates_atomically_and_switches_provider_default
 def test_runtime_config_patch_rejects_a_sealed_node_even_when_it_is_a_leaf(tmp_path: Path) -> None:
     state, client, identity, session, store, bridge = _active_runtime_client(tmp_path)
     try:
-        user_node = store.load_nodes(session["session_id"])[0]
+        user_node = next(
+            node for node in store.load_nodes(session["session_id"])
+            if node.data_type == "message" and node.role == "user"
+        )
         response = client.patch(
             f"/api/sessions/{session['session_id']}/runtime-config",
             json={"node_id": user_node.id, "permission_mode": "full_access"},
@@ -332,7 +335,7 @@ def test_session_summary_counts_user_and_assistant_messages_not_runtime_nodes(
 
         summary = store.get_session_summary(session.session_id)
         assert summary is not None
-        assert len(store.load_nodes(session.session_id)) == 10
+        assert len(store.load_nodes(session.session_id)) == 11
         assert summary.message_count == 6
 
         empty = store.create_session("空会话")
