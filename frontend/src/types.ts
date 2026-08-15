@@ -109,6 +109,8 @@ export interface Conversation {
   projectId?: string;
   localOnly?: boolean;
   projectAvailable?: boolean;
+  /** True when the title was set by the user; automatic first-message titles stay false. */
+  titleIsCustom?: boolean;
 }
 
 export interface RuntimeConfigModel {

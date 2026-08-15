@@ -120,6 +120,7 @@ export function summaryToConversation(summary: SessionInfo, existing?: Conversat
     projectId: summary.project_id !== undefined ? summary.project_id ?? undefined : existing?.projectId,
     localOnly: summary.local_only !== undefined ? summary.local_only : existing?.localOnly,
     projectAvailable: summary.project_available !== undefined ? summary.project_available ?? undefined : existing?.projectAvailable,
+    titleIsCustom: summary.title_is_custom !== undefined ? summary.title_is_custom : existing?.titleIsCustom,
   };
 }
 

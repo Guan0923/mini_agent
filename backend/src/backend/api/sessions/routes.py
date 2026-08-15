@@ -14,6 +14,7 @@ from backend.domain.runtime_state import RuntimeStateValidationError
 from backend.providers import ModelConfigurationError
 from backend.runtime import build_application as _default_build_application
 from backend.storage.auth.crypto import SecretDecryptionError
+from backend.storage.codec import normalize_session_title
 
 from ..auth.dependencies import require_user
 from ..auth.types import UserIdentity
@@ -135,6 +136,7 @@ def _summary_payload(summary, *, project_id: str | None = None, project_availabl
         "archived_at": summary.archived_at,
         "deleted_at": summary.deleted_at,
         "local_only": summary.local_only,
+        "title_is_custom": summary.title_is_custom,
         "project_id": project_id,
         "project_available": project_available,
     }
@@ -639,6 +641,13 @@ def get_session_transcript(
 def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
     title = body.title or (source.title if rewind else f"{source.title}（分支）")
     client_id = body.client_id
+    # A fork title is always a locked custom title.  A rewind inherits the
+    # source's provenance unless the caller supplied a genuinely new title;
+    # the Web client echoes the source title, so only a different value (or an
+    # explicit None) keeps automatic naming alive on the branch.
+    title_is_custom = None if not rewind else (
+        source.title_is_custom if not body.title or normalize_session_title(body.title) == source.title else True
+    )
     target = None
     try:
         if body.source_node_id:
@@ -666,13 +675,14 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
                 client_id=client_id,
                 local_only=source.local_only,
                 root_parent=(source_node.session_id, source_node.id),
+                title_is_custom=title_is_custom,
             )
         elif body.run_id:
             records = store.load_conversation_records(source.session_id)
             if not any(str(record["run_id"]) == body.run_id for record in records):
                 raise ValueError("指定的 run 不属于当前会话。")
             target = store.fork_run(body.run_id)
-            target = store.rename_session(target.session_id, title)
+            target = store.rename_session(target.session_id, title, title_is_custom=title_is_custom)
             if client_id:
                 target = store.set_client_id(target.session_id, client_id)
         else:
@@ -682,6 +692,7 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
                 client_id=client_id,
                 force_new=rewind,
                 local_only=source.local_only,
+                title_is_custom=title_is_custom,
             )
     except Exception:
         if target is not None:

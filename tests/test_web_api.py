@@ -342,3 +342,81 @@ def test_session_summary_counts_user_and_assistant_messages_not_runtime_nodes(
         empty_summary = store.get_session_summary(empty.session_id)
         assert empty_summary is not None
         assert empty_summary.message_count == 0
+
+
+def test_rewind_inherits_title_provenance_and_retitles_without_first_user(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web")
+    with TestClient(create_app(state)) as client:
+        user = client.post("/api/auth/guest").json()["user"]
+        store = _store(state, user["id"])
+
+        def source_session() -> tuple[str, str]:
+            session = store.create_session("新对话")
+            store.start_turn(session.session_id, "run-first", "检查项目中的测试失败")
+            store.finish_turn(session.session_id, "run-first", "completed", "好的")
+            writer = NodeWriter(store)
+            parent: RuntimeNode | None = None
+            first_user = None
+            for content in ("检查项目中的测试失败", "已修复"):
+                user_node = writer.create(
+                    session_id=session.session_id,
+                    parent=parent,
+                    data=message_payload("user", content),
+                )
+                first_user = user_node if first_user is None else first_user
+                parent = writer.delete(user_node.session_id, user_node.id)
+                assistant_node = writer.create(
+                    session_id=session.session_id,
+                    parent=parent,
+                    data=message_payload("assistant", "好的"),
+                )
+                parent = writer.delete(assistant_node.session_id, assistant_node.id)
+            assert store.get_session(session.session_id).title == "检查项目中的测试失败"
+            assert store.get_session(session.session_id).title_is_custom is False
+            return session.session_id, first_user.id
+
+        # Rewind keeping the first user message: the automatic title and its
+        # provenance are inherited, and the next prompt cannot replace it.
+        source_id, first_user_id = source_session()
+        kept = client.post(
+            f"/api/sessions/{source_id}/rewind",
+            json={
+                "title": "检查项目中的测试失败",
+                "client_id": "rewound-keep",
+                "source_node_id": first_user_id,
+            },
+        )
+        assert kept.status_code == 200, kept.text
+        kept_payload = kept.json()
+        assert kept_payload["title"] == "检查项目中的测试失败"
+        assert kept_payload["title_is_custom"] is False
+        store.start_turn(kept_payload["session_id"], "run-kept", "后续问题")
+        assert store.get_session_summary(kept_payload["session_id"]).title == "检查项目中的测试失败"
+
+        # Rewind past the first user message (empty fallback history): the
+        # next prompt becomes the new first user and replaces the auto title.
+        source_id, _first_user_id = source_session()
+        past = client.post(
+            f"/api/sessions/{source_id}/rewind",
+            json={"title": "检查项目中的测试失败", "client_id": "rewound-past", "fallback_messages": []},
+        )
+        assert past.status_code == 200, past.text
+        past_payload = past.json()
+        assert past_payload["title_is_custom"] is False
+        store.start_turn(past_payload["session_id"], "run-past", "全新开始")
+        assert store.get_session_summary(past_payload["session_id"]).title == "全新开始"
+
+        # A manual title survives both rewind shapes.
+        source_id, first_user_id = source_session()
+        store.rename_session(source_id, "手工标题")
+        assert store.get_session(source_id).title_is_custom is True
+        manual = client.post(
+            f"/api/sessions/{source_id}/rewind",
+            json={"title": "手工标题", "client_id": "rewound-manual", "source_node_id": first_user_id},
+        )
+        assert manual.status_code == 200, manual.text
+        manual_payload = manual.json()
+        assert manual_payload["title"] == "手工标题"
+        assert manual_payload["title_is_custom"] is True
+        store.start_turn(manual_payload["session_id"], "run-manual", "提问")
+        assert store.get_session_summary(manual_payload["session_id"]).title == "手工标题"

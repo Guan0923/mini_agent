@@ -15,7 +15,7 @@ from backend.domain import (
 )
 from backend.domain.state import utc_now
 
-from .codec import normalize_session_title
+from .codec import is_default_session_title, normalize_session_title
 
 
 class SQLiteSessionMixin:
@@ -26,7 +26,13 @@ class SQLiteSessionMixin:
         client_id: str | None = None,
         local_only: bool = False,
         root_parent: tuple[str, str] | None = None,
+        title_is_custom: bool | None = None,
     ) -> Session:
+        title_is_custom = (
+            not is_default_session_title(normalize_session_title(title))
+            if title_is_custom is None
+            else title_is_custom
+        )
         session = Session(
             new_session_id(),
             normalize_session_title(title),
@@ -34,6 +40,7 @@ class SQLiteSessionMixin:
             utc_now(),
             client_id=client_id,
             local_only=local_only,
+            title_is_custom=title_is_custom,
         )
         root_path = self.paths.session_root(session.session_id)
         root_existed = root_path.exists()
@@ -41,8 +48,8 @@ class SQLiteSessionMixin:
         try:
             with self._connection(session.session_id) as connection:
                 connection.execute(
-                    "INSERT INTO session_meta(session_id,title,owner_device_id,created_at,updated_at,client_id,local_only) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO session_meta(session_id,title,owner_device_id,created_at,updated_at,client_id,local_only,title_is_custom) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         session.session_id,
                         session.title,
@@ -51,6 +58,7 @@ class SQLiteSessionMixin:
                         session.updated_at,
                         session.client_id,
                         int(session.local_only),
+                        int(session.title_is_custom),
                     ),
                 )
                 self._insert_session_root(
@@ -74,7 +82,7 @@ class SQLiteSessionMixin:
             return None
         with self._connection(session_id) as connection:
             row = connection.execute(
-                "SELECT session_id, title, created_at, updated_at, client_id, archived_at, deleted_at, local_only FROM session_meta"
+                "SELECT session_id, title, created_at, updated_at, client_id, archived_at, deleted_at, local_only, title_is_custom FROM session_meta"
             ).fetchone()
         return self._session(row) if row else None
 
@@ -101,7 +109,7 @@ class SQLiteSessionMixin:
                     ORDER BY n.timestamp DESC, n.id DESC LIMIT 1),
                 (SELECT run_id FROM session_runs ORDER BY updated_at DESC, run_id DESC LIMIT 1),
                 (SELECT status FROM session_runs ORDER BY updated_at DESC, run_id DESC LIMIT 1),
-                m.client_id, m.archived_at, m.deleted_at, m.local_only
+                m.client_id, m.archived_at, m.deleted_at, m.local_only, m.title_is_custom
                 FROM session_meta AS m"""
             ).fetchone()
         if row is None:
@@ -119,6 +127,7 @@ class SQLiteSessionMixin:
             archived_at=str(row[9]) if row[9] is not None else None,
             deleted_at=str(row[10]) if row[10] is not None else None,
             local_only=bool(row[11]),
+            title_is_custom=bool(row[12]),
         )
 
     def list_sessions(self, *, state: str = "active") -> list[SessionSummary]:
@@ -228,15 +237,35 @@ class SQLiteSessionMixin:
         client_id: str | None = None,
         force_new: bool = False,
         local_only: bool = False,
+        title_is_custom: bool | None = None,
     ) -> Session:
-        """Create an idle session seeded with text-only legacy Web history."""
+        """Create an idle session seeded with text-only legacy Web history.
+
+        Without an explicit custom title, the default placeholder is replaced
+        by the first imported user message; the imported session then keeps
+        automatic naming until the user renames it.
+        """
 
         if client_id and not force_new:
             existing = self.find_session_by_client_id(client_id)
             if existing is not None:
                 return existing
         parsed = [message_from_dict(item) for item in messages if item.get("role") in {"user", "assistant"}]
-        session = self.create_session(title, client_id=client_id, local_only=local_only)
+        if title_is_custom is None:
+            title_is_custom = not is_default_session_title(normalize_session_title(title))
+        if not title_is_custom:
+            first_user = next(
+                (message for message in parsed if str(getattr(message, "role", "")) == "user"),
+                None,
+            )
+            if first_user is not None:
+                title = normalize_session_title(str(getattr(first_user, "content", "") or ""))
+        session = self.create_session(
+            title,
+            client_id=client_id,
+            local_only=local_only,
+            title_is_custom=title_is_custom,
+        )
         try:
             if parsed:
                 from backend.domain.runtime_state import NodeWriter, message_payload
@@ -258,12 +287,25 @@ class SQLiteSessionMixin:
             raise
         return session
 
-    def rename_session(self, session_id: str, title: str) -> Session:
-        """Rename a non-deleted session and preserve the update in sync history."""
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        *,
+        title_is_custom: bool | None = None,
+    ) -> Session:
+        """Rename a non-deleted session and preserve the update in sync history.
+
+        A manual rename locks the title so automatic naming never overwrites
+        it.  Internal renames (rewind inheritance) may pass the source flag
+        explicitly to keep automatic naming alive.
+        """
 
         if not title.strip():
             raise ValueError("Session title cannot be empty.")
         cleaned = normalize_session_title(title)
+        if title_is_custom is None:
+            title_is_custom = True
         with self._connection_for_existing(session_id) as connection:
             self._assert_writable(connection)
             self._assert_not_running(connection)
@@ -272,7 +314,10 @@ class SQLiteSessionMixin:
                 raise ValueError(f"Unknown session: {session_id}")
             if row[0] is not None:
                 raise ValueError("Deleted sessions cannot be renamed.")
-            connection.execute("UPDATE session_meta SET title=?, updated_at=?", (cleaned, utc_now()))
+            connection.execute(
+                "UPDATE session_meta SET title=?, title_is_custom=?, updated_at=?",
+                (cleaned, int(title_is_custom), utc_now()),
+            )
             self._queue(connection, session_id)
         session = self.get_session(session_id)
         if session is None:

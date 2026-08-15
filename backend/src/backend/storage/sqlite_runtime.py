@@ -17,7 +17,6 @@ from .codec import (
     decode_runtime_state,
     encode_message_data,
     encode_runtime_state,
-    is_default_session_title,
     normalize_session_title,
 )
 from .sqlite_schema import SCHEMA_VERSION
@@ -187,6 +186,7 @@ class SQLiteRuntimeMixin:
             "session": {
                 "session_id": session.session_id,
                 "title": session.title,
+                "title_is_custom": session.title_is_custom,
                 "created_at": session.created_at,
                 "updated_at": session.updated_at,
                 "client_id": session.client_id,
@@ -254,18 +254,17 @@ class SQLiteRuntimeMixin:
         origin = provenance or RunProvenance(workflow_id=run_id, trigger="legacy")
         with self._connection(session_id) as connection:
             self._assert_writable(connection)
-            meta = connection.execute("SELECT title FROM session_meta").fetchone()
+            meta = connection.execute("SELECT title, title_is_custom FROM session_meta").fetchone()
             if meta is None:
                 raise ValueError(f"Unknown session: {session_id}")
             title = str(meta[0])
-            if (
-                is_default_session_title(title)
-                and connection.execute(
-                    "SELECT 1 FROM runtime_nodes WHERE json_extract(data_json, '$.type') <> 'root' LIMIT 1"
-                ).fetchone()
-                is None
-                and connection.execute("SELECT 1 FROM session_messages LIMIT 1").fetchone() is None
-            ):
+            # Automatic naming applies only while the full parent chain has no
+            # user message, so the first prompt of a fresh conversation (and of
+            # a rewind that undid its first user message) becomes the title.
+            # The legacy session_messages projection is checked for the current
+            # session only; cross-session ancestors always carry canonical
+            # runtime_nodes and are walked through the deterministic roots.
+            if not bool(meta[1]) and not self._chain_has_user_message(connection, session_id):
                 title = normalize_session_title(task)
             connection.execute(
                 """INSERT INTO session_runs VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
@@ -291,6 +290,58 @@ class SQLiteRuntimeMixin:
                 )
             connection.execute("UPDATE session_meta SET title=?, updated_at=?", (title, timestamp))
             self._queue(connection, session_id)
+
+    def _chain_has_user_message(self, connection: sqlite3.Connection, session_id: str) -> bool:
+        """Return whether the full parent chain contains a user message.
+
+        Walks the deterministic session roots upward so fork/rewind ancestors
+        that live in a different session database are included.  The caller's
+        connection is reused for the current session (opening a second
+        connection to the same database would hit the migration write lock);
+        ancestor databases are opened individually.  The chain is bounded by
+        the user's local session set, so a cycle is impossible.
+        """
+
+        visited: set[str] = set()
+        current = session_id
+        while current and current not in visited:
+            visited.add(current)
+            if current == session_id:
+                found, parent_session = self._chain_query(connection, current)
+            else:
+                if not self.paths.session_db(current).exists():
+                    return False
+                with self._connection(current) as ancestor:
+                    found, parent_session = self._chain_query(ancestor, current)
+            if found:
+                return True
+            if parent_session is None:
+                return False
+            current = parent_session
+        return False
+
+    @staticmethod
+    def _chain_query(connection: sqlite3.Connection, session_id: str) -> tuple[bool, str | None]:
+        """Query one chain session for a user message and its root parent."""
+
+        if (
+            connection.execute(
+                "SELECT 1 FROM runtime_nodes "
+                "WHERE json_extract(data_json, '$.type')='message' "
+                "AND json_extract(data_json, '$.message.role')='user' LIMIT 1"
+            ).fetchone()
+            is not None
+            or connection.execute("SELECT 1 FROM session_messages WHERE role='user' LIMIT 1").fetchone()
+            is not None
+        ):
+            return True, None
+        parent_row = connection.execute(
+            "SELECT parent_session_id FROM runtime_nodes WHERE id=?",
+            (session_root_id(session_id),),
+        ).fetchone()
+        if parent_row is None or not str(parent_row[0]):
+            return False, None
+        return False, str(parent_row[0])
 
     def append_turn_input(self, session_id: str, run_id: str, content: str) -> None:
         with self._connection(session_id) as connection:
@@ -440,6 +491,7 @@ class SQLiteRuntimeMixin:
             str(row[5]) if row[5] is not None else None,
             str(row[6]) if row[6] is not None else None,
             bool(row[7]) if len(row) > 7 else False,
+            bool(row[8]) if len(row) > 8 else False,
         )
 
     @staticmethod

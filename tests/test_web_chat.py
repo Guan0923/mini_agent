@@ -65,9 +65,16 @@ class _TerminalConversation:
     def __init__(self, outcome: list[RuntimeEvent] | BaseException) -> None:
         self.active_session = SimpleNamespace(session_id="session-terminal")
         self.outcome = outcome
+        self.runtime_node_bridge = None
 
     def ensure_session(self, _prompt: str | None = None) -> None:
         return None
+
+    def attach_runtime_node_bridge(self, bridge, *, events_external: bool = True) -> None:
+        # Mirror ConversationService._bind_node_bridge: the attached bridge is
+        # started before the run so streamed events reach a live sidecar.
+        self.runtime_node_bridge = bridge
+        bridge.start()
 
     def run_task(self, _prompt: str, **kwargs: object) -> SimpleNamespace:
         if isinstance(self.outcome, BaseException):

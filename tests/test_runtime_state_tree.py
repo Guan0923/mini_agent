@@ -142,10 +142,10 @@ def test_v4_database_migration_adds_root_without_losing_message_tree(tmp_path: P
     assert (migrated_user.parent_session_id, migrated_user.parent_id) == migrated_root.key
     assert reopened.get_session_summary(session.session_id).message_count == 1  # type: ignore[union-attr]
     with sqlite3.connect(reopened.paths.session_db(session.session_id)) as connection:
-        assert connection.execute("SELECT schema_version FROM session_meta").fetchone() == (5,)
+        assert connection.execute("SELECT schema_version FROM session_meta").fetchone() == (6,)
 
 
-def test_v4_snapshot_import_adds_root_and_writes_v5(tmp_path: Path) -> None:
+def test_v4_snapshot_import_adds_root_and_writes_v6(tmp_path: Path) -> None:
     source = SQLiteSessionStore(ClientPaths(tmp_path / "source"), "device_a")
     session = source.create_session("snapshot")
     writer = NodeWriter(source)
@@ -172,7 +172,94 @@ def test_v4_snapshot_import_adds_root_and_writes_v5(tmp_path: Path) -> None:
     assert restored_root is not None
     assert restored_user is not None
     assert (restored_user.parent_session_id, restored_user.parent_id) == restored_root.key
-    assert replica.export_runtime_node_snapshot(session.session_id)["schema_version"] == 5
+    assert replica.export_runtime_node_snapshot(session.session_id)["schema_version"] == 6
+
+
+def _snapshot_with_title(snapshot: dict[str, object], title: str, custom: object) -> dict[str, object]:
+    value = json.loads(json.dumps(snapshot))
+    value["session"] = {**value["session"], "title": title}
+    if custom is None:
+        value["session"].pop("title_is_custom", None)
+    else:
+        value["session"]["title_is_custom"] = custom
+    return value
+
+
+def test_v5_snapshot_title_inference_and_v6_round_trip(tmp_path: Path) -> None:
+    source = SQLiteSessionStore(ClientPaths(tmp_path / "source"), "device_a")
+    session = source.create_session("新对话")
+    writer = NodeWriter(source)
+    root = source.get_session_root(session.session_id)
+    assert root is not None
+    user = writer.create(session_id=session.session_id, parent=root, data=message_payload("user", "  快照  消息 "))
+    writer.delete(user.session_id, user.id)
+    snapshot = source.export_runtime_node_snapshot(session.session_id)
+    assert snapshot["schema_version"] == 6
+    assert snapshot["session"]["title_is_custom"] is False
+
+    # v5 snapshot without the field: placeholder title is backfilled from the
+    # first user message and stays automatic.
+    replica = SQLiteSessionStore(ClientPaths(tmp_path / "replica"), "device_b")
+    replica.apply_runtime_node_snapshot(
+        _snapshot_with_title(snapshot, "New session", None),
+        local_device_id="device_b",
+    )
+    restored = replica.get_session(session.session_id)
+    assert restored is not None
+    assert restored.title == "快照 消息"
+    assert restored.title_is_custom is False
+    assert replica.export_runtime_node_snapshot(session.session_id)["schema_version"] == 6
+
+    # v5 snapshot with a non-placeholder title: conservatively custom.
+    conservative = SQLiteSessionStore(ClientPaths(tmp_path / "conservative"), "device_b")
+    conservative.apply_runtime_node_snapshot(
+        _snapshot_with_title(snapshot, "云端旧标题", None),
+        local_device_id="device_b",
+    )
+    restored = conservative.get_session(session.session_id)
+    assert restored is not None
+    assert restored.title == "云端旧标题"
+    assert restored.title_is_custom is True
+
+    # v6 snapshot carries the flag and is trusted verbatim.
+    trusted = SQLiteSessionStore(ClientPaths(tmp_path / "trusted"), "device_b")
+    trusted.apply_runtime_node_snapshot(
+        _snapshot_with_title(snapshot, "云端新标题", True),
+        local_device_id="device_b",
+    )
+    restored = trusted.get_session(session.session_id)
+    assert restored is not None
+    assert restored.title == "云端新标题"
+    assert restored.title_is_custom is True
+
+
+def test_remote_snapshot_carries_title_is_custom(tmp_path: Path) -> None:
+    source = SQLiteSessionStore(ClientPaths(tmp_path / "source"), "device_a")
+    session = source.create_session("新对话")
+    source.start_turn(session.session_id, "run-sync", "同步标题")
+    writer = NodeWriter(source)
+    root = source.get_session_root(session.session_id)
+    assert root is not None
+    user = writer.create(session_id=session.session_id, parent=root, data=message_payload("user", "同步标题"))
+    writer.delete(user.session_id, user.id)
+    snapshot = source.export_runtime_node_snapshot(session.session_id)
+    assert snapshot["session"]["title"] == "同步标题"
+    assert snapshot["session"]["title_is_custom"] is False
+
+    replica = SQLiteSessionStore(ClientPaths(tmp_path / "replica"), "device_b")
+    replica.apply_remote_snapshot(
+        {
+            "session_id": session.session_id,
+            "owner_device_id": "device_a",
+            "revision": 1,
+            "snapshot": snapshot,
+        },
+        local_device_id="device_b",
+    )
+    restored = replica.get_session(session.session_id)
+    assert restored is not None
+    assert restored.title == "同步标题"
+    assert restored.title_is_custom is False
 
 
 def test_provider_usage_aliases_and_partial_fields_are_normalized() -> None:
@@ -624,7 +711,7 @@ def test_sqlite_node_atomic_finalization_and_snapshot(tmp_path: Path) -> None:
     writer.update(node.session_id, node.id, data=message_payload("user", "hello"))
     writer.delete(node.session_id, node.id)
     snapshot = store.export_runtime_node_snapshot(session.session_id)
-    assert snapshot["schema_version"] == 5
+    assert snapshot["schema_version"] == 6
     assert len(snapshot["nodes"]) == 2
     assert sum(node["data"].get("type") == "message" for node in snapshot["nodes"]) == 1
     assert "runtime" not in snapshot
@@ -634,7 +721,7 @@ def test_sqlite_node_atomic_finalization_and_snapshot(tmp_path: Path) -> None:
 
 def test_old_runtime_snapshot_is_rejected(tmp_path: Path) -> None:
     store = SQLiteSessionStore(ClientPaths(tmp_path / "mini-agent"), "device")
-    with pytest.raises(ValueError, match="schema_version=4 or 5"):
+    with pytest.raises(ValueError, match="schema_version=4, 5, or 6"):
         store.apply_runtime_node_snapshot({"schema_version": 3}, local_device_id="device")
 
 

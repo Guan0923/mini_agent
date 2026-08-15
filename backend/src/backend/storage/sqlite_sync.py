@@ -12,7 +12,8 @@ from backend.domain.runtime_state import ensure_session_root
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState, text_messages
 
-from .sqlite_schema import SCHEMA_VERSION
+from .codec import is_default_session_title, normalize_session_title
+from .sqlite_schema import SCHEMA_VERSION, message_text
 
 
 class SQLiteSyncMixin:
@@ -41,11 +42,11 @@ class SQLiteSyncMixin:
         "runtime_messages": ("run_id", "sequence", "kind", "message", "data_json", "created_at"),
     }
 
-    _SUPPORTED_NODE_SNAPSHOT_VERSIONS = frozenset({4, 5})
+    _SUPPORTED_NODE_SNAPSHOT_VERSIONS = frozenset({4, 5, 6})
 
 
     def export_runtime_node_snapshot(self, session_id: str) -> dict[str, object]:
-        """Export only session metadata and canonical nodes (schema 5)."""
+        """Export only session metadata and canonical nodes (schema 6)."""
 
         session = self.get_session(session_id)
         if session is None:
@@ -54,7 +55,7 @@ class SQLiteSyncMixin:
             raise ValueError("Local-only sessions are excluded from cloud sync.")
         with self._connection(session_id) as connection:
             row = connection.execute(
-                "SELECT owner_device_id,title,created_at,updated_at,client_id,archived_at,deleted_at FROM session_meta"
+                "SELECT owner_device_id,title,created_at,updated_at,client_id,archived_at,deleted_at,title_is_custom FROM session_meta"
             ).fetchone()
             nodes = connection.execute(
                 "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json FROM runtime_nodes ORDER BY timestamp,id"
@@ -67,6 +68,7 @@ class SQLiteSyncMixin:
                 "session_id": session_id,
                 "owner_device_id": str(row[0]),
                 "title": str(row[1]),
+                "title_is_custom": bool(row[7]),
                 "created_at": str(row[2]),
                 "updated_at": str(row[3]),
                 "client_id": str(row[4]) if row[4] is not None else None,
@@ -76,12 +78,41 @@ class SQLiteSyncMixin:
             "nodes": [self._node_from_row(row_item).to_dict() for row_item in nodes],
         }
 
+    @staticmethod
+    def _snapshot_title_meta(meta: dict[str, object], nodes: list[TreeRuntimeState]) -> tuple[str, bool]:
+        """Resolve the title and its custom flag for an incoming snapshot.
+
+        v6 snapshots carry ``title_is_custom`` and are trusted verbatim.
+        Older v4/v5 snapshots lack the field and are inferred conservatively:
+        a placeholder title is backfilled from the first user message and
+        stays automatic, while any other title is treated as a manual rename
+        so a historical custom title is never overwritten by auto-naming.
+        """
+
+        title = str(meta.get("title") or DEFAULT_SESSION_TITLE)
+        custom = meta.get("title_is_custom")
+        if custom is not None:
+            return title, bool(custom)
+        if not is_default_session_title(title):
+            return title, True
+        for node in nodes:
+            data = getattr(node, "data", None)
+            if not isinstance(data, dict) or data.get("type") != "message":
+                continue
+            message = data.get("message")
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            text = message_text(data)
+            if text:
+                return normalize_session_title(text), False
+        return title, False
+
     def apply_runtime_node_snapshot(self, snapshot: dict[str, object], *, local_device_id: str) -> None:
-        """Import a v4/v5 snapshot and persist the normalized v5 shape."""
+        """Import a v4/v5/v6 snapshot and persist the normalized v6 shape."""
 
         snapshot_version = int(snapshot.get("schema_version", -1))
         if snapshot_version not in self._SUPPORTED_NODE_SNAPSHOT_VERSIONS:
-            raise ValueError("Only RuntimeState node snapshots (schema_version=4 or 5) are supported.")
+            raise ValueError("Only RuntimeState node snapshots (schema_version=4, 5, or 6) are supported.")
         meta = snapshot.get("session")
         raw_nodes = snapshot.get("nodes")
         if not isinstance(meta, dict) or not isinstance(raw_nodes, list):
@@ -105,6 +136,7 @@ class SQLiteSyncMixin:
             session_id,
             timestamp=str(meta.get("created_at") or utc_now()),
         )
+        title, title_is_custom = self._snapshot_title_meta(meta, nodes)
         # A remote session must satisfy the same local directory contract as
         # a newly created session.  ``_connection`` initializes SQLite but
         # deliberately does not create workspace/uploads, which would make a
@@ -114,11 +146,11 @@ class SQLiteSyncMixin:
             self._clear_snapshot_tables(connection)
             connection.execute(
                 """INSERT INTO session_meta(session_id,title,owner_device_id,remote_revision,read_only,
-                    schema_version,created_at,updated_at,client_id,archived_at,deleted_at)
-                    VALUES (?,?,?,0,1,?,?,?,?,?,?)""",
+                    schema_version,created_at,updated_at,client_id,archived_at,deleted_at,title_is_custom)
+                    VALUES (?,?,?,0,1,?,?,?,?,?,?,?)""",
                 (
                     session_id,
-                    str(meta.get("title") or DEFAULT_SESSION_TITLE),
+                    title,
                     owner,
                     SCHEMA_VERSION,
                     str(meta.get("created_at") or utc_now()),
@@ -126,6 +158,7 @@ class SQLiteSyncMixin:
                     str(meta["client_id"]) if meta.get("client_id") is not None else None,
                     str(meta["archived_at"]) if meta.get("archived_at") is not None else None,
                     str(meta["deleted_at"]) if meta.get("deleted_at") is not None else None,
+                    int(title_is_custom),
                 ),
             )
             for node in nodes:
@@ -227,7 +260,7 @@ class SQLiteSyncMixin:
             raise ValueError("Remote snapshot session id does not match its envelope.")
         snapshot_version = int(snapshot.get("schema_version", -1))
         if snapshot_version not in self._SUPPORTED_NODE_SNAPSHOT_VERSIONS or not isinstance(snapshot.get("nodes"), list):
-            raise ValueError("Remote snapshot must use schema_version=4 or 5 and contain a nodes list.")
+            raise ValueError("Remote snapshot must use schema_version=4, 5, or 6 and contain a nodes list.")
         if not all(isinstance(item, dict) for item in snapshot["nodes"]):
             raise ValueError("Remote snapshot nodes must be objects.")
         nodes = [TreeRuntimeState.from_dict(item) for item in snapshot["nodes"]]
@@ -238,16 +271,17 @@ class SQLiteSyncMixin:
             session_id,
             timestamp=str(meta.get("created_at") or utc_now()),
         )
+        title, title_is_custom = self._snapshot_title_meta(meta, nodes)
         self.paths.ensure_session(session_id)
         with self._connection(session_id) as connection:
             self._clear_snapshot_tables(connection)
             connection.execute(
                 "INSERT INTO session_meta(session_id,title,owner_device_id,remote_revision,read_only,"
-                "schema_version,created_at,updated_at,client_id,archived_at,deleted_at,local_only) "
-                "VALUES (?,?,?,?,1,?,?,?,?,?,?,0)",
+                "schema_version,created_at,updated_at,client_id,archived_at,deleted_at,local_only,title_is_custom) "
+                "VALUES (?,?,?,?,1,?,?,?,?,?,?,0,?)",
                 (
                     session_id,
-                    str(meta.get("title") or DEFAULT_SESSION_TITLE),
+                    title,
                     owner_device_id,
                     revision,
                     SCHEMA_VERSION,
@@ -256,6 +290,7 @@ class SQLiteSyncMixin:
                     str(meta["client_id"]) if meta.get("client_id") is not None else None,
                     str(meta["archived_at"]) if meta.get("archived_at") is not None else None,
                     str(meta["deleted_at"]) if meta.get("deleted_at") is not None else None,
+                    int(title_is_custom),
                 ),
             )
             for node in nodes:
@@ -384,7 +419,7 @@ class SQLiteSyncMixin:
     @staticmethod
     def _export_snapshot(connection: sqlite3.Connection, session_id: str) -> dict[str, object]:
         meta = connection.execute(
-            "SELECT title,owner_device_id,created_at,updated_at,client_id,archived_at,deleted_at FROM session_meta"
+            "SELECT title,owner_device_id,created_at,updated_at,client_id,archived_at,deleted_at,title_is_custom FROM session_meta"
         ).fetchone()
         if meta is None:
             raise ValueError(f"Unknown session: {session_id}")
@@ -399,6 +434,7 @@ class SQLiteSyncMixin:
                 "client_id": str(meta[4]) if meta[4] is not None else None,
                 "archived_at": str(meta[5]) if meta[5] is not None else None,
                 "deleted_at": str(meta[6]) if meta[6] is not None else None,
+                "title_is_custom": bool(meta[7]),
             },
             "nodes": [],
             "runtime": None,

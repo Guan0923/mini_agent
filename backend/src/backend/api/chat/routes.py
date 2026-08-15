@@ -490,7 +490,11 @@ def _stream(
                     runtime_for_bridge = getattr(conversation, "runtime", None)
                     if runtime_for_bridge is not None:
                         bridge_ref["bridge"].bind_runtime(runtime_for_bridge)
-                    bridge_ref["bridge"].start()
+                    if operation is not None:
+                        # Resume keeps the immediate bridge start: there is no
+                        # new user text and the bridge must adopt the paused
+                        # leaf before the stream begins.
+                        bridge_ref["bridge"].start()
                     attach_bridge = getattr(conversation, "attach_runtime_node_bridge", None)
                     if callable(attach_bridge):
                         # The SSE sink already forwards every RuntimeEvent to

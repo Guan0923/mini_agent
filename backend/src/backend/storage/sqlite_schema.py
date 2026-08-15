@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from backend.domain.runtime_state import create_root_node, session_root_id
 
-SCHEMA_VERSION = 5
+from .codec import is_default_session_title, normalize_session_title
+
+SCHEMA_VERSION = 6
 RUNTIME_NODE_SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_meta (
     session_id TEXT PRIMARY KEY, title TEXT NOT NULL, owner_device_id TEXT NOT NULL,
     remote_revision INTEGER NOT NULL DEFAULT 0, read_only INTEGER NOT NULL DEFAULT 0,
-    schema_version INTEGER NOT NULL DEFAULT 5, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 6, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     client_id TEXT, archived_at TEXT, deleted_at TEXT,
-    local_only INTEGER NOT NULL DEFAULT 0
+    local_only INTEGER NOT NULL DEFAULT 0, title_is_custom INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS session_runs (
     run_id TEXT PRIMARY KEY, task TEXT NOT NULL, status TEXT NOT NULL, workflow_id TEXT,
@@ -145,6 +148,7 @@ class SQLiteSchemaMixin:
             ("archived_at", "TEXT"),
             ("deleted_at", "TEXT"),
             ("local_only", "INTEGER NOT NULL DEFAULT 0"),
+            ("title_is_custom", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if name not in meta_columns:
                 connection.execute(f"ALTER TABLE session_meta ADD COLUMN {name} {definition}")
@@ -176,6 +180,15 @@ class SQLiteSchemaMixin:
         ):
             if name not in outbox_columns:
                 connection.execute(f"ALTER TABLE sync_outbox ADD COLUMN {name} {definition}")
+        # v5 -> v6 provenance backfill.  A placeholder title is replaced by
+        # the first local user message; any other title is conservatively
+        # treated as a manual rename so historical titles are never
+        # overwritten by automatic naming.  Runs after the outbox columns are
+        # ready because cloud-backed sessions re-queue their canonical
+        # snapshot in the same transaction; the upgrade and the backfill
+        # commit together.
+        if "title_is_custom" not in meta_columns:
+            self._backfill_title_is_custom(connection)
         legacy_outbox = connection.execute("SELECT 1 FROM sync_outbox WHERE operation_id IS NULL LIMIT 1").fetchone()
         if legacy_outbox is not None:
             connection.execute("DELETE FROM sync_outbox WHERE operation_id IS NULL")
@@ -196,6 +209,34 @@ class SQLiteSchemaMixin:
             meta = connection.execute("SELECT session_id,local_only,read_only FROM session_meta LIMIT 1").fetchone()
             if meta is not None and not int(meta[1]) and not int(meta[2]):
                 self._queue(connection, str(meta[0]))
+
+    def _backfill_title_is_custom(self, connection: sqlite3.Connection) -> None:
+        """Infer ``title_is_custom`` for a pre-v6 database and backfill titles.
+
+        Runs exactly once, inside the same transaction as the schema upgrade.
+        Cloud-backed sessions then re-queue their canonical snapshot so the
+        sync service observes the v6 shape; local-only project sessions stay
+        out of the outbox.
+        """
+
+        meta = connection.execute("SELECT title FROM session_meta LIMIT 1").fetchone()
+        if meta is None:
+            return
+        title = str(meta[0])
+        if is_default_session_title(title):
+            user_text = first_local_user_message(connection)
+            if user_text is not None:
+                connection.execute("UPDATE session_meta SET title=?", (normalize_session_title(user_text),))
+            connection.execute("UPDATE session_meta SET title_is_custom=0")
+        else:
+            # Historical non-placeholder titles cannot reliably distinguish
+            # automatic from manual naming.  Preserve them by treating every
+            # such title as custom; the automatic rule then never overwrites
+            # a title the user may have typed themselves.
+            connection.execute("UPDATE session_meta SET title_is_custom=1")
+        meta = connection.execute("SELECT session_id,local_only,read_only FROM session_meta").fetchone()
+        if meta is not None and not int(meta[1]) and not int(meta[2]):
+            self._queue(connection, str(meta[0]))
 
     def _ensure_session_root(self, connection: sqlite3.Connection) -> bool:
         """Create a root and reparent legacy local roots when needed."""
@@ -279,3 +320,51 @@ class SQLiteSchemaMixin:
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             self._node_values(root),
         )
+
+
+def message_text(data: object) -> str:
+    """Return the joined text of a canonical message node payload."""
+
+    if not isinstance(data, dict):
+        return ""
+    message = data.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        str(block.get("text") or "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") in {"text", "reasoning", "bash"}
+    )
+
+
+def first_local_user_message(connection: sqlite3.Connection) -> str | None:
+    """Return the text of the first local user message, if any.
+
+    ``runtime_nodes`` is the canonical conversation source.  The legacy
+    ``session_messages`` projection remains a fallback for pre-node stores so
+    the placeholder title of an ancient session is still replaced.
+    """
+
+    rows = connection.execute(
+        "SELECT data_json FROM runtime_nodes "
+        "WHERE json_extract(data_json, '$.type')='message' "
+        "AND json_extract(data_json, '$.message.role')='user' "
+        "ORDER BY timestamp,id"
+    ).fetchall()
+    for (payload,) in rows:
+        try:
+            data = json.loads(str(payload))
+        except (TypeError, ValueError):
+            continue
+        text = message_text(data)
+        if text:
+            return text
+    row = connection.execute(
+        "SELECT content FROM session_messages WHERE role='user' ORDER BY id LIMIT 1"
+    ).fetchone()
+    return str(row[0]) if row is not None else None

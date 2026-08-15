@@ -15,6 +15,7 @@ export interface SessionInfo {
   deleted_at?: string | null;
   last_node_id?: string | null;
   local_only?: boolean;
+  title_is_custom?: boolean;
   project_id?: string | null;
   project_available?: boolean | null;
 }
