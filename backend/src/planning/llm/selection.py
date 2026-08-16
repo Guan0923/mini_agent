@@ -29,7 +29,14 @@ class SelectionMixin:
     ) -> SkillSelection:
         catalog = runtime.services.skill_catalog
         definitions = catalog.definitions() if isinstance(catalog, SkillCatalog) else ()
-        metadata = [{"name": skill.name, "description": skill.description} for skill in definitions]
+        metadata: list[dict[str, object]] = []
+        for skill in definitions:
+            entry: dict[str, object] = {"name": skill.name, "description": skill.description}
+            if skill.metadata:
+                entry["metadata"] = dict(skill.metadata)
+            if skill.allowed_tools:
+                entry["allowed-tools"] = skill.allowed_tools
+            metadata.append(entry)
         raw = self._json_request(
             runtime,
             SystemMessage(

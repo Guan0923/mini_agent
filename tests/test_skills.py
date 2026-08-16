@@ -45,13 +45,21 @@ def write_skill(
     return manifest
 
 
-def definition(name: str, description: str | None = None) -> SkillDefinition:
+def definition(
+    name: str,
+    description: str | None = None,
+    *,
+    metadata: tuple[tuple[str, str], ...] = (),
+    allowed_tools: tuple[str, ...] = (),
+    manifest: Path | None = None,
+) -> SkillDefinition:
     return SkillDefinition(
         name,
         description or f"Use {name}.",
-        f"Follow {name}.",
+        metadata,
+        allowed_tools,
         f".mini_agent/skills/{name}",
-        f"sha-{name}",
+        manifest or Path(f".mini_agent/skills/{name}/SKILL.md"),
     )
 
 
@@ -78,8 +86,9 @@ def test_discovers_valid_skill_and_explicit_reference(tmp_path: Path) -> None:
     assert catalog.names() == ("demo-skill",)
     assert catalog.explicit_names("Use $demo-skill but preserve $HOME.") == ("demo-skill",)
     assert skill.root == ".mini_agent/skills/demo-skill"
-    assert skill.instructions == "# Workflow\nRead references/guide.md."
-    assert len(skill.sha256) == 64
+    snapshot = skill.snapshot()
+    assert snapshot.instructions == "# Workflow\nRead references/guide.md."
+    assert len(snapshot.sha256) == 64
 
 
 def test_project_skills_override_global_skills_by_name(tmp_path: Path) -> None:
@@ -99,7 +108,7 @@ def test_project_skills_override_global_skills_by_name(tmp_path: Path) -> None:
     definitions = {item.name: item for item in catalog.definitions()}
 
     assert catalog.names() == ("global-only", "shared")
-    assert definitions["shared"].instructions == "Project instructions."
+    assert definitions["shared"].snapshot().instructions == "Project instructions."
     assert definitions["shared"].root == ".mini_agent/skills/shared"
     assert definitions["global-only"].root == (global_root / "global-only").resolve().as_posix()
 
@@ -116,7 +125,7 @@ def test_project_override_skips_malformed_global_manifest(tmp_path: Path) -> Non
     catalog = SkillCatalog.discover(workspace, global_root=global_root)
 
     assert catalog.names() == ("shared",)
-    assert catalog.definitions()[0].instructions == "Valid project instructions."
+    assert catalog.definitions()[0].snapshot().instructions == "Valid project instructions."
 
 
 def test_unknown_explicit_skill_reference_is_rejected_before_model_call() -> None:
@@ -153,11 +162,10 @@ def test_unknown_explicit_skill_is_rejected_when_catalog_is_empty() -> None:
     ("manifest", "error"),
     [
         ("name: demo\ndescription: Demo\n", "start with YAML frontmatter"),
-        ("---\nname: demo\n---\nBody\n", "only 'name' and 'description'"),
+        ("---\nname: demo\n---\nBody\n", "must contain 'name' and 'description'"),
         ("---\nname: Demo\ndescription: Demo\n---\nBody\n", "lowercase letters"),
         ("---\nname: demo\ndescription: ''\n---\nBody\n", "description must be"),
-        ("---\nname: demo\ndescription: Demo\nextra: true\n---\nBody\n", "only 'name' and 'description'"),
-        ("---\nname: demo\ndescription: Demo\n---\n", "instructions must not be empty"),
+        ("---\nname: demo\ndescription: Demo\nextra: true\n---\nBody\n", "unknown key"),
     ],
 )
 def test_rejects_invalid_manifests(tmp_path: Path, manifest: str, error: str) -> None:
@@ -192,12 +200,24 @@ def test_rejects_non_utf8_and_size_limits(tmp_path: Path) -> None:
         SkillCatalog.discover(tmp_path)
 
 
-def test_rejects_instruction_line_limit(tmp_path: Path) -> None:
+def test_rejects_instruction_line_limit_at_snapshot(tmp_path: Path) -> None:
     body = "\n".join("line" for _ in range(MAX_INSTRUCTION_LINES + 1))
     write_skill(tmp_path, instructions=body)
 
+    catalog = SkillCatalog.discover(tmp_path)
+    assert catalog.names() == ("demo",)
+
     with pytest.raises(SkillConfigurationError, match="instructions exceed"):
-        SkillCatalog.discover(tmp_path)
+        catalog.snapshots({"demo"})
+
+
+def test_empty_instructions_fail_only_at_snapshot(tmp_path: Path) -> None:
+    write_skill(tmp_path, instructions="")
+
+    catalog = SkillCatalog.discover(tmp_path)
+
+    with pytest.raises(SkillConfigurationError, match="instructions must not be empty"):
+        catalog.snapshots({"demo"})
 
 
 def test_rejects_manifest_symlink_outside_skill_root(tmp_path: Path) -> None:
@@ -270,9 +290,14 @@ class ReplyOnlyPlanner:
         return AssistantMessage(content="done")
 
 
-def test_explicit_skill_bypasses_automatic_selection() -> None:
+def test_explicit_skill_bypasses_automatic_selection(tmp_path: Path) -> None:
     planner = SelectingPlanner(("beta", "beta"))
-    catalog = SkillCatalog((definition("alpha"), definition("beta")))
+    catalog = SkillCatalog(
+        (
+            definition("alpha", manifest=write_skill(tmp_path, "alpha")),
+            definition("beta", manifest=write_skill(tmp_path, "beta")),
+        )
+    )
     runner = AgentRunner(
         planner,
         ToolRegistry(),
@@ -301,12 +326,12 @@ def test_runner_without_skills_does_not_call_selector() -> None:
     assert state.model_turns == 1
 
 
-def test_automatic_skill_selection_has_a_separate_budget_counter() -> None:
+def test_automatic_skill_selection_has_a_separate_budget_counter(tmp_path: Path) -> None:
     planner = SelectingPlanner(("demo",))
     runner = AgentRunner(
         planner,
         ToolRegistry(),
-        skill_catalog=SkillCatalog((definition("demo"),)),
+        skill_catalog=SkillCatalog((definition("demo", manifest=write_skill(tmp_path, "demo")),)),
         skill_auto_select=True,
     )
 
@@ -319,12 +344,12 @@ def test_automatic_skill_selection_has_a_separate_budget_counter() -> None:
     assert planner.decision_calls == 1
 
 
-def test_explicit_skill_does_not_require_a_selector() -> None:
+def test_explicit_skill_does_not_require_a_selector(tmp_path: Path) -> None:
     planner = ReplyOnlyPlanner()
     runner = AgentRunner(
         planner,
         ToolRegistry(),
-        skill_catalog=SkillCatalog((definition("demo"),)),
+        skill_catalog=SkillCatalog((definition("demo", manifest=write_skill(tmp_path, "demo")),)),
     )
 
     state = runner.run(runner.new_runtime(task="Use $demo."))
@@ -375,14 +400,16 @@ def test_llm_skill_selection_uses_only_current_turn() -> None:
 
 
 @pytest.mark.parametrize("mode", ["agent", "plan"])
-def test_llm_selection_sees_metadata_then_active_body_is_injected(mode: str) -> None:
+def test_llm_selection_sees_metadata_then_active_body_is_injected(tmp_path: Path, mode: str) -> None:
     client = RecordingClient(
         [
             PreparedResponse(AssistantMessage(content='{"skills":["demo"]}')),
             PreparedResponse(AssistantMessage(content="done")),
         ]
     )
-    catalog = SkillCatalog((definition("demo", "Use for reports."),))
+    catalog = SkillCatalog(
+        (definition("demo", "Use for reports.", manifest=write_skill(tmp_path, "demo", instructions="Follow demo.")),)
+    )
     planner = LLMPlanner(client, [], [])
     runner = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog)
     runtime = runner.new_runtime(task="Prepare a report.", mode=mode)
@@ -419,10 +446,16 @@ def test_llm_skill_selection_repairs_unknown_name() -> None:
     assert repairs[0]["outcome"] == "repaired"
 
 
-def test_handoff_skills_skip_reselection() -> None:
+def test_handoff_skills_skip_reselection(tmp_path: Path) -> None:
     planner = SelectingPlanner(("other",))
-    inherited = definition("demo").snapshot()
-    catalog = SkillCatalog((definition("demo"), definition("other")))
+    demo_manifest = write_skill(tmp_path, "demo")
+    inherited = definition("demo", manifest=demo_manifest).snapshot()
+    catalog = SkillCatalog(
+        (
+            definition("demo", manifest=demo_manifest),
+            definition("other", manifest=write_skill(tmp_path, "other")),
+        )
+    )
     runner = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog)
     runtime = runner.new_runtime(task="Implement", active_skills=[inherited])
 
@@ -447,3 +480,77 @@ def test_skills_command_lists_catalog_and_empty_state() -> None:
     app.runner = SimpleNamespace(skill_catalog=SkillCatalog())
     assert app._handle_command("skills", "") is True
     assert outputs == ["No project Skills found in .mini_agent/skills."]
+
+
+def test_discovers_skill_with_optional_frontmatter(tmp_path: Path) -> None:
+    directory = tmp_path / ".mini_agent" / "skills" / "demo"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(
+        "---\n"
+        "name: demo\n"
+        "description: Demo tasks.\n"
+        "metadata:\n"
+        "  owner: platform\n"
+        "  risk: low\n"
+        "allowed-tools:\n"
+        "  - read\n"
+        "  - write\n"
+        "---\nBody\n",
+        encoding="utf-8",
+    )
+
+    skill = SkillCatalog.discover(tmp_path).definitions()[0]
+
+    assert skill.metadata == (("owner", "platform"), ("risk", "low"))
+    assert skill.allowed_tools == ("read", "write")
+    assert skill.snapshot().instructions == "Body"
+
+
+def test_rejects_non_string_metadata_value(tmp_path: Path) -> None:
+    directory = tmp_path / ".mini_agent" / "skills" / "demo"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo\nmetadata:\n  owner: 42\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SkillConfigurationError, match="metadata values must be strings"):
+        SkillCatalog.discover(tmp_path)
+
+
+def test_rejects_non_string_allowed_tools(tmp_path: Path) -> None:
+    directory = tmp_path / ".mini_agent" / "skills" / "demo"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo\nallowed-tools:\n  - 42\n---\nBody\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SkillConfigurationError, match="allowed-tools must contain only non-empty strings"):
+        SkillCatalog.discover(tmp_path)
+
+
+def test_llm_skill_selection_sees_optional_frontmatter() -> None:
+    client = RecordingClient([PreparedResponse(AssistantMessage(content='{"skills":[]}'))])
+    catalog = SkillCatalog((definition("demo", metadata=(("owner", "platform"),), allowed_tools=("read", "write")),))
+    planner = LLMPlanner(client, [], [])
+    runtime = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog).new_runtime(task="demo")
+
+    planner.select_skills(runtime)
+
+    selection_system = client.requests[0][0].content or ""
+    assert '"metadata": {"owner": "platform"}' in selection_system
+    assert '"allowed-tools": ["read", "write"]' in selection_system
+
+
+def test_explicit_skill_with_empty_instructions_fails_run(tmp_path: Path) -> None:
+    planner = ReplyOnlyPlanner()
+    catalog = SkillCatalog((definition("demo", manifest=write_skill(tmp_path, "demo", instructions="")),))
+    runner = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog)
+
+    state = runner.run(runner.new_runtime(task="Use $demo."))
+
+    assert state.status == "failed"
+    assert "Skill activation failed" in (state.final_answer or "")
+    assert "instructions must not be empty" in (state.final_answer or "")
+    assert planner.decision_calls == 0

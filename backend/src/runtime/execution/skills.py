@@ -36,7 +36,11 @@ class SkillActivator:
             return True
 
         if explicit:
-            run.active_skills = catalog.snapshots(explicit)
+            try:
+                run.active_skills = catalog.snapshots(explicit)
+            except SkillConfigurationError as exc:
+                fail_run(runtime, f"Skill activation failed: {exc}")
+                return False
             names = [skill.name for skill in run.active_skills]
             self._publish(runtime, names, names, [], source="explicit")
             runtime.save()
