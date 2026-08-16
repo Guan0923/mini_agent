@@ -491,6 +491,39 @@ class RuntimeEventNodeBridge:
         self.assistant_blocks.append(block)
         self._update_assistant()
 
+    def _persist_steering(self, data: Mapping[str, Any]) -> None:
+        """Persist one steering input as a first-class user message node.
+
+        Steering is a genuine user turn: it must appear in the canonical node
+        projection in conversation order, not as a control block inside the
+        previous assistant message.  An empty assistant placeholder that has
+        not yet received any blocks is discarded instead of being sealed, so
+        it cannot produce an empty assistant node ahead of the user message.
+        """
+
+        if self.assistant is not None:
+            # An assistant with real text or tool results is preserved as a
+            # node.  A placeholder that only carries unexecuted tool calls is
+            # discarded like the in-memory message: the steering input
+            # supersedes it, and sealing it would project an empty assistant
+            # ahead of the user message.
+            if any(block.get("type") in {"text", "tool_result"} for block in self.assistant_blocks):
+                self._seal_assistant("success")
+            else:
+                self.assistant = None
+        content = str(data.get("content") or "")
+        node = self.writer.create(
+            session_id=self.session_id,
+            parent=self.last_node,
+            data=message_payload("user", content, **({"run_id": self.run_id} if self.run_id else {})),
+            provider_name=self.provider_name,
+            model=self.model_config,
+            permission_mode=self.permission_mode,
+            running_mode=self.running_mode,
+            cwd=self.cwd,
+        )
+        self.last_node = self.writer.delete(node.session_id, node.id, status="success")
+
     def _seal_assistant(self, status: NodeStatus = "success") -> None:
         if self.assistant is not None:
             self.last_node = self.writer.delete(self.session_id, self.assistant.id, status=status)
@@ -756,12 +789,13 @@ class RuntimeEventNodeBridge:
             self._append_event_block("approval", kind, message, data)
         elif kind in {"user_input_requested", "user_input_received"}:
             self._append_event_block("question", kind, message, data)
+        elif kind == "steering_applied":
+            self._persist_steering(data)
         elif kind in {
             "plan",
             "feedback_received",
             "handoff_created",
             "steering_received",
-            "steering_applied",
             "model_repair",
         }:
             self._append_event_block("plan", kind, message, data)
@@ -838,7 +872,13 @@ class RuntimeEventNodeBridge:
                 code=code or self.abort_code or None,
                 detail=final_answer if status == "abort" else None,
             )
-            final_answer = terminal_error_text(self.terminal_error)
+            fallback = terminal_error_text(self.terminal_error)
+            # A caller-provided terminal answer (for example ``fail_run``'s
+            # exact message) is authoritative for the node text; the generic
+            # terminal template is only a fallback for empty answers and for
+            # answers that already equal the template (e.g. cancel wording).
+            if not final_answer or final_answer == fallback:
+                final_answer = fallback
         if self.assistant is None and (final_answer or status != "success"):
             self._ensure_assistant()
             self.assistant_blocks = [{"type": "text", "text": final_answer}] if final_answer else []

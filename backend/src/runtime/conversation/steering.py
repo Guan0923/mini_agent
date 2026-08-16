@@ -41,7 +41,10 @@ def apply_steering(runtime: AgentRuntime, update: SteeringUpdate, *, phase: str)
     if store is not None:
         store.append_turn_input(runtime.state.session_id, runtime.run.run_id, update.content)
     runtime.run.add_event("steering_applied", "In-run user input applied", **data)
-    publish(RuntimeEvent("steering_applied", "In-run user input applied", data))
+    # The content travels with the event so the message-tree bridge can
+    # persist the steering input as a first-class user node; without it the
+    # canonical node projection would silently drop the message.
+    publish(RuntimeEvent("steering_applied", "In-run user input applied", {**data, "content": update.content}))
     runtime.save()
 
 
