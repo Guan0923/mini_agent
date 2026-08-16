@@ -47,3 +47,6 @@ webapp-data/
 .dsh-token-usage.json
 .backend.restart-*.log
 .frontend.restart-*.log
+
+# Linked git worktrees
+.worktrees/
