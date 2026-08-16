@@ -273,6 +273,42 @@ def test_project_path_update_allows_duplicate_active_cwd(tmp_path: Path) -> None
         assert response.json()["cwd"] == str(first.resolve())
 
 
+def test_project_skill_trust_exposes_and_revokes_trust(tmp_path: Path) -> None:
+    from backend.configuration import UserConfigStore
+    from backend.skills.trust import ProjectSkillTrustStore
+
+    state = WebAppState(tmp_path / "web")
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    with TestClient(create_app(state)) as client:
+        user = client.post("/api/auth/guest").json()["user"]
+        created = state.projects(user["id"]).create(project_dir)
+
+        # No trust recorded yet.
+        details = client.get(f"/api/projects/{created.project_id}/skill-trust")
+        assert details.status_code == 200, details.text
+        assert details.json()["trusted_skills"] == {}
+
+        # Record trust directly in the user config.
+        paths = state.user_paths(user["id"])
+        store = ProjectSkillTrustStore(UserConfigStore(paths.config_file))
+        workspace_sha = details.json()["workspace_sha256"]
+        store.record_trust(created.project_id, workspace_sha, "demo", "a" * 64)
+
+        details = client.get(f"/api/projects/{created.project_id}/skill-trust")
+        assert details.status_code == 200
+        assert details.json()["trusted_skills"] == {"demo": {"tree_sha256": "a" * 64}}
+
+        revoked = client.delete(f"/api/projects/{created.project_id}/skill-trust")
+        assert revoked.status_code == 200, revoked.text
+        assert revoked.json()["trusted_skills"] == {}
+        assert store.is_trusted(created.project_id, workspace_sha, "demo", "a" * 64) is False
+
+        missing = client.get("/api/projects/not-a-project/skill-trust")
+        assert missing.status_code == 404
+
+
 def test_web_default_session_title_is_renamed_on_first_turn(tmp_path: Path) -> None:
     state = WebAppState(tmp_path / "web")
     with TestClient(create_app(state)) as client:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -10,6 +12,8 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
+from backend.configuration import UserConfigStore
+from backend.skills.trust import ProjectSkillTrustStore
 from backend.storage.projects import Project, ProjectStore
 
 from .auth.dependencies import require_user
@@ -282,3 +286,47 @@ def restore_project(
         return _project_payload(store.restore(project_id), store)
     except Exception as exc:
         raise _mutation_error(exc) from exc
+
+
+def _workspace_sha256(cwd: str) -> str:
+    normalized = os.path.normcase(str(Path(cwd).resolve())).replace("\\", "/")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _trust_store(request: Request, identity: UserIdentity) -> ProjectSkillTrustStore:
+    state = request.app.state.web
+    paths = state.user_paths(identity.id)
+    return ProjectSkillTrustStore(UserConfigStore(paths.config_file))
+
+
+@router.get("/projects/{project_id}/skill-trust")
+def get_project_skill_trust(
+    project_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict[str, object]:
+    projects = _project_store(request, identity)
+    project = projects.get(project_id, include_removed=False)
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在或已移除。")
+    trusted = _trust_store(request, identity).trusted_skills(project_id, _workspace_sha256(project.cwd))
+    return {
+        "project_id": project_id,
+        "workspace_sha256": _workspace_sha256(project.cwd),
+        "trusted_skills": {name: {"tree_sha256": tree} for name, tree in trusted.items()},
+    }
+
+
+@router.delete("/projects/{project_id}/skill-trust")
+def revoke_project_skill_trust(
+    project_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict[str, object]:
+    projects = _project_store(request, identity)
+    project = projects.get(project_id, include_removed=False)
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在或已移除。")
+    store = _trust_store(request, identity)
+    store.revoke_project(project_id)
+    return {"project_id": project_id, "trusted_skills": {}}

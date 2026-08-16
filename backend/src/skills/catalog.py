@@ -1,4 +1,4 @@
-"""Workspace-local Skill discovery and validation."""
+"""User-level Skill discovery and validation."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import yaml
 
 from backend.domain.skills import SkillSnapshot
 
-SKILLS_RELATIVE_ROOT = Path(".mini_agent") / "skills"
 MAX_SKILL_BYTES = 64 * 1024
 MAX_INSTRUCTION_LINES = 1_000
 MAX_METADATA_BYTES = 2 * 1024
@@ -127,22 +126,18 @@ class SkillCatalog:
             raise SkillConfigurationError("Skill names must be unique.")
 
     @classmethod
-    def discover(cls, workspace: Path, *, global_root: Path | None = None) -> SkillCatalog:
-        """Merge global and project Skills, with project names taking precedence."""
+    def discover(cls, root: Path | None = None, *, global_root: Path | None = None) -> SkillCatalog:
+        """Discover Skills from the canonical user-level root.
+
+        ``root`` is the single source of user Skills.  ``global_root`` is kept
+        as a deprecated alias for compatibility and takes precedence when both
+        are provided.
+        """
 
         definitions: dict[str, SkillDefinition] = {}
-        project_root = workspace.resolve() / SKILLS_RELATIVE_ROOT
-        project_names = cls._directory_names(project_root)
-        if global_root is not None:
-            definitions.update(
-                cls._discover_root(
-                    global_root,
-                    global_root,
-                    absolute_roots=True,
-                    excluded_names=project_names,
-                )
-            )
-        definitions.update(cls._discover_root(project_root, workspace.resolve()))
+        skills_root = global_root if global_root is not None else root
+        if skills_root is not None:
+            definitions.update(cls._discover_root(skills_root, skills_root, absolute_roots=True))
         return cls(tuple(definitions[name] for name in sorted(definitions)))
 
     @classmethod
@@ -152,7 +147,6 @@ class SkillCatalog:
         owner_root: Path,
         *,
         absolute_roots: bool = False,
-        excluded_names: set[str] | None = None,
     ) -> dict[str, SkillDefinition]:
         if not skills_root.exists():
             return {}
@@ -161,8 +155,6 @@ class SkillCatalog:
         resolved_root = cls._confined(skills_root, owner_root, "Skill root")
         definitions: dict[str, SkillDefinition] = {}
         for directory in sorted((item for item in skills_root.iterdir() if item.is_dir()), key=lambda item: item.name):
-            if directory.name in (excluded_names or set()):
-                continue
             resolved_directory = cls._confined(directory, resolved_root, "Skill directory")
             manifest = directory / "SKILL.md"
             if not manifest.exists():
@@ -173,14 +165,6 @@ class SkillCatalog:
                 raise SkillConfigurationError(f"Duplicate Skill name {definition.name!r}: {manifest}")
             definitions[definition.name] = definition
         return definitions
-
-    @staticmethod
-    def _directory_names(skills_root: Path) -> set[str]:
-        if not skills_root.exists():
-            return set()
-        if not skills_root.is_dir():
-            raise SkillConfigurationError(f"Skill root is not a directory: {skills_root}")
-        return {item.name for item in skills_root.iterdir() if item.is_dir()}
 
     @staticmethod
     def _confined(path: Path, root: Path, label: str) -> Path:

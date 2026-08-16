@@ -15,7 +15,7 @@ import {
   type ProviderConfig,
   type SessionInfo,
 } from "../api";
-import { changeProjectPath, createProject, createProjectSession, listProjects, removeProject, renameProject, restoreProject, type ProjectInfo } from "../api/projects";
+import { changeProjectPath, createProject, createProjectSession, listProjects, removeProject, renameProject, restoreProject, revokeProjectSkillTrust, type ProjectInfo } from "../api/projects";
 import { useAuth } from "../auth/AuthProvider";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
 import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnreadArchived, summaryToConversation, transcriptToMessages, importableMessages, STORAGE_KEY, ARCHIVE_READ_KEY } from "./storage";
@@ -425,6 +425,16 @@ function AgentApp() {
     }
   }
 
+  async function revokeProjectSkillTrustFromSidebar(projectId: string): Promise<void> {
+    setActionError(null);
+    try {
+      await revokeProjectSkillTrust(projectId);
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+      throw error;
+    }
+  }
+
   async function restoreProjectFromTrash(projectId: string): Promise<void> {
     setActionError(null);
     try {
@@ -654,6 +664,7 @@ function AgentApp() {
       onRemoveProject={removeProjectFromSidebar}
       onRenameProject={renameProjectFromSidebar}
       onChangeProjectPath={changeProjectPathFromSidebar}
+      onRevokeSkillTrust={revokeProjectSkillTrustFromSidebar}
       onRestoreProject={restoreProjectFromTrash}
       onSelect={(id) => { setCurrentId(id); setPage("chat"); }}
       onNavigate={setPage}

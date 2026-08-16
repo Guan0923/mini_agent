@@ -30,6 +30,7 @@ def build_user_application(
     workspace: Path | None = None,
     session_provisioner: Callable[..., object] | None = None,
     session_provisioner_cleanup: Callable[[str], None] | None = None,
+    project_id: str | None = None,
 ) -> AgentApplication:
     """Build an application with the canonical per-user runtime settings."""
 
@@ -53,7 +54,6 @@ def build_user_application(
             max_tool_calls=max_tool_calls,
             log_full_messages=log_full_messages,
         ),
-        "project_mcp_enabled": False,
         "user_preferences": user_preferences,
         "paths": state.user_paths(user_id),
         "model_config": state.model_config_for_user(user_id)
@@ -63,6 +63,7 @@ def build_user_application(
         "default_timezone": str(state.agent_config_for_user(user_id).get("timezone", DEFAULT_TIME_ZONE)),
         "session_provisioner": session_provisioner,
         "session_provisioner_cleanup": session_provisioner_cleanup,
+        "project_id": project_id or None,
     }
     # Preserve compatibility with embedders/tests that inject the historical
     # builder signature while still passing hooks to the canonical factory.

@@ -50,6 +50,7 @@ interface AppSidebarProps {
   onRemoveProject?: (projectId: string) => void | Promise<unknown>;
   onRenameProject?: (projectId: string, name: string) => void | Promise<unknown>;
   onChangeProjectPath?: (projectId: string) => void | Promise<unknown>;
+  onRevokeSkillTrust?: (projectId: string) => void | Promise<unknown>;
   onSelect: (id: string) => void;
   onNavigate: (page: Page) => void;
   onRename: (id: string, title: string) => Promise<void>;
@@ -293,15 +294,17 @@ interface ProjectSettingsProps {
   onRenameProject?: (projectId: string, name: string) => void | Promise<unknown>;
   onChangeProjectPath?: (projectId: string) => void | Promise<unknown>;
   onConfirmRemove: (project: ProjectInfo) => void;
+  onRevokeSkillTrust?: (projectId: string) => void | Promise<unknown>;
 }
 
-function ProjectSettings({ project, onRenameProject, onChangeProjectPath, onConfirmRemove }: ProjectSettingsProps) {
+function ProjectSettings({ project, onRenameProject, onChangeProjectPath, onConfirmRemove, onRevokeSkillTrust }: ProjectSettingsProps) {
   const [open, setOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameSaving, setRenameSaving] = useState(false);
   const [pathSaving, setPathSaving] = useState(false);
   const [draftName, setDraftName] = useState(project.name);
   const [renameError, setRenameError] = useState("");
+  const [revoking, setRevoking] = useState(false);
 
   useEffect(() => {
     if (!renameOpen) setDraftName(project.name);
@@ -337,6 +340,14 @@ function ProjectSettings({ project, onRenameProject, onChangeProjectPath, onConf
       .finally(() => setPathSaving(false));
   }
 
+  function revokeSkillTrust() {
+    if (!onRevokeSkillTrust || revoking) return;
+    setRevoking(true);
+    void Promise.resolve(onRevokeSkillTrust(project.project_id))
+      .catch(() => undefined)
+      .finally(() => setRevoking(false));
+  }
+
   const content = (
     <List
       size="small"
@@ -344,6 +355,13 @@ function ProjectSettings({ project, onRenameProject, onChangeProjectPath, onConf
       dataSource={[
         { key: "rename", label: "修改项目名称", onClick: () => { setOpen(false); setRenameError(""); setRenameOpen(true); } },
         { key: "path", label: "修改项目路径", onClick: openPathPicker, disabled: pathSaving },
+        {
+          key: "skill-trust",
+          label: "撤销项目 Skill 信任",
+          onClick: () => { setOpen(false); revokeSkillTrust(); },
+          disabled: revoking,
+          loading: revoking,
+        },
         { key: "remove", label: "删除项目", danger: true, onClick: () => { setOpen(false); onConfirmRemove(project); } },
       ]}
       renderItem={(item) => (
@@ -353,7 +371,7 @@ function ProjectSettings({ project, onRenameProject, onChangeProjectPath, onConf
             block
             danger={item.danger}
             disabled={item.disabled}
-            loading={item.key === "path" && pathSaving}
+            loading={item.key === "path" && pathSaving || item.key === "skill-trust" && revoking}
             onClick={item.onClick}
             style={{ textAlign: "left" }}
           >
@@ -481,6 +499,7 @@ export default function AppSidebar({
   onRemoveProject,
   onRenameProject,
   onChangeProjectPath,
+  onRevokeSkillTrust,
   onSelect,
   onNavigate,
   onRename,
@@ -570,6 +589,7 @@ export default function AppSidebar({
           onRenameProject={onRenameProject}
           onChangeProjectPath={onChangeProjectPath}
           onConfirmRemove={confirmRemove}
+          onRevokeSkillTrust={onRevokeSkillTrust}
         />
       </span>
     ),

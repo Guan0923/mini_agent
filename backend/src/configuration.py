@@ -359,6 +359,29 @@ class UserConfigStore:
                 atomic_write_text(self.path, _to_toml(merged))
             return merged
 
+    def replace_section(self, name: str, value: Mapping[str, object]) -> dict[str, object]:
+        """Atomically replace one top-level TOML section, preserving the rest.
+
+        ``update`` merges nested tables and therefore cannot remove keys;
+        callers that need full-section semantics (e.g. a trust index whose
+        entries must be revocable) use this method instead.
+        """
+
+        if not isinstance(name, str) or not name or any(part.isspace() for part in name.split(".")):
+            raise ValueError(f"Invalid section name: {name!r}")
+        with self._lock():
+            raw_current = load_config(self.path) if self.path.exists() else {}
+            current = _strip_config_secrets(raw_current)
+            normalized: dict[str, object] = {str(key): item for key, item in current.items() if isinstance(key, str)}
+            cleaned = _strip_config_secrets({str(key): item for key, item in value.items() if isinstance(key, str)})
+            if cleaned:
+                normalized[name] = cleaned
+            else:
+                normalized.pop(name, None)
+            if normalized != raw_current:
+                atomic_write_text(self.path, _to_toml(normalized))
+            return normalized
+
     def ensure_defaults(self, defaults: Mapping[str, Mapping[str, object]]) -> dict[str, object]:
         with self._lock():
             raw_current = load_config(self.path) if self.path.exists() else {}

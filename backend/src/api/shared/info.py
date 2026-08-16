@@ -34,10 +34,7 @@ def list_tools(request: Request, identity: UserIdentity = Depends(require_user))
 @router.get("/skills")
 def list_skills(request: Request, identity: UserIdentity = Depends(require_user)) -> list[dict]:
     state: WebAppState = request.app.state.web
-    catalog = SkillCatalog.discover(
-        _catalog_workspace(state, identity.id),
-        global_root=state.user_paths(identity.id).skills_dir,
-    )
+    catalog = SkillCatalog.discover(global_root=state.user_paths(identity.id).skills_dir)
     return [{"name": skill.name, "description": skill.description} for skill in catalog.definitions()]
 
 

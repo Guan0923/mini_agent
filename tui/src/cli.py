@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
 from pathlib import Path
 
 from backend.configuration import ClientPaths, initialize_config
-from backend.mcp.config import McpTrustStore, describe_project_servers, prepare_mcp_plan
 from backend.observability import EventFanout, JsonlRunLogger
 from backend.providers import ModelConfigurationError
 from backend.runtime import (
@@ -173,11 +171,6 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Revoke the saved browser-authorized device session (network mode only).",
     )
-    parser.add_argument(
-        "--trust-project-mcp",
-        action="store_true",
-        help="Review and trust this workspace's project MCP configuration, then exit.",
-    )
     args = parser.parse_args(argv)
     tool_budget: dict[str, int] = {}
     if args.max_tool_calls is not None:
@@ -190,13 +183,6 @@ def main(argv: list[str] | None = None) -> int:
     paths = ClientPaths.from_home()
     try:
         initialize_config(paths, workspace)
-        mcp_plan = prepare_mcp_plan(paths, workspace)
-        trust_store = McpTrustStore(paths.mcp_trust_file)
-        if args.trust_project_mcp:
-            if args.task or args.resume:
-                parser.error("--trust-project-mcp cannot be combined with a task or --resume.")
-            return _trust_project_mcp(parser, mcp_plan, trust_store)
-        project_mcp_enabled = _project_mcp_policy(parser, mcp_plan, trust_store)
         settings = RunnerSettings(
             max_transport_retries=5,
             strategy=args.strategy,
@@ -208,7 +194,6 @@ def main(argv: list[str] | None = None) -> int:
             args.planner,
             settings,
             (),
-            project_mcp_enabled,
         )
         conversation = application.open_conversation(args.resume)
     except ModelConfigurationError as exc:
@@ -298,37 +283,3 @@ def _run_network_task(args) -> int:
     except ApiError as exc:
         print(f"[client] error: {exc}")
         return 1
-
-
-def _trust_project_mcp(parser, plan, trust_store: McpTrustStore) -> int:
-    if not plan.has_project_config:
-        print("No project .mini_agent/mcp.toml is configured.")
-        return 0
-    if not sys.stdin.isatty():
-        parser.error("--trust-project-mcp requires an interactive terminal.")
-    print(describe_project_servers(plan))
-    choice = input("Trust this exact project MCP configuration? [y/N]: ").strip().lower()
-    if choice not in {"y", "yes"}:
-        print("Project MCP configuration was not trusted.")
-        return 1
-    trust_store.trust(plan)
-    print("Project MCP configuration trusted. No server was started.")
-    return 0
-
-
-def _project_mcp_policy(parser, plan, trust_store: McpTrustStore) -> bool:
-    if not plan.has_project_config or trust_store.is_trusted(plan):
-        return True
-    if not sys.stdin.isatty():
-        parser.error("Project MCP configuration is untrusted. Run --trust-project-mcp from an interactive terminal.")
-    print(describe_project_servers(plan))
-    while True:
-        choice = input("[1] Trust and start  [2] Disable for this run  [3] Cancel: ").strip().lower()
-        if choice in {"1", "trust"}:
-            trust_store.trust(plan)
-            return True
-        if choice in {"2", "disable"}:
-            return False
-        if choice in {"3", "cancel"}:
-            raise SystemExit(1)
-        print("Choose 1, 2, or 3.")

@@ -8,6 +8,12 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest_tmp*/
+bt_*/
+probe*/
+pytest-of-*/
+pytest_*.txt
+*.out.txt
 .ruff_cache/
 .mypy_cache/
 .coverage

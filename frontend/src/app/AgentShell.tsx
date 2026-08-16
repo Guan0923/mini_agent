@@ -38,6 +38,7 @@ export interface AgentShellProps {
   onRemoveProject: (projectId: string) => Promise<void>;
   onRenameProject: (projectId: string, name: string) => Promise<void>;
   onChangeProjectPath: (projectId: string) => Promise<void>;
+  onRevokeSkillTrust: (projectId: string) => Promise<void>;
   onRestoreProject: (projectId: string) => Promise<void>;
   onSelect: (id: string) => void;
   onNavigate: (page: Page) => void;
@@ -112,6 +113,7 @@ export default function AgentShell(props: AgentShellProps) {
       onRemoveProject={props.onRemoveProject}
       onRenameProject={props.onRenameProject}
       onChangeProjectPath={props.onChangeProjectPath}
+      onRevokeSkillTrust={props.onRevokeSkillTrust}
       onSelect={select}
       onNavigate={navigate}
       onRename={props.onRename}

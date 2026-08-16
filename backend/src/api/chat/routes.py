@@ -406,6 +406,13 @@ def _stream(
                 if identity is not None and session_id is not None
                 else state.chat_workspace
             )
+            bound_project = (
+                state.projects(identity.id).session_project(session_id, include_removed=False)
+                if identity is not None and session_id is not None
+                else None
+            )
+            if bound_project is not None and not bound_project.available:
+                raise RuntimeError("项目 cwd 不可访问，请恢复文件夹后重试。")
             path_options = {"paths": state.user_paths(identity.id)} if identity is not None else {}
             selected_model_config = model_config
             if identity is not None:
@@ -422,13 +429,13 @@ def _stream(
                     model_config=selected_model_config,
                     load_model_config=False,
                     workspace=workspace,
+                    project_id=bound_project.project_id if bound_project is not None else None,
                 )
             else:
                 app = build_application(
                     workspace,
                     planner_name="llm",
                     settings=RunnerSettings(log_full_messages=True),
-                    project_mcp_enabled=False,
                     user_preferences=user_preferences,
                     model_config=model_config,
                     config_override=runtime_config,

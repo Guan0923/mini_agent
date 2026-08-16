@@ -63,3 +63,19 @@ export async function changeProjectPath(projectId: string): Promise<ProjectInfo 
 export async function restoreProject(projectId: string): Promise<ProjectInfo> {
   return requestJson<ProjectInfo>(`/api/projects/${encodeURIComponent(projectId)}/restore`, { method: "POST" });
 }
+
+export interface ProjectSkillTrustDetails {
+  project_id: string;
+  workspace_sha256: string;
+  trusted_skills: Record<string, { tree_sha256: string }>;
+}
+
+export async function getProjectSkillTrust(projectId: string): Promise<ProjectSkillTrustDetails> {
+  return requestJson<ProjectSkillTrustDetails>(`/api/projects/${encodeURIComponent(projectId)}/skill-trust`);
+}
+
+export async function revokeProjectSkillTrust(projectId: string): Promise<ProjectSkillTrustDetails> {
+  return requestJson<ProjectSkillTrustDetails>(`/api/projects/${encodeURIComponent(projectId)}/skill-trust`, {
+    method: "DELETE",
+  });
+}

@@ -24,6 +24,8 @@ def auto_approve(request: InterruptRequest) -> InterruptDecision:
     if request.kind == "question":
         answers = {q.id: [q.options[0].label] for q in request.questions}
         return InterruptDecision("answer", answers=answers)
+    if request.kind == "skill":
+        return InterruptDecision("skip")
     return InterruptDecision("continue")
 
 
@@ -110,6 +112,12 @@ def make_interactive_interrupt(
                     "goal": request.data.get("goal"),
                     "steps": request.data.get("steps", []),
                     "details": request.data.get("details"),
+                    "skill": request.data.get("skill"),
+                    "description": request.data.get("description"),
+                    "project_id": request.data.get("project_id"),
+                    "workspace_sha256": request.data.get("workspace_sha256"),
+                    "tree_sha256": request.data.get("tree_sha256"),
+                    "path": request.data.get("path"),
                 },
             }
         )
@@ -148,6 +156,9 @@ def make_interactive_interrupt(
             return InterruptDecision("answer", answers=answers if isinstance(answers, dict) else None)
         if request.kind == "resume":
             return InterruptDecision("continue" if choice == "continue" else "back")
+        if request.kind == "skill":
+            return InterruptDecision("trust" if choice == "trust" else "skip")
+        return InterruptDecision("cancel")
         return InterruptDecision("continue")
 
     return decide

@@ -21,6 +21,7 @@ class AgentApplication:
     default_timezone: str = DEFAULT_TIME_ZONE
     session_provisioner: Callable[..., object] | None = None
     session_provisioner_cleanup: Callable[[str], None] | None = None
+    project_id: str | None = None
 
     def close(self) -> None:
         try:

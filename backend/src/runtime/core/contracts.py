@@ -23,6 +23,8 @@ HumanChoice = Literal[
     "supplement",
     "answer",
     "back",
+    "trust",
+    "skip",
 ]
 
 
@@ -44,7 +46,7 @@ class UserQuestion:
 class InterruptRequest:
     """A human decision point for a plan review or confirmed tool action."""
 
-    kind: Literal["plan", "tool", "question", "resume"]
+    kind: Literal["plan", "tool", "question", "resume", "skill"]
     message: str
     data: dict[str, Any]
     questions: tuple[UserQuestion, ...] = ()

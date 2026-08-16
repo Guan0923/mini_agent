@@ -1,9 +1,9 @@
-"""Isolated client state, config seeding, workspace materialization, and MCP pre-trust.
+"""Isolated client state, config seeding, and workspace materialization.
 
 The benchmark never touches the developer's real ``~/mini_agent`` directory. All
-client-owned data (config, logs, skills, session stores, MCP trust) lives under
-one sandbox root, seeded from a copy of the user's ``config.toml`` so the real
-model credentials are reused without mutating anything outside the sandbox.
+client-owned data (config, logs, skills, session stores, MCP servers) lives
+under one sandbox root, seeded from a copy of the user's ``config.toml`` so the
+real model credentials are reused without mutating anything outside the sandbox.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ class Sandbox:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(seed_file.content, encoding="utf-8")
         for skill in task.seed.skills:
-            self._write_skill(workspace, skill.name, skill.description, skill.instructions)
+            self._write_skill(skill.name, skill.description, skill.instructions)
         if task.seed.mcp is not None:
             self._write_mcp_file(workspace, task.seed.mcp)
         return workspace
@@ -131,9 +131,9 @@ class Sandbox:
             raise ValueError(f"seed path escapes task workspace: {relative!r}")
         return candidate
 
-    @staticmethod
-    def _write_skill(workspace: Path, name: str, description: str, instructions: str) -> None:
-        manifest = workspace / ".mini_agent" / "skills" / name / "SKILL.md"
+    def _write_skill(self, name: str, description: str, instructions: str) -> None:
+        self.paths.ensure()
+        manifest = self.paths.skills_dir / name / "SKILL.md"
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text(
             f"---\nname: {name}\ndescription: {description}\n---\n{instructions}\n",
@@ -144,12 +144,11 @@ class Sandbox:
         if seed.profile not in {"retail", "airline"}:
             raise ValueError(f"unsupported benchmark MCP profile: {seed.profile!r}")
         server_path = Path(__file__).resolve().parent / "mcp" / "mock_server.py"
-        mcp_dir = workspace / ".mini_agent"
-        mcp_dir.mkdir(parents=True, exist_ok=True)
+        self.paths.ensure()
         server_args = [str(server_path), "--profile", seed.profile]
         if seed.tools:
             server_args.extend(("--tools", *seed.tools))
-        (mcp_dir / "mcp.toml").write_text(
+        self.paths.mcp_file.write_text(
             f"[servers.{seed.server_name}]\n"
             f"command = {json.dumps(sys.executable)}\n"
             f"args = {json.dumps(server_args)}\n"
@@ -163,13 +162,3 @@ def activate_client_paths(paths: ClientPaths) -> None:
     import backend.runtime.application.factory as factory
 
     factory.client_paths = lambda: paths
-
-
-def trust_project_mcp(paths: ClientPaths, workspace: Path) -> None:
-    """Pre-trust a project MCP file so build_application does not refuse it."""
-    from backend.mcp.config import McpTrustStore, prepare_mcp_plan
-
-    plan = prepare_mcp_plan(paths, workspace)
-    store = McpTrustStore(paths.mcp_trust_file)
-    if plan.has_project_config and not store.is_trusted(plan):
-        store.trust(plan)

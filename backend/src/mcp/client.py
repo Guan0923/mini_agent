@@ -15,7 +15,6 @@ from typing import Any, overload
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from backend.configuration import validate_identity_id
 from backend.tools import Tool, ToolError
 
 from .config import McpServerConfig, McpSettings, read_server_configs, valid_tool_name
@@ -138,36 +137,20 @@ class ExternalMcpResources(Sequence[Tool]):
             close()
 
 
-def load_server_configs(global_file: Path, project_file: Path) -> tuple[McpServerConfig, ...]:
-    """Compatibility helper that parses and merges two configuration files."""
+def load_server_configs(global_file: Path, project_file: Path | None = None) -> tuple[McpServerConfig, ...]:
+    """Compatibility helper that parses the single user-level configuration file."""
 
-    servers = {
-        item.name: item
-        for item in read_server_configs(global_file, reject_plaintext_secrets=_is_user_mcp_file(global_file))
-    }
-    servers.update({item.name: item for item in read_server_configs(project_file)})
-    return tuple(servers[name] for name in sorted(servers))
-
-
-def _is_user_mcp_file(path: Path) -> bool:
-    """Recognize the canonical per-identity MCP file for compatibility callers."""
-
-    path = Path(path)
-    if path.name != "servers.toml" or path.parent.name != "mcp":
-        return False
-    try:
-        validate_identity_id(path.parent.parent.name, require_uuid=True)
-    except (ValueError, TypeError):
-        return False
-    return True
+    del project_file
+    return read_server_configs(global_file, reject_plaintext_secrets=True)
 
 
 def load_external_tools(
     global_file: Path,
-    project_file: Path,
+    project_file: Path | None = None,
     settings: McpSettings | None = None,
 ) -> ExternalMcpResources:
-    return start_external_tools(load_server_configs(global_file, project_file), settings)
+    del project_file
+    return start_external_tools(read_server_configs(global_file, reject_plaintext_secrets=True), settings)
 
 
 def start_external_tools(

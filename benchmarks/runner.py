@@ -18,7 +18,7 @@ from .grading.programmatic import run_checkers
 from .grading.scoring import aggregate_score
 from .metrics import RunMetrics
 from .model import BenchmarkTask, Budgets, CheckContext, CheckerVerdict, TaskResult
-from .sandbox import Sandbox, trust_project_mcp
+from .sandbox import Sandbox
 
 
 def auto_approve(request: InterruptRequest) -> InterruptDecision:
@@ -127,8 +127,6 @@ def run_one_task(
     phase = "workspace"
     try:
         workspace = sandbox.materialize_workspace(task)
-        if task.seed.mcp is not None:
-            trust_project_mcp(sandbox.paths, workspace)
 
         settings = RunnerSettings(
             max_tool_calls=task.budgets.max_tool_calls,
@@ -139,7 +137,6 @@ def run_one_task(
             workspace,
             planner_name=planner,
             settings=settings,
-            project_mcp_enabled=True,
             paths=sandbox.paths,
             model_config=sandbox.model_config,
         )

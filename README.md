@@ -8,7 +8,7 @@ Mini-Agent 是一个面向学习与实验的 Python Agent Harness。它用可观
 
 - **执行与规划**：Agent 直接基于对话与工具结果自由决策；独立的只读 Plan mode 可调研、提问并提交 Plan Review。
 - **安全工具**：提供 workspace-confined 的文件读取、搜索、写入和精确编辑，以及网页搜索、受 SSRF 防护的网页抓取和跨平台命令执行；写入、命令和联网操作需要审批。
-- **分层 Skills**：合并 `~/.mini_agent/<user_id>/skills` 与项目 `.mini_agent/skills`，同名时项目版本完整覆盖全局版本。
+- **分层 Skills**：用户级 Skill 位于 `~/.mini_agent/<user_id>/skills`；项目 `.mini_agent/skills` 中的 Skill 属于不可信仓库内容，默认不生效，逐个审批其完整目录指纹后才可使用（见下文）。
 - **并发 Subagents**：父 Agent 可把独立工作交给多个子 Agent 并发执行；批次结果持久化，同路径写入和命令执行有进程内协调。
 - **MCP**：既可通过 stdio 暴露安全只读工具，也可从全局/项目 `mcp.toml` 加载外部 server；外部工具始终需要审批且不进入 Plan mode。
 - **耐久运行**：backend 使用 `~/.mini_agent/client.db` 保存本地浏览器会话哈希，认证用户使用 `~/.mini_agent/<user_id>/runtime/<session_id>/state.db`，每个会话拥有独立的 `workspace/` 与 `uploads/`。
@@ -98,9 +98,9 @@ TUI 使用 alternate screen，消息区可滚动，状态栏和输入框固定�
 
 任务中可用 `@relative/path` 注入 workspace 文件，也可用 `$skill-name` 显式激活 Skill。Plan mode 只暴露只读调研工具以及 `request_user_input`、`request_plan_review`；只有后者会打开 Plan Review，批准后会创建独立、可审计的 Agent run。
 
-## 全局与项目 Skills
+## 用户级与项目 Skills
 
-全局 Skill 位于 `~/.mini_agent/<user_id>/skills/<skill-name>/SKILL.md`，项目 Skill 位于 `<workspace>/.mini_agent/skills/<skill-name>/SKILL.md`；同名时项目版本完整覆盖全局版本。manifest 示例：
+用户级 Skill 位于 `~/.mini_agent/<user_id>/skills/<skill-name>/SKILL.md`，属于账户拥有、直接可用的内容。项目 Skill 位于 `<workspace>/.mini_agent/skills/<skill-name>/SKILL.md`，被视为不可信仓库内容：**默认不生效，也不会出现在 Skill 选择请求中**。项目会话首次使用某个项目 Skill 时，Web 会逐个弹出信任审批，只有批准当前完整目录指纹后该 Skill 才进入本次运行；`full_access`、benchmark 和后台运行不会自动批准。manifest 示例：
 
 ```markdown
 ---
@@ -114,10 +114,12 @@ Read changed files, inspect focused tests, and report concrete findings.
 ```
 
 - 名称仅允许小写字母、数字和连字符，最长 64 字符，且必须与目录名一致。
-- frontmatter 只允许 `name` 和 `description`；manifest 最大 64 KiB，正文最多 1000 行。
+- frontmatter 只允许 `name`、`description`、`metadata` 和 `allowed-tools`；manifest 最大 64 KiB，正文最多 1000 行。
 - LLM planner 先根据名称和描述选择 Skill，再把完整正文加入当前 run；Rule planner 不做语义选择。
 - 激活内容、根目录和 SHA-256 会进入 checkpoint；恢复和 Plan handoff 使用原快照。
 - Skill 可带 `scripts/`、`references/`、`assets/`，但不会注册新工具，也不能绕过 workspace、JSON Schema 或审批策略。
+- **项目 Skill 信任**：信任按单个 Skill 独立记录在 `~/.mini_agent/<user_id>/config.toml` 的 `[project_skill_trust]`，绑定项目路径哈希与该 Skill 完整目录树 SHA-256。修改 `SKILL.md`、脚本、引用或资源文件后，该 Skill 需要重新审批；新增 Skill 不会继承任何已有信任。项目设置菜单可随时撤销全部项目 Skill 信任。
+- 未信任的项目 Skill 名称、描述和正文不会进入模型请求；用户显式引用未信任的 `$skill-name` 会清晰失败。
 
 无效 Skill 会在启动时快速失败并指出文件和原因。
 
@@ -148,7 +150,7 @@ mini-agent-mcp --workspace C:\path\to\workspace
 
 MCP adapter 只暴露 `read_file`、`glob`、`grep`、`get_current_time`。写入、命令和联网工具不会通过该 server 暴露；所有参数仍经过共享 JSON Schema 校验，路径仍限制在指定 workspace 内。MCP server 本身不需要模型密钥或 PostgreSQL。
 
-客户端也会合并 `~/.mini_agent/<user_id>/mcp/servers.toml` 与 `<workspace>/.mini_agent/mcp.toml`，同名 server 由项目配置完整覆盖：
+客户端只读取用户级 `~/.mini_agent/<user_id>/mcp/servers.toml`；项目目录中的 `.mini_agent/mcp.toml` 不再参与配置。
 
 ```toml
 [servers.example]
@@ -160,9 +162,7 @@ args = ["--stdio"]
 # env_refs = { EXAMPLE_TOKEN = "env://EXAMPLE_TOKEN" }
 ```
 
-发现的工具注册为 `mcp_<server>_<tool>`。外部 server 使用长生命周期 stdio session；其工具始终需要审批且不向 Plan mode 暴露。
-
-项目 `.mini_agent/mcp.toml` 在首次启动及配置变化后必须审批。交互启动可选择持久信任、仅本次禁用或取消；脚本环境应先在终端执行 `mini-agent --workspace <path> --trust-project-mcp`。信任文件只保存工作区与配置哈希。MCP 初始化、调用和关闭超时由 `config.toml` 的 `[mcp]` 设置。
+发现的工具注册为 `mcp_<server>_<tool>`。外部 server 使用长生命周期 stdio session；其工具始终需要审批且不向 Plan mode 暴露。MCP 初始化、调用和关闭超时由 `config.toml` 的 `[mcp]` 设置。
 
 Skills 默认只由显式 `$skill-name` 激活且不会额外调用模型；设置 `skills.auto_select = true` 才启用自动选择。Subagent 的批次数量、worker 数和执行期限由 `[subagents]` 设置，父运行状态和持久化事件始终由父线程串行更新。
 

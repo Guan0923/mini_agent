@@ -54,6 +54,7 @@ class AgentRunner:
         max_transport_retries: int = 5,
         skill_catalog: object | None = None,
         skill_auto_select: bool = False,
+        project_skill_gate: object | None = None,
         workspace_root: str | None = None,
         subagents: object | None = None,
         resources: tuple[object, ...] = (),
@@ -63,6 +64,7 @@ class AgentRunner:
         self.tools = tools
         self.skill_catalog = skill_catalog
         self.skill_auto_select = skill_auto_select
+        self.project_skill_gate = project_skill_gate
         self.workspace_root = workspace_root
         self.subagents = subagents
         self._resources = resources
@@ -75,7 +77,7 @@ class AgentRunner:
         )
         self.checkpoints = checkpoints
         self.hooks = HookManager(hooks)
-        self._skills = SkillActivator()
+        self._skills = SkillActivator(self.project_skill_gate)
         self._execution = ExecutionWorkflow()
         self._plan_mode = PlanModeWorkflow()
 
@@ -145,6 +147,7 @@ class AgentRunner:
             tools=self.tools,
             skill_catalog=self.skill_catalog,
             skill_auto_select=self.skill_auto_select,
+            project_skill_gate=self.project_skill_gate,
             checkpoint_store=self.checkpoints,
             runtime_store=runtime_store,  # type: ignore[arg-type]
             hooks=self.hooks,
@@ -161,6 +164,7 @@ class AgentRunner:
         runtime.services.checkpoint_store = self.checkpoints
         runtime.services.skill_catalog = self.skill_catalog
         runtime.services.skill_auto_select = self.skill_auto_select
+        runtime.services.project_skill_gate = self.project_skill_gate
         runtime.services.hooks = self.hooks
         runtime.services.subagents = self.subagents
         runtime.services.provider_config_resolver = self.provider_config_resolver

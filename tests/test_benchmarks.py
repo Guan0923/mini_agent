@@ -403,7 +403,8 @@ def test_sandbox_rejects_escape_and_isolates_fixtures(tmp_path: Path) -> None:
     first_state = first / "retail_state.json"
     first_state.write_text(first_state.read_text(encoding="utf-8").replace("delivered", "cancelled"), encoding="utf-8")
     assert "delivered" in (second / "retail_state.json").read_text(encoding="utf-8")
-    mcp_config = (first / ".mini_agent" / "mcp.toml").read_text(encoding="utf-8")
+    assert not (first / ".mini_agent" / "mcp.toml").exists()
+    mcp_config = sandbox.paths.mcp_file.read_text(encoding="utf-8")
     assert "--tools" in mcp_config and "exchange_delivered_order_items" in mcp_config
 
 

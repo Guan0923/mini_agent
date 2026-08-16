@@ -343,6 +343,7 @@ class RuntimeServices:
     tools: object
     skill_catalog: object | None = None
     skill_auto_select: bool = False
+    project_skill_gate: object | None = None
     checkpoint_store: object | None = None
     runtime_store: RuntimeStore | None = None
     on_event: EventHandler | None = None

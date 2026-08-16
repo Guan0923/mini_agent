@@ -6,13 +6,13 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 
-from backend.configuration import ClientPaths, initialize_config, load_config, section
+from backend.configuration import ClientPaths, UserConfigStore, initialize_config, load_config, section
 from backend.domain import DEFAULT_TIME_ZONE
 from backend.mcp.client import ExternalMcpResources, start_external_tools
-from backend.mcp.config import McpSettings, McpTrustStore, prepare_mcp_plan
+from backend.mcp.config import McpSettings, prepare_mcp_plan
 from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.providers import LLMClient, ModelConfig
-from backend.skills import SkillCatalog
+from backend.skills import ProjectSkillGate, ProjectSkillTrustStore, SkillCatalog
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.sync import RequestsSyncTransport, SyncClient, SyncCoordinator
 from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry, delegation_tools
@@ -43,7 +43,6 @@ def build_application(
     planner_name: PlannerName = "llm",
     settings: RunnerSettings | None = None,
     hooks: Iterable[AgentHook] = (),
-    project_mcp_enabled: bool = True,
     *,
     paths: ClientPaths | None = None,
     user_preferences: str = "",
@@ -52,6 +51,7 @@ def build_application(
     default_timezone: str = DEFAULT_TIME_ZONE,
     session_provisioner: object | None = None,
     session_provisioner_cleanup: object | None = None,
+    project_id: str | None = None,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     base_config = initialize_config(resolved_paths, workspace)
@@ -75,13 +75,16 @@ def build_application(
         store,
         files,
         resolved_paths,
-        project_mcp_enabled,
         user_preferences,
     )
     if model_config is None:
-        runner = _build_subagent_runner(*runner_args)
+        runner = _build_subagent_runner(*runner_args, **({"project_id": project_id} if project_id else {}))
     else:
-        runner = _build_subagent_runner(*runner_args, model_config=model_config)
+        runner = _build_subagent_runner(
+            *runner_args,
+            model_config=model_config,
+            **({"project_id": project_id} if project_id else {}),
+        )
     try:
         sync_coordinator = _build_sync_coordinator(config, store)
     except Exception:
@@ -95,6 +98,7 @@ def build_application(
         default_timezone,
         session_provisioner,
         session_provisioner_cleanup,
+        project_id=project_id,
     )
 
 
@@ -103,7 +107,6 @@ def build_runner(
     planner_name: PlannerName = "llm",
     settings: RunnerSettings | None = None,
     hooks: Iterable[AgentHook] = (),
-    project_mcp_enabled: bool = True,
     user_preferences: str = "",
     model_config: ModelConfig | None = None,
 ) -> AgentRunner:
@@ -116,7 +119,6 @@ def build_runner(
         hooks,
         config,
         paths=paths,
-        project_mcp_enabled=project_mcp_enabled,
         user_preferences=user_preferences,
         model_config=model_config,
     )
@@ -131,10 +133,10 @@ def _build_subagent_runner(
     checkpoints: object | None = None,
     files: WorkspaceFiles | None = None,
     paths: ClientPaths | None = None,
-    project_mcp_enabled: bool = True,
     user_preferences: str = "",
     *,
     model_config: ModelConfig | None = None,
+    project_id: str | None = None,
 ) -> AgentRunner:
     resolved_paths = paths or client_paths()
     skill_settings = SkillSettings.from_config(config)
@@ -152,15 +154,11 @@ def _build_subagent_runner(
             skill_settings,
             user_preferences=user_preferences,
             model_config=model_config,
+            project_id=project_id,
         )
 
     coordinator = SubagentCoordinator(child_factory, workspace, subagent_settings)
-    external = _external_resources(
-        workspace,
-        resolved_paths,
-        config,
-        project_mcp_enabled=project_mcp_enabled,
-    )
+    external = _external_resources(workspace, resolved_paths, config)
     try:
         tools = build_tool_registry(
             workspace,
@@ -183,6 +181,7 @@ def _build_subagent_runner(
             resources=(external,),
             user_preferences=user_preferences,
             model_config=model_config,
+            project_id=project_id,
         )
     except Exception:
         external.close()
@@ -203,8 +202,18 @@ def _build_runner(
     resources: tuple[object, ...] = (),
     user_preferences: str = "",
     model_config: ModelConfig | None = None,
+    project_id: str | None = None,
 ) -> AgentRunner:
-    skills = SkillCatalog.discover(workspace, global_root=paths.skills_dir)
+    skills = SkillCatalog.discover(global_root=paths.skills_dir)
+    project_skill_gate = (
+        ProjectSkillGate(
+            workspace,
+            project_id,
+            ProjectSkillTrustStore(UserConfigStore(paths.config_file)),
+        )
+        if project_id
+        else None
+    )
     if planner_name == "rule":
         planner = RuleBasedPlanner()
     else:
@@ -224,6 +233,7 @@ def _build_runner(
         hooks=hooks,
         skill_catalog=skills,
         skill_auto_select=skill_settings.auto_select,
+        project_skill_gate=project_skill_gate,
         workspace_root=str(workspace.resolve()),
         subagents=subagents,
         resources=resources,
@@ -234,18 +244,11 @@ def _external_resources(
     workspace: Path,
     paths: ClientPaths,
     config: dict[str, object],
-    *,
-    project_mcp_enabled: bool,
 ) -> ExternalMcpResources:
-    plan = prepare_mcp_plan(paths, workspace)
-    include_project = project_mcp_enabled and plan.has_project_config
-    if include_project and not McpTrustStore(paths.mcp_trust_file).is_trusted(plan):
-        raise ValueError(
-            "Project MCP configuration is not trusted. Run with --trust-project-mcp "
-            "from an interactive terminal, or disable project MCP for this process."
-        )
+    del workspace
+    plan = prepare_mcp_plan(paths)
     return start_external_tools(
-        plan.effective_servers(include_project=include_project),
+        plan.effective_servers(),
         McpSettings.from_config(config),
     )
 

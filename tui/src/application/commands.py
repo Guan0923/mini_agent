@@ -152,7 +152,7 @@ class CommandAppMixin(SessionCommandMixin):
             catalog = getattr(self.runner, "skill_catalog", None)
             definitions = catalog.definitions() if catalog is not None else ()
             if not definitions:
-                self._write("No project Skills found in .mini_agent/skills.")
+                self._write("No user Skills found.")
                 return True
             self._write("\n".join(f"{skill.name} — {skill.description}" for skill in definitions))
             return True

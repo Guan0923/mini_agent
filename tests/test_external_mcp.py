@@ -8,9 +8,9 @@ import pytest
 from backend.mcp import client as mcp_client
 
 
-def test_project_mcp_server_fully_overrides_global_definition(tmp_path: Path) -> None:
-    global_file = tmp_path / "home" / "mcp.toml"
-    global_file.parent.mkdir()
+def test_project_mcp_file_is_ignored_and_user_file_is_the_only_source(tmp_path: Path) -> None:
+    global_file = tmp_path / "home" / "mcp" / "servers.toml"
+    global_file.parent.mkdir(parents=True)
     global_file.write_text(
         """
 [servers.global_only]
@@ -21,7 +21,7 @@ args = ["--global"]
 command = "old-command"
 args = ["--old"]
 cwd = "old-cwd"
-env = { SECRET = "old-secret" }
+env_refs = { SECRET = "env://SECRET" }
 """.strip(),
         encoding="utf-8",
     )
@@ -39,10 +39,10 @@ args = ["--project"]
     configs = {item.name: item for item in mcp_client.load_server_configs(global_file, project_file)}
 
     assert set(configs) == {"global_only", "shared"}
-    assert configs["shared"].command == "project-command"
-    assert configs["shared"].args == ("--project",)
-    assert configs["shared"].cwd is None
-    assert configs["shared"].env is None
+    assert configs["shared"].command == "old-command"
+    assert configs["shared"].args == ("--old",)
+    assert configs["shared"].cwd == "old-cwd"
+    assert configs["shared"].env_refs == {"SECRET": "env://SECRET"}
 
 
 def test_external_mcp_submit_cancels_a_timed_out_future(monkeypatch) -> None:

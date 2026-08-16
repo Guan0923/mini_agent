@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 from threading import Event, Lock, Thread, get_ident
@@ -22,43 +21,41 @@ from backend.runtime.subagent_bridge import ParentRuntimeBridge
 from backend.runtime.subagents import SubagentCoordinator
 from backend.tools import ToolError, ToolRegistry
 from backend.tools.filesystem import normalized_workspace_path
-from tui import cli as tui_cli
 
 
-def _write_mcp(path: Path, *, secret: str = "secret-one", tool_name: str = "echo") -> None:
+def _write_mcp(path: Path, *, secret: str = "secret-one", tool_name: str = "echo", plaintext: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    env_line = f'env = {{ API_TOKEN = "{secret}" }}' if plaintext else 'env_refs = { API_TOKEN = "env://API_TOKEN" }'
     path.write_text(
         "\n".join(
             (
                 "[servers.demo]",
                 'command = "demo-server"',
                 f'args = ["--tool", "{tool_name}"]',
-                f'env = {{ API_TOKEN = "{secret}" }}',
+                env_line,
             )
         ),
         encoding="utf-8",
     )
 
 
-def test_project_mcp_trust_is_digest_based_and_never_persists_secret(tmp_path: Path) -> None:
+def test_user_mcp_plaintext_secrets_are_rejected(tmp_path: Path) -> None:
+    paths = ClientPaths(tmp_path / "home")
+    _write_mcp(paths.mcp_file)
+
+    with pytest.raises(ToolError, match="plaintext"):
+        prepare_mcp_plan(paths)
+
+
+def test_project_mcp_file_is_ignored(tmp_path: Path) -> None:
     paths = ClientPaths(tmp_path / "home")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    project_file = workspace / ".mini_agent" / "mcp.toml"
-    _write_mcp(project_file)
-    store = McpTrustStore(paths.mcp_trust_file)
+    _write_mcp(workspace / ".mini_agent" / "mcp.toml")
+
     plan = prepare_mcp_plan(paths, workspace)
 
-    assert store.is_trusted(plan) is False
-    store.trust(plan)
-
-    persisted = paths.mcp_trust_file.read_text(encoding="utf-8")
-    assert store.is_trusted(plan) is True
-    assert "secret-one" not in persisted
-    assert "demo-server" not in persisted
-
-    _write_mcp(project_file, secret="secret-two")
-    assert store.is_trusted(prepare_mcp_plan(paths, workspace)) is False
+    assert plan.effective_servers() == ()
 
 
 @pytest.mark.parametrize("value", [0, -1, float("inf"), "10", True])
@@ -67,85 +64,37 @@ def test_mcp_timeouts_require_finite_positive_numbers(value: object) -> None:
         McpSettings.from_config({"mcp": {"call_timeout_seconds": value}})
 
 
-def test_untrusted_project_mcp_never_reaches_process_start(tmp_path: Path, monkeypatch) -> None:
+def test_user_mcp_servers_are_started_and_project_file_is_ignored(tmp_path: Path, monkeypatch) -> None:
     paths = ClientPaths(tmp_path / "home")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    _write_mcp(workspace / ".mini_agent" / "mcp.toml")
-    started = False
+    started: list[tuple] = []
 
-    def start(_configs, _settings):
-        nonlocal started
-        started = True
+    def start(configs, _settings):
+        started.append(configs)
         return mcp_client.ExternalMcpResources()
 
     monkeypatch.setattr(app_factory, "start_external_tools", start)
-
-    with pytest.raises(ValueError, match="not trusted"):
-        app_factory._external_resources(workspace, paths, {}, project_mcp_enabled=True)
-
-    assert started is False
-    McpTrustStore(paths.mcp_trust_file).trust(prepare_mcp_plan(paths, workspace))
-    app_factory._external_resources(workspace, paths, {}, project_mcp_enabled=True)
-    assert started is True
-
-
-def test_interactive_project_mcp_policy_supports_disable_trust_and_cancel(tmp_path: Path, monkeypatch, capsys) -> None:
-    paths = ClientPaths(tmp_path / "home")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    project_file = workspace / ".mini_agent" / "mcp.toml"
-    _write_mcp(project_file)
-    plan = prepare_mcp_plan(paths, workspace)
-    store = McpTrustStore(paths.mcp_trust_file)
-    choices = iter(("2", "1", "3"))
-    monkeypatch.setattr(tui_cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(choices))
-    parser = argparse.ArgumentParser()
-
-    assert tui_cli._project_mcp_policy(parser, plan, store) is False
-    assert store.is_trusted(plan) is False
-    assert tui_cli._project_mcp_policy(parser, plan, store) is True
-    assert store.is_trusted(plan) is True
-
-    _write_mcp(project_file, secret="secret-two")
-    changed = prepare_mcp_plan(paths, workspace)
-    with pytest.raises(SystemExit):
-        tui_cli._project_mcp_policy(parser, changed, store)
-
-    output = capsys.readouterr().out
-    assert "API_TOKEN" in output
-    assert "secret-one" not in output
-    assert "secret-two" not in output
-
-
-def test_noninteractive_project_mcp_policy_rejects_untrusted_config(tmp_path: Path, monkeypatch, capsys) -> None:
-    paths = ClientPaths(tmp_path / "home")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
     _write_mcp(workspace / ".mini_agent" / "mcp.toml")
-    plan = prepare_mcp_plan(paths, workspace)
-    monkeypatch.setattr(tui_cli.sys, "stdin", SimpleNamespace(isatty=lambda: False))
 
-    with pytest.raises(SystemExit):
-        tui_cli._project_mcp_policy(argparse.ArgumentParser(), plan, McpTrustStore(paths.mcp_trust_file))
+    app_factory._external_resources(workspace, paths, {})
+    assert started == [()]
 
-    assert "--trust-project-mcp" in capsys.readouterr().err
+    _write_mcp(paths.mcp_file, plaintext=False)
+    app_factory._external_resources(workspace, paths, {})
+    assert len(started) == 2
+    assert len(started[1]) == 1
+    assert started[1][0].name == "demo"
 
 
-def test_trust_project_mcp_command_records_trust_without_starting(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_mcp_trust_store_is_compat_noop(tmp_path: Path) -> None:
     paths = ClientPaths(tmp_path / "home")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    _write_mcp(workspace / ".mini_agent" / "mcp.toml")
-    plan = prepare_mcp_plan(paths, workspace)
+    plan = prepare_mcp_plan(paths)
     store = McpTrustStore(paths.mcp_trust_file)
-    monkeypatch.setattr(tui_cli.sys, "stdin", SimpleNamespace(isatty=lambda: True))
-    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
 
-    assert tui_cli._trust_project_mcp(argparse.ArgumentParser(), plan, store) == 0
     assert store.is_trusted(plan) is True
-    assert "No server was started." in capsys.readouterr().out
+    store.trust(plan)
+    assert paths.mcp_trust_file.exists() is False
 
 
 def test_invalid_external_tool_name_closes_its_manager(monkeypatch) -> None:

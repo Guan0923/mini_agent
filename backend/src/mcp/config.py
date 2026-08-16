@@ -1,19 +1,15 @@
-"""Validated MCP configuration and project trust persistence."""
+"""Validated user-level MCP configuration."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
-import os
 import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
-from backend.configuration import ClientPaths, ConfigurationError, atomic_write_text, section
+from backend.configuration import ClientPaths, ConfigurationError, section
 from backend.tools import ToolError
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -72,29 +68,12 @@ class McpServerConfig:
 
 @dataclass(frozen=True)
 class McpConfigPlan:
-    """A validated, side-effect-free description of layered MCP configuration."""
+    """A validated, side-effect-free description of user MCP configuration."""
 
-    workspace_id: str
-    project_digest: str | None
     global_servers: tuple[McpServerConfig, ...]
-    project_servers: tuple[McpServerConfig, ...]
 
-    @property
-    def has_project_config(self) -> bool:
-        return self.project_digest is not None
-
-    def effective_servers(self, *, include_project: bool) -> tuple[McpServerConfig, ...]:
-        merged = {item.name: item for item in self.global_servers if item.enabled}
-        if include_project:
-            for item in self.project_servers:
-                if item.enabled:
-                    merged[item.name] = item
-                else:
-                    # A project-level disabled entry intentionally masks a
-                    # same-named user server instead of allowing the global
-                    # definition to leak back into the effective plan.
-                    merged.pop(item.name, None)
-        return tuple(merged[name] for name in sorted(merged))
+    def effective_servers(self) -> tuple[McpServerConfig, ...]:
+        return tuple(sorted((item for item in self.global_servers if item.enabled), key=lambda item: item.name))
 
 
 class McpTrustStore:
@@ -104,88 +83,29 @@ class McpTrustStore:
         self.path = path
 
     def is_trusted(self, plan: McpConfigPlan) -> bool:
-        if not plan.has_project_config:
-            return True
-        record = self._read().get(plan.workspace_id)
-        return isinstance(record, dict) and record.get("config_sha256") == plan.project_digest
+        # Project MCP trust is obsolete: only user-level MCP servers exist.
+        return True
 
     def trust(self, plan: McpConfigPlan) -> None:
-        if plan.project_digest is None:
-            return
-        entries = self._read()
-        entries[plan.workspace_id] = {
-            "config_sha256": plan.project_digest,
-            "trusted_at": datetime.now(UTC).isoformat(),
-        }
-        lines: list[str] = []
-        for workspace_id in sorted(entries):
-            record = entries[workspace_id]
-            digest = record.get("config_sha256")
-            trusted_at = record.get("trusted_at")
-            if not isinstance(digest, str) or not isinstance(trusted_at, str):
-                continue
-            lines.extend(
-                (
-                    f"[workspaces.{json.dumps(workspace_id)}]",
-                    f"config_sha256 = {json.dumps(digest)}",
-                    f"trusted_at = {json.dumps(trusted_at)}",
-                    "",
-                )
-            )
-        atomic_write_text(self.path, "\n".join(lines))
+        return
 
     def _read(self) -> dict[str, dict[str, str]]:
-        if not self.path.exists():
-            return {}
-        try:
-            with self.path.open("rb") as handle:
-                values = tomllib.load(handle)
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            raise ConfigurationError(f"Invalid MCP trust store {self.path}: {exc}") from exc
-        workspaces = values.get("workspaces", {})
-        if not isinstance(workspaces, dict):
-            raise ConfigurationError(f"{self.path}: [workspaces] must be a table.")
-        return {
-            str(key): {str(name): str(value) for name, value in record.items()}
-            for key, record in workspaces.items()
-            if isinstance(record, dict)
-        }
+        return {}
 
 
-def prepare_mcp_plan(paths: ClientPaths, workspace: Path) -> McpConfigPlan:
-    """Parse and validate all MCP files without starting a process."""
+def prepare_mcp_plan(paths: ClientPaths, workspace: Path | None = None) -> McpConfigPlan:
+    """Parse and validate the user-level MCP file without starting a process.
+
+    ``workspace`` is accepted for compatibility and ignored: the user-level
+    ``servers.toml`` is the single source of external MCP servers.
+    """
 
     # User-owned MCP files are part of the durable snapshot.  Sensitive
     # values must therefore be references to a process environment or OS
-    # credential store, never plaintext in ``servers.toml``.  Project MCP
-    # remains a separately trusted, backward-compatible input because it is
-    # not copied into the user snapshot.
+    # credential store, never plaintext in ``servers.toml``.
+    del workspace
     global_servers = read_server_configs(paths.mcp_file, reject_plaintext_secrets=True)
-    project_file = workspace / ".mini_agent" / "mcp.toml"
-    project_servers = read_server_configs(project_file)
-    project_digest = _server_digest(project_servers) if project_file.exists() else None
-    return McpConfigPlan(
-        workspace_id=_workspace_id(workspace),
-        project_digest=project_digest,
-        global_servers=global_servers,
-        project_servers=project_servers,
-    )
-
-
-def describe_project_servers(plan: McpConfigPlan) -> str:
-    """Render a review that deliberately omits configured environment values."""
-
-    lines = ["PROJECT MCP REVIEW"]
-    if not plan.project_servers:
-        lines.append("The project MCP file defines no servers.")
-    for server in plan.project_servers:
-        lines.append(f"\nServer: {server.name}")
-        lines.append(f"Command: {server.command}")
-        lines.append(f"Args: {json.dumps(list(server.args), ensure_ascii=False)}")
-        lines.append(f"Cwd: {server.cwd or '(inherited)'}")
-        names = sorted({*(server.env or {}).keys(), *(server.env_refs or {}).keys()})
-        lines.append(f"Environment names: {', '.join(names) if names else '(none)'}")
-    return "\n".join(lines)
+    return McpConfigPlan(global_servers=global_servers)
 
 
 def read_server_configs(path: Path, *, reject_plaintext_secrets: bool = False) -> tuple[McpServerConfig, ...]:
@@ -274,28 +194,6 @@ def _positive_number(values: Mapping[str, object], name: str, default: float) ->
     if not math.isfinite(resolved) or resolved <= 0:
         raise ConfigurationError(f"mcp.{name} must be a finite positive number.")
     return resolved
-
-
-def _workspace_id(workspace: Path) -> str:
-    normalized = os.path.normcase(str(workspace.resolve())).replace("\\", "/")
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-def _server_digest(servers: tuple[McpServerConfig, ...]) -> str:
-    payload = [
-        {
-            "name": server.name,
-            "command": server.command,
-            "args": list(server.args),
-            "cwd": server.cwd,
-            "env": dict(sorted((server.env or {}).items())),
-            "env_refs": dict(sorted((server.env_refs or {}).items())),
-            "enabled": server.enabled,
-        }
-        for server in servers
-    ]
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _parse_secret_reference(value: str) -> str | None:

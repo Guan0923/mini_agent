@@ -109,6 +109,33 @@ export default function DecisionCard({ request, onSubmit }: Props) {
     );
   }
 
+  if (request.kind === "skill") {
+    return (
+      <Card className="decision-card skill-decision" size="small" title={<><SafetyCertificateOutlined /> 项目 Skill 信任审批</>}>
+        <p>{request.message || "这个项目 Skill 尚未被信任。"}</p>
+        <strong className="mono">{request.skill || "unknown-skill"}</strong>
+        {request.description ? <p>{request.description}</p> : null}
+        {request.path ? (
+          <p className="muted">
+            项目路径：<code>{request.path}</code>
+          </p>
+        ) : null}
+        {request.tree_sha256 ? (
+          <p className="muted">
+            目录指纹（SHA-256）：<code>{request.tree_sha256}</code>
+          </p>
+        ) : null}
+        <p className="muted">
+          信任只针对当前目录内容。Skill 中的脚本、引用或资料发生变化后需要重新审批。
+        </p>
+        <Space className="decision-actions" wrap>
+          <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("trust")}>信任这个 Skill</Button>
+          <Button autoInsertSpace={false} loading={submitting} disabled={submitting} onClick={() => void submit("skip")}>本次跳过</Button>
+        </Space>
+      </Card>
+    );
+  }
+
   const shownArguments =
     typeof request.arguments === "string" ? request.arguments : JSON.stringify(request.arguments ?? {}, null, 2);
   return (
