@@ -109,7 +109,9 @@ class ConversationService(ConversationSessionController):
             or "unknown"
         )
         model_config = dict(latest.model) if latest is not None else dict(self.runtime.state.model_snapshot or {})
-        model_config.setdefault("current_model", getattr(config, "model", None) or self.runtime.state.model or "unknown")
+        model_config.setdefault(
+            "current_model", getattr(config, "model", None) or self.runtime.state.model or "unknown"
+        )
         model_config.setdefault("context_length", getattr(config, "context_size", 128000))
         model_config.setdefault("output_length", getattr(config, "max_tokens", 8192))
         model_config.setdefault("reasoning_effort", "medium")
@@ -352,6 +354,14 @@ class ConversationService(ConversationSessionController):
         # ahead of time so it can expose the active dynamic leaf to PATCH;
         # local callers get an equivalent bridge here.
         self._bind_node_bridge(prepared, on_event)
+        # ``mode`` is the initial runtime configuration for this turn.  The
+        # runner refreshes ``RunState.mode`` from ``state.running_mode`` at
+        # dispatch time and the bridge's ``bind_runtime`` derives it from the
+        # latest durable node, so an explicitly requested mode must be
+        # re-applied after both: otherwise a Plan review handoff to an agent
+        # run would silently inherit the previous node's ``plan`` mode.
+        if mode in {"agent", "plan"}:
+            self.runtime.state.running_mode = mode
         try:
             state = self.runner.run(runtime)
         except Exception as exc:
