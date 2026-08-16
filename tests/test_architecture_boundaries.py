@@ -54,6 +54,24 @@ def test_runtime_event_import_does_not_load_application_graph() -> None:
     )
 
 
+def test_jobs_import_does_not_load_outer_layers_or_third_party() -> None:
+    _run_isolated_import(
+        "import backend.jobs",
+        (
+            "backend.runtime",
+            "backend.tools",
+            "backend.mcp",
+            "backend.api",
+            "backend.storage",
+            "backend.sync",
+            "backend.providers",
+            "backend.planning",
+            "requests",
+            "fastapi",
+        ),
+    )
+
+
 def test_deepseek_adapter_does_not_own_http_transport() -> None:
     imports = _package_imports(SOURCE / "providers" / "deepseek")
     assert "requests" not in imports
