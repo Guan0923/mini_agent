@@ -32,6 +32,9 @@ venv/
 logs/
 .mini_agent/*
 .agent-logs/
+/backend_run*.log
+/backend_stdout.log
+/backend_stderr.log
 !.mini_agent/skills/
 !.mini_agent/skills/**
 
