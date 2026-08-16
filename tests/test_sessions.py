@@ -1,12 +1,11 @@
 import sqlite3
 from pathlib import Path
 
-from backend.domain import AgentAction, NodeWriter, RunState, StrategySelection, message_payload
+from backend.domain import AgentAction, NodeWriter, RunState, message_payload
 from backend.runtime import AgentRunner
 from backend.tools import ToolRegistry
-from tui.cli import TerminalApp
-
 from tests.local_store import session_store
+from tui.cli import TerminalApp
 
 
 def test_sqlite_session_store_persists_multi_turn_conversation(tmp_path: Path) -> None:
@@ -105,9 +104,6 @@ class HistoryPlanner:
 
     def __init__(self) -> None:
         self.histories: list[list[dict[str, str]]] = []
-
-    def select_strategy(self, history: list[dict[str, str]], mode: str) -> StrategySelection:
-        return StrategySelection("reactive", "The test uses one direct answer.")
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         self.histories.append(list(history))

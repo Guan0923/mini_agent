@@ -33,8 +33,10 @@ sync = []
 [project.scripts]
 mini-agent-mcp = "backend.mcp.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+# The `src` directory *is* the `backend` package (flat source layout).
+# setuptools' explicit-layout discovery names everything under it `backend.*`.
+[tool.setuptools]
+package-dir = {backend = "src"}
 
 [tool.setuptools.package-data]
 "backend.planning.prompts" = ["*.md"]

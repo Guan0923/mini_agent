@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from backend.domain import FAILED_TERMINAL_MESSAGE, AssistantMessage, PlanningError, ToolMessage
 from backend.observability import EventFanout, JsonlRunLogger
 from backend.planning import LLMPlanner, RuleBasedPlanner
@@ -29,14 +30,6 @@ class StaticCompletionClient:
             model="test-model",
             finish_reason="stop",
         )
-
-
-class SequencedCompletionClient:
-    def __init__(self, contents: list[str]) -> None:
-        self._contents = iter(contents)
-
-    def run(self, runtime) -> PreparedResponse:
-        return PreparedResponse(AssistantMessage(content=next(self._contents)))
 
 
 class ReasoningPlanner:
@@ -75,6 +68,22 @@ class FailingCompletionClient:
         raise PlanningError("provider token=visible-secret failed")
 
 
+class ToolThenAnswerClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self, runtime) -> PreparedResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return PreparedResponse(
+                AssistantMessage(
+                    content="I will use a tool.",
+                    tool_messages=[ToolMessage(name="echo", call_id="call_echo", arguments={"value": "ok"})],
+                )
+            )
+        return PreparedResponse(AssistantMessage(content="model answer"))
+
+
 def test_session_runtime_messages_survive_restart_and_match_run_state(tmp_path: Path) -> None:
     store = session_store(tmp_path / "store")
     service = ConversationService(AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)), store)
@@ -99,7 +108,7 @@ def test_session_runtime_messages_survive_restart_and_match_run_state(tmp_path: 
 
 def test_unexpected_failure_still_ends_the_persisted_runtime_trace(tmp_path: Path) -> None:
     store = session_store(tmp_path / "store")
-    service = ConversationService(AgentRunner(ExplodingPlanner(), ToolRegistry(), strategy="reactive"), store)
+    service = ConversationService(AgentRunner(ExplodingPlanner(), ToolRegistry()), store)
 
     with pytest.raises(RuntimeError, match="unexpected failure"):
         service.run_task("fail", mode="agent")
@@ -139,9 +148,11 @@ def test_restored_session_uses_the_current_runtime_message_policy(tmp_path: Path
 def test_checkpoint_and_jsonl_share_the_same_ordered_runtime_timestamps(tmp_path: Path) -> None:
     checkpoints = session_store(tmp_path / "checkpoints")
     logger = JsonlRunLogger(tmp_path / "logs")
-    runner = AgentRunner(ReasoningPlanner(), ToolRegistry(), strategy="reactive", checkpoints=checkpoints)
+    runner = AgentRunner(ReasoningPlanner(), ToolRegistry(), checkpoints=checkpoints)
     session = checkpoints.create_session("think")
-    runtime = runner.new_runtime(task="think", session_id=session.session_id, on_event=logger, runtime_store=checkpoints)
+    runtime = runner.new_runtime(
+        task="think", session_id=session.session_id, on_event=logger, runtime_store=checkpoints
+    )
 
     state = runner.run(runtime)
     saved = checkpoints.load_runtime(session.session_id)
@@ -162,7 +173,7 @@ def test_checkpoint_and_jsonl_share_the_same_ordered_runtime_timestamps(tmp_path
 
 def test_model_exchange_messages_are_logged_as_normalized_request_and_response(tmp_path: Path) -> None:
     planner = LLMPlanner(StaticCompletionClient(provider_options={"deepseek": {"raw": "not logged"}}), [], [])
-    runner = AgentRunner(planner, ToolRegistry(), strategy="reactive")
+    runner = AgentRunner(planner, ToolRegistry())
 
     state = runner.run(runner.new_runtime(task="say hello"))
 
@@ -179,13 +190,9 @@ def test_model_exchange_messages_are_logged_as_normalized_request_and_response(t
 
 
 def test_each_model_call_receives_a_distinct_exchange_id() -> None:
-    planner = LLMPlanner(
-        SequencedCompletionClient(['{"strategy":"reactive","reason":"Direct answer."}', "model answer"]),
-        [],
-        [],
-    )
-    runner = AgentRunner(planner, ToolRegistry())
-    state = runner.run(runner.new_runtime(task="say hello"))
+    planner = LLMPlanner(ToolThenAnswerClient(), [], [])
+    runner = AgentRunner(planner, ToolRegistry([Tool("echo", "Echoes a value.", lambda value: value)]))
+    state = runner.run(runner.new_runtime(task="use a tool"))
 
     exchange_ids = [
         message.data["exchange_id"] for message in state.runtime_messages if message.kind == "model_request"
@@ -196,7 +203,7 @@ def test_each_model_call_receives_a_distinct_exchange_id() -> None:
 
 def test_model_request_failure_is_recorded_without_secret_content() -> None:
     planner = LLMPlanner(FailingCompletionClient(), [], [])
-    runner = AgentRunner(planner, ToolRegistry(), strategy="reactive", log_full_messages=False)
+    runner = AgentRunner(planner, ToolRegistry(), log_full_messages=False)
 
     state = runner.run(runner.new_runtime(task="fail"))
 
@@ -209,7 +216,7 @@ def test_model_request_failure_is_recorded_without_secret_content() -> None:
 def test_failed_run_closes_canonical_history_and_survives_restart(tmp_path: Path) -> None:
     store = session_store(tmp_path / "store")
     planner = LLMPlanner(FailingCompletionClient(), [], [])
-    service = ConversationService(AgentRunner(planner, ToolRegistry(), strategy="reactive"), store)
+    service = ConversationService(AgentRunner(planner, ToolRegistry()), store)
 
     state = service.run_task("fail", mode="agent")
 
@@ -231,7 +238,7 @@ def test_failed_run_closes_canonical_history_and_survives_restart(tmp_path: Path
 
 
 def test_fail_run_records_the_same_assistant_error_only_once() -> None:
-    runtime = AgentRunner(RuleBasedPlanner(), ToolRegistry(), strategy="reactive").new_runtime(task="fail")
+    runtime = AgentRunner(RuleBasedPlanner(), ToolRegistry()).new_runtime(task="fail")
 
     fail_run(runtime, "Decision failed.")
     fail_run(runtime, "Decision failed.")
@@ -247,7 +254,7 @@ def test_fail_run_records_the_same_assistant_error_only_once() -> None:
 def test_summary_mode_redacts_secret_message_content_everywhere_in_the_audit_trace(tmp_path: Path) -> None:
     logger = JsonlRunLogger(tmp_path / "logs", include_full_messages=False)
     planner = LLMPlanner(StaticCompletionClient("token=visible-secret"), [], [])
-    runner = AgentRunner(planner, ToolRegistry(), strategy="reactive", log_full_messages=False)
+    runner = AgentRunner(planner, ToolRegistry(), log_full_messages=False)
     runtime = runner.new_runtime(task="API_KEY=visible-secret", on_event=logger)
 
     state = runner.run(runtime)
@@ -288,8 +295,6 @@ def test_backend_runtime_has_no_database_url_configuration() -> None:
 
 class StreamingCompletionClient:
     def run(self, runtime) -> PreparedResponse:
-        if runtime.exchange.operation == "strategy":
-            return PreparedResponse(AssistantMessage(content='{"strategy":"reactive","reason":"Direct response."}'))
         assert runtime.exchange.on_reasoning is not None
         assert runtime.exchange.on_content is not None
         runtime.exchange.on_reasoning("Think.")
@@ -305,7 +310,7 @@ def test_response_stream_is_renderable_but_not_persisted_chunk_by_chunk(tmp_path
     events = []
     logger = JsonlRunLogger(tmp_path / "logs")
     planner = LLMPlanner(StreamingCompletionClient(), [], [])
-    runner = AgentRunner(planner, ToolRegistry(), strategy="auto")
+    runner = AgentRunner(planner, ToolRegistry())
     runtime = runner.new_runtime(
         task="say hello",
         on_event=EventFanout([events.append, logger]),
@@ -341,7 +346,6 @@ def test_assistant_message_bounds_non_stream_content_before_tool_execution_and_i
     runner = AgentRunner(
         OneToolThenAnswerPlanner(),
         ToolRegistry([Tool("echo", "Echoes a value.", lambda value: value)]),
-        strategy="reactive",
     )
 
     state = runner.run(runner.new_runtime(task="use a tool", on_event=events.append))
@@ -381,7 +385,6 @@ def test_tool_lifecycle_events_are_correlated_by_call_id() -> None:
     runner = AgentRunner(
         OneToolThenAnswerPlanner(),
         ToolRegistry([Tool("echo", "Echoes a value.", lambda value: value)]),
-        strategy="reactive",
     )
 
     runner.run(runner.new_runtime(task="use a tool", on_event=events.append))
@@ -401,7 +404,7 @@ class ExplodingStreamingPlanner:
 
 def test_unexpected_failure_closes_open_response_stream() -> None:
     events = []
-    runner = AgentRunner(ExplodingStreamingPlanner(), ToolRegistry(), strategy="reactive")
+    runner = AgentRunner(ExplodingStreamingPlanner(), ToolRegistry())
     runtime = runner.new_runtime(task="fail while streaming", on_event=events.append)
 
     with pytest.raises(RuntimeError, match="stream interrupted"):

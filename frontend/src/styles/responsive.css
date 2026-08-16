@@ -11,6 +11,10 @@
     padding: 0 12px 14px;
   }
 
+  .composer.has-todo {
+    padding-top: 46px;
+  }
+
   .composer-toolbar {
     left: 12px;
     right: 58px;

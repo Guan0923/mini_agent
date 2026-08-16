@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./ChatPage";
@@ -395,5 +395,56 @@ describe("ChatPage run lifecycle", () => {
     expect(messages).toBeInTheDocument();
     expect(timeline).toBeInTheDocument();
     expect(timeline?.parentElement).toBe(content);
+  });
+
+  it("renders the session todo panel merged inside the composer", () => {
+    const initial: Conversation = {
+      id: "conversation-todo",
+      title: "任务清单",
+      messages: [
+        { id: "user-todo", role: "user", content: "做多步任务", events: [] },
+        {
+          id: "assistant-todo",
+          role: "assistant",
+          content: "",
+          events: [
+            {
+              kind: "tool_call",
+              message: "todo_write",
+              data: {
+                tool: "todo_write",
+                call_id: "call-todo",
+                arguments: {
+                  todos: [
+                    { content: "探索仓库", status: "in_progress" },
+                    { content: "写测试", status: "pending" },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const { container } = render(<Harness initial={initial} />);
+
+    const header = screen.getByText("任务清单");
+    expect(header.closest(".composer")).not.toBeNull();
+    expect(header.closest(".todo-panel")).not.toBeNull();
+    expect(header.closest(".composer-todo-anchor")).not.toBeNull();
+    expect(header.closest(".composer")?.className).toContain("has-todo");
+    expect(screen.getByText("0/2 完成")).toBeTruthy();
+
+    fireEvent.click(header.closest(".ant-collapse-header")!);
+    expect(screen.getByText("探索仓库")).toBeTruthy();
+    expect(screen.getByText("写测试")).toBeTruthy();
+  });
+
+  it("hides the todo panel when the conversation has no todo list", () => {
+    const { container } = render(<Harness />);
+
+    expect(screen.queryByText("任务清单")).toBeNull();
+    expect(container.querySelector(".composer")?.className).not.toContain("has-todo");
+    expect(container.querySelector(".composer-todo-anchor")).toBeNull();
   });
 });

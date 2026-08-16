@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from backend.api.user_data import copy_session_files, user_paths, user_root, user_workspace
 from backend.configuration import ClientPaths, ConfigurationError
 

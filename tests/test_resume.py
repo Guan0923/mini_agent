@@ -1,19 +1,15 @@
-import json
 from pathlib import Path
 
 import pytest
+
 from backend.domain import (
-    AgentAction,
     AssistantMessage,
-    ExecutionPlan,
-    PlanStep,
     RecoveryCheckpoint,
     RunProvenance,
     RunState,
-    StepEvaluation,
     ToolMessage,
 )
-from backend.runtime import AgentRunner, ConversationService, RuntimeEvent
+from backend.runtime import AgentRunner, ConversationService
 from backend.runtime.conversation.recovery import reconstruct_attempt
 from backend.runtime.core.context import RuntimeState
 from backend.runtime.core.contracts import InterruptDecision
@@ -45,37 +41,6 @@ class FinalPlanner:
         return AssistantMessage(content="Resumed.")
 
 
-class ResumeDynamicPlanner:
-    name = "resume-dynamic"
-
-    def __init__(self) -> None:
-        self.replan_reasons: list[str] = []
-        self.replan_statuses: list[str] = []
-
-    def create_plan(self, runtime) -> ExecutionPlan:
-        return ExecutionPlan(
-            goal="Perform one side effect safely.",
-            steps=[
-                PlanStep(
-                    id="effect",
-                    description="Create the effect once",
-                    action=AgentAction(type="tool_call", tool="side_effect", arguments={}),
-                )
-            ],
-        )
-
-    def evaluate_step(self, runtime) -> StepEvaluation:
-        return StepEvaluation("continue", "The step completed.")
-
-    def replan(self, runtime) -> ExecutionPlan:
-        plan = runtime.exchange.context["plan"]
-        reason = runtime.exchange.context["reason"]
-        assert plan.steps[0].status in {"failed", "indeterminate"}
-        self.replan_reasons.append(reason)
-        self.replan_statuses.append(plan.steps[0].status)
-        return ExecutionPlan(goal="Inspect instead of replaying.", steps=[], final_answer="Recovered safely.")
-
-
 class PlanHandoffPlanner:
     name = "plan-handoff"
 
@@ -98,7 +63,6 @@ def shared_service(tmp_path: Path, planner, tools: ToolRegistry):
     runner = AgentRunner(
         planner,
         tools,
-        strategy="reactive",
         checkpoints=store,
         workspace_root=str(tmp_path.resolve()),
     )
@@ -188,82 +152,6 @@ def test_cooperative_pause_is_cancelled_resumable_and_preserves_workflow_identit
     assert transition_reason == "run_cancelled"
     assert len(attempt_starts) == 2
     assert attempt_starts[0][0] != attempt_starts[1][0]
-
-
-def test_dynamic_resume_replans_indeterminate_step_without_replaying_tool(tmp_path: Path) -> None:
-    effect = tmp_path / "dynamic-effect.txt"
-
-    def interrupt_after_effect() -> str:
-        effect.write_text(effect.read_text() + "x" if effect.exists() else "x")
-        raise KeyboardInterrupt
-
-    planner = ResumeDynamicPlanner()
-    tools = ToolRegistry([Tool("side_effect", "Create one side effect.", interrupt_after_effect)])
-    store = session_store(tmp_path / "store")
-    runner = AgentRunner(
-        planner,
-        tools,
-        strategy="dynamic_replan",
-        checkpoints=store,
-        workspace_root=str(tmp_path.resolve()),
-    )
-    service = ConversationService(runner, store)
-
-    with pytest.raises(KeyboardInterrupt):
-        service.run_task("perform dynamic work", mode="agent")
-    assert service.active_session is not None
-
-    resumed = ConversationService(runner, store).resume_session(
-        service.active_session.session_id,
-        interrupt=lambda _request: InterruptDecision("continue"),
-    )
-
-    assert resumed is not None and resumed.status == "completed"
-    assert effect.read_text() == "x"
-    assert planner.replan_reasons and "indeterminate" in planner.replan_reasons[0]
-    assert planner.replan_statuses == ["indeterminate"]
-    assert resumed.plan_history[-1].steps[0].status == "indeterminate"
-
-
-def test_dynamic_resume_replans_step_that_never_reached_tool_call(tmp_path: Path) -> None:
-    effect = tmp_path / "not-called.txt"
-
-    def side_effect() -> str:
-        effect.write_text("called")
-        return "called"
-
-    planner = ResumeDynamicPlanner()
-    tools = ToolRegistry([Tool("side_effect", "Create one side effect.", side_effect)])
-    store = session_store(tmp_path / "store")
-    runner = AgentRunner(
-        planner,
-        tools,
-        strategy="dynamic_replan",
-        checkpoints=store,
-        workspace_root=str(tmp_path.resolve()),
-    )
-    service = ConversationService(runner, store)
-
-    def interrupt_after_step_started(event: RuntimeEvent) -> None:
-        if event.kind == "plan_progress" and event.data.get("trigger") == "step_started":
-            raise KeyboardInterrupt
-
-    with pytest.raises(KeyboardInterrupt):
-        service.run_task("stop before the tool call", mode="agent", on_event=interrupt_after_step_started)
-    assert service.active_session is not None
-    preview = service.prepare_resume(service.active_session.session_id)
-    assert preview.indeterminate_call_ids == ()
-    assert not effect.exists()
-
-    resumed = ConversationService(runner, store).resume_session(
-        service.active_session.session_id,
-        interrupt=lambda _request: InterruptDecision("continue"),
-    )
-
-    assert resumed is not None and resumed.status == "completed"
-    assert not effect.exists()
-    assert planner.replan_statuses == ["failed"]
-    assert "fresh decision" in planner.replan_reasons[0]
 
 
 def test_plan_review_handoff_creates_new_workflow_with_parent_source(tmp_path: Path) -> None:
@@ -409,7 +297,6 @@ def test_resume_without_id_uses_latest_session_and_rejects_workspace_change(tmp_
     other_runner = AgentRunner(
         FinalPlanner(),
         ToolRegistry(),
-        strategy="reactive",
         checkpoints=store,
         workspace_root=str((tmp_path / "moved").resolve()),
     )

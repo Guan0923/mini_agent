@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from textual.app import App, ComposeResult
+
 from tui.latex import LatexMarkdown, latex_markdown_parser, latex_to_terminal_text
 from tui.rendering.transcript import MarkdownBody
 from tui.screens.history import HistoryScreen

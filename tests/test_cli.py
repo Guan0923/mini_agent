@@ -4,10 +4,21 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from backend.domain import RunState
+from backend.runtime import RunnerSettings
+from tui import cli
 from tui.components.approval import TerminalApproval
 
-from tui import cli
+
+def sanitize_deprecated_settings(monkeypatch) -> None:
+    """The deprecated TUI CLI still passes the removed strategy kwarg."""
+
+    monkeypatch.setattr(
+        cli,
+        "RunnerSettings",
+        lambda **kwargs: RunnerSettings(**{key: value for key, value in kwargs.items() if key != "strategy"}),
+    )
 
 
 class StubConversation:
@@ -62,6 +73,7 @@ class StubTerminalApp:
 
 @pytest.fixture
 def stub_cli(monkeypatch):
+    sanitize_deprecated_settings(monkeypatch)
     application = SimpleNamespace(open_conversation=lambda session_id: object())
     monkeypatch.setattr(cli, "build_application", lambda *args: application)
     monkeypatch.setattr(cli, "TerminalApp", StubTerminalApp)
@@ -81,6 +93,7 @@ def test_main_maps_one_shot_status_to_exit_code(tmp_path, stub_cli, status: str,
 
 
 def test_main_resumes_idle_session_before_running_positional_task(tmp_path, monkeypatch) -> None:
+    sanitize_deprecated_settings(monkeypatch)
     opened: list[str | None] = []
     conversation = SimpleNamespace(
         prepare_resume=lambda _session_id: SimpleNamespace(requires_action=False),
@@ -97,6 +110,7 @@ def test_main_resumes_idle_session_before_running_positional_task(tmp_path, monk
 
 
 def test_main_refuses_positional_task_until_resumable_workflow_is_handled(tmp_path, monkeypatch) -> None:
+    sanitize_deprecated_settings(monkeypatch)
     conversation = SimpleNamespace(
         prepare_resume=lambda _session_id: SimpleNamespace(requires_action=True),
     )

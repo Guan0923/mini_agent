@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from backend.domain import (
     AssistantMessage,
     RunHandoff,
@@ -123,7 +124,6 @@ def test_unknown_explicit_skill_reference_is_rejected_before_model_call() -> Non
     runner = AgentRunner(
         planner,
         ToolRegistry(),
-        strategy="reactive",
         skill_catalog=SkillCatalog((definition("demo"),)),
     )
 
@@ -139,7 +139,6 @@ def test_unknown_explicit_skill_is_rejected_when_catalog_is_empty() -> None:
     runner = AgentRunner(
         planner,
         ToolRegistry(),
-        strategy="reactive",
         skill_catalog=SkillCatalog(()),
     )
 
@@ -277,7 +276,6 @@ def test_explicit_skill_bypasses_automatic_selection() -> None:
     runner = AgentRunner(
         planner,
         ToolRegistry(),
-        strategy="reactive",
         skill_catalog=catalog,
     )
 
@@ -294,7 +292,7 @@ def test_explicit_skill_bypasses_automatic_selection() -> None:
 
 def test_runner_without_skills_does_not_call_selector() -> None:
     planner = SelectingPlanner(("unused",))
-    runner = AgentRunner(planner, ToolRegistry(), strategy="reactive", skill_catalog=SkillCatalog())
+    runner = AgentRunner(planner, ToolRegistry(), skill_catalog=SkillCatalog())
 
     state = runner.run(runner.new_runtime(task="hello"))
 
@@ -308,7 +306,6 @@ def test_automatic_skill_selection_has_a_separate_budget_counter() -> None:
     runner = AgentRunner(
         planner,
         ToolRegistry(),
-        strategy="reactive",
         skill_catalog=SkillCatalog((definition("demo"),)),
         skill_auto_select=True,
     )
@@ -327,7 +324,6 @@ def test_explicit_skill_does_not_require_a_selector() -> None:
     runner = AgentRunner(
         planner,
         ToolRegistry(),
-        strategy="reactive",
         skill_catalog=SkillCatalog((definition("demo"),)),
     )
 
@@ -369,7 +365,6 @@ def test_llm_skill_selection_uses_only_current_turn() -> None:
     runtime = AgentRunner(
         planner,
         ToolRegistry(),
-        strategy="reactive",
         skill_catalog=catalog,
     ).new_runtime(task="Use demo now.", messages=history)
 
@@ -389,7 +384,7 @@ def test_llm_selection_sees_metadata_then_active_body_is_injected(mode: str) -> 
     )
     catalog = SkillCatalog((definition("demo", "Use for reports."),))
     planner = LLMPlanner(client, [], [])
-    runner = AgentRunner(planner, ToolRegistry(), strategy="reactive", skill_catalog=catalog)
+    runner = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog)
     runtime = runner.new_runtime(task="Prepare a report.", mode=mode)
 
     selection = planner.select_skills(runtime)
@@ -428,7 +423,7 @@ def test_handoff_skills_skip_reselection() -> None:
     planner = SelectingPlanner(("other",))
     inherited = definition("demo").snapshot()
     catalog = SkillCatalog((definition("demo"), definition("other")))
-    runner = AgentRunner(planner, ToolRegistry(), strategy="reactive", skill_catalog=catalog)
+    runner = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog)
     runtime = runner.new_runtime(task="Implement", active_skills=[inherited])
 
     state = runner.run(runtime)

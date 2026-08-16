@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from backend.api.sessions.projection import project_node_transcript
 from backend.configuration import ClientPaths
 from backend.domain.runtime_state import (

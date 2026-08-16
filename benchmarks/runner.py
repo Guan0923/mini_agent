@@ -40,7 +40,6 @@ def build_metrics(collector: EventCollector, state, duration_ms: float) -> RunMe
         model_calls=int(finished.get("model_calls", state.model_turns) or 0),
         tool_calls=int(finished.get("tool_calls", len(state.actions)) or 0),
         retries=int(finished.get("retries", 0) or 0),
-        replans=int(finished.get("replans", state.replan_count) or 0),
         prompt_tokens=collector.prompt_tokens,
         completion_tokens=collector.completion_tokens,
         total_tokens=collector.total_tokens,

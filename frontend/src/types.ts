@@ -23,6 +23,13 @@ export interface ToolEvent {
   data?: Record<string, unknown>;
 }
 
+export type TodoStatus = "pending" | "in_progress" | "completed";
+
+export interface TodoItem {
+  content: string;
+  status: TodoStatus;
+}
+
 export type RuntimeNodeStatus = "failed" | "success" | "abort";
 export type RuntimeNodeDataType = "message" | "compaction" | "root";
 export type ThinkingMode = "enable" | "disable";

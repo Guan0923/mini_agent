@@ -5,7 +5,7 @@
 - **对话**：和 mini-agent 聊天，实时看它的工具调用（读文件、跑命令、Web 搜索等）和流式回答
 - **Benchmark 成绩单**：在网页上跑 benchmark 任务，看每道题的分数、耗时、token 和判卷明细
 
-后端是 FastAPI（`backend/src/backend/api/`），通过 SSE 把 agent 的运行事件实时推给前端。未登录用户看到 Three.js 粒子海洋首页；登录后进入隔离的聊天与 Benchmark 空间。
+后端是 FastAPI（`backend/src/api/`），通过 SSE 把 agent 的运行事件实时推给前端。未登录用户看到 Three.js 粒子海洋首页；登录后进入隔离的聊天与 Benchmark 空间。
 
 ## 本地启动
 
@@ -64,7 +64,7 @@ cookie_secure = true
 ## 结构
 
 ```
-backend/src/backend/api/         FastAPI 后端（认证 / app / chat / benchmark）
+backend/src/api/                FastAPI 后端（认证 / app / chat / benchmark）
 frontend/                React + Vite + TypeScript 前端
   src/components/OceanScene.tsx  GPU 粒子海洋与鼠标波浪
   src/pages/HomePage.tsx         未登录首页

@@ -42,3 +42,8 @@ webapp-data/
 
 # Local desktop task metadata
 .reasonix/
+
+# Local runtime artifacts
+.dsh-token-usage.json
+.backend.restart-*.log
+.frontend.restart-*.log

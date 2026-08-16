@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from backend.tools import Tool, ToolError, ToolRegistry, WorkspaceCommand
 
 

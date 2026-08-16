@@ -2,7 +2,8 @@ import json
 from pathlib import Path
 
 import pytest
-from backend.domain import AssistantMessage, StrategySelection, ToolMessage, UserMessage
+
+from backend.domain import AssistantMessage, ToolMessage, UserMessage
 from backend.runtime import AgentRunner, ConversationService
 from backend.runtime.conversation.user_input import (
     REQUEST_USER_INPUT_NAME,
@@ -104,9 +105,6 @@ class QuestionThenPlanPlanner:
             )
         self.agent_histories.append(list(runtime.state.messages))
         return AssistantMessage(content="Implemented.")
-
-    def select_strategy(self, runtime):
-        return StrategySelection("reactive", "Execute from the approved conversation history.")
 
 
 class ScriptedPlanPlanner(QuestionThenPlanPlanner):

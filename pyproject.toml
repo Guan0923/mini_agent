@@ -41,3 +41,8 @@ extend-exclude = [".pip-tmp", ".pytest-tmp-*", ".pytest-local-*", "pytest-cache-
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# Multi-package workspace: backend/tui packages live in flat src dirs, so ruff
+# cannot infer first-party status from the file's own package path.
+known-first-party = ["backend", "tui"]

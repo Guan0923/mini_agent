@@ -6,7 +6,7 @@ Mini-Agent 是一个面向学习与实验的 Python Agent Harness。它用可观
 
 ## 已实现能力
 
-- **执行与规划**：支持 `reactive`、`dynamic_replan` 和自动策略选择；独立的只读 Plan mode 可调研、提问并提交 Plan Review。
+- **执行与规划**：Agent 直接基于对话与工具结果自由决策；独立的只读 Plan mode 可调研、提问并提交 Plan Review。
 - **安全工具**：提供 workspace-confined 的文件读取、搜索、写入和精确编辑，以及网页搜索、受 SSRF 防护的网页抓取和跨平台命令执行；写入、命令和联网操作需要审批。
 - **分层 Skills**：合并 `~/.mini_agent/<user_id>/skills` 与项目 `.mini_agent/skills`，同名时项目版本完整覆盖全局版本。
 - **并发 Subagents**：父 Agent 可把独立工作交给多个子 Agent 并发执行；批次结果持久化，同路径写入和命令执行有进程内协调。
@@ -45,7 +45,6 @@ mini-agent --resume session_xxx
 ```text
 --workspace PATH
 --planner llm|rule
---strategy auto|reactive|dynamic_replan
 --max-tool-calls N
 --log-dir PATH
 --resume SESSION_ID
@@ -183,19 +182,19 @@ Browser/TUI <-> loopback backend API; cloud never owns Agent Runtime or workspac
 JSONL      <-> ~/.mini_agent-cache/logs/<user_id> redacted diagnostics
 ```
 
-- `src/backend/domain/`：provider-neutral message、plan、session、skill 和 run state。
-- `src/backend/planning/`：规则/LLM planner、上下文管理、模型请求生命周期和结构化输出。
-- `src/backend/runtime/`：应用装配、conversation、workflow、Plan mode、hooks、恢复和 Subagent 协调。
-- `src/backend/providers/`：通用 HTTP/SSE transport、Provider 门面和 DeepSeek wire adapter。
-- `src/backend/tools/`：ToolRegistry、JSON Schema、文件、网页、命令和 delegation tool。
-- `src/backend/mcp/`：只读 MCP adapter 与分层外部 stdio MCP client。
-- `src/backend/storage/sqlite.py`、`src/backend/sync/`：本地会话存储、同步客户端和快照端口；`src/backend/cloud/`：cloud HTTPS client 与 HTTP snapshot adapter。
+- `backend/src/domain/`：provider-neutral message、plan、session、skill 和 run state。
+- `backend/src/planning/`：规则/LLM planner、上下文管理、模型请求生命周期和结构化输出。
+- `backend/src/runtime/`：应用装配、conversation、workflow、Plan mode、hooks、恢复和 Subagent 协调。
+- `backend/src/providers/`：通用 HTTP/SSE transport、Provider 门面和 DeepSeek wire adapter。
+- `backend/src/tools/`：ToolRegistry、JSON Schema、文件、网页、命令和 delegation tool。
+- `backend/src/mcp/`：只读 MCP adapter 与分层外部 stdio MCP client。
+- `backend/src/storage/sqlite.py`、`backend/src/sync/`：本地会话存储、同步客户端和快照端口；`backend/src/cloud/`：cloud HTTPS client 与 HTTP snapshot adapter。
 - `cloud/src/cloud/`：独立账户、设备授权、密钥封装和 PostgreSQL snapshot API。
-- `src/backend/observability/`：事件扇出、JSONL 记录与脱敏。
-- `src/tui/`：CLI、Textual 组件、screen、rendering、view 和 widget。
-- `src/frontend/`：未来浏览器前端占位；只能通过版本化 backend API 通信。
+- `backend/src/observability/`：事件扇出、JSONL 记录与脱敏。
+- `tui/src/`：CLI、Textual 组件、screen、rendering、view 和 widget（**已废弃**，不再投入新开发）。
+- `frontend/`：浏览器前端；只能通过版本化 backend API 通信。
 
-依赖保持向内：domain 不依赖外层；provider 不导入 TUI 或 storage；TUI 只组合 runtime 服务并渲染 `RuntimeEvent`。详细契约见 [docs/architecture.md](docs/architecture.md)。
+依赖保持向内：domain 不依赖外层；provider 不导入 storage；web 前端只通过 backend API 通信（TUI 已废弃，仅作遗留入口）。详细契约见 [docs/architecture.md](docs/architecture.md)。
 
 ## 开发与验证
 

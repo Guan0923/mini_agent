@@ -11,7 +11,6 @@ class RunMetrics:
     model_calls: int
     tool_calls: int
     retries: int
-    replans: int
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int

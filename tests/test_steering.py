@@ -39,7 +39,6 @@ def test_steering_after_model_response_discards_stale_tool_call() -> None:
     runner = AgentRunner(
         SteeringPlanner(),
         ToolRegistry([Tool("work", "Work", lambda: calls.append("called") or "done")]),
-        strategy="reactive",
     )
     runtime = runner.new_runtime(task="start")
     runtime.services.steering = sequence_handler([[], ["change direction"], [], []])
@@ -67,7 +66,6 @@ def test_cancellation_after_model_response_discards_stale_tool_call() -> None:
     runner = AgentRunner(
         CancellingPlanner(),
         ToolRegistry([Tool("work", "Work", lambda: calls.append("called") or "done")]),
-        strategy="reactive",
     )
     runtime = runner.new_runtime(task="start")
     runtime.services.cancel_requested = lambda: cancel_requested
@@ -114,7 +112,6 @@ def test_cancellation_during_tool_keeps_result_and_skips_remaining_tools() -> No
                 Tool("second", "Second", lambda: calls.append("second") or "second result"),
             ]
         ),
-        strategy="reactive",
     )
     runtime = runner.new_runtime(task="start")
     runtime.services.cancel_requested = lambda: cancel_requested
@@ -143,7 +140,7 @@ def test_conversation_persists_cooperatively_cancelled_run(tmp_path: Path) -> No
             return AssistantMessage(content="stale response")
 
     service = ConversationService(
-        AgentRunner(CancellingPlanner(), ToolRegistry([]), strategy="reactive"),
+        AgentRunner(CancellingPlanner(), ToolRegistry([])),
         store,
     )
 
@@ -192,7 +189,6 @@ def test_steering_during_tool_keeps_result_and_stops_remaining_actions() -> None
                 Tool("second", "Second", lambda: calls.append("second") or "second result"),
             ]
         ),
-        strategy="reactive",
     )
     runtime = runner.new_runtime(task="start")
     runtime.services.steering = drain
@@ -216,7 +212,7 @@ def test_steering_during_tool_keeps_result_and_stops_remaining_actions() -> None
 def test_conversation_persists_merged_in_run_messages(tmp_path: Path) -> None:
     store = session_store(tmp_path / "store")
     service = ConversationService(
-        AgentRunner(SteeringPlanner(), ToolRegistry([Tool("work", "Work", lambda: "done")]), strategy="reactive"),
+        AgentRunner(SteeringPlanner(), ToolRegistry([Tool("work", "Work", lambda: "done")])),
         store,
     )
     handler = sequence_handler([[], ["first update", "second update"], [], []])

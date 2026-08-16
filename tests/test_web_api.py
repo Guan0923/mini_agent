@@ -4,6 +4,8 @@ import threading
 import time
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from backend.api.app import create_app
 from backend.api.chat import ChatRequest, ResumeRequest, _reasoning_parameters
 from backend.api.interrupts import make_interactive_interrupt, registry
@@ -16,7 +18,6 @@ from backend.runtime.core.contracts import InterruptRequest, QuestionOption, Use
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.storage.auth import LocalAuthStore
 from backend.storage.sqlite import SQLiteSessionStore
-from fastapi.testclient import TestClient
 
 
 def resolve_once(request: InterruptRequest, choice: str, **values):

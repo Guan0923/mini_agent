@@ -39,16 +39,16 @@ Local backend `backend.cloud.CloudClient` <-> versioned cloud HTTPS API <-> Post
 
 `AgentRuntime` is session-scoped and intentionally split into three parts:
 
-- `RuntimeState` is JSON-serializable. It owns typed messages, safe model settings, tool specifications, the active `RunState`, plan state, latest usage, pending assistant/tool progress, and completed run summaries.
+- `RuntimeState` is JSON-serializable. It owns typed messages, safe model settings, tool specifications, the active `RunState`, latest usage, pending assistant/tool progress, and completed run summaries.
 - `RuntimeServices` contains process-local dependencies such as the planner, tool handlers, stores, event sinks, approval and steering callbacks, Subagent coordinator, the clock, and ID generation. Secrets and callables are never serialized.
 - `RuntimeServices` also owns the process-local `HookManager`. Synchronous run, model, and tool hooks are rebound after session restoration and never serialized into checkpoints.
 - `RuntimeExchange` contains one transient model operation: request mode, allowed tools, request payload, raw response or SSE iterator, prepared response, and reasoning callback.
 
 The formal execution entry points (`AgentRunner.run`, planner capabilities, workflows, `ToolStepExecutor.execute`, and provider preparation functions) take only `AgentRuntime`. A deprecated `LegacyAgentRunner` and planner capability adapters isolate pre-Runtime embedding APIs.
 
-One session permits one active turn. Runtime snapshots are saved at stable transitions, including model responses, tool results, plan changes, and turn completion. SSE reasoning deltas are merged into one ordered durable `thinking` message; raw HTTP objects remain transient.
+One session permits one active turn. Runtime snapshots are saved at stable transitions, including model responses, tool results, and turn completion. SSE reasoning deltas are merged into one ordered durable `thinking` message; raw HTTP objects remain transient.
 
-The runtime retains a non-blocking process-local steering callback for embedding callers. Workflows drain and merge steering only after strategy/model responses and before or after individual tool or plan steps; an operation already in progress may finish before stale work is skipped and the new `UserMessage` is checkpointed. The Textual TUI does not bind running input to this callback: it keeps messages in a process-local next-turn queue and starts one merged follow-up run after the active run finishes or is cooperatively cancelled with Esc. Approval prompts remain the exclusive terminal input state while a review is pending.
+The runtime retains a non-blocking process-local steering callback for embedding callers. Workflows drain and merge steering only after model responses and before or after individual tool steps; an operation already in progress may finish before stale work is skipped and the new `UserMessage` is checkpointed. The Textual TUI does not bind running input to this callback: it keeps messages in a process-local next-turn queue and starts one merged follow-up run after the active run finishes or is cooperatively cancelled with Esc. Approval prompts remain the exclusive terminal input state while a review is pending.
 
 ## Lifecycle Hooks
 
@@ -72,7 +72,7 @@ Available pairs are `before_run/after_run`, `before_model/after_model`, and `bef
 
 Top-level history contains `SystemMessage`, `UserMessage`, and `AssistantMessage`. Every message has `name`, `role`, and `content`. Assistant messages additionally preserve reasoning, raw provider logprobs, and zero or more nested `ToolMessage` values.
 
-A ToolMessage owns the model's call ID, tool name, arguments, status, result or error content, and retryability. Pending tool calls live in `RuntimeState.active_message`; after every nested tool has a terminal result, the complete AssistantMessage moves into history. `ExecutionPlan` steps use the same ToolMessage type.
+A ToolMessage owns the model's call ID, tool name, arguments, status, result or error content, and retryability. Pending tool calls live in `RuntimeState.active_message`; after every nested tool has a terminal result, the complete AssistantMessage moves into history.
 
 Each account or guest `~/.mini_agent/<user_id>/runtime/<session_id>/state.db` retains resumable runtime state, ordered runtime messages, checkpoints, and compact conversation projections. The same session directory owns an independent `workspace/` and `uploads/`; Web and network TUI do not receive separate directory layers. Usage is kept in its provider-native JSON shape and overwritten with the most recent completed turn's final model usage.
 
@@ -86,7 +86,7 @@ Review decisions behave as follows:
 - `Implement and Clear Session` completes and persists the Plan run, then follows `RunHandoff(new_session=True)` into a newly created, active session. The isolated context contains only `AssistantMessage(final_plan)` and the automatic implementation message.
 - `Cancel and Stay in plan mode` cancels the Plan run, preserves the complete Plan conversation, and leaves the TUI in Plan mode.
 
-The handoff is sequential rather than a mode mutation inside one run: the Plan run remains an auditable producer, while the Agent run is an independently checkpointed consumer in either the existing or a fresh session. The Agent prompt explicitly declares prior Plan-mode restrictions inactive, and the normal strategy router selects the implementation strategy.
+The handoff is sequential rather than a mode mutation inside one run: the Plan run remains an auditable producer, while the Agent run is an independently checkpointed consumer in either the existing or a fresh session. The Agent prompt explicitly declares prior Plan-mode restrictions inactive, and the Agent run executes through the default decision workflow.
 
 Plan questions, Plan Review, and Tool Review intentionally use separate decision vocabularies. Questions return `answer` with an answer map (an empty list explicitly skips one question) or `cancel`; Plan Review accepts only the three choices above; Tool Review remains `Continue / Cancel / Supplement`, so tool feedback behavior is unchanged.
 
@@ -94,7 +94,7 @@ Plan questions, Plan Review, and Tool Review intentionally use separate decision
 
 `SkillCatalog` merges direct child manifests from `~/.mini_agent/<user_id>/skills` and `<workspace>/.mini_agent/skills`; a project Skill fully overrides the same global name. Discovery is fail-fast and validates UTF-8, bounded size and line count, exact metadata, directory-name equality, duplicates within each layer, and resolved path confinement. Optional resources remain ordinary files; Skills do not register tools or expand permissions.
 
-`SkillActivator` runs before both Plan-mode dispatch and Agent strategy routing. With an LLM planner and a non-empty catalog, it claims one model turn and invokes the `SkillSelector` capability with metadata only. The runtime unions semantic selections with installed names explicitly referenced as `$name`, resolves them in stable catalog order, snapshots full instructions/root/hash into `RunState.active_skills`, and emits `skills_selected`. Empty catalogs add no request; planners without the capability retain normal behavior unless a known Skill was explicitly requested, which fails clearly.
+`SkillActivator` runs before both Plan-mode dispatch and the default Agent execution workflow. With an LLM planner and a non-empty catalog, it claims one model turn and invokes the `SkillSelector` capability with metadata only. The runtime unions semantic selections with installed names explicitly referenced as `$name`, resolves them in stable catalog order, snapshots full instructions/root/hash into `RunState.active_skills`, and emits `skills_selected`. Empty catalogs add no request; planners without the capability retain normal behavior unless a known Skill was explicitly requested, which fails clearly.
 
 `LLMPlanner` appends active snapshots to each later operation's system message before context estimation. The appended policy keeps every preceding system constraint authoritative and cannot bypass tool schemas, workspace confinement, or approval. Checkpoints serialize snapshots directly, and Plan Review copies them into `RunHandoff`, so implementation uses the exact approved Skill version even across an isolated session. A later ordinary user turn starts with an empty active set and selects again.
 
@@ -131,12 +131,12 @@ DeepSeek.prepare_response(runtime: AgentRuntime) -> PreparedResponse
 
 `JsonHttpTransport` owns HTTP status handling, JSON decoding, SSE event decoding, redirect policy, and response cleanup. `DeepSeek` only expands active chat messages, constructs the vendor payload, validates tool-call arguments, aggregates streamed fragments, and converts the response back to provider-neutral messages. Artifact snapshots are not accepted at the provider boundary.
 
-Tool decisions use DeepSeek native Tool Calls. Strategy selection, plan creation, evaluation, and replanning remain JSON-output operations. Another API should add its own adapter without changing domain messages or workflows.
+Tool decisions use DeepSeek native Tool Calls. Another API should add its own adapter without changing domain messages or workflows.
 
 ## Responsibilities
 
-- `domain` owns typed messages, ToolSpec, run/plan values, and compatibility serialization.
-- `runtime` owns AgentRuntime, application composition, provider-neutral events, contracts, recovery, and Subagent coordination. Its root contains only lazy public exports. Implementations are grouped by responsibility: `core/` owns state, events, contracts, settings, and hooks; `application/` owns services and dependency composition; `execution/` owns runners, routing, workflows, steps, and outcomes; `conversation/` owns session orchestration, steering, references, recovery, and user questions; `planning/` owns Plan mode and Plan Review; `persistence/` owns checkpoint ports and persistent-event conversion.
+- `domain` owns typed messages, ToolSpec, run values, and compatibility serialization.
+- `runtime` owns AgentRuntime, application composition, provider-neutral events, contracts, recovery, and Subagent coordination. Its root contains only lazy public exports. Implementations are grouped by responsibility: `core/` owns state, events, contracts, settings, and hooks; `application/` owns services and dependency composition; `execution/` owns runners, workflows, steps, and outcomes; `conversation/` owns session orchestration, steering, references, recovery, and user questions; `planning/` owns Plan mode and Plan Review; `persistence/` owns checkpoint ports and persistent-event conversion.
 - `ConversationService` and `AgentApplication` depend on the `RuntimeRunner` protocol; only the composition root selects `AgentRunner`.
 - `PlanModeWorkflow` owns final proposal recording, review, and handoff so the runner only dispatches run modes and strategies.
 - Lifecycle hooks use narrow provider-neutral contexts: before hooks may cancel, model hooks may replace messages/tools/request parameters, and tool hooks may replace arguments before validation and approval. After hooks receive snapshots in reverse registration order.

@@ -3,12 +3,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from backend.api.app import create_app
 from backend.api.auth.service import WebAuthSettings
 from backend.api.state import WebAppState
 from backend.cloud import CloudUnavailable
 from backend.storage.auth.types import UserIdentity
-from fastapi.testclient import TestClient
 
 
 def _state(tmp_path: Path, *, cloud_client=None) -> WebAppState:

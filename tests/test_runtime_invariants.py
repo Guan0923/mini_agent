@@ -13,7 +13,7 @@ class RepeatingReplyPlanner:
 
 
 def test_equal_assistant_replies_are_appended_on_every_turn() -> None:
-    runner = AgentRunner(RepeatingReplyPlanner(), ToolRegistry(), strategy="reactive")
+    runner = AgentRunner(RepeatingReplyPlanner(), ToolRegistry())
     first_runtime = runner.new_runtime(task="first turn")
 
     runner.run(first_runtime)
@@ -56,7 +56,6 @@ def test_run_finished_checkpoint_observes_archived_runtime_state() -> None:
     runner = AgentRunner(
         UsagePlanner(),
         ToolRegistry(),
-        strategy="reactive",
         checkpoints=checkpoints,
     )
     runtime = runner.new_runtime(task="record usage")

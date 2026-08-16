@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 import pytest
+
 from backend.domain import (
     AssistantMessage,
-    ExecutionPlan,
-    PlanStep,
     RunState,
-    StepEvaluation,
     ToolMessage,
 )
 from backend.planning import LLMPlanner
 from backend.runtime import LegacyAgentRunner as AgentRunner
 from backend.runtime import PreparedResponse, RunnerSettings, RuntimeState
 from backend.tools import Tool, ToolRegistry
-
 from tui import cli
 
 
@@ -67,40 +64,6 @@ class BrokenFinalizerPlanner(NoFinalizerPlanner):
         raise RuntimeError("provider unavailable")
 
 
-class DynamicBudgetPlanner:
-    name = "dynamic-budget"
-
-    def __init__(self, step_count: int) -> None:
-        self.step_count = step_count
-        self.finalizations = 0
-
-    def create_dynamic_plan(self, runtime) -> ExecutionPlan:
-        del runtime
-        return ExecutionPlan(
-            goal="Inspect the project",
-            steps=[
-                PlanStep(
-                    id=f"step_{index}",
-                    description=f"Inspect {index}",
-                    tool_message=ToolMessage(name="inspect", call_id=f"call_{index}"),
-                )
-                for index in range(1, self.step_count + 1)
-            ],
-        )
-
-    def evaluate_step(self, runtime) -> StepEvaluation:
-        del runtime
-        return StepEvaluation("continue", "The step succeeded.")
-
-    def replan(self, runtime) -> ExecutionPlan:
-        raise AssertionError(f"Unexpected replan for {runtime.run.run_id}")
-
-    def finalize(self, runtime, reason: str) -> AssistantMessage:
-        del runtime, reason
-        self.finalizations += 1
-        return AssistantMessage(content="Dynamic budget summary")
-
-
 def registry(calls: list[str] | None = None) -> ToolRegistry:
     recorded = calls if calls is not None else []
     return ToolRegistry([Tool("inspect", "Inspect", lambda: recorded.append("inspect") or "ok")])
@@ -124,7 +87,6 @@ def test_over_budget_tool_batch_is_rejected_atomically_and_finalized() -> None:
     state = AgentRunner(
         planner,
         registry(calls),
-        strategy="reactive",
         max_tool_calls=2,
     ).run("Inspect")
 
@@ -148,7 +110,6 @@ def test_model_turns_are_metrics_without_a_model_turn_budget() -> None:
     state = AgentRunner(
         planner,
         registry(),
-        strategy="reactive",
     ).run("Inspect")
 
     assert state.status == "completed"
@@ -164,7 +125,6 @@ def test_budget_finalization_has_a_deterministic_fallback(planner) -> None:
     state = AgentRunner(
         planner,
         registry(),
-        strategy="reactive",
         max_tool_calls=1,
     ).run("Inspect")
 
@@ -175,39 +135,6 @@ def test_budget_finalization_has_a_deterministic_fallback(planner) -> None:
     assert error.data["finalizer"] == "fallback"
     if isinstance(planner, BrokenFinalizerPlanner):
         assert error.data["finalization_error"] == "provider unavailable"
-
-
-def test_dynamic_plan_over_tool_budget_finalizes_without_execution() -> None:
-    calls: list[str] = []
-    planner = DynamicBudgetPlanner(3)
-    state = AgentRunner(
-        planner,
-        registry(calls),
-        strategy="dynamic_replan",
-        max_tool_calls=2,
-    ).run("Inspect")
-
-    assert state.status == "failed"
-    assert len(state.actions) == 2
-    assert calls == ["inspect", "inspect"]
-    assert planner.finalizations == 1
-    assert state.final_answer == "Dynamic budget summary"
-
-
-def test_dynamic_plan_that_exactly_uses_tool_budget_completes() -> None:
-    calls: list[str] = []
-    planner = DynamicBudgetPlanner(2)
-    state = AgentRunner(
-        planner,
-        registry(calls),
-        strategy="dynamic_replan",
-        max_tool_calls=2,
-    ).run("Inspect")
-
-    assert state.status == "completed"
-    assert len(state.actions) == 2
-    assert calls == ["inspect", "inspect"]
-    assert planner.finalizations == 0
 
 
 def test_settings_serialize_new_budgets_and_load_legacy_max_actions() -> None:
@@ -275,7 +202,7 @@ def test_llm_finalizer_uses_text_mode_without_tools() -> None:
 
     client = CaptureClient()
     planner = LLMPlanner(client, ["inspect"], ["inspect"])
-    runner = AgentRunner(NoFinalizerPlanner(), registry(), strategy="reactive")
+    runner = AgentRunner(NoFinalizerPlanner(), registry())
     runtime = runner.new_runtime(task="Inspect")
 
     message = planner.finalize(runtime, "tool budget exhausted")

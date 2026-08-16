@@ -7,14 +7,15 @@ from typing import Any
 
 import pytest
 import requests
-from backend.cloud import CloudAuthExpired, CloudClient, CloudConflict, CloudUnavailable
-from backend.storage.auth.types import UserIdentity
-from backend.sync.cloud_repository import CloudSyncConflict as BackendCloudSyncConflict
 from cloud.api.app import create_app
 from cloud.auth.mail import NullMailer
 from cloud.auth.types import AuthStorageUnavailable
 from cloud.sync.repository import CloudSyncConflict, EncryptedSnapshotChunk
 from fastapi.testclient import TestClient
+
+from backend.cloud import CloudAuthExpired, CloudClient, CloudConflict, CloudUnavailable
+from backend.storage.auth.types import UserIdentity
+from backend.sync.cloud_repository import CloudSyncConflict as BackendCloudSyncConflict
 
 USER_A = "123e4567-e89b-12d3-a456-426614174000"
 USER_B = "123e4567-e89b-12d3-a456-426614174001"

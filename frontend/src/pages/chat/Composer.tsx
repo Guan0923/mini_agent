@@ -2,8 +2,9 @@ import { Button, Drawer, Input, Progress, Select, Space, Tooltip } from "antd";
 import { ArrowUpOutlined, SettingOutlined, StopOutlined } from "@ant-design/icons";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import type { KeyboardEvent, RefObject } from "react";
-import type { ChatMode, PermissionMode, ReasoningEffort } from "../../types";
+import type { ChatMode, PermissionMode, ReasoningEffort, TodoItem } from "../../types";
 import IconAction from "../../components/IconAction";
+import { SessionTodoPanel } from "./todoPanel";
 
 const REASONING_LABELS: Record<ReasoningEffort, string> = { low: "低", medium: "中", high: "高", xhigh: "超高", max: "最大" };
 export type SettingsSelectKey = "mode" | "permission" | "reasoning";
@@ -18,6 +19,7 @@ export interface ComposerProps {
   mode: ChatMode;
   permissionMode: PermissionMode;
   reasoningEffort: ReasoningEffort;
+  todos: TodoItem[] | null;
   usagePercent?: number;
   usageTotalTokens?: number | null;
   usageContextLength?: number;
@@ -54,12 +56,19 @@ export default function Composer(props: ComposerProps) {
     </Space>
   );
   return (
-    <div className="composer">
+    <div className={`composer${props.todos && props.todos.length > 0 ? " has-todo" : ""}`}>
       {props.commandMenuVisible && <div className="command-menu">{props.filteredCommands.map((command, index) => <button key={command.name} className={`command-item${index === props.activeCommandIndex ? " selected" : ""}`} onMouseEnter={() => props.onActiveCommandChange(index)} onClick={() => props.onComplete(index)}><span className="command-name">{command.name}</span><span className="command-desc">{command.label} · {command.description}</span></button>)}</div>}
-      <div className="composer-box">
-        <Input.TextArea className="composer-input" ref={props.taRef} value={props.input} disabled={props.disabled} onChange={(event) => props.onInputChange(event.target.value)} onKeyDown={props.onKeyDown} placeholder={props.disabledReason || "输入任务，按 Enter 发送"} autoSize={{ minRows: 1, maxRows: 8 }} />
-        <div className="composer-toolbar">{props.isMobile ? <IconAction className="run-settings-trigger" label="运行设置" icon={<SettingOutlined />} disabled={false} onClick={props.onOpenSettings} /> : settingsControls}</div>
-        {props.busy ? <Tooltip title="停止"><Button className="send-btn stop" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /> </Tooltip> : <Tooltip title={props.disabledReason || "发送"}><Button className="send-btn" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送" onClick={props.onSend} disabled={props.disabled || !props.input.trim()} /></Tooltip>}
+      <div className="composer-box-anchor">
+        {props.todos && props.todos.length > 0 ? (
+          <div className="composer-todo-anchor">
+            <SessionTodoPanel todos={props.todos} busy={props.busy} />
+          </div>
+        ) : null}
+        <div className="composer-box">
+          <Input.TextArea className="composer-input" ref={props.taRef} value={props.input} disabled={props.disabled} onChange={(event) => props.onInputChange(event.target.value)} onKeyDown={props.onKeyDown} placeholder={props.disabledReason || "输入任务，按 Enter 发送"} autoSize={{ minRows: 1, maxRows: 8 }} />
+          <div className="composer-toolbar">{props.isMobile ? <IconAction className="run-settings-trigger" label="运行设置" icon={<SettingOutlined />} disabled={false} onClick={props.onOpenSettings} /> : settingsControls}</div>
+          {props.busy ? <Tooltip title="停止"><Button className="send-btn stop" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /> </Tooltip> : <Tooltip title={props.disabledReason || "发送"}><Button className="send-btn" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送" onClick={props.onSend} disabled={props.disabled || !props.input.trim()} /></Tooltip>}
+        </div>
       </div>
       <Drawer className="run-settings-drawer" title="运行设置" placement="bottom" open={props.settingsOpen} onClose={props.onCloseSettings}>{settingsControls}</Drawer>
     </div>

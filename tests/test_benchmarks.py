@@ -6,8 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from backend.runtime.core.events import RuntimeEvent
 
+from backend.runtime.core.events import RuntimeEvent
 from benchmarks.event_collector import EventCollector
 from benchmarks.grading.programmatic import (
     content_equals,
@@ -80,7 +80,7 @@ def test_generic_checkers_and_checker_failures_are_isolated(tmp_path: Path) -> N
         workspace=tmp_path,
         status="completed",
         final_answer="",
-        metrics=RunMetrics(0, 0, 0, 0, 0, 0, 0, 0, [], 2, 0),
+        metrics=RunMetrics(0, 0, 0, 0, 0, 0, 0, [], 2, 0),
         tool_calls_by_name={},
     )
 
@@ -110,15 +110,17 @@ def test_generic_checkers_and_checker_failures_are_isolated(tmp_path: Path) -> N
 
 def test_event_collector_publishes_subagent_metrics() -> None:
     collector = EventCollector()
-    collector(RuntimeEvent(
-        "model_request",
-        "Authorization: Bearer secret-value",
-        {"headers": {"Authorization": "Bearer secret-value"}, "prompt": "read this"},
-        timestamp="2026-01-01T00:00:00Z",
-    ))
+    collector(
+        RuntimeEvent(
+            "model_request",
+            "Authorization: Bearer secret-value",
+            {"headers": {"Authorization": "Bearer secret-value"}, "prompt": "read this"},
+            timestamp="2026-01-01T00:00:00Z",
+        )
+    )
     collector(RuntimeEvent("subagent_completed", "done", timestamp="2026-01-01T00:00:01Z"))
     collector(RuntimeEvent("subagent_failed", "failed", timestamp="2026-01-01T00:00:02Z"))
-    state = SimpleNamespace(model_turns=0, actions=[], replan_count=0, active_skills=[])
+    state = SimpleNamespace(model_turns=0, actions=[], active_skills=[])
 
     metrics = build_metrics(collector, state, 12.5)
     assert metrics.subagent_completed == 1

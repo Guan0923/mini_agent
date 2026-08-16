@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from backend.domain import AssistantMessage, RunState, StrategySelection, ToolMessage, ToolSpec, UserMessage
+from backend.domain import AssistantMessage, RunState, ToolMessage, ToolSpec, UserMessage
 from backend.planning import RuleBasedPlanner
 from backend.runtime import AgentRunner, ConversationService, RuntimeState
 from backend.tools import Tool, ToolRegistry
@@ -113,9 +113,6 @@ class UsagePlanner:
 
     def __init__(self) -> None:
         self.turn = 0
-
-    def select_strategy(self, runtime):
-        return StrategySelection("reactive", "Direct response.")
 
     def decide(self, runtime):
         self.turn += 1

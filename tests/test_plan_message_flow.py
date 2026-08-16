@@ -1,10 +1,10 @@
 from pathlib import Path
 
 import pytest
+
 from backend.configuration import ClientPaths
 from backend.domain import (
     AssistantMessage,
-    StrategySelection,
     ToolMessage,
     UserMessage,
     message_from_dict,
@@ -12,8 +12,8 @@ from backend.domain import (
 from backend.runtime import AgentRunner, ConversationService
 from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
-from backend.tools import ToolRegistry
 from backend.storage.sqlite import SQLiteSessionStore
+from backend.tools import ToolRegistry
 from tests.local_store import session_store
 
 PLAN = "# Reviewed change\n\n## Summary\nImplement the reviewed change."
@@ -58,9 +58,6 @@ class PlanMessagePlanner:
         self.agent_histories.append(list(runtime.state.messages))
         return AssistantMessage(content="Implemented from ordinary messages.")
 
-    def select_strategy(self, runtime):
-        return StrategySelection("reactive", "The model can execute directly from conversation history.")
-
 
 class ConversationPlanner(PlanMessagePlanner):
     def decide(self, runtime):
@@ -86,7 +83,6 @@ def test_plan_implement_keeps_control_call_as_ordinary_history(tmp_path: Path) -
     )
 
     assert result.mode == "agent"
-    assert result.strategy == "reactive"
     assert planner.agent_histories[-1] == [
         UserMessage(content="Plan the change"),
         completed_review_message(),

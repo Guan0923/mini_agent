@@ -4,6 +4,7 @@ import asyncio
 
 from textual.app import App
 from textual.widgets import Markdown
+
 from tui.screens.history import HistoryScreen
 from tui.screens.inspection import SessionsScreen, TraceScreen
 

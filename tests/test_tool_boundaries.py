@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from backend.domain import AssistantMessage, ToolMessage
 from backend.providers.config import ModelConfig, load_env_file
 from backend.runtime import AgentRunner
@@ -89,7 +90,7 @@ def test_tool_call_trace_nests_arguments_that_match_event_field_names() -> None:
             "additionalProperties": False,
         },
     )
-    runner = AgentRunner(MessageArgumentPlanner(), ToolRegistry([tool]), strategy="reactive")
+    runner = AgentRunner(MessageArgumentPlanner(), ToolRegistry([tool]))
 
     state = runner.run(runner.new_runtime(task="echo a message"))
 

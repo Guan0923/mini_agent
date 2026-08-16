@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from backend.api import chat
 from backend.api.interrupts import make_interactive_interrupt, registry
 from backend.domain.runtime_state import InMemoryNodeStore

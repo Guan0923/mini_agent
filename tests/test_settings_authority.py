@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+
 from backend.configuration import UserConfigStore
 from backend.domain import SystemMessage, ToolSpec, UserMessage
 from backend.providers import (

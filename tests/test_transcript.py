@@ -64,7 +64,7 @@ def test_metadata_events_do_not_schedule_transcript_reconcile() -> None:
             await pilot.pause()
             assert view._reconcile_scheduled is False
 
-            for kind in ("model_request", "model_response", "model_repair", "context_usage", "strategy"):
+            for kind in ("model_request", "model_response", "model_repair", "context_usage"):
                 view.handle_runtime_event(_event(kind, kind))
                 assert view._reconcile_scheduled is False
 

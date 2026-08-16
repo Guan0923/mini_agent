@@ -1,12 +1,10 @@
-"""Run Mini-Agent (TUI client) directly from a source checkout."""
+"""Run Mini-Agent (TUI client) from a source checkout.
 
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT / "backend" / "src"))
-sys.path.insert(0, str(ROOT / "tui" / "src"))
-
+Requires the workspace packages to be installed editable (e.g. ``uv sync`` or
+``python -m pip install -e backend -e tui``); the ``backend`` and ``tui``
+packages live in flat source directories (``backend/src``, ``tui/src``) and
+are resolved through the installed package mapping.
+"""
 
 from tui.cli import main  # noqa: E402
 

@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from backend.domain import DEFAULT_TIME_ZONE
 from backend.planning import RuleBasedPlanner
 from backend.planning.prompts import compose_system_prompt

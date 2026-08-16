@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { Button, Grid, Input } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
@@ -16,6 +16,7 @@ import MarkdownContent from "../../components/MarkdownContent";
 import { AssistantMessage, MessageActions } from "./messageParts";
 import Composer, { type SettingsSelectKey } from "./Composer";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
+import { latestTodoList } from "./todoPanel";
 import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "../../app/runtimeDetailProjection";
 import { DEFAULT_RUNTIME_NODE_MODEL, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
 import type {
@@ -118,6 +119,7 @@ export default function ChatPage({
 
   const messages = conversation?.messages ?? [];
   const busy = runningProp ?? localBusy;
+  const todo = useMemo(() => latestTodoList(messages), [messages]);
   const filteredCommands = commandSuggestions(input);
   const commandMenuVisible = !busy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
   const display = configuredDisplayMode ?? "medium";
@@ -707,6 +709,7 @@ export default function ChatPage({
         mode={mode}
         permissionMode={permissionMode}
         reasoningEffort={reasoningEffort}
+        todos={todo}
         usagePercent={usagePercent}
         usageTotalTokens={activeUsage?.total ?? null}
         usageContextLength={activeUsage?.context}

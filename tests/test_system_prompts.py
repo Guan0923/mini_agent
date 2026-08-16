@@ -1,4 +1,5 @@
 import pytest
+
 from backend.domain import AssistantMessage, SkillSnapshot, SystemMessage
 from backend.planning import LLMPlanner
 from backend.planning import prompts as prompt_module
@@ -137,16 +138,3 @@ def test_plan_decision_uses_composed_prompt_and_control_tools() -> None:
         "request_user_input",
         "request_plan_review",
     ]
-
-
-def test_structured_plan_request_keeps_its_narrow_system_prompt() -> None:
-    client = RecordingClient(AssistantMessage(content='{"goal":"Answer","steps":[],"final_answer":"Done"}'))
-    planner = LLMPlanner(client, [], [])
-    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="Answer")
-
-    planner.create_plan(runtime)
-
-    system = client.message_requests[0][0]
-    assert isinstance(system, SystemMessage)
-    assert "Create the complete fixed plan" in (system.content or "")
-    assert "# Shared Working Rules" not in (system.content or "")
