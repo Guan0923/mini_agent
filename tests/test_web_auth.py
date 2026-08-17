@@ -9,6 +9,7 @@ from backend.api.app import create_app
 from backend.api.auth.service import WebAuthSettings
 from backend.api.state import WebAppState
 from backend.cloud import CloudUnavailable
+from backend.configuration import ClientPaths
 from backend.storage.auth.types import UserIdentity
 
 
@@ -17,10 +18,32 @@ def _state(tmp_path: Path, *, cloud_client=None) -> WebAppState:
 
 
 def test_default_web_state_is_local_and_does_not_require_postgres(tmp_path: Path) -> None:
+    legacy_root = tmp_path / "web"
+    (legacy_root / "rag").mkdir(parents=True)
+    (legacy_root / "mcp").mkdir()
+    (legacy_root / "skills").mkdir()
+    (legacy_root / "runtime").mkdir()
+    (legacy_root / "config.toml").write_text("[model]\nmodel = 'legacy'\n", encoding="utf-8")
+    (legacy_root / "client.db").write_bytes(b"legacy")
+
     state = _state(tmp_path)
     assert state.auth.path.name == "client.db"
+    assert state.auth.path == tmp_path / ".mini_agent-cache" / "auth" / "client.db"
     assert state.auth.path.is_file()
     assert not list(tmp_path.rglob("auth.sqlite3"))
+    assert (legacy_root / "config.toml").exists()
+    assert (legacy_root / "client.db").read_bytes() == b"legacy"
+    assert (legacy_root / "rag").is_dir()
+    assert (legacy_root / "mcp").is_dir()
+    assert (legacy_root / "skills").is_dir()
+    assert (legacy_root / "runtime").is_dir()
+
+
+def test_client_paths_from_home_uses_legacy_cache_outside_web_root(tmp_path: Path) -> None:
+    paths = ClientPaths.from_home(tmp_path)
+
+    assert paths.root == tmp_path / ".mini_agent-cache" / "tui"
+    assert tmp_path / ".mini_agent" != paths.root
 
 
 def test_guest_login_is_fully_offline_and_reuses_cookie(tmp_path: Path) -> None:

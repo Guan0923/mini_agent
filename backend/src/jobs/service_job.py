@@ -213,14 +213,27 @@ class ServiceJob(Job):
     def close(self, timeout: float | None = None) -> None:
         """Cancel, wait for the supervisor, and join it (idempotent).
 
-        After a terminal state the supervisor thread has already exited;
-        joining guarantees no dangling thread handle.
+        After a terminal state the supervisor thread has already exited and
+        joining leaves no dangling handle.  A blocking ``driver.check`` /
+        ``driver.stop`` that ignores cancellation can keep the supervisor alive
+        past the join window; that is logged as a warning naming the job and
+        thread (mirroring :class:`~backend.jobs.ThreadJob`) and the job stays
+        non-terminal so a later ``close`` after the driver unblocks still
+        finishes cleanly.
         """
+        thread = self._supervisor_thread
         if self.info().state not in TERMINAL_STATES:
             super().close(timeout)
-        thread = self._supervisor_thread
         if thread is not None:
             thread.join(timeout=5.0)
+            if thread.is_alive():
+                logger.warning(
+                    "job %s supervisor thread %s (ident %s) did not finish within the close timeout; cancel requested: %s",
+                    self._id,
+                    thread.name,
+                    thread.ident,
+                    self._cancelled(),
+                )
 
     # -- cancellation -------------------------------------------------------
 

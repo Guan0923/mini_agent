@@ -167,8 +167,15 @@
   display: flex;
   align-items: center;
   gap: 6px !important;
-  width: 100%;
-  max-width: 100%;
+  /* Keep upload and runtime controls in the same toolbar row. */
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  max-width: none;
+}
+
+.composer-toolbar {
+  flex-wrap: nowrap;
 }
 
 .composer-settings-controls .mode-picker {
@@ -337,15 +344,65 @@
 }
 
 .profile-trigger {
+  flex: 1 1 auto;
   min-width: 0;
   max-width: calc(100% - 56px);
+  width: 100%;
   padding: 0 6px;
   justify-content: flex-start;
   text-align: left;
 }
 
-.profile-trigger .ant-typography {
-  max-width: 160px;
+.sidebar-profile-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  margin-top: 8px;
+}
+
+.sidebar-profile-row > .profile-trigger {
+  flex: 1 1 auto;
+}
+
+.sidebar-profile-row > .ant-btn:last-child {
+  flex: 0 0 auto;
+}
+
+.profile-trigger-label-viewport {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.profile-trigger-label-text {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-trigger-label-viewport.is-scrolling .profile-trigger-label-text {
+  width: max-content;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  animation: profile-trigger-label-marquee 4.2s ease-in-out infinite alternate;
+}
+
+@keyframes profile-trigger-label-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(var(--profile-shift)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .profile-trigger-label-viewport.is-scrolling .profile-trigger-label-text {
+    animation: none;
+  }
 }
 
 .profile-popover-content {

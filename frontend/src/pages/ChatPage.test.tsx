@@ -380,6 +380,19 @@ describe("ChatPage run lifecycle", () => {
     expect(send.previousElementSibling).toHaveClass("composer-toolbar");
   });
 
+  it("scrolls the chat container to the bottom from the floating button", async () => {
+    const { container } = render(<Harness />);
+    const scroll = container.querySelector<HTMLElement>(".chat-scroll");
+    if (!scroll) throw new Error("chat scroll container was not rendered");
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1200 });
+    const scrollTo = vi.fn();
+    Object.defineProperty(scroll, "scrollTo", { configurable: true, value: scrollTo });
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "滚动到底部" }));
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1200, behavior: "smooth" });
+  });
+
   it("keeps Timeline inside the same scroll container as messages", () => {
     const initial: Conversation = {
       id: "conversation-timeline-layout",

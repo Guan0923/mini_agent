@@ -66,12 +66,61 @@ interface ProfilePopoverProps {
   onSave?: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
 }
 
+function ProfileLabel({ label }: { label: string }) {
+  const viewportRef = useRef<HTMLSpanElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [overflow, setOverflow] = useState(0);
+  const [scrolling, setScrolling] = useState(false);
+
+  function measureOverflow(): number {
+    const viewport = viewportRef.current;
+    const text = textRef.current;
+    if (!viewport || !text) return 0;
+    const next = Math.max(0, text.scrollWidth - viewport.clientWidth);
+    setOverflow(next > 1 ? next : 0);
+    return next;
+  }
+
+  useEffect(() => {
+    setScrolling(false);
+    const measure = () => {
+      const next = measureOverflow();
+      if (next <= 1) setScrolling(false);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+    if (observer && viewportRef.current) observer.observe(viewportRef.current);
+    if (observer && textRef.current) observer.observe(textRef.current);
+    return () => {
+      window.removeEventListener("resize", measure);
+      observer?.disconnect();
+    };
+  }, [label]);
+
+  function handleMouseEnter() {
+    setScrolling(measureOverflow() > 1);
+  }
+
+  const textStyle = { "--profile-shift": `-${overflow}px` } as CSSProperties;
+  return (
+    <span
+      className={`profile-trigger-label-viewport${scrolling ? " is-scrolling" : ""}`}
+      ref={viewportRef}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={() => setScrolling(false)}
+    >
+      <span className="profile-trigger-label-text" ref={textRef} style={textStyle}>{label}</span>
+    </span>
+  );
+}
+
 function ProfilePopover({ user, onSave }: ProfilePopoverProps) {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [draft, setDraft] = useState({ display_name: "", agent_preferences: "" });
-  const label = user?.display_name?.trim() || "用户";
+  const label = user?.display_name?.trim() || (user?.kind === "guest" ? "游客用户" : "用户");
 
   useEffect(() => {
     if (!open) return;
@@ -151,7 +200,7 @@ function ProfilePopover({ user, onSave }: ProfilePopoverProps) {
       placement="topLeft"
     >
       <Button className="profile-trigger" type="text" icon={<UserOutlined />} aria-label={`个人简介：${label}`}>
-        <Typography.Text ellipsis title={label}>{label}</Typography.Text>
+        <ProfileLabel label={label} />
       </Button>
     </Popover>
   );
@@ -515,6 +564,7 @@ export default function AppSidebar({
   const loadedProjectStorageKey = useRef<string | null>(null);
   const previousCurrentProjectId = useRef<string | undefined>(undefined);
   const currentProjectId = conversations.find((conversation) => conversation.id === currentId)?.projectId;
+  const displayName = user?.display_name?.trim() || (user?.kind === "guest" ? "游客用户" : "用户");
 
   useEffect(() => {
     if (loadedProjectStorageKey.current !== projectStorageKey) return;
@@ -716,18 +766,16 @@ export default function AppSidebar({
         <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>
           Mini-Agent
         </Typography.Text>
-        <Space style={{ width: "100%", justifyContent: "space-between", marginTop: 8 }}>
+        <div className="sidebar-profile-row">
           {onOpenSettings ? (
             <Button
               className="profile-trigger"
               type="text"
               icon={<UserOutlined />}
               onClick={onOpenSettings}
-              aria-label={"个人简介：" + (user?.display_name?.trim() || "用户")}
+              aria-label={"个人简介：" + displayName}
             >
-              <Typography.Text ellipsis title={user?.display_name?.trim() || "用户"}>
-                {user?.display_name?.trim() || "用户"}
-              </Typography.Text>
+              <ProfileLabel label={displayName} />
             </Button>
           ) : (
             <ProfilePopover user={user} onSave={onProfileUpdate} />
@@ -741,7 +789,7 @@ export default function AppSidebar({
           >
             退出
           </Button>
-        </Space>
+        </div>
       </div>
     </div>
   );

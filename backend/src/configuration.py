@@ -61,7 +61,10 @@ class ClientPaths:
 
     @classmethod
     def from_home(cls, home: Path | None = None) -> ClientPaths:
-        return cls((home or Path.home()) / ".mini_agent")
+        # The standalone TUI is legacy-only.  Keep its implicit device tree
+        # outside the authenticated Web data root so it cannot recreate
+        # root-level files alongside ``~/.mini_agent/<user_id>`` trees.
+        return cls((home or Path.home()) / ".mini_agent-cache" / "tui")
 
     @property
     def config_file(self) -> Path:
@@ -105,7 +108,8 @@ class ClientPaths:
     def logs_dir(self) -> Path:
         """Optional TUI-only diagnostics kept outside the user snapshot tree."""
 
-        return self.root.parent / ".mini_agent-cache" / "logs" / self.root.name
+        cache_parent = self.root.parent.parent if self.root.parent.name == ".mini_agent-cache" else self.root.parent
+        return cache_parent / ".mini_agent-cache" / "logs" / self.root.name
 
     @property
     def rag_dir(self) -> Path:

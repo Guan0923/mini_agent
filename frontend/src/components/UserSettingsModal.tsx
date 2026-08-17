@@ -137,7 +137,7 @@ export default function UserSettingsModal({
   onAgentConfigUpdate,
   onProviderConfigUpdate,
 }: UserSettingsModalProps) {
-  const { modal } = AntApp.useApp();
+  const { modal, message } = AntApp.useApp();
   const [section, setSection] = useState<SettingsSection>("profile");
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [saved, setSaved] = useState<UserSettings | null>(null);
@@ -392,6 +392,7 @@ export default function UserSettingsModal({
       } else {
         return;
       }
+      message.success("保存成功");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "保存失败，请稍后重试。");
     } finally {
@@ -407,6 +408,7 @@ export default function UserSettingsModal({
       const job = await saveToCloud(force);
       setSyncJob(job);
       await refreshCloud();
+      message.success("保存成功");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "启动云端保存失败。");
     } finally {
@@ -467,6 +469,7 @@ export default function UserSettingsModal({
       setProviderDrafts((current) => ({ ...current, [updated.id]: nextDraft }));
       setSavedProviderDrafts((current) => ({ ...current, [updated.id]: nextDraft }));
       if (updated.is_active) onProviderConfigUpdate?.(updated);
+      message.success("保存成功");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "保存提供商失败。");
     } finally {

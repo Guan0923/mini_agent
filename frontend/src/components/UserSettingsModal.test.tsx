@@ -142,8 +142,10 @@ describe("UserSettingsModal", () => {
       auto_save_enabled: true,
       auto_save_rule: "idle_5m",
     }));
+    expect((await screen.findAllByText("保存成功")).length).toBeGreaterThanOrEqual(1);
     await userEvent.click(screen.getByRole("button", { name: "保存到云端" }));
     await waitFor(() => expect(api.saveToCloud).toHaveBeenCalledWith(false));
+    expect((await screen.findAllByText("保存成功")).length).toBeGreaterThanOrEqual(2);
   });
 
   it("checks dirty state for mask and close button but keeps Escape disabled", async () => {
@@ -191,6 +193,19 @@ describe("UserSettingsModal", () => {
     }));
     expect(onUserUpdate).toHaveBeenCalledWith({ display_name: "新名字", agent_preferences: "" });
     expect(screen.getByDisplayValue("新名字")).toBeInTheDocument();
+    expect(await screen.findByText("保存成功")).toBeInTheDocument();
+  });
+
+  it("does not show a success message when saving fails", async () => {
+    api.updateProfile.mockRejectedValueOnce(new Error("保存失败"));
+    renderModal();
+    const name = await screen.findByDisplayValue("旧名字");
+    await userEvent.clear(name);
+    await userEvent.type(name, "新名字");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByText("保存失败")).toBeInTheDocument();
+    expect(screen.queryByText("保存成功")).not.toBeInTheDocument();
   });
 
   it("switches the current Provider and model from user settings", async () => {

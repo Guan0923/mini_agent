@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { Button, Grid, Input } from "antd";
+import { Button, FloatButton, Grid, Input } from "antd";
+import { VerticalAlignBottomOutlined } from "@ant-design/icons";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
   compactSession,
@@ -803,6 +804,12 @@ export default function ChatPage({
     void onFork(conversation.id, messageId);
   }
 
+  function scrollToBottom() {
+    const scrollContainer = chatScrollRef.current;
+    if (!scrollContainer) return;
+    scrollContainer.scrollTo({ top: scrollContainer.scrollHeight, behavior: "smooth" });
+  }
+
 
   function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     const isComposing = event.nativeEvent.isComposing;
@@ -946,6 +953,14 @@ export default function ChatPage({
             window.open(sessionFileContentUrl(conversation.sessionId, "upload", upload.path), "_blank", "noopener");
           }
         }}
+      />
+      <FloatButton
+        className="chat-scroll-bottom-button"
+        icon={<VerticalAlignBottomOutlined />}
+        tooltip="滚动到底部"
+        aria-label="滚动到底部"
+        style={{ right: 24, bottom: 96 }}
+        onClick={scrollToBottom}
       />
     </div>
   );

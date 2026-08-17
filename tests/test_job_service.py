@@ -11,6 +11,7 @@ real services or sleeps beyond the tiny configured check interval.
 from __future__ import annotations
 
 import itertools
+import logging
 import threading
 import time
 
@@ -45,8 +46,9 @@ class FakeDriver:
 
     Each :meth:`start` returns a new handle of generation ``g`` (``"h<g>"``).
     ``plans[g]`` is a list of per-call outcomes; when exhausted, ``check``
-    returns ``default``.  ``block_check[handle]`` makes that handle's first
-    probe block until the event is set (used to pause a rebuild).
+    returns ``default``.  ``block_check[handle]`` makes that handle's probes
+    block until the event is set (used to pause a rebuild or keep the
+    supervisor stuck), signalling each entry via ``entered_block[handle]``.
     """
 
     def __init__(self, *, plans: dict[int, list[bool]] | None = None, default: bool = True) -> None:
@@ -56,6 +58,7 @@ class FakeDriver:
         self.stopped: list[str] = []
         self.checks: list[tuple[str, bool]] = []
         self.block_check: dict[str, threading.Event] = {}
+        self.entered_block: dict[str, threading.Event] = {}
         self._gen = itertools.count(1)
 
     def start(self) -> str:
@@ -65,6 +68,7 @@ class FakeDriver:
 
     def check(self, handle: str) -> bool:
         if handle in self.block_check:
+            self.entered_block.setdefault(handle, threading.Event()).set()
             self.block_check[handle].wait(30)
         gen = int(handle[1:])
         plan = self.plans.get(gen)
@@ -296,3 +300,49 @@ def test_supervisor_thread_exits_after_terminal_state() -> None:
     assert thread is not None
     thread.join(timeout=5)
     assert not thread.is_alive()
+
+
+def test_close_logs_warning_when_supervisor_thread_does_not_exit(caplog) -> None:
+    """A blocking driver.check that ignores cancellation must be logged, not
+    silently dropped, and the job stays non-terminal until it finally exits."""
+    driver = FakeDriver(plans={1: [True]}, default=True)
+    job = make_job(driver)
+    job.start()
+    wait_until(lambda: job.health is ServiceHealth.HEALTHY)
+
+    # Make the next probe of h1 block; the supervisor is then stuck in check.
+    gate = threading.Event()
+    driver.block_check["h1"] = gate
+    wait_until(lambda: "h1" in driver.entered_block)
+    assert driver.entered_block["h1"].wait(5), "supervisor never blocked on a probe"
+    caplog.set_level(logging.WARNING, logger="backend.jobs.service_job")
+
+    close_thread = threading.Thread(target=lambda: job.close(timeout=0.2))
+    close_thread.start()
+
+    def warning_emitted() -> bool:
+        return any(
+            rec.levelno == logging.WARNING
+            and rec.name == "backend.jobs.service_job"
+            and "did not finish" in rec.message
+            and job._id in rec.message
+            for rec in caplog.records
+        )
+
+    wait_until(warning_emitted, timeout=10)
+    thread = job._supervisor_thread
+    assert thread is not None
+    # The warning names the thread (and the job); the supervisor is still stuck.
+    assert any(thread.name in rec.message for rec in caplog.records)
+    assert any(rec.levelno == logging.WARNING and str(thread.ident) in rec.message for rec in caplog.records)
+    # Job is documented non-terminal while the supervisor cannot exit.
+    assert job.info().state is JobState.RUNNING
+
+    gate.set()  # let the supervisor finally finish
+    wait_until(lambda: job.info().state is JobState.CANCELLED)
+    close_thread.join(timeout=10)
+    thread = job._supervisor_thread
+    assert thread is not None and not thread.is_alive()
+    # close is idempotent afterwards.
+    job.close(timeout=2)
+    assert job.info().state is JobState.CANCELLED

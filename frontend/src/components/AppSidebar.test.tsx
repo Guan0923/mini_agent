@@ -198,6 +198,87 @@ describe("AppSidebar utility navigation", () => {
     );
     expect(screen.getByRole("button", { name: "个人简介：游客用户" })).toBeInTheDocument();
   });
+
+  it("shows the guest username when settings are opened from the chat sidebar", () => {
+    render(
+      <AppSidebar
+        user={{ id: "guest", email: null, kind: "guest", display_name: "游客用户" }}
+        conversations={[conversation]}
+        archivedCount={0}
+        currentId={conversation.id}
+        page="chat"
+        onNew={vi.fn()}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onSignOut={vi.fn()}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "个人简介：游客用户" });
+    expect(trigger).toHaveTextContent("游客用户");
+    expect(trigger.querySelector(".profile-trigger-label-text")).toHaveTextContent("游客用户");
+  });
+
+  it("truncates long names and scrolls them only while hovered", () => {
+    render(
+      <AppSidebar
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "这是一个很长的用户名称用于测试悬浮循环滚动" }}
+        conversations={[conversation]}
+        archivedCount={0}
+        currentId={conversation.id}
+        page="chat"
+        onNew={vi.fn()}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onSignOut={vi.fn()}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    const viewport = document.querySelector<HTMLElement>(".profile-trigger-label-viewport");
+    const text = document.querySelector<HTMLElement>(".profile-trigger-label-text");
+    if (!viewport || !text) throw new Error("profile label was not rendered");
+    Object.defineProperty(viewport, "clientWidth", { configurable: true, value: 80 });
+    Object.defineProperty(text, "scrollWidth", { configurable: true, value: 240 });
+
+    fireEvent.mouseEnter(viewport);
+    expect(viewport).toHaveClass("is-scrolling");
+    fireEvent.mouseLeave(viewport);
+    expect(viewport).not.toHaveClass("is-scrolling");
+  });
+
+  it("does not start marquee scrolling for a short name", () => {
+    render(
+      <AppSidebar
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "小明" }}
+        conversations={[conversation]}
+        archivedCount={0}
+        currentId={conversation.id}
+        page="chat"
+        onNew={vi.fn()}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onSignOut={vi.fn()}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    const viewport = document.querySelector<HTMLElement>(".profile-trigger-label-viewport");
+    const text = document.querySelector<HTMLElement>(".profile-trigger-label-text");
+    if (!viewport || !text) throw new Error("profile label was not rendered");
+    Object.defineProperty(viewport, "clientWidth", { configurable: true, value: 160 });
+    Object.defineProperty(text, "scrollWidth", { configurable: true, value: 32 });
+
+    fireEvent.mouseEnter(viewport);
+    expect(viewport).not.toHaveClass("is-scrolling");
+  });
   it("renders history metadata and scrolls only the hovered overflowing item", () => {
     const second: Conversation = { id: "c2", title: "第二个会话", messages: [] };
     const longTitle = "这是一个足够长的历史会话摘要，用于验证悬浮时只滚动当前条目";

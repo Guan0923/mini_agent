@@ -62,6 +62,16 @@ function AgentApp() {
         if (active) {
           setDisplayMode(effectiveDisplayMode(settings.agent_config.display_mode));
           setProviderConfig(settings.provider_config?.id ? settings.provider_config : null);
+          if (user) {
+            const profileName = settings.profile.display_name.trim()
+              || user.display_name?.trim()
+              || (user.kind === "guest" ? "游客用户" : "用户");
+            setUser({
+              ...user,
+              display_name: profileName,
+              agent_preferences: settings.profile.agent_preferences,
+            });
+          }
         }
       })
       .catch(() => undefined);

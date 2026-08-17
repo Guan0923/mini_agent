@@ -85,7 +85,12 @@ class WebAppState:
             from backend.storage.auth.local import LocalAuthStore
             from backend.storage.user_settings import PerUserSettingsRepository
 
-            self.auth = LocalAuthStore(self.data_root / "client.db")
+            # A browser can present a session before the request identifies a
+            # user, so this device-level index cannot live under one user's
+            # directory.  Keep it outside the authenticated data root; the
+            # root itself is reserved for ``<user_id>`` directories.
+            auth_path = self.data_root.parent / ".mini_agent-cache" / "auth" / "client.db"
+            self.auth = LocalAuthStore(auth_path)
             self.settings = PerUserSettingsRepository(data_root)
         del database_url, secret_key
 
