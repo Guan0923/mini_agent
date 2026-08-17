@@ -18,7 +18,7 @@ import { HELP_TEXT, parseCommand } from "../../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../../commands/completion";
 import { fileKeyAction, fileTrigger, insertToken, completionToken, toCandidates, type FileCandidate, type FileTrigger } from "../../commands/fileCompletion";
 import MarkdownContent from "../../components/MarkdownContent";
-import { AssistantMessage, MessageActions } from "./messageParts";
+import { AssistantMessage, MessageActions, MessageReferenceChip } from "./messageParts";
 import Composer, { type SettingsSelectKey } from "./Composer";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import { latestTodoList } from "./todoPanel";
@@ -853,6 +853,13 @@ export default function ChatPage({
                         title={onRewind && !busy ? "点击编辑此消息" : undefined}
                       >
                         <MarkdownContent text={message.content} />
+                        {message.references && message.references.length > 0 ? (
+                          <div className="message-references" aria-label="消息引用">
+                            {message.references.map((reference) => (
+                              <MessageReferenceChip key={`${reference.source}:${reference.path}`} reference={reference} sessionId={conversation?.sessionId} />
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
                     )}
                     {editingMessageId !== message.id ? (

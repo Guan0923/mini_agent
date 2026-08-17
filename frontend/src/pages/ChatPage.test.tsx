@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   searchSessionFiles: vi.fn(),
   uploadSessionFiles: vi.fn(),
   deleteSessionFile: vi.fn(),
+  fileReferenceAvailable: vi.fn().mockResolvedValue(true),
   sessionFileContentUrl: vi.fn((sessionId: string, source: string, path: string) => `/files?session=${sessionId}&source=${source}&path=${encodeURIComponent(path)}`),
 }));
 
@@ -544,5 +545,56 @@ describe("ChatPage file references", () => {
 
     await user.click(screen.getByLabelText("移除 temp.txt"));
     expect(mocks.deleteSessionFile).toHaveBeenCalledWith("session-files", "upload", "temp.txt");
+  });
+
+  it("renders message references and marks deleted files as unavailable", async () => {
+    mocks.fileReferenceAvailable = vi.fn().mockResolvedValue(false);
+    const initial: Conversation = {
+      id: "conversation-refs",
+      title: "引用会话",
+      sessionId: "session-refs",
+      messages: [
+        {
+          id: "user-refs",
+          role: "user",
+          content: "看看这些文件",
+          events: [],
+          references: [
+            { source: "upload", path: "report.pdf" },
+            { source: "project", path: "src/main.py" },
+          ],
+        },
+      ],
+    };
+    render(<Harness initial={initial} />);
+
+    expect(screen.getByLabelText("消息引用")).toBeInTheDocument();
+    expect(await screen.findAllByText("文件不可用")).toHaveLength(2);
+    expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    expect(screen.getByText("src/main.py")).toBeInTheDocument();
+    expect(mocks.fileReferenceAvailable).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders available message references as links", async () => {
+    mocks.fileReferenceAvailable = vi.fn().mockResolvedValue(true);
+    const initial: Conversation = {
+      id: "conversation-refs-ok",
+      title: "引用会话",
+      sessionId: "session-refs-ok",
+      messages: [
+        {
+          id: "user-refs-ok",
+          role: "user",
+          content: "看看这些文件",
+          events: [],
+          references: [{ source: "upload", path: "notes.md" }],
+        },
+      ],
+    };
+    render(<Harness initial={initial} />);
+
+    const link = await screen.findByRole("link", { name: "引用 notes.md" });
+    expect(link).toHaveAttribute("href", "/files?session=session-refs-ok&source=upload&path=notes.md");
+    expect(screen.queryByText("文件不可用")).not.toBeInTheDocument();
   });
 });
