@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field, StrictBool, StrictInt, field_validator
 from backend.cloud import CloudApiError, CloudAuthExpired, CloudConflict, CloudUnavailable
 from backend.domain import DEFAULT_TIME_ZONE, validate_time_zone
 from backend.storage.auth.types import AuthStorageUnavailable
+from backend.tools.terminal import available_terminal_executables
 
 from ..user_data import UserDataUnavailable, remove_user_root, user_root
 from .dependencies import require_browser_user, require_user
@@ -88,6 +90,7 @@ class AgentConfigPayload(BaseModel):
 
 class RuntimeConfigPayload(BaseModel):
     max_tool_calls: StrictInt = Field(default=32, ge=1, le=1000)
+    terminal_type: Literal["cmd", "git_bash", "powershell", "pwsh", "wsl"] = "cmd"
 
 
 class ProviderConfigPayload(BaseModel):
@@ -419,7 +422,10 @@ def update_runtime_config(
 ) -> dict[str, object]:
     _origin_guard(request)
     try:
-        return request.app.state.web.settings.update_runtime_config(identity.id, body.model_dump(exclude_unset=True))
+        values = body.model_dump(exclude_unset=True)
+        if os.name == "nt" and body.terminal_type not in available_terminal_executables(is_windows=True):
+            raise ValueError("selected terminal is not available on this system")
+        return request.app.state.web.settings.update_runtime_config(identity.id, values)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

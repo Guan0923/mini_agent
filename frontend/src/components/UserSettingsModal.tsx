@@ -179,7 +179,12 @@ export default function UserSettingsModal({
           provider_configs: providers,
           sync_preferences: next.sync_preferences ?? defaultSyncPreferences,
           sync_state: next.sync_state ?? defaultSyncState,
-          runtime_config: next.runtime_config ?? { max_tool_calls: 32 },
+          runtime_config: {
+            ...(next.runtime_config ?? { max_tool_calls: 32, terminal_type: "cmd" }),
+            terminal_type: next.runtime_config?.terminal_type ?? "cmd",
+          },
+          terminal_options: next.terminal_options ?? [],
+          terminal_notice: next.terminal_notice ?? null,
         };
         const drafts = Object.fromEntries(providers.map((provider) => [provider.id, { provider_name: provider.provider_name, model: provider.model, api_key: "" }]));
         setSettings(normalized);
@@ -204,7 +209,9 @@ export default function UserSettingsModal({
           provider_config: defaultProvider,
           provider_configs: [],
           capability_config: {},
-          runtime_config: { max_tool_calls: 32 },
+          runtime_config: { max_tool_calls: 32, terminal_type: "cmd" },
+          terminal_options: [],
+          terminal_notice: null,
           timezone_options: [],
           sync_preferences: defaultSyncPreferences,
           sync_state: defaultSyncState,
@@ -654,6 +661,30 @@ export default function UserSettingsModal({
         {section === "runtime" && (
           <Form layout="vertical">
             <Typography.Title level={4}>运行配置</Typography.Title>
+            {settings.terminal_notice ? (
+              <Alert
+                type="warning"
+                showIcon
+                title="终端状态提示"
+                description={settings.terminal_notice}
+                style={{ marginBottom: 16 }}
+              />
+            ) : null}
+            <Form.Item label="启动终端">
+              <Select
+                aria-label="启动终端"
+                value={settings.runtime_config.terminal_type}
+                options={settings.terminal_options}
+                disabled={settings.terminal_options.length === 0}
+                onChange={(terminal_type) => updateSettings({
+                  runtime_config: { ...settings.runtime_config, terminal_type },
+                })}
+                notFoundContent="暂无可用终端"
+              />
+              <Typography.Paragraph type="secondary">
+                仅显示当前系统已安装且可调用的终端；保存后仅影响新建或恢复的运行。
+              </Typography.Paragraph>
+            </Form.Item>
             <Form.Item label="工具调用上限">
               <InputNumber
                 aria-label="工具调用上限"
@@ -664,7 +695,7 @@ export default function UserSettingsModal({
                 value={settings.runtime_config.max_tool_calls}
                 onChange={(max_tool_calls) => {
                   if (typeof max_tool_calls === "number" && Number.isInteger(max_tool_calls)) {
-                    updateSettings({ runtime_config: { max_tool_calls } as RuntimeConfig });
+                    updateSettings({ runtime_config: { ...settings.runtime_config, max_tool_calls } });
                   }
                 }}
               />

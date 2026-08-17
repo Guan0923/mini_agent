@@ -49,13 +49,14 @@ def test_command_tool_uses_powershell_on_windows_and_workspace_cwd(tmp_path: Pat
     output = WorkspaceCommand(
         tmp_path,
         is_windows=True,
+        terminal_type="powershell",
         popen_factory=popen_factory,
         environment={"PATH": "C:\\Windows\\System32", "API_KEY": "secret"},
     ).run("New-Item -ItemType Directory demo")
 
     assert output == "stdout:\ncreated\n"
     assert calls[0][0] == [
-        "powershell",
+        "powershell.exe",
         "-NoLogo",
         "-NoProfile",
         "-NonInteractive",
@@ -71,6 +72,70 @@ def test_command_tool_uses_powershell_on_windows_and_workspace_cwd(tmp_path: Pat
     assert options["creationflags"] == getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     assert "start_new_session" not in options
     assert process.communicate_calls == [30]
+
+
+@pytest.mark.parametrize(
+    ("terminal_type", "expected"),
+    [
+        ("cmd", ["cmd.exe", "/d", "/s", "/c", "echo hi"]),
+        ("pwsh", ["pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "echo hi"]),
+    ],
+)
+def test_command_tool_uses_selected_windows_terminal(tmp_path: Path, terminal_type: str, expected: list[str]) -> None:
+    calls: list[list[str]] = []
+
+    def popen_factory(args: list[str], **_kwargs: Any) -> FakeProcess:
+        calls.append(args)
+        return FakeProcess()
+
+    WorkspaceCommand(
+        tmp_path,
+        is_windows=True,
+        terminal_type=terminal_type,
+        popen_factory=popen_factory,
+        environment={"PATH": ""},
+    ).run("echo hi")
+
+    assert calls == [expected]
+
+
+def test_command_tool_uses_git_bash_executable_when_selected(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr("backend.tools.command.terminal_executable", lambda *_args, **_kwargs: "git-bash.exe")
+
+    def popen_factory(args: list[str], **_kwargs: Any) -> FakeProcess:
+        calls.append(args)
+        return FakeProcess()
+
+    WorkspaceCommand(
+        tmp_path,
+        is_windows=True,
+        terminal_type="git_bash",
+        popen_factory=popen_factory,
+    ).run("echo hi")
+
+    assert calls == [["git-bash.exe", "-lc", "echo hi"]]
+
+
+def test_command_tool_maps_workspace_for_wsl(tmp_path: Path, monkeypatch) -> None:
+    from backend.tools.terminal import windows_workspace_to_wsl
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr("backend.tools.command.terminal_executable", lambda *_args, **_kwargs: "wsl.exe")
+
+    def popen_factory(args: list[str], **_kwargs: Any) -> FakeProcess:
+        calls.append(args)
+        return FakeProcess()
+
+    WorkspaceCommand(
+        tmp_path,
+        is_windows=True,
+        terminal_type="wsl",
+        popen_factory=popen_factory,
+    ).run("pwd")
+
+    assert calls == [["wsl.exe", "--cd", windows_workspace_to_wsl(tmp_path.resolve()), "--", "sh", "-lc", "pwd"]]
 
 
 def test_command_tool_uses_bash_on_unix_and_reports_command_failures(tmp_path: Path) -> None:

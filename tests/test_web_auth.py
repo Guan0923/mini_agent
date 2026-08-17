@@ -212,13 +212,53 @@ def test_runtime_config_defaults_validates_and_persists_per_user(tmp_path: Path)
     with TestClient(create_app(state)) as client:
         login = client.post("/api/auth/guest")
         assert login.status_code == 200
-        assert client.get("/api/auth/settings").json()["runtime_config"] == {"max_tool_calls": 32}
+        settings = client.get("/api/auth/settings").json()
+        assert settings["runtime_config"] == {
+            "max_tool_calls": 32,
+            "terminal_type": "cmd",
+        }
+        assert {option["value"] for option in settings["terminal_options"]} >= {"cmd"}
+        assert settings["terminal_notice"] is None
 
         saved = client.put("/api/auth/runtime-config", json={"max_tool_calls": 1000})
         assert saved.status_code == 200
-        assert saved.json() == {"max_tool_calls": 1000}
-        assert client.get("/api/auth/settings").json()["runtime_config"] == {"max_tool_calls": 1000}
+        assert saved.json() == {"max_tool_calls": 1000, "terminal_type": "cmd"}
+        assert client.get("/api/auth/settings").json()["runtime_config"] == {
+            "max_tool_calls": 1000,
+            "terminal_type": "cmd",
+        }
 
         for value in (0, 1001, True, "32"):
             response = client.put("/api/auth/runtime-config", json={"max_tool_calls": value})
             assert response.status_code == 422
+
+
+def test_runtime_config_accepts_each_detected_terminal(tmp_path: Path, monkeypatch) -> None:
+    detected = {
+        "cmd": "cmd.exe",
+        "git_bash": "bash.exe",
+        "powershell": "powershell.exe",
+        "pwsh": "pwsh.exe",
+        "wsl": "wsl.exe",
+    }
+    monkeypatch.setattr("backend.api.auth.routes.available_terminal_executables", lambda **_kwargs: detected)
+    state = _state(tmp_path)
+    with TestClient(create_app(state)) as client:
+        assert client.post("/api/auth/guest").status_code == 200
+        for terminal_type in detected:
+            response = client.put("/api/auth/runtime-config", json={"terminal_type": terminal_type})
+            assert response.status_code == 200, response.text
+            assert response.json()["terminal_type"] == terminal_type
+
+
+def test_runtime_config_rejects_unavailable_terminal(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.api.auth.routes.available_terminal_executables",
+        lambda **_kwargs: {"cmd": "cmd.exe"},
+    )
+    state = _state(tmp_path)
+    with TestClient(create_app(state)) as client:
+        assert client.post("/api/auth/guest").status_code == 200
+        response = client.put("/api/auth/runtime-config", json={"terminal_type": "pwsh"})
+        assert response.status_code == 422
+        assert "not available" in response.json()["detail"]

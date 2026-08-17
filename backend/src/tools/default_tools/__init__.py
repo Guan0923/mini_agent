@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, TerminalType
+
 from ..base import Tool
 from ..command import WorkspaceCommand
 from ..filesystem import WorkspaceFiles
@@ -23,6 +25,7 @@ def build_default_tools(
     search: DdgrWebSearch | None = None,
     fetcher: SafeWebFetcher | None = None,
     upload_files: WorkspaceFiles | None = None,
+    terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
 ) -> tuple[Tool, ...]:
     """Build tools in the stable order exposed to planners."""
 
@@ -34,7 +37,7 @@ def build_default_tools(
         read_pdf_tool(workspace),
         *web_tools(search or DdgrWebSearch(), fetcher or SafeWebFetcher()),
         *filesystem_mutation_tools(workspace_files),
-        command_tool(WorkspaceCommand(workspace)),
+        command_tool(WorkspaceCommand(workspace, terminal_type=terminal_type)),
     ]
     if upload_files is not None:
         tools.append(upload_file_read_tool(upload_files))

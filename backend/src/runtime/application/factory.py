@@ -8,6 +8,7 @@ from typing import Literal
 
 from backend.configuration import ClientPaths, UserConfigStore, initialize_config, load_config, section
 from backend.domain import DEFAULT_TIME_ZONE
+from backend.domain.terminal import DEFAULT_TERMINAL_TYPE
 from backend.jobs import JobRegistry, JobScope, JobScopeKind
 from backend.mcp.client import ExternalMcpResources, start_external_tools
 from backend.mcp.config import McpSettings, prepare_mcp_plan
@@ -17,6 +18,7 @@ from backend.skills import ProjectSkillGate, ProjectSkillTrustStore, SkillCatalo
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.sync import RequestsSyncTransport, SyncClient, SyncCoordinator
 from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry, delegation_tools
+from backend.tools.terminal import effective_terminal_type
 
 from ..capability_settings import SkillSettings, SubagentSettings
 from ..conversation.references import FileReferenceExpander
@@ -155,7 +157,9 @@ def _build_subagent_runner(
     project_id: str | None = None,
     job_registry: JobRegistry | None = None,
     job_user_id: str | None = None,
+    terminal_type: str | None = None,
 ) -> AgentRunner:
+    terminal_type = terminal_type or _terminal_type_for_config(config)
     resolved_paths = paths or client_paths()
     skill_settings = SkillSettings.from_config(config)
     subagent_settings = SubagentSettings.from_config(config)
@@ -165,7 +169,7 @@ def _build_subagent_runner(
             workspace,
             planner_name,
             settings,
-            build_tool_registry(workspace, upload_files=upload_files),
+            build_tool_registry(workspace, upload_files=upload_files, terminal_type=terminal_type),
             hooks,
             checkpoints,
             resolved_paths,
@@ -193,6 +197,7 @@ def _build_subagent_runner(
             workspace,
             workspace_files=files,
             upload_files=upload_files,
+            terminal_type=terminal_type,
             extra_tools=(
                 *delegation_tools(subagent_settings.max_tasks_per_batch),
                 *external,
@@ -322,6 +327,12 @@ def _settings_for(
         max_tool_calls=max_tool_calls,  # type: ignore[arg-type]
         log_full_messages=log_full_messages_from_toml(paths.config_file),
     )
+
+
+def _terminal_type_for_config(config: dict[str, object]) -> str:
+    runtime = config.get("runtime")
+    values = runtime if isinstance(runtime, dict) else {}
+    return effective_terminal_type(values.get("terminal_type", DEFAULT_TERMINAL_TYPE))
 
 
 def _build_sync_coordinator(

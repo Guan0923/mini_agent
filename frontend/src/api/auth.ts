@@ -58,6 +58,14 @@ export interface TimezoneOption {
 
 export interface RuntimeConfig {
   max_tool_calls: number;
+  terminal_type: TerminalType;
+}
+
+export type TerminalType = "cmd" | "git_bash" | "powershell" | "pwsh" | "wsl";
+
+export interface TerminalOption {
+  value: TerminalType;
+  label: string;
 }
 
 export interface UserSettings {
@@ -67,6 +75,8 @@ export interface UserSettings {
   provider_configs: ProviderConfig[];
   capability_config: Record<string, unknown>;
   runtime_config: RuntimeConfig;
+  terminal_options: TerminalOption[];
+  terminal_notice: string | null;
   timezone_options: TimezoneOption[];
   sync_preferences: SyncPreferences;
   sync_state: SyncState;

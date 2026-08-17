@@ -9,7 +9,10 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, TERMINAL_LABELS, TerminalType, normalize_terminal_type
+
 from .base import ToolError
+from .terminal import terminal_executable, windows_workspace_to_wsl
 
 ProcessFactory = Callable[..., subprocess.Popen[str]]
 TreeTerminator = Callable[[subprocess.Popen[str]], None]
@@ -43,18 +46,20 @@ class WorkspaceCommand:
         workspace: Path,
         *,
         is_windows: bool | None = None,
+        terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
         popen_factory: ProcessFactory = subprocess.Popen,
         tree_terminator: TreeTerminator | None = None,
         environment: Mapping[str, str] | None = None,
     ) -> None:
         self._workspace = workspace.resolve()
         self._is_windows = os.name == "nt" if is_windows is None else is_windows
+        self._terminal_type = normalize_terminal_type(terminal_type)
         self._popen_factory = popen_factory
         self._tree_terminator = tree_terminator
         self._environment = self._filtered_environment(os.environ if environment is None else environment)
 
     def run(self, command: str, timeout_seconds: int = 30) -> str:
-        """Execute Bash on Unix-like systems and PowerShell on Windows."""
+        """Execute the configured terminal command inside the workspace."""
 
         self._validate(command, timeout_seconds)
         process_options: dict[str, Any] = {
@@ -75,7 +80,7 @@ class WorkspaceCommand:
         try:
             process = self._popen_factory(self._command_line(command), **process_options)
         except FileNotFoundError as exc:
-            shell = "PowerShell" if self._is_windows else "Bash"
+            shell = TERMINAL_LABELS.get(self._terminal_type, "Bash") if self._is_windows else "Bash"
             raise ToolError(f"{shell} is not available on this system.") from exc
         except OSError as exc:
             raise ToolError(f"Unable to start command: {exc}") from exc
@@ -103,9 +108,23 @@ class WorkspaceCommand:
         return output or "Command completed successfully."
 
     def _command_line(self, command: str) -> list[str]:
-        if self._is_windows:
-            return ["powershell", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
-        return ["bash", "-c", command]
+        if not self._is_windows:
+            return ["bash", "-c", command]
+
+        executable = terminal_executable(self._terminal_type, environment=self._environment)
+        if executable is None:
+            raise ToolError(f"{TERMINAL_LABELS[self._terminal_type]} is not available on this system.")
+        if self._terminal_type == "cmd":
+            return [executable, "/d", "/s", "/c", command]
+        if self._terminal_type in {"powershell", "pwsh"}:
+            return [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
+        if self._terminal_type == "git_bash":
+            return [executable, "-lc", command]
+        try:
+            linux_workspace = windows_workspace_to_wsl(self._workspace)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        return [executable, "--cd", linux_workspace, "--", "sh", "-lc", command]
 
     def _terminate_process_tree(self, process: subprocess.Popen[str]) -> None:
         if self._tree_terminator is not None:
