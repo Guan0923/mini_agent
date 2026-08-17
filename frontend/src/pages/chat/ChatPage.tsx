@@ -736,9 +736,13 @@ export default function ChatPage({
 
   async function rewindMessage(messageId: string) {
     if (!conversation || !onRewind || busy) return;
+    const message = conversation.messages.find((item) => item.id === messageId);
     const result = await onRewind(conversation.id, messageId);
     if (result === undefined) return;
     setInput(typeof result === "string" ? result : result.content);
+    // Carry the rewound message's references into the composer so the
+    // replacement run keeps the same structured file references.
+    setReferences(message?.references ?? []);
     window.setTimeout(() => taRef.current?.focus(), 0);
   }
 
@@ -746,6 +750,7 @@ export default function ChatPage({
     if (busy || !onRewind || !message.content) return;
     setEditingMessageId(message.id);
     setEditingDraft(message.content);
+    setReferences(message.references ?? []);
   }
 
   function cancelEdit() {
@@ -764,11 +769,15 @@ export default function ChatPage({
     const sessionId = typeof result === "string" ? conversation.sessionId : result.sessionId;
     if (!sessionId) return;
     cancelEdit();
-    await runPrompt(nextPrompt, {
-      conversationId: conversation.id,
-      sessionId,
-      sourceNodeId: typeof result === "string" ? undefined : result.sourceNodeId,
-    });
+    await runPrompt(
+      nextPrompt,
+      {
+        conversationId: conversation.id,
+        sessionId,
+        sourceNodeId: typeof result === "string" ? undefined : result.sourceNodeId,
+      },
+      message.references,
+    );
   }
 
   function handleUserBubbleClick(event: ReactMouseEvent<HTMLDivElement>, message: ChatMessage) {
