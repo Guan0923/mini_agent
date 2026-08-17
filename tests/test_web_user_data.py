@@ -50,3 +50,30 @@ def test_each_session_has_an_independent_workspace_and_branch_copy(tmp_path: Pat
 
     (branch / "notes.txt").write_text("branch", encoding="utf-8")
     assert (source / "notes.txt").read_text(encoding="utf-8") == "source"
+
+
+def test_legacy_uploads_migrate_into_workspace(tmp_path: Path) -> None:
+    paths = ClientPaths(user_root(tmp_path, USER_ID))
+    root = paths.session_root("session_migrate")
+    root.mkdir(parents=True)
+    (root / "workspace").mkdir()
+    legacy = root / "uploads"
+    legacy.mkdir()
+    (legacy / "old.txt").write_text("legacy", encoding="utf-8")
+    paths.ensure_session("session_migrate")
+    assert (paths.session_uploads("session_migrate") / "old.txt").read_text(encoding="utf-8") == "legacy"
+    assert not (root / "uploads").exists()
+
+
+def test_branch_copy_migrates_legacy_uploads_first(tmp_path: Path) -> None:
+    paths = ClientPaths(user_root(tmp_path, USER_ID))
+    source_root = paths.session_root("session_legacy_source")
+    source_root.mkdir(parents=True)
+    (source_root / "workspace").mkdir()
+    legacy = source_root / "uploads"
+    legacy.mkdir()
+    (legacy / "old.txt").write_text("legacy", encoding="utf-8")
+    (source_root / "state.db").touch()
+
+    copy_session_files(tmp_path, USER_ID, "session_legacy_source", "session_legacy_branch")
+    assert (paths.session_uploads("session_legacy_branch") / "old.txt").read_text(encoding="utf-8") == "legacy"

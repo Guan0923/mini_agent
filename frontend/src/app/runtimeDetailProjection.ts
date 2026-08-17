@@ -1,4 +1,4 @@
-import type { ChatMessage, Conversation, RuntimeNodeFrame, RuntimeStateNode, ToolEvent } from "../types";
+import type { ChatMessage, Conversation, FileReference, RuntimeNodeFrame, RuntimeStateNode, ToolEvent } from "../types";
 import { applyRuntimeNodeFrame } from "./runtimeNodeReducer";
 import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
@@ -42,6 +42,23 @@ export interface ProjectedNodeDetails {
   events: ToolEvent[];
   runId?: string;
   error?: string;
+  references?: FileReference[];
+}
+
+function projectedReferences(message: Record<string, unknown>): FileReference[] | undefined {
+  const raw = message.references;
+  if (!Array.isArray(raw)) return undefined;
+  const references: FileReference[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const source = record.source;
+    const path = record.path;
+    if ((source === "project" || source === "upload") && typeof path === "string" && path) {
+      references.push({ source, path });
+    }
+  }
+  return references.length > 0 ? references : undefined;
 }
 
 function terminalError(message: Record<string, unknown>): string | undefined {
@@ -128,6 +145,7 @@ export function projectRuntimeNode(node: RuntimeStateNode, terminal = true): Pro
     events,
     runId: typeof message.run_id === "string" ? message.run_id : undefined,
     error: terminalNodeError(node, message, terminal),
+    references: role === "user" ? projectedReferences(message) : undefined,
   };
 }
 
@@ -171,7 +189,11 @@ export function integrateRuntimeNodeFrame(conversation: Conversation, frame: Run
   if (projection?.role === "user") {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       if (messages[index].role !== "user") continue;
-      messages[index] = { ...messages[index], sourceNodeId: frame.node.parent_id || undefined };
+      messages[index] = {
+        ...messages[index],
+        sourceNodeId: frame.node.parent_id || undefined,
+        references: projection.references,
+      };
       break;
     }
   } else if (projection?.role === "assistant" || projection?.role === "tool_result") {

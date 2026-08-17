@@ -12,6 +12,11 @@ const mocks = vi.hoisted(() => ({
   listSkills: vi.fn(),
   listTools: vi.fn(),
   patchRuntimeConfig: vi.fn(),
+  searchSessionFiles: vi.fn(),
+  uploadSessionFiles: vi.fn(),
+  deleteSessionFile: vi.fn(),
+  fileReferenceAvailable: vi.fn().mockResolvedValue(true),
+  sessionFileContentUrl: vi.fn((sessionId: string, source: string, path: string) => `/files?session=${sessionId}&source=${source}&path=${encodeURIComponent(path)}`),
 }));
 
 vi.mock("../api", () => mocks);
@@ -446,5 +451,150 @@ describe("ChatPage run lifecycle", () => {
     expect(screen.queryByText("任务清单")).toBeNull();
     expect(container.querySelector(".composer")?.className).not.toContain("has-todo");
     expect(container.querySelector(".composer-todo-anchor")).toBeNull();
+  });
+});
+
+describe("ChatPage file references", () => {
+  const sessionConversation = (): Conversation => ({
+    id: "conversation-files",
+    title: "文件会话",
+    sessionId: "session-files",
+    messages: [],
+  });
+
+  it("searches files when typing @ and completes with a reference", async () => {
+    mocks.searchSessionFiles.mockResolvedValue([
+      { source: "upload", path: "notes.md", name: "notes.md", size: 10, mime: "text/markdown", mtime: "2026-01-01T00:00:00+00:00", is_image: false },
+    ]);
+    const user = userEvent.setup();
+    const { container } = render(<Harness initial={sessionConversation()} />);
+    const textarea = screen.getByPlaceholderText("输入任务，按 Enter 发送");
+    await user.type(textarea, "请查看 @note");
+    await waitFor(() => expect(mocks.searchSessionFiles).toHaveBeenCalledWith("session-files", "note", 20));
+    const item = container.querySelector(".file-item")!;
+    await user.click(item);
+
+    expect(textarea).toHaveValue("请查看 @notes.md");
+    expect(screen.getByLabelText("待发送引用")).toBeInTheDocument();
+    expect(screen.getByText("notes.md", { selector: ".composer-reference-path" })).toBeInTheDocument();
+  });
+
+  it("inserts quoted tokens for paths with spaces", async () => {
+    mocks.searchSessionFiles.mockResolvedValue([
+      { source: "project", path: "my notes.txt", name: "my notes.txt", size: 10, mime: "text/plain", mtime: "2026-01-01T00:00:00+00:00", is_image: false },
+    ]);
+    const user = userEvent.setup();
+    const { container } = render(<Harness initial={sessionConversation()} />);
+    const textarea = screen.getByPlaceholderText("输入任务，按 Enter 发送");
+    await user.type(textarea, "看看 @my");
+    await waitFor(() => expect(container.querySelector(".file-item")).not.toBeNull());
+    await user.click(container.querySelector(".file-item")!);
+
+    expect(textarea).toHaveValue("看看 @\"my notes.txt\"");
+  });
+
+  it("dismisses the file menu with Escape and never opens the command menu", async () => {
+    mocks.searchSessionFiles.mockResolvedValue([
+      { source: "upload", path: "a.txt", name: "a.txt", size: 1, mime: "text/plain", mtime: "2026-01-01T00:00:00+00:00", is_image: false },
+    ]);
+    const user = userEvent.setup();
+    const { container } = render(<Harness initial={sessionConversation()} />);
+    const textarea = screen.getByPlaceholderText("输入任务，按 Enter 发送");
+    await user.type(textarea, "@a");
+    await waitFor(() => expect(container.querySelector(".file-item")).not.toBeNull());
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(container.querySelector(".file-item")).toBeNull());
+  });
+
+  it("uploads picked files, shows progress, and sends references with the message", async () => {
+    mocks.uploadSessionFiles.mockResolvedValue([
+      { source: "upload", path: "shot.png", name: "shot.png", size: 4, mime: "image/png", mtime: "2026-01-01T00:00:00+00:00", is_image: true },
+    ]);
+    mocks.streamChat.mockImplementation(
+      (_prompt: string, onMessage: (message: StreamMessage) => void) => {
+        onMessage({ type: "done", status: "completed", final_answer: "收到" });
+        return Promise.resolve("completed" as const);
+      },
+    );
+    const user = userEvent.setup();
+    const { container } = render(<Harness initial={sessionConversation()} />);
+    const textarea = screen.getByPlaceholderText("输入任务，按 Enter 发送");
+    const file = new File(["png"], "shot.png", { type: "image/png" });
+    await user.upload(container.querySelector('input[type="file"]')!, file);
+
+    expect(mocks.uploadSessionFiles).toHaveBeenCalledWith("session-files", [file], expect.any(Function));
+    expect(await screen.findByText("shot.png", { selector: ".composer-upload-name" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("待发送引用")).toBeInTheDocument());
+
+    await user.type(textarea, "分析图片");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(mocks.streamChat).toHaveBeenCalled());
+    expect(mocks.streamChat.mock.calls[0][1]).toBeDefined();
+  });
+
+  it("removing a completed upload deletes the server file before send", async () => {
+    mocks.uploadSessionFiles.mockResolvedValue([
+      { source: "upload", path: "temp.txt", name: "temp.txt", size: 3, mime: "text/plain", mtime: "2026-01-01T00:00:00+00:00", is_image: false },
+    ]);
+    mocks.deleteSessionFile.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    const { container } = render(<Harness initial={sessionConversation()} />);
+    const file = new File(["abc"], "temp.txt", { type: "text/plain" });
+    await user.upload(container.querySelector('input[type="file"]')!, file);
+    await waitFor(() => expect(mocks.uploadSessionFiles).toHaveBeenCalled());
+
+    await user.click(screen.getByLabelText("移除 temp.txt"));
+    expect(mocks.deleteSessionFile).toHaveBeenCalledWith("session-files", "upload", "temp.txt");
+  });
+
+  it("renders message references and marks deleted files as unavailable", async () => {
+    mocks.fileReferenceAvailable = vi.fn().mockResolvedValue(false);
+    const initial: Conversation = {
+      id: "conversation-refs",
+      title: "引用会话",
+      sessionId: "session-refs",
+      messages: [
+        {
+          id: "user-refs",
+          role: "user",
+          content: "看看这些文件",
+          events: [],
+          references: [
+            { source: "upload", path: "report.pdf" },
+            { source: "project", path: "src/main.py" },
+          ],
+        },
+      ],
+    };
+    render(<Harness initial={initial} />);
+
+    expect(screen.getByLabelText("消息引用")).toBeInTheDocument();
+    expect(await screen.findAllByText("文件不可用")).toHaveLength(2);
+    expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    expect(screen.getByText("src/main.py")).toBeInTheDocument();
+    expect(mocks.fileReferenceAvailable).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders available message references as links", async () => {
+    mocks.fileReferenceAvailable = vi.fn().mockResolvedValue(true);
+    const initial: Conversation = {
+      id: "conversation-refs-ok",
+      title: "引用会话",
+      sessionId: "session-refs-ok",
+      messages: [
+        {
+          id: "user-refs-ok",
+          role: "user",
+          content: "看看这些文件",
+          events: [],
+          references: [{ source: "upload", path: "notes.md" }],
+        },
+      ],
+    };
+    render(<Harness initial={initial} />);
+
+    const link = await screen.findByRole("link", { name: "引用 notes.md" });
+    expect(link).toHaveAttribute("href", "/files?session=session-refs-ok&source=upload&path=notes.md");
+    expect(screen.queryByText("文件不可用")).not.toBeInTheDocument();
   });
 });

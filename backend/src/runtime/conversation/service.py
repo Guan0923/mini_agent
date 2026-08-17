@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from backend.domain import (
@@ -76,7 +76,11 @@ class ConversationService(ConversationSessionController):
         self.runtime_node_bridge = bridge
         self._node_bridge_events_external = events_external
 
-    def _node_bridge_for_runtime(self, prompt: str) -> RuntimeEventNodeBridge | None:
+    def _node_bridge_for_runtime(
+        self,
+        prompt: str,
+        references: list[Mapping[str, str]] | None = None,
+    ) -> RuntimeEventNodeBridge | None:
         """Create a local bridge from the latest durable node configuration."""
 
         if self.session_store is None or not callable(getattr(self.session_store, "create_node", None)):
@@ -130,15 +134,21 @@ class ConversationService(ConversationSessionController):
             permission_mode=permission_mode,
             running_mode=running_mode,
             cwd=str(getattr(self.runtime.state, "workspace_root", "") or ""),
+            references=references,
             emit=lambda _frame: None,
         )
 
-    def _bind_node_bridge(self, prompt: str, on_event: EventHandler | None) -> None:
+    def _bind_node_bridge(
+        self,
+        prompt: str,
+        on_event: EventHandler | None,
+        references: list[Mapping[str, str]] | None = None,
+    ) -> None:
         """Bind a bridge to the runtime and compose its local event sink."""
 
         bridge = self.runtime_node_bridge
         if bridge is None or bridge.closed:
-            bridge = self._node_bridge_for_runtime(prompt)
+            bridge = self._node_bridge_for_runtime(prompt, references)
             self.runtime_node_bridge = bridge
             self._node_bridge_events_external = False
         if bridge is None or self.runtime is None:
@@ -171,8 +181,9 @@ class ConversationService(ConversationSessionController):
         suspend_requested: CancellationHandler | None = None,
         trigger: RunTrigger = "embedding",
         request_parameters: Mapping[str, Any] | None = None,
+        references: Sequence[Mapping[str, str]] = (),
     ) -> RunState:
-        prepared = self._prepare(task)
+        prepared = self._prepare(task, structured=bool(references))
         state = self._run_single_turn(
             prepared,
             mode=mode,
@@ -183,6 +194,7 @@ class ConversationService(ConversationSessionController):
             suspend_requested=suspend_requested,
             trigger=trigger,
             request_parameters=request_parameters,
+            references=list(references),
         )
         handoff = state.handoff
         if handoff is None:
@@ -264,13 +276,14 @@ class ConversationService(ConversationSessionController):
             isolated_runtime.save()
             if paths is not None and not provisioned:
                 paths.ensure_session(isolated_session.session_id)
+                # Uploads live below the workspace in the canonical layout, so
+                # a single workspace copy carries them.  Migrate a legacy
+                # sibling uploads directory first so old sessions are copied
+                # completely.
+                paths.migrate_legacy_uploads(source_session.session_id)
                 _copy_session_tree(
                     paths.session_workspace(source_session.session_id),
                     paths.session_workspace(isolated_session.session_id),
-                )
-                _copy_session_tree(
-                    paths.session_uploads(source_session.session_id),
-                    paths.session_uploads(isolated_session.session_id),
                 )
         except Exception:
             if provisioned and self._session_provisioner_cleanup is not None:
@@ -302,6 +315,7 @@ class ConversationService(ConversationSessionController):
         source_session_id: str | None = None,
         source_run_id: str | None = None,
         request_parameters: Mapping[str, Any] | None = None,
+        references: list[Mapping[str, str]] | None = None,
     ) -> RunState:
         provenance = RunProvenance(
             trigger=trigger,
@@ -353,7 +367,7 @@ class ConversationService(ConversationSessionController):
         # embedding executions as well as Web SSE.  Web attaches a bridge
         # ahead of time so it can expose the active dynamic leaf to PATCH;
         # local callers get an equivalent bridge here.
-        self._bind_node_bridge(prepared, on_event)
+        self._bind_node_bridge(prepared, on_event, references)
         # ``mode`` is the initial runtime configuration for this turn.  The
         # runner refreshes ``RunState.mode`` from ``state.running_mode`` at
         # dispatch time and the bridge's ``bind_runtime`` derives it from the
@@ -422,11 +436,11 @@ class ConversationService(ConversationSessionController):
             request_parameters=request_parameters,
         )
 
-    def _prepare(self, task: str) -> str:
+    def _prepare(self, task: str, *, structured: bool = False) -> str:
         if self._task_preprocessor is None:
             return task
         try:
-            return self._task_preprocessor.expand(task)
+            return self._task_preprocessor.expand(task, structured=structured)
         except ToolError as exc:
             raise TaskPreparationError(str(exc)) from exc
 

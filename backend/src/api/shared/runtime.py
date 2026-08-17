@@ -33,7 +33,6 @@ def build_user_application(
     project_id: str | None = None,
 ) -> AgentApplication:
     """Build an application with the canonical per-user runtime settings."""
-
     application_builder = builder or build_application
     runtime_config = state.runtime_config_for_user(user_id)
     runtime_values = runtime_config.get("runtime", {})
@@ -64,6 +63,7 @@ def build_user_application(
         "session_provisioner": session_provisioner,
         "session_provisioner_cleanup": session_provisioner_cleanup,
         "project_id": project_id or None,
+        "upload_root": _session_upload_root(state, user_id, session_id),
     }
     # Preserve compatibility with embedders/tests that inject the historical
     # builder signature while still passing hooks to the canonical factory.
@@ -89,6 +89,7 @@ def build_user_application(
     # secrets in the per-user settings database and out of RuntimeState.
     runner = getattr(application, "runner", None)
     if runner is not None:
+
         def resolver(provider_name: str):
             return state.model_config_for_provider_name(user_id, provider_name)
 
@@ -99,6 +100,19 @@ def build_user_application(
         if callable(setter):
             setter(resolver)
     return application
+
+
+def _session_upload_root(state: WebAppState, user_id: str, session_id: str) -> Path | None:
+    """Resolve the session's canonical upload directory for the upload tool."""
+
+    paths = state.user_paths(user_id)
+    try:
+        paths.ensure_session(session_id)
+    except Exception:
+        # A freshly created session may not have a durable workspace yet;
+        # uploads simply stay unavailable until the session is provisioned.
+        return None
+    return paths.session_uploads(session_id)
 
 
 def _project_session_provisioner(state: WebAppState, user_id: str):

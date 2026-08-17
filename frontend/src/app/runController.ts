@@ -107,6 +107,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
             reasoningEffort: request.reasoningEffort,
             providerName: request.providerName,
             model: request.model,
+            references: request.references,
           });
       if (result === "aborted") {
         callbacks.updateLastMessage(request.conversationId, (item) => ({

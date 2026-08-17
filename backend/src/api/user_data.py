@@ -125,11 +125,14 @@ def copy_session_files(data_root: Path, user_id: str, source_session_id: str, ta
         raise ValueError("Source session does not exist.")
     target_existed = target_root.exists()
     paths.ensure_session(target_session_id)
+    # Uploads live below the workspace in the canonical layout.  Migrate a
+    # legacy sibling uploads directory first so the workspace copy carries
+    # every upload.
+    paths.migrate_legacy_uploads(source_session_id)
     try:
         _copy_tree_without_symlinks(
             paths.session_workspace(source_session_id), paths.session_workspace(target_session_id)
         )
-        _copy_tree_without_symlinks(paths.session_uploads(source_session_id), paths.session_uploads(target_session_id))
     except Exception:
         # Branch callers create a fresh target session before copying.  If a
         # payload contains a link/special file or the disk fills up, remove
@@ -155,6 +158,7 @@ def copy_session_uploads(data_root: Path, user_id: str, source_session_id: str, 
         raise ValueError("Source session does not exist.")
     target_existed = target_root.exists()
     paths.ensure_session(target_session_id)
+    paths.migrate_legacy_uploads(source_session_id)
     try:
         _copy_tree_without_symlinks(paths.session_uploads(source_session_id), paths.session_uploads(target_session_id))
     except Exception:
@@ -255,13 +259,34 @@ def _copy_session_payload(source: Path, target: Path) -> None:
         finally:
             target_connection.close()
             source_connection.close()
-        for name in ("workspace", "uploads"):
+        for name in ("workspace",):
             source_item = source / name
             target_item = target / name
             if source_item.exists():
                 _copy_tree_without_symlinks(source_item, target_item)
             else:
                 target_item.mkdir(parents=True, exist_ok=True)
+        # Uploads live below the workspace in the canonical layout.  A legacy
+        # guest session may still carry the pre-v0.4 sibling uploads directory;
+        # migrate it into the copied workspace so its files are preserved.
+        legacy_uploads = source / "uploads"
+        if legacy_uploads.is_symlink():
+            raise ValueError("Guest session uploads cannot be a symbolic link.")
+        if legacy_uploads.is_dir():
+            canonical = target / "workspace" / "uploads"
+            canonical.mkdir(parents=True, exist_ok=True)
+            for item in legacy_uploads.iterdir():
+                if item.is_symlink():
+                    raise ValueError(f"Guest session upload contains a symbolic link: {item.name}")
+                destination = canonical / item.name
+                if destination.exists() or destination.is_symlink():
+                    raise ValueError(f"Guest session upload collides with canonical entry: {item.name}")
+                if item.is_dir():
+                    _copy_tree_without_symlinks(item, destination)
+                elif item.is_file():
+                    shutil.copy2(item, destination)
+                else:
+                    raise ValueError(f"Guest session upload contains a special file: {item.name}")
     except (OSError, sqlite3.DatabaseError, ValueError) as exc:
         shutil.rmtree(target, ignore_errors=True)
         raise RuntimeError(f"游客会话复制失败: {source.name}") from exc

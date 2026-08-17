@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import time
 from pathlib import Path
@@ -153,5 +154,158 @@ def test_snapshot_round_trip_restores_session_workspace(tmp_path: Path, monkeypa
         assert restored["status"] == "complete", restored.get("error")
         assert note.read_text(encoding="utf-8") == "snapshot content"
         assert settings.profile_for_user(USER_ID)["display_name"] == "User"
+    finally:
+        manager.close()
+
+
+def test_legacy_snapshot_uploads_migrate_on_restore(tmp_path: Path, monkeypatch) -> None:
+    """Old snapshots carrying runtime/<sid>/uploads auto-migrate into workspace/uploads."""
+
+    keys = MemoryKeyStore()
+    monkeypatch.setattr(crypto, "_LOCAL_KEY_STORE", keys)
+    settings = PerUserSettingsRepository(tmp_path)
+    settings.update_profile(USER_ID, display_name="User", agent_preferences="")
+    paths = ClientPaths(tmp_path / USER_ID)
+    paths.ensure_session("session_1")
+    connection = sqlite3.connect(paths.session_db("session_1"))
+    try:
+        connection.execute("CREATE TABLE session_runs (status TEXT)")
+        connection.commit()
+    finally:
+        connection.close()
+    # Simulate a pre-canonical layout: uploads next to the workspace.
+    legacy = paths.session_root("session_1") / "uploads"
+    legacy.mkdir()
+    (legacy / "old.png").write_bytes(b"\x89PNG\r\n\x1a\nlegacy-upload")
+
+    cloud = MemoryCloudRepository()
+    manager = SnapshotManager(tmp_path, settings, cloud)  # type: ignore[arg-type]
+    manager.key_store = keys
+    try:
+        save = manager.start_save(USER_ID)
+        saved = _wait_for_job(manager, USER_ID, str(save["id"]))
+        assert saved["status"] == "complete", saved
+        snapshot_id = str(saved["snapshot_id"])
+
+        # Wipe the local session and restore from the legacy snapshot.
+        shutil.rmtree(paths.session_root("session_1"))
+        restore = manager.start_restore(USER_ID, snapshot_id)
+        restored = _wait_for_job(manager, USER_ID, str(restore["id"]))
+        assert restored["status"] == "complete", restored.get("error")
+
+        restored_paths = ClientPaths(tmp_path / USER_ID)
+        restored_paths.ensure_session("session_1")
+        assert (
+            restored_paths.session_uploads("session_1") / "old.png"
+        ).read_bytes() == b"\x89PNG\r\n\x1a\nlegacy-upload"
+        assert not (restored_paths.session_root("session_1") / "uploads").exists()
+    finally:
+        manager.close()
+
+
+def test_old_format_snapshot_archive_uploads_migrate_on_restore(tmp_path: Path, monkeypatch) -> None:
+    """A hand-built v2 archive with the pre-canonical uploads path restores and migrates."""
+
+    import hashlib
+    import io
+    import secrets
+    import zipfile
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    from backend.sync.cloud_repository import EncryptedSnapshotChunk
+    from backend.sync.snapshots import CHUNK_SIZE, SNAPSHOT_FORMAT_VERSION
+
+    keys = MemoryKeyStore()
+    monkeypatch.setattr(crypto, "_LOCAL_KEY_STORE", keys)
+    settings = PerUserSettingsRepository(tmp_path)
+    settings.update_profile(USER_ID, display_name="User", agent_preferences="")
+
+    # Build the legacy snapshot payload: runtime/session_1/{state.db,uploads/old.png}.
+    payload = tmp_path / "legacy-payload"
+    session_payload = payload / "runtime" / "session_1"
+    (session_payload / "workspace").mkdir(parents=True)
+    (session_payload / "uploads").mkdir()
+    (session_payload / "uploads" / "old.png").write_bytes(b"\x89PNG\r\nlegacy-archive")
+    state_db = session_payload / "state.db"
+    with sqlite3.connect(state_db) as connection:
+        connection.execute("CREATE TABLE session_runs (status TEXT)")
+        connection.commit()
+    (payload / "config.toml").write_text("[runtime]\nlog_full_messages = true\n", encoding="utf-8")
+    user_db = payload / "user.db"
+    with sqlite3.connect(user_db) as connection:
+        connection.execute("CREATE TABLE user_profile (id TEXT PRIMARY KEY, display_name TEXT)")
+        connection.commit()
+
+    files = [
+        {
+            "path": path.relative_to(payload).as_posix(),
+            "size": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in sorted(payload.rglob("*"))
+        if path.is_file()
+    ]
+    (payload / "manifest.json").write_text(
+        json.dumps(
+            {
+                "format_version": SNAPSHOT_FORMAT_VERSION,
+                "user_id": USER_ID,
+                "local_revision": 1,
+                "created_at": time.time(),
+                "files": files,
+            }
+        ),
+        encoding="utf-8",
+    )
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(payload.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(payload).as_posix())
+
+    key = b"k" * 32
+    keys.set(USER_ID, key)
+    snapshot_id = "snapshot_legacy_old_layout"
+    cipher = AESGCM(key)
+    chunks: list[EncryptedSnapshotChunk] = []
+    plaintext = archive_bytes.getvalue()
+    for sequence in range(0, max(len(plaintext), 1), CHUNK_SIZE):
+        nonce = secrets.token_bytes(12)
+        index = sequence // CHUNK_SIZE
+        aad = f"mini-agent-snapshot:v2:{USER_ID}:{snapshot_id}:{index}".encode()
+        ciphertext = cipher.encrypt(nonce, plaintext[sequence : sequence + CHUNK_SIZE], aad)
+        chunks.append(
+            EncryptedSnapshotChunk(
+                index,
+                nonce,
+                ciphertext,
+                hashlib.sha256(ciphertext).hexdigest(),
+            )
+        )
+    cloud = MemoryCloudRepository()
+    cloud.chunks[snapshot_id] = chunks
+    cloud.snapshots[snapshot_id] = {
+        "id": snapshot_id,
+        "version": 1,
+        "local_revision": 1,
+        "device_id": "web-test",
+        "archive_size": len(plaintext),
+        "archive_sha256": hashlib.sha256(plaintext).hexdigest(),
+        "chunk_count": len(chunks),
+        "completed_at": "2026-08-09T00:00:00",
+    }
+    cloud.key = key
+
+    manager = SnapshotManager(tmp_path, settings, cloud)  # type: ignore[arg-type]
+    manager.key_store = keys
+    try:
+        restore = manager.start_restore(USER_ID, snapshot_id)
+        restored = _wait_for_job(manager, USER_ID, str(restore["id"]))
+        assert restored["status"] == "complete", restored.get("error")
+
+        paths = ClientPaths(tmp_path / USER_ID)
+        assert (paths.session_uploads("session_1") / "old.png").read_bytes() == b"\x89PNG\r\nlegacy-archive"
+        assert not (paths.session_root("session_1") / "uploads").exists()
     finally:
         manager.close()

@@ -419,6 +419,32 @@ def test_root_is_not_returned_as_model_context_or_transcript_message() -> None:
     assert project_node_transcript([root, user])[0]["source_node_id"] == root.id
 
 
+def test_transcript_projects_structured_references_on_user_messages() -> None:
+    root = create_root_node("s")
+    tree = RuntimeStateTree([root])
+    user = tree.create_child(
+        session_id="s",
+        parent=root,
+        data=message_payload(
+            "user",
+            "请查看上传的配置",
+            references=[{"source": "upload", "path": "config.yaml"}, {"source": "project", "path": "README.md"}],
+        ),
+    )
+    transcript = project_node_transcript([root, user])
+    assert transcript[0]["references"] == [
+        {"source": "upload", "path": "config.yaml"},
+        {"source": "project", "path": "README.md"},
+    ]
+    # Malformed metadata never crashes the projection.
+    bogus = tree.create_child(
+        session_id="s",
+        parent=user,
+        data=message_payload("user", "bogus", references="not-a-list"),
+    )
+    assert project_node_transcript([root, user, bogus])[-1].get("references") is None
+
+
 def test_compaction_accepts_a_dynamic_leaf_before_durable_finalization() -> None:
     store = InMemoryNodeStore()
     writer = NodeWriter(store)

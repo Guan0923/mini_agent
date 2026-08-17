@@ -161,6 +161,19 @@ class ClientPaths:
         return self.session_root(session_id) / "workspace"
 
     def session_uploads(self, session_id: str) -> Path:
+        """Return the canonical upload directory below the session workspace.
+
+        Uploads belong to the session payload and are therefore kept inside
+        ``workspace`` so every workspace copy/restore path carries them
+        automatically.  The pre-v0.4 sibling ``uploads`` directory is a legacy
+        layout and is migrated into this location by :meth:`ensure_session`.
+        """
+
+        return self.session_workspace(session_id) / "uploads"
+
+    def legacy_session_uploads(self, session_id: str) -> Path:
+        """Return the legacy sibling uploads directory for migration only."""
+
         return self.session_root(session_id) / "uploads"
 
     def ensure_session(self, session_id: str) -> Path:
@@ -183,7 +196,50 @@ class ClientPaths:
         # contract must be complete even for callers that prepare a workspace
         # before opening the session store.
         self.session_db(session_id).touch(exist_ok=True)
+        self.migrate_legacy_uploads(session_id)
         return root
+
+    def migrate_legacy_uploads(self, session_id: str) -> None:
+        """Move a pre-canonical sibling ``uploads`` directory into the workspace.
+
+        Older sessions stored uploads next to the workspace at
+        ``runtime/<session>/uploads``.  The canonical location is now
+        ``workspace/uploads`` so workspace copies, sync snapshots, branch
+        creation and guest imports carry uploads automatically.  The migration
+        refuses symbolic links and special files and leaves an already
+        canonical session untouched.
+        """
+
+        legacy = self.legacy_session_uploads(session_id)
+        if legacy.is_symlink():
+            raise ConfigurationError("Legacy uploads directory cannot be a symbolic link.")
+        if not legacy.is_dir():
+            return
+        canonical = self.session_uploads(session_id)
+        if canonical.is_symlink():
+            raise ConfigurationError("Session uploads directory cannot be a symbolic link.")
+        canonical.mkdir(parents=True, exist_ok=True)
+        for item in legacy.iterdir():
+            if item.is_symlink():
+                raise ConfigurationError(f"Legacy upload contains a symbolic link: {item.name}")
+            if item.is_dir():
+                target = canonical / item.name
+                if target.exists() or target.is_symlink():
+                    raise ConfigurationError(f"Legacy upload collides with canonical entry: {item.name}")
+                item.rename(target)
+            elif item.is_file():
+                target = canonical / item.name
+                if target.exists() or target.is_symlink():
+                    raise ConfigurationError(f"Legacy upload collides with canonical entry: {item.name}")
+                item.rename(target)
+            else:
+                raise ConfigurationError(f"Legacy upload contains a special file: {item.name}")
+        try:
+            legacy.rmdir()
+        except OSError:
+            # A concurrent writer may have repopulated the legacy directory;
+            # leave it in place rather than failing session provisioning.
+            pass
 
     def ensure(self) -> None:
         if self.root.exists() and self.root.is_symlink():

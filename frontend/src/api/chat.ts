@@ -1,4 +1,4 @@
-import type { ChatMode, PermissionMode, ReasoningEffort, RuntimeConfigModel, StreamMessage } from "../types";
+import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, RuntimeConfigModel, StreamMessage } from "../types";
 import { apiUrl } from "./base";
 import { ApiError, errorFrom, notifyUnauthorized } from "./request";
 
@@ -10,6 +10,7 @@ export interface StreamOptions {
   reasoningEffort?: ReasoningEffort;
   providerName?: string;
   model?: RuntimeConfigModel;
+  references?: FileReference[];
 }
 
 async function streamEndpoint(
@@ -105,6 +106,7 @@ export async function streamChat(
       reasoning_effort: normalized.reasoningEffort,
       provider_name: normalized.providerName,
       model: normalized.model,
+      references: normalized.references,
       interactive: normalized.permissionMode != null,
     },
     onMessage,

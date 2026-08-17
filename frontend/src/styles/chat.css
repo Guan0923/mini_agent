@@ -5,6 +5,49 @@
   flex-direction: column;
   height: 100%;
 }
+
+/* ---------- Message file references ---------- */
+.message-references {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.message-reference {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.65);
+  font-size: 12.5px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.message-reference:hover {
+  border-color: var(--accent);
+}
+
+.message-reference-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-reference.is-unavailable {
+  opacity: 0.75;
+  cursor: default;
+}
+
+.message-reference-unavailable {
+  color: #b91c1c;
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
 .chat-content {
   flex: 1;
   min-width: 0;

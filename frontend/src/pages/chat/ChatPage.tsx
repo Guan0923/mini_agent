@@ -3,17 +3,22 @@ import { Button, Grid, Input } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
   compactSession,
+  deleteSessionFile,
   listSkills,
   patchRuntimeConfig,
+  searchSessionFiles,
+  sessionFileContentUrl,
   streamChat,
   streamResume,
   submitDecision,
+  uploadSessionFiles,
 } from "../../api";
 import type { ProviderConfig } from "../../api";
 import { HELP_TEXT, parseCommand } from "../../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../../commands/completion";
+import { fileKeyAction, fileTrigger, insertToken, completionToken, toCandidates, type FileCandidate, type FileTrigger } from "../../commands/fileCompletion";
 import MarkdownContent from "../../components/MarkdownContent";
-import { AssistantMessage, MessageActions } from "./messageParts";
+import { AssistantMessage, MessageActions, MessageReferenceChip } from "./messageParts";
 import Composer, { type SettingsSelectKey } from "./Composer";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import { latestTodoList } from "./todoPanel";
@@ -25,6 +30,7 @@ import type {
   Conversation,
   DecisionRequest,
   DisplayMode,
+  FileReference,
   Page,
   PermissionMode,
   ReasoningEffort,
@@ -59,6 +65,20 @@ interface RewindResult {
   sourceNodeId?: string;
 }
 
+/** One file being uploaded or already stored in the session uploads. */
+interface PendingUpload {
+  uid: string;
+  name: string;
+  isImage: boolean;
+  status: "uploading" | "done" | "error";
+  percent: number;
+  /** The original file, kept for retries. */
+  file?: File;
+  /** Server path once the upload completed. */
+  path?: string;
+  error?: string;
+}
+
 interface ChatRunRequest {
   conversationId: string;
   sessionId: string;
@@ -70,6 +90,7 @@ interface ChatRunRequest {
   providerName?: string;
   model?: RuntimeNodeModel;
   sourceNodeId?: string;
+  references?: FileReference[];
 }
 
 function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
@@ -111,6 +132,13 @@ export default function ChatPage({
   const [commandMenuDismissedFor, setCommandMenuDismissedFor] = useState<string | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingDraft, setEditingDraft] = useState("");
+  const [references, setReferences] = useState<FileReference[]>([]);
+  const [fileTriggerState, setFileTriggerState] = useState<FileTrigger | null>(null);
+  const [fileCandidates, setFileCandidates] = useState<FileCandidate[]>([]);
+  const [activeFileIndex, setActiveFileIndex] = useState(0);
+  const [fileMenuDismissedFor, setFileMenuDismissedFor] = useState<string | null>(null);
+  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
+  const fileSearchTimerRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const taRef = useRef<TextAreaRef>(null);
   const editRef = useRef<TextAreaRef>(null);
@@ -122,6 +150,9 @@ export default function ChatPage({
   const todo = useMemo(() => latestTodoList(messages), [messages]);
   const filteredCommands = commandSuggestions(input);
   const commandMenuVisible = !busy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
+  // The file menu is mutually exclusive with the slash-command menu and only
+  // appears while the caret still sits inside an `@` trigger.
+  const fileMenuVisible = !busy && fileMenuDismissedFor !== input && fileTriggerState !== null && fileCandidates.length > 0;
   const display = configuredDisplayMode ?? "medium";
 
   const activeRuntimeNode = (() => {
@@ -245,10 +276,146 @@ export default function ChatPage({
     }
   }, [editingMessageId]);
 
-  function changeInput(value: string) {
+  function changeInput(value: string, caret?: number) {
     setInput(value);
     setCommandMenuDismissedFor(null);
     setActiveCommandIndex(0);
+    // File completion follows the caret.  The textarea reports its selection
+    // on change; when unavailable (programmatic edits) fall back to the end.
+    const position = caret ?? nativeTextArea(taRef.current)?.selectionStart ?? value.length;
+    const trigger = fileTrigger(value, position);
+    setFileTriggerState(trigger);
+    if (!trigger) {
+      if (fileSearchTimerRef.current !== null) {
+        window.clearTimeout(fileSearchTimerRef.current);
+        fileSearchTimerRef.current = null;
+      }
+      setFileCandidates([]);
+      setFileMenuDismissedFor(null);
+      return;
+    }
+    setFileMenuDismissedFor(null);
+    setActiveFileIndex(0);
+    if (fileSearchTimerRef.current !== null) {
+      window.clearTimeout(fileSearchTimerRef.current);
+    }
+    fileSearchTimerRef.current = window.setTimeout(() => {
+      fileSearchTimerRef.current = null;
+      void searchFiles(trigger);
+    }, 250);
+  }
+
+  async function searchFiles(trigger: FileTrigger) {
+    if (!conversation?.sessionId) return;
+    try {
+      const results = await searchSessionFiles(conversation.sessionId, trigger.query, 20);
+      setFileCandidates(toCandidates(results));
+    } catch {
+      setFileCandidates([]);
+    }
+  }
+
+  function completeFile(index = activeFileIndex) {
+    const candidate = fileCandidates[index];
+    if (!candidate || !fileTriggerState) return;
+    const token = completionToken(candidate.reference.path);
+    const { value, caret } = insertToken(input, fileTriggerState, token);
+    setInput(value);
+    setFileTriggerState(null);
+    setFileCandidates([]);
+    setFileMenuDismissedFor(value);
+    pendingCaretRef.current = caret;
+    // Uploaded files are already on disk; project files only become a
+    // reference for this message.
+    setReferences((current) =>
+      current.some(
+        (item) => item.source === candidate.reference.source && item.path === candidate.reference.path,
+      ) ? current : [...current, candidate.reference],
+    );
+  }
+
+  function removeReference(index: number) {
+    setReferences((current) => current.filter((_item, itemIndex) => itemIndex !== index));
+  }
+
+  function handlePickFiles(files: FileList | File[]) {
+    if (!conversation?.sessionId || busy) return;
+    const selected = Array.from(files).filter((file) => file.size > 0);
+    if (selected.length === 0) return;
+    const sessionId = conversation.sessionId;
+    const uploads: PendingUpload[] = selected.map((file) => ({
+      uid: crypto.randomUUID(),
+      name: file.name,
+      isImage: file.type.startsWith("image/"),
+      status: "uploading",
+      percent: 0,
+      file,
+    }));
+    setPendingUploads((current) => [...current, ...uploads]);
+    void uploadSessionFiles(sessionId, selected, (percent) => {
+      setPendingUploads((current) => current.map((item) => (item.status === "uploading" ? { ...item, percent } : item)));
+    }).then((results) => {
+      setPendingUploads((current) => {
+        const next = [...current];
+        results.forEach((result, index) => {
+          const upload = uploads[index];
+          if (!upload) return;
+          const position = next.findIndex((item) => item.uid === upload.uid);
+          if (position === -1) return;
+          next[position] = {
+            ...next[position],
+            status: "done",
+            percent: 100,
+            path: result.path,
+          };
+        });
+        return next;
+      });
+      // Auto-insert the reference at the caret for every completed file, so
+      // sending only file references is possible without typing anything.
+      results.forEach((result) => {
+        setReferences((current) =>
+          current.some((item) => item.source === "upload" && item.path === result.path)
+            ? current
+            : [...current, { source: "upload", path: result.path }],
+        );
+        insertUploadReference(result.path, result.name);
+      });
+    }).catch((error) => {
+      setPendingUploads((current) =>
+        current.map((item) => (item.uid === uploads[0].uid ? { ...item, status: "error", error: String((error as Error).message ?? error) } : item)),
+      );
+    });
+  }
+
+  function insertUploadReference(path: string, name: string) {
+    setInput((current) => {
+      const token = completionToken(path);
+      const caret = nativeTextArea(taRef.current)?.selectionStart ?? current.length;
+      const value = `${current.slice(0, caret)}${token}${current.slice(caret)}`;
+      pendingCaretRef.current = caret + token.length;
+      void name;
+      return value;
+    });
+  }
+
+  function removePendingUpload(index: number) {
+    const upload = pendingUploads[index];
+    if (!upload) return;
+    if (upload.status === "done" && upload.path && conversation?.sessionId) {
+      // A completed new upload is deleted from the server when removed
+      // before sending; existing project files only drop their reference.
+      void deleteSessionFile(conversation.sessionId, "upload", upload.path).catch(() => undefined);
+      setReferences((current) => current.filter((item) => item.source !== "upload" || item.path !== upload.path));
+    }
+    setPendingUploads((current) => current.filter((_item, itemIndex) => itemIndex !== index));
+  }
+
+  function retryUpload(index: number) {
+    const upload = pendingUploads[index];
+    if (!upload || !conversation?.sessionId || !upload.file) return;
+    setPendingUploads((current) => current.filter((_item, itemIndex) => itemIndex !== index));
+    handlePickFiles([upload.file]);
   }
 
   function completeCommand(index = activeCommandIndex) {
@@ -302,6 +469,7 @@ export default function ChatPage({
     prompt: string | null,
     resume = false,
     sourceNodeId?: string | null,
+    references?: FileReference[],
   ) {
     const controller = new AbortController();
     abortRef.current = controller;
@@ -396,13 +564,13 @@ export default function ChatPage({
         const chatSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
         const options = chatSourceNodeId
           ? (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId }
-            : { sessionId, sourceNodeId: chatSourceNodeId, providerName: requestProviderName, model: requestModel, mode, permissionMode, reasoningEffort })
+            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, references }
+            : { sessionId, sourceNodeId: chatSourceNodeId, providerName: requestProviderName, model: requestModel, mode, permissionMode, reasoningEffort, references })
           // An empty tree has no dynamic runtime configuration to submit. Keep
           // the stable positional call for clients embedding ChatPage while
           // all established sessions use the explicit v0.3 config object.
           : (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel }
+            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, references }
             : sessionId);
         const result = await streamChat(
           prompt ?? "",
@@ -445,6 +613,7 @@ export default function ChatPage({
     prompt: string | null,
     resume = false,
     sourceNodeId: string | null = conversation?.lastNodeId ?? null,
+    references?: FileReference[],
   ) {
     if (onRun) {
       await onRun({
@@ -458,15 +627,20 @@ export default function ChatPage({
         providerName: requestProviderName,
         model: requestModel,
         sourceNodeId: sourceNodeId ?? undefined,
+        references,
       });
       return;
     }
-    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId);
+    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId, references);
   }
 
-  async function runPrompt(prompt: string, target?: { conversationId: string; sessionId: string; sourceNodeId?: string }) {
+  async function runPrompt(
+    prompt: string,
+    target?: { conversationId: string; sessionId: string; sourceNodeId?: string },
+    references?: FileReference[],
+  ) {
     const { conversationId, sessionId } = target ?? await ensureSession();
-    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [] };
+    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [], references };
     const assistantMessage: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", events: [], running: true };
     onUpdate(conversationId, (current) => ({
       ...current,
@@ -483,6 +657,7 @@ export default function ChatPage({
       prompt,
       false,
       target ? target.sourceNodeId ?? null : conversation?.lastNodeId ?? null,
+      references,
     );
   }
 
@@ -531,7 +706,8 @@ export default function ChatPage({
       return;
     }
     setInput("");
-    await runPrompt(prompt);
+    await runPrompt(prompt, undefined, references.length > 0 ? references : undefined);
+    setReferences([]);
   }
 
   async function chooseDecision(request: DecisionRequest, choice: string, options?: { supplement?: string; answers?: Record<string, string[]> }) {
@@ -560,9 +736,13 @@ export default function ChatPage({
 
   async function rewindMessage(messageId: string) {
     if (!conversation || !onRewind || busy) return;
+    const message = conversation.messages.find((item) => item.id === messageId);
     const result = await onRewind(conversation.id, messageId);
     if (result === undefined) return;
     setInput(typeof result === "string" ? result : result.content);
+    // Carry the rewound message's references into the composer so the
+    // replacement run keeps the same structured file references.
+    setReferences(message?.references ?? []);
     window.setTimeout(() => taRef.current?.focus(), 0);
   }
 
@@ -570,6 +750,7 @@ export default function ChatPage({
     if (busy || !onRewind || !message.content) return;
     setEditingMessageId(message.id);
     setEditingDraft(message.content);
+    setReferences(message.references ?? []);
   }
 
   function cancelEdit() {
@@ -588,11 +769,15 @@ export default function ChatPage({
     const sessionId = typeof result === "string" ? conversation.sessionId : result.sessionId;
     if (!sessionId) return;
     cancelEdit();
-    await runPrompt(nextPrompt, {
-      conversationId: conversation.id,
-      sessionId,
-      sourceNodeId: typeof result === "string" ? undefined : result.sourceNodeId,
-    });
+    await runPrompt(
+      nextPrompt,
+      {
+        conversationId: conversation.id,
+        sessionId,
+        sourceNodeId: typeof result === "string" ? undefined : result.sourceNodeId,
+      },
+      message.references,
+    );
   }
 
   function handleUserBubbleClick(event: ReactMouseEvent<HTMLDivElement>, message: ChatMessage) {
@@ -620,7 +805,12 @@ export default function ChatPage({
 
 
   function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
-    const action = commandKeyAction({ key: event.key, shiftKey: event.shiftKey, isComposing: event.nativeEvent.isComposing, menuVisible: commandMenuVisible });
+    const isComposing = event.nativeEvent.isComposing;
+    const fileAction = fileKeyAction({ key: event.key, shiftKey: event.shiftKey, isComposing, menuVisible: fileMenuVisible });
+    if (fileAction.type === "move") { event.preventDefault(); setActiveFileIndex((current) => nextCommandIndex(current, fileAction.direction, fileCandidates.length)); return; }
+    if (fileAction.type === "dismiss") { event.preventDefault(); setFileMenuDismissedFor(input); return; }
+    if (fileAction.type === "complete") { event.preventDefault(); completeFile(); return; }
+    const action = commandKeyAction({ key: event.key, shiftKey: event.shiftKey, isComposing, menuVisible: commandMenuVisible });
     if (action.type === "move") { event.preventDefault(); setActiveCommandIndex((current) => nextCommandIndex(current, action.direction, filteredCommands.length)); return; }
     if (action.type === "dismiss") { event.preventDefault(); setCommandMenuDismissedFor(input); return; }
     if (action.type === "complete") { event.preventDefault(); completeCommand(); return; }
@@ -672,6 +862,13 @@ export default function ChatPage({
                         title={onRewind && !busy ? "点击编辑此消息" : undefined}
                       >
                         <MarkdownContent text={message.content} />
+                        {message.references && message.references.length > 0 ? (
+                          <div className="message-references" aria-label="消息引用">
+                            {message.references.map((reference) => (
+                              <MessageReferenceChip key={`${reference.source}:${reference.path}`} reference={reference} sessionId={conversation?.sessionId} />
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
                     )}
                     {editingMessageId !== message.id ? (
@@ -730,6 +927,25 @@ export default function ChatPage({
         onSend={() => void send()}
         disabled={conversation?.projectId !== undefined && conversation.projectAvailable === false}
         disabledReason={conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
+        fileCandidates={fileCandidates}
+        fileMenuVisible={fileMenuVisible}
+        activeFileIndex={activeFileIndex}
+        fileMenuQuery={fileTriggerState?.query ?? ""}
+        references={references}
+        onFileComplete={completeFile}
+        onActiveFileChange={setActiveFileIndex}
+        onRemoveReference={removeReference}
+        onPickFiles={handlePickFiles}
+        sessionId={conversation?.sessionId}
+        pendingUploads={pendingUploads}
+        onRemoveUpload={removePendingUpload}
+        onRetryUpload={retryUpload}
+        onUploadPreview={(index) => {
+          const upload = pendingUploads[index];
+          if (upload?.path && conversation?.sessionId) {
+            window.open(sessionFileContentUrl(conversation.sessionId, "upload", upload.path), "_blank", "noopener");
+          }
+        }}
       />
     </div>
   );

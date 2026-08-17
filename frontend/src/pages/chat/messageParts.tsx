@@ -1,8 +1,9 @@
 import { Alert, Avatar, BorderBeam, Collapse, App as AntApp, message as staticMessage } from "antd";
 import { BranchesOutlined, CopyOutlined, EditOutlined, FileTextOutlined, RollbackOutlined, ToolOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
-import type { ChatMessage, DecisionRequest, DisplayMode, ToolEvent } from "../../types";
+import type { ChatMessage, DecisionRequest, DisplayMode, FileReference, ToolEvent } from "../../types";
 import { effectiveDisplayMode } from "../../app/displayMode";
+import { fileReferenceAvailable, sessionFileContentUrl } from "../../api";
 import DecisionCard from "../../components/DecisionCard";
 import IconAction from "../../components/IconAction";
 import MarkdownContent from "../../components/MarkdownContent";
@@ -23,6 +24,55 @@ export async function copyText(value: string): Promise<void> {
   const copied = document.execCommand("copy");
   textarea.remove();
   if (!copied) throw new Error("浏览器拒绝了复制操作");
+}
+
+/** One structured file reference chip with an availability probe. */
+export function MessageReferenceChip({
+  reference,
+  sessionId,
+}: {
+  reference: FileReference;
+  sessionId?: string;
+}) {
+  const [available, setAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!sessionId) {
+      setAvailable(false);
+      return;
+    }
+    let disposed = false;
+    void fileReferenceAvailable(reference, sessionId).then((ok) => {
+      if (!disposed) setAvailable(ok);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [reference.source, reference.path, sessionId]);
+
+  const url = sessionId ? sessionFileContentUrl(sessionId, reference.source, reference.path) : undefined;
+  const label = reference.source === "upload" ? "会话上传" : "项目文件";
+  if (available === false) {
+    return (
+      <span className="message-reference is-unavailable" title="文件不可用">
+        <span className={`file-source-badge ${reference.source}`}>{label}</span>
+        <span className="message-reference-path">{reference.path}</span>
+        <span className="message-reference-unavailable">文件不可用</span>
+      </span>
+    );
+  }
+  return (
+    <a
+      className="message-reference"
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(event) => event.stopPropagation()}
+      aria-label={`引用 ${reference.path}`}
+    >
+      <span className={`file-source-badge ${reference.source}`}>{label}</span>
+      <span className="message-reference-path">{reference.path}</span>
+    </a>
+  );
 }
 
 export function MessageActions({

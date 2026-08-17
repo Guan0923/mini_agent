@@ -60,6 +60,20 @@ class RuntimeModelRequest(BaseModel):
         return self
 
 
+class FileReference(BaseModel):
+    """One structured file reference attached to a user message.
+
+    ``source`` distinguishes the session's project root (the effective cwd,
+    which may be an external project folder) from the session's own upload
+    directory.  ``path`` is always workspace-relative and confined.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["project", "upload"]
+    path: str = Field(min_length=1, max_length=2_000)
+
+
 class ChatRequest(BaseModel):
     prompt: str
     interactive: bool = False
@@ -71,6 +85,7 @@ class ChatRequest(BaseModel):
     provider_name: str | None = Field(default=None, min_length=1, max_length=80)
     model: RuntimeModelRequest | None = None
     source_node_id: str | None = None
+    references: list[FileReference] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
     def normalize_running_mode(self) -> ChatRequest:
@@ -251,6 +266,44 @@ def _has_conversation_nodes(nodes: list[object]) -> bool:
     return any(getattr(node, "data_type", None) != "root" for node in nodes)
 
 
+def _validate_references(
+    state: WebAppState,
+    identity: UserIdentity,
+    session_id: str,
+    references: list[FileReference],
+) -> list[dict[str, str]]:
+    """Resolve every structured reference against this session's roots.
+
+    Each ``project`` reference must be a real regular file below the session's
+    effective cwd, and each ``upload`` reference must live in this session's
+    canonical upload directory.  A missing, forged, or cross-session reference
+    is rejected here so history never silently re-resolves to another file.
+    """
+
+    if not references:
+        return []
+    from backend.api.session_files.store import SessionFileError, SessionFileStore
+
+    paths = state.user_paths(identity.id)
+    paths.ensure_session(session_id)
+    try:
+        project_root = state.session_workspace(identity.id, session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    store = SessionFileStore(paths, session_id, project_root=project_root)
+    normalized: list[dict[str, str]] = []
+    for reference in references:
+        try:
+            resolved = store.resolve(reference.source, reference.path)
+        except SessionFileError as exc:
+            raise HTTPException(status_code=422, detail=f"引用文件无效：{reference.path}（{exc}）") from exc
+        # Keep the client-supplied relative path as the durable reference;
+        # ``resolve`` already proved confinement and existence.
+        normalized.append({"source": reference.source, "path": reference.path})
+        del resolved
+    return normalized
+
+
 def _stream(
     state: WebAppState,
     prompt: str,
@@ -269,6 +322,7 @@ def _stream(
     model_config: ModelConfig | None = None,
     runtime_config: dict[str, object] | None = None,
     request_model: RuntimeModelRequest | None = None,
+    references: list[dict[str, str]] | None = None,
     operation: Callable[..., object] | None = None,
 ):
     # ``WebAppState`` owns these process-local registries in production, but
@@ -494,6 +548,7 @@ def _stream(
                         permission_mode=permission_mode or "approval_for_me",
                         running_mode=mode,
                         cwd=str(workspace),
+                        references=references,
                         emit=lambda frame: q.put(frame.to_dict()) if not cancel_requested.is_set() else None,
                     )
                     bridge_ref["bridge"].apply_runtime_config(
@@ -528,6 +583,7 @@ def _stream(
                     interrupt=interrupt,
                     cancel_requested=cancel_requested.is_set,
                     request_parameters=_model_request_parameters(request_model, effective_reasoning),
+                    references=references or [],
                 )
             else:
                 run_state = operation(
@@ -759,6 +815,7 @@ async def chat(
         # ordinary, isolated conversations and is therefore safe to sync.
         resolved_session_id = store.create_session().session_id
     state.user_paths(identity.id).ensure_session(resolved_session_id)
+    references = _validate_references(state, identity, resolved_session_id, body.references)
     return StreamingResponse(
         _stream(
             state,
@@ -777,6 +834,7 @@ async def chat(
             default_timezone=str(state.agent_config_for_user(identity.id).get("timezone", DEFAULT_TIME_ZONE)),
             model_config=_model_config_snapshot(state, identity.id),
             runtime_config=state.runtime_config_for_user(identity.id),
+            references=references,
         ),
         media_type="text/event-stream",
     )

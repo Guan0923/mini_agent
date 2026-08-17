@@ -1,4 +1,4 @@
-import type { ChatMode, PermissionMode, ReasoningEffort, RuntimeConfigModel } from "../types";
+import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, RuntimeConfigModel } from "../types";
 
 export interface ChatRunRequest {
   conversationId: string;
@@ -11,6 +11,7 @@ export interface ChatRunRequest {
   providerName?: string;
   model?: RuntimeConfigModel;
   sourceNodeId?: string;
+  references?: FileReference[];
 }
 
 export interface ActiveRun {

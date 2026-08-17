@@ -246,6 +246,135 @@
   font-size: 13px;
 }
 
+/* ---------- File completion menu ---------- */
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 14px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-item:hover {
+  background: #f2f3f5;
+}
+
+.file-item.selected {
+  background: #e8ecff;
+}
+
+.file-item-name {
+  font-weight: 600;
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-item-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-source-badge {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.file-source-badge.upload {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.file-source-badge.project {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+/* ---------- Pending references and upload strip ---------- */
+.composer-references,
+.composer-uploads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 4px 0;
+}
+
+.composer-reference,
+.composer-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fafafa;
+  font-size: 12.5px;
+}
+
+.composer-reference-path,
+.composer-upload-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-reference-remove,
+.composer-upload-remove {
+  flex-shrink: 0;
+  padding: 0 2px;
+  line-height: 1;
+  color: var(--muted);
+}
+
+.composer-upload-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  object-fit: cover;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.composer-upload-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.composer-upload-progress {
+  width: 56px;
+  margin: 0;
+}
+
+.composer-upload.status-error {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.composer-upload-error {
+  color: #b91c1c;
+  font-size: 12px;
+}
+
+.composer-box.is-dragging {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(64, 112, 244, 0.25);
+}
+
 .global-error {
   position: absolute;
   top: 12px;

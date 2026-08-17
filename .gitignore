@@ -59,3 +59,6 @@ webapp-data/
 
 # Linked git worktrees
 .worktrees/
+
+# Local sandbox tool caches
+.npm-cache/

@@ -4,6 +4,23 @@ export type PermissionMode = "approval_for_me" | "full_access";
 export type DisplayMode = "minimal" | "medium" | "verbose" | "developer";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
+export type FileSource = "project" | "upload";
+
+export interface FileReference {
+  source: FileSource;
+  path: string;
+}
+
+export interface SessionFileInfo {
+  source: FileSource;
+  path: string;
+  name: string;
+  size: number;
+  mime: string;
+  mtime: string;
+  is_image: boolean;
+}
+
 export interface AuthUser {
   id: string;
   email: string | null;
@@ -97,6 +114,8 @@ export interface ChatMessage {
   sourceNodeId?: string;
   runtimeNodeIds?: string[];
   decision?: DecisionRequest;
+  /** Structured file references attached to a user message. */
+  references?: FileReference[];
 }
 
 export interface Conversation {

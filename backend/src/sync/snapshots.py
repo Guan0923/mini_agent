@@ -373,21 +373,21 @@ class SnapshotManager:
                 continue
             target_state_db = target / "state.db"
             self._backup_sqlite(state_db, target_state_db)
-            for name in ("workspace", "uploads"):
-                source = session / name
-                if source.exists():
-                    self._copy_tree(
-                        source,
-                        target / name,
-                        exclude_runtime_logs=True,
-                        reject_symlinks=True,
-                    )
+            # Uploads live below the workspace in the canonical layout.  A
+            # single workspace copy carries them; legacy sibling uploads
+            # directories are migrated first so no old upload is dropped.
+            paths.migrate_legacy_uploads(session.name)
+            source = session / "workspace"
+            if source.exists():
+                self._copy_tree(
+                    source,
+                    target / "workspace",
+                    exclude_runtime_logs=True,
+                    reject_symlinks=True,
+                )
             self._index_session_files(
                 target_state_db,
-                {
-                    "workspace": target / "workspace",
-                    "uploads": target / "uploads",
-                },
+                {"workspace": target / "workspace"},
             )
         manifest = {
             "format_version": SNAPSHOT_FORMAT_VERSION,
