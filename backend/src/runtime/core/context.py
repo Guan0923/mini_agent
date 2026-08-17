@@ -366,6 +366,9 @@ class RuntimeServices:
     # rather than a persisted field: the bridge owns the dynamic sidecar and
     # can replace a failed placeholder immediately before every model request.
     runtime_node_context: Callable[[], Sequence[RuntimeTreeNode]] | None = None
+    # In-process JobScope.  It is intentionally non-serializable and is
+    # supplied by AgentRunner when a run is opened.
+    job_scope: object | None = None
 
 
 @dataclass

@@ -20,9 +20,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.domain import DEFAULT_TIME_ZONE, FAILED_TERMINAL_MESSAGE, terminal_error_text
+from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime import RunnerSettings, build_application
 from backend.runtime.core.events import RuntimeEvent
+from backend.runtime.job_events import RuntimeJobEventBridge
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.storage.auth.crypto import SecretDecryptionError
 
@@ -230,6 +232,15 @@ def _event_payload(event: RuntimeEvent) -> dict:
         }
     if event.kind in {"response_delta", "response_start", "thinking_delta"}:
         return {**identifiers, "content": event.message}
+    if event.kind.startswith("job_"):
+        return {
+            **identifiers,
+            "job_id": data.get("job_id"),
+            "job_kind": data.get("job_kind"),
+            "state": data.get("state"),
+            "cancel_requested": data.get("cancel_requested", False),
+            "error": data.get("error"),
+        }
     return identifiers
 
 
@@ -755,7 +766,24 @@ def _stream(
                     pass
             done.set()
 
-    threading.Thread(target=worker, daemon=True).start()
+    job_registry = getattr(state, "job_registry", None)
+    job_holder: dict[str, ThreadJob | None] = {"job": None}
+    if job_registry is not None:
+        parent_scope = getattr(state, "system_job_scope", job_registry.root_scope())
+        user_scope = parent_scope.child(
+            JobScopeKind.USER,
+            user_id=owner_id or None,
+            session_id=session_id,
+        )
+        job = ThreadJob(job_registry.new_job_id(), worker)
+        job_holder["job"] = job
+        job.add_listener(RuntimeJobEventBridge(sink))
+        q.put({"type": "job", "job_id": job.info().id, "state": "pending"})
+        job_registry.submit(job, scope=user_scope, lane=JobLane.FOREGROUND, admission=AdmissionPolicy())
+    else:
+        # Focused embedding tests may use a minimal state double.  Preserve a
+        # self-contained fallback while production always supplies a registry.
+        threading.Thread(target=worker, daemon=True).start()
 
     async def generator():
         try:
@@ -774,6 +802,12 @@ def _stream(
             # A closed browser/TUI response is the cancellation signal for the
             # associated runtime.  Normal completion is harmlessly idempotent.
             cancel_requested.set()
+            job = job_holder["job"]
+            if job is not None:
+                try:
+                    job.cancel("stream disconnected")
+                except Exception:
+                    pass
 
     return generator()
 

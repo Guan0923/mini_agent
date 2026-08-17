@@ -19,13 +19,14 @@ export interface SyncState {
 export interface SyncJob {
   id: string;
   kind: "save" | "restore";
-  status: "queued" | "running" | "complete" | "failed" | "conflict";
+  status: "queued" | "running" | "complete" | "failed" | "conflict" | "cancelled";
   phase: string;
   progress: number;
   snapshot_id: string | null;
   error: string;
   created_at: number;
   updated_at: number;
+  cancel_requested?: boolean;
 }
 
 export interface CloudSnapshot {
@@ -67,6 +68,10 @@ export function saveToCloud(force = false): Promise<SyncJob> {
 
 export function getSyncJob(id: string): Promise<SyncJob> {
   return requestJson<SyncJob>(`/api/sync/jobs/${encodeURIComponent(id)}`);
+}
+
+export function cancelSyncJob(id: string): Promise<SyncJob> {
+  return requestJson<SyncJob>(`/api/sync/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
 }
 
 export function getCloudSnapshots(): Promise<CloudSnapshot[]> {

@@ -15,6 +15,7 @@ from backend.domain import (
     new_run_id,
     new_session_id,
 )
+from backend.jobs import JobRegistry, JobScope, JobScopeKind
 from backend.planning.base import ContextCompactor
 from backend.planning.context_management import ContextCompactionResult
 
@@ -59,6 +60,8 @@ class AgentRunner:
         subagents: object | None = None,
         resources: tuple[object, ...] = (),
         provider_config_resolver=None,
+        job_registry: JobRegistry | None = None,
+        job_scope: JobScope | None = None,
     ) -> None:
         self.planner = planner
         self.tools = tools
@@ -69,6 +72,9 @@ class AgentRunner:
         self.subagents = subagents
         self._resources = resources
         self.provider_config_resolver = provider_config_resolver
+        self.job_registry = job_registry or JobRegistry()
+        self._owns_job_registry = job_registry is None
+        self.job_scope = job_scope or self.job_registry.root_scope().child(JobScopeKind.RUNNER)
         self._closed = False
         self.settings = RunnerSettings(
             max_transport_retries=max_transport_retries,
@@ -120,6 +126,11 @@ class AgentRunner:
             provenance=RunProvenance(trigger="embedding", workspace_root=self.workspace_root),
         )
         runtime.state.status = "running"
+        runtime.services.job_scope = self.job_scope.child(
+            JobScopeKind.RUN,
+            session_id=runtime.state.session_id,
+            run_id=runtime.state.current_run.run_id,
+        )
         runtime.services.on_event = on_event
         runtime.services.interrupt = interrupt
         runtime.services.confirm = confirm
@@ -153,6 +164,7 @@ class AgentRunner:
             hooks=self.hooks,
             subagents=self.subagents,
             provider_config_resolver=self.provider_config_resolver,
+            job_scope=self.job_scope,
         )
         return AgentRuntime(state=state, services=services)
 
@@ -168,6 +180,12 @@ class AgentRunner:
         runtime.services.hooks = self.hooks
         runtime.services.subagents = self.subagents
         runtime.services.provider_config_resolver = self.provider_config_resolver
+        if runtime.services.job_scope is None and runtime.state.current_run is not None:
+            runtime.services.job_scope = self.job_scope.child(
+                JobScopeKind.RUN,
+                session_id=runtime.state.session_id,
+                run_id=runtime.state.current_run.run_id,
+            )
         runtime.state.runner_settings = self.settings
         return runtime
 
@@ -307,6 +325,11 @@ class AgentRunner:
         if self._closed:
             return
         self._closed = True
+        try:
+            self.job_scope.close(timeout=5.0)
+        finally:
+            if self._owns_job_registry:
+                self.job_registry.close_all(reason="runner closed", timeout=5.0)
         for resource in reversed(self._resources):
             close = getattr(resource, "close", None)
             if callable(close):

@@ -73,6 +73,7 @@ class JobInfo:
     pids: tuple[int, ...] = ()
     exit_code: int | None = None
     cancel_requested_at: datetime | None = None
+    health: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

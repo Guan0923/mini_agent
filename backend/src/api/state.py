@@ -10,6 +10,7 @@ from threading import RLock
 from typing import Any
 
 from backend.configuration import ClientPaths, validate_identity_id
+from backend.jobs import JobRegistry
 from backend.storage.projects import ProjectStore
 
 from .auth.mail import NullMailer
@@ -34,6 +35,7 @@ class WebAppState:
         cloud_client: Any | None = None,
         snapshot_repository: Any | None = None,
         project_picker: Callable[[], Path | None] | None = None,
+        job_registry: JobRegistry | None = None,
     ) -> None:
         data_root = Path(data_root)
         if data_root.is_symlink():
@@ -48,6 +50,8 @@ class WebAppState:
         self.benchmark_root = self.data_root.parent / ".mini_agent-cache" / "benchmark"
         self.cloud_client = cloud_client
         self.project_picker = project_picker
+        self.job_registry = job_registry or JobRegistry()
+        self.system_job_scope = self.job_registry.root_scope()
         # Process-local active dynamic-node configuration registry.  It is
         # intentionally not persisted; the durable node remains the source of
         # truth and a crashed run leaves its failed placeholder recoverable.
@@ -108,6 +112,7 @@ class WebAppState:
                 data_root,
                 self.settings,
                 snapshot_repository,
+                job_registry=self.job_registry,
                 user_allowed=lambda user_id: (
                     (identity := self.auth.user_by_id(user_id)) is not None
                     and not identity.is_guest
@@ -268,6 +273,10 @@ class WebAppState:
         return self.settings.runtime_config_for_user(user_id)
 
     def close(self) -> None:
+        # Stop all registered carriers before closing stores they may still
+        # reference.  The registry is process-owned and therefore closes
+        # exactly once even when an injected resource aliases another close.
+        self.job_registry.close_all(reason="web application closed", timeout=5.0)
         closed: set[int] = set()
         for resource in (
             self.snapshot_manager,

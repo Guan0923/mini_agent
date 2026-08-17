@@ -235,9 +235,39 @@ class JobRegistry(JobStateListener):
             record = self._records.get(job_id)
             return self._build_info(record) if record is not None else None
 
+    def get_for_user(self, user_id: str, job_id: str) -> ScopedJobInfo | None:
+        """Return a job only when its inherited owner belongs to ``user_id``."""
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None or record.owner.user_id != user_id:
+                return None
+            return self._build_info(record)
+
     def list(self, query: JobQuery | None = None) -> tuple[ScopedJobInfo, ...]:
         with self._lock:
             return tuple(self._build_info(record) for record in self._records.values() if self._matches(record, query))
+
+    def list_for_user(
+        self, user_id: str, query: JobQuery | None = None, *, session_id: str | None = None
+    ) -> tuple[ScopedJobInfo, ...]:
+        """List only jobs whose effective owner is ``user_id``."""
+        with self._lock:
+            return tuple(
+                self._build_info(record)
+                for record in self._records.values()
+                if record.owner.user_id == user_id
+                and (session_id is None or record.owner.session_id == session_id)
+                and self._matches(record, query)
+            )
+
+    def cancel_for_user(self, user_id: str, job_id: str) -> bool:
+        """Request cancellation after enforcing the owner boundary."""
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None or record.owner.user_id != user_id:
+                return False
+            job = record.job
+        return job.cancel("user requested cancellation")
 
     def active_count(self, *, lane: JobLane | None = None, scope: JobScope | None = None) -> int:
         """Count pending and running jobs, optionally filtered."""

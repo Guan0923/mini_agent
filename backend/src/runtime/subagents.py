@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Lock
@@ -13,6 +12,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from backend.domain import new_session_id
+from backend.jobs import AdmissionPolicy, JobLane, JobRegistry, JobScopeKind, JobState, ThreadJob
 from backend.tools import ToolError
 
 from .capability_settings import SubagentSettings
@@ -120,24 +120,47 @@ class SubagentCoordinator:
         controls = {task.id: _TaskControl() for task in tasks}
         batch_control = _TaskControl()
         batch_control.start()
-        executor = ThreadPoolExecutor(
-            max_workers=min(len(tasks), self._settings.max_workers),
-            thread_name_prefix="mini-agent-subagent",
-        )
-        futures: dict[Future[dict[str, Any]], SubagentTask] = {
-            executor.submit(
-                self._run_task,
-                parent_interrupt is not None,
-                bridge,
-                batch_id,
-                task,
-                controls[task.id],
-                batch_control,
-            ): task
-            for task in tasks
-        }
-        pending = set(futures)
         results: dict[str, dict[str, Any]] = {}
+        task_exceptions: dict[str, BaseException] = {}
+        jobs: dict[str, ThreadJob] = {}
+        registry = getattr(runtime.services.job_scope, "registry", None)
+        owns_registry = registry is None
+        if owns_registry:
+            registry = JobRegistry()
+            parent_scope = registry.root_scope().child(
+                JobScopeKind.RUN,
+                session_id=runtime.state.session_id,
+                run_id=getattr(runtime.run, "run_id", None),
+            )
+        else:
+            parent_scope = runtime.services.job_scope
+        assert parent_scope is not None
+        for task in tasks:
+            task_scope = parent_scope.child(JobScopeKind.TASK)
+
+            def run_task(task=task) -> None:
+                try:
+                    results[task.id] = self._run_task(
+                        parent_interrupt is not None,
+                        bridge,
+                        batch_id,
+                        task,
+                        controls[task.id],
+                        batch_control,
+                    )
+                except BaseException as exc:
+                    task_exceptions[task.id] = exc
+                    raise
+
+            job = ThreadJob(registry.new_job_id(), run_task)
+            jobs[task.id] = job
+            registry.submit(
+                job,
+                scope=task_scope,
+                lane=JobLane.FOREGROUND,
+                admission=AdmissionPolicy(queue_timeout_seconds=30.0),
+            )
+        pending = set(jobs)
         cancelled = False
         try:
             while pending:
@@ -146,16 +169,16 @@ class SubagentCoordinator:
                 cancel_requested = runtime.services.cancel_requested
                 cancelled = bool(cancel_requested is not None and cancel_requested())
                 expired_batch = batch_control.elapsed(now) >= self._settings.batch_timeout_seconds
-                for future in list(pending):
-                    task = futures[future]
+                for task_id in list(pending):
+                    task = next(item for item in tasks if item.id == task_id)
                     control = controls[task.id]
                     timed_out = expired_batch or control.elapsed(now) >= self._settings.task_timeout_seconds
                     if cancelled or timed_out:
                         control.cancel.set()
-                        future.cancel()
+                        jobs[task.id].cancel("parent run cancelled" if cancelled else "subagent timeout")
                         status = "cancelled" if cancelled else "timed_out"
                         results[task.id] = {"id": task.id, "status": status, "answer": "", "error": ""}
-                        pending.remove(future)
+                        pending.remove(task.id)
                         self._event(
                             runtime,
                             "subagent_failed",
@@ -165,13 +188,22 @@ class SubagentCoordinator:
                             status=status,
                         )
                         continue
-                    if not future.done():
+                    state = jobs[task.id].info().state
+                    if state not in {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED}:
                         continue
-                    pending.remove(future)
-                    try:
-                        results[task.id] = future.result()
-                    except Exception as exc:
-                        error = self._safe_error(exc)
+                    pending.remove(task.id)
+                    if task.id in results:
+                        continue
+                    if state is JobState.CANCELLED:
+                        results[task.id] = {"id": task.id, "status": "cancelled", "answer": "", "error": ""}
+                        continue
+                    error = jobs[task.id].info().error or "Subagent task failed."
+                    if state is JobState.FAILED:
+                        exception = task_exceptions.get(task.id)
+                        if isinstance(exception, (KeyboardInterrupt, SystemExit)):
+                            raise exception
+                        if exception is not None:
+                            error = self._safe_error(exception)  # type: ignore[arg-type]
                         results[task.id] = {
                             "id": task.id,
                             "status": "failed",
@@ -193,7 +225,8 @@ class SubagentCoordinator:
             for control in controls.values():
                 control.cancel.set()
             bridge.close()
-            executor.shutdown(wait=False, cancel_futures=True)
+            if owns_registry:
+                registry.close_all(reason="subagent batch finished", timeout=5.0)
 
         ordered = [results[task.id] for task in tasks]
         batch["status"] = (

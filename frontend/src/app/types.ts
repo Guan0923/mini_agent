@@ -17,4 +17,5 @@ export interface ChatRunRequest {
 export interface ActiveRun {
   controller: AbortController;
   sessionId: string;
+  jobId?: string;
 }

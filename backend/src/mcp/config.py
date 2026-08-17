@@ -33,6 +33,8 @@ class McpSettings:
     initialization_timeout_seconds: float = 15.0
     call_timeout_seconds: float = 60.0
     shutdown_timeout_seconds: float = 5.0
+    health_failure_threshold: int = 3
+    rebuild_failure_threshold: int = 3
 
     @classmethod
     def from_config(cls, values: Mapping[str, object]) -> McpSettings:
@@ -41,6 +43,8 @@ class McpSettings:
             initialization_timeout_seconds=_positive_number(configured, "initialization_timeout_seconds", 15.0),
             call_timeout_seconds=_positive_number(configured, "call_timeout_seconds", 60.0),
             shutdown_timeout_seconds=_positive_number(configured, "shutdown_timeout_seconds", 5.0),
+            health_failure_threshold=_positive_integer(configured, "health_failure_threshold", 3),
+            rebuild_failure_threshold=_positive_integer(configured, "rebuild_failure_threshold", 3),
         )
 
 
@@ -194,6 +198,13 @@ def _positive_number(values: Mapping[str, object], name: str, default: float) ->
     if not math.isfinite(resolved) or resolved <= 0:
         raise ConfigurationError(f"mcp.{name} must be a finite positive number.")
     return resolved
+
+
+def _positive_integer(values: Mapping[str, object], name: str, default: int) -> int:
+    raw = values.get(name, default)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        raise ConfigurationError(f"mcp.{name} must be a positive integer.")
+    return raw
 
 
 def _parse_secret_reference(value: str) -> str | None:

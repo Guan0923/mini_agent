@@ -12,12 +12,12 @@ import threading
 import time
 import zipfile
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from uuid import uuid4
 
 from backend.configuration import ClientPaths, validate_identity_id
+from backend.jobs import AdmissionPolicy, JobLane, JobRegistry, JobScopeKind, QueueMode, ThreadJob
 from backend.storage.auth.crypto import UserDataKeyStore
 
 from .cloud_repository import (
@@ -63,6 +63,7 @@ class SnapshotJob:
     error: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    cancel_requested: bool = False
 
     def public(self) -> dict[str, object]:
         value = asdict(self)
@@ -80,6 +81,7 @@ class SnapshotManager:
         repository: SnapshotRepository,
         *,
         user_allowed: Callable[[str], bool] | None = None,
+        job_registry: JobRegistry | None = None,
     ) -> None:
         data_root = Path(data_root)
         if data_root.is_symlink():
@@ -90,7 +92,10 @@ class SnapshotManager:
         self.repository = repository
         self._user_allowed = user_allowed or (lambda _user_id: True)
         self.key_store = UserDataKeyStore()
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mini-agent-cloud")
+        self._registry = job_registry or JobRegistry()
+        self._owns_registry = job_registry is None
+        self._scope = self._registry.root_scope().child(JobScopeKind.RUNNER)
+        self._job_handles: dict[str, ThreadJob] = {}
         self._jobs: dict[str, SnapshotJob] = {}
         self._jobs_lock = threading.Lock()
         self._user_locks: dict[str, threading.Lock] = {}
@@ -163,6 +168,18 @@ class SnapshotManager:
             job = self._jobs.get(job_id)
             return job.public() if job is not None and job.user_id == user_id else None
 
+    def cancel(self, user_id: str, job_id: str) -> bool:
+        """Request cooperative cancellation for a user-owned snapshot Job."""
+        with self._jobs_lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.user_id != user_id or job.status not in {"queued", "running"}:
+                return False
+            job.cancel_requested = True
+            handle = self._job_handles.get(job_id)
+        if handle is not None:
+            handle.cancel("user requested cancellation")
+        return True
+
     def active_job(self, user_id: str) -> dict[str, object] | None:
         with self._jobs_lock:
             jobs = [job for job in self._jobs.values() if job.user_id == user_id]
@@ -174,7 +191,7 @@ class SnapshotManager:
         self._require_allowed(user_id)
         job = self._new_job(user_id, "save")
         if job.status == "queued" and job.phase == "queued":
-            self._executor.submit(self._save, job, force)
+            self._start_worker(job, lambda: self._save(job, force))
         return job.public()
 
     def start_restore(self, user_id: str, snapshot_id: str) -> dict[str, object]:
@@ -184,7 +201,7 @@ class SnapshotManager:
             return job.public()
         job.snapshot_id = snapshot_id
         if job.status == "queued" and job.phase == "queued":
-            self._executor.submit(self._restore, job, snapshot_id)
+            self._start_worker(job, lambda: self._restore(job, snapshot_id))
         return job.public()
 
     def snapshots(self, user_id: str) -> list[dict[str, object]]:
@@ -232,6 +249,30 @@ class SnapshotManager:
                         self.start_save(user_id)
                 except Exception:
                     continue
+
+    def _start_worker(self, job: SnapshotJob, target: Callable[[], None]) -> None:
+        """Run one save/restore through the shared background resource pool."""
+        owner_scope = self._scope.child(JobScopeKind.USER, user_id=job.user_id)
+
+        def run() -> None:
+            target()
+            if job.cancel_requested and job.phase not in {"replace", "complete"}:
+                self._update(job, phase="cancelled", progress=100, status="cancelled")
+                return
+            if job.status in {"failed", "conflict"}:
+                raise RuntimeError("snapshot operation failed")
+
+        handle = ThreadJob(self._registry.new_job_id(), run)
+        self._job_handles[job.id] = handle
+        try:
+            self._registry.submit(
+                handle,
+                scope=owner_scope,
+                lane=JobLane.BACKGROUND,
+                admission=AdmissionPolicy(queue_mode=QueueMode.WAIT, queue_timeout_seconds=30.0),
+            )
+        except Exception as exc:
+            self._finish_failed_job(job, phase="failed", status="failed", error=type(exc).__name__)
 
     def _require_allowed(self, user_id: str) -> None:
         validate_identity_id(user_id, require_uuid=True)
@@ -985,4 +1026,6 @@ class SnapshotManager:
     def close(self) -> None:
         self._stop.set()
         self._scheduler.join(timeout=2)
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._scope.close(timeout=5.0)
+        if self._owns_registry:
+            self._registry.close_all(reason="snapshot manager closed", timeout=5.0)

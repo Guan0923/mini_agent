@@ -97,6 +97,25 @@ def get_job(
     return job
 
 
+@router.post("/jobs/{job_id}/cancel", status_code=202)
+def cancel_job(
+    job_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict[str, object]:
+    _require_cloud_identity(identity)
+    manager = _manager(request)
+    if not manager.cancel(identity.id, job_id):
+        current = manager.job(identity.id, job_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="同步任务不存在。")
+        raise HTTPException(status_code=409, detail="同步任务已经结束或不可取消。")
+    current = manager.job(identity.id, job_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="同步任务不存在。")
+    return current
+
+
 @router.get("/snapshots")
 def snapshots(request: Request, identity: UserIdentity = Depends(require_user)) -> list[dict[str, object]]:
     _require_cloud_identity(identity)

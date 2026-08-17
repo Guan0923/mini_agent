@@ -53,6 +53,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -157,6 +158,8 @@ class ServiceJob(Job):
         self._stopped_handles: set[object] = set()
         self._health = ServiceHealth.DOWN
         self._rebuild_count = 0
+        self._force_rebuild = threading.Event()
+        self._external_failures = 0
 
     # -- public API ---------------------------------------------------------
 
@@ -165,6 +168,32 @@ class ServiceJob(Job):
         """Current service health; independent of :meth:`Job.info` state."""
         with self._lock:
             return self._health
+
+    def info(self):
+        """Include service health without changing the core state machine."""
+        return replace(super().info(), health=self.health.value)
+
+    def report_failure(self) -> None:
+        """Report a failed service call to the supervisor.
+
+        Transport adapters can call this when a request times out or returns
+        an exception.  The supervisor remains the only component that stops
+        and rebuilds the live instance.
+        """
+        with self._lock:
+            self._external_failures += 1
+            failures = self._external_failures
+        if failures >= self._max_failures:
+            self._set_health(ServiceHealth.DEGRADED)
+        if failures > self._max_failures:
+            self._force_rebuild.set()
+
+    def report_success(self) -> None:
+        """Reset call-failure streak and recover a degraded service."""
+        with self._lock:
+            self._external_failures = 0
+        if self.health is ServiceHealth.DEGRADED:
+            self._set_health(ServiceHealth.HEALTHY)
 
     def start(self) -> None:
         """Transition to ``running`` and launch the daemon supervisor thread.
@@ -239,6 +268,9 @@ class ServiceJob(Job):
 
         consecutive_failures = 0
         while not self._cancelled():
+            if self._force_rebuild.is_set():
+                self._force_rebuild.clear()
+                consecutive_failures = self._max_failures + 1
             if self._check_current():
                 consecutive_failures = 0
                 if self.health is ServiceHealth.DEGRADED:

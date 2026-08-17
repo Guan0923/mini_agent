@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from backend.jobs import AdmissionPolicy, JobLane, JobRegistry, JobScopeKind, ThreadJob
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -74,20 +76,39 @@ class SyncClient:
 class SyncCoordinator:
     """One event-driven worker; there is deliberately no periodic polling."""
 
-    def __init__(self, client: SyncClient, store, *, error_sink: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        client: SyncClient,
+        store,
+        *,
+        error_sink: Callable[[str], None] | None = None,
+        job_registry: JobRegistry | None = None,
+    ) -> None:
         self.client = client
         self.store = store
         self.error_sink = error_sink
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="mini-agent-sync", daemon=True)
+        self._registry = job_registry
+        self._job: ThreadJob | None = None
         self._started = False
 
     def start(self) -> None:
         if self._started:
             return
         self._started = True
-        self._thread.start()
+        if self._registry is None:
+            self._thread.start()
+        else:
+            scope = self._registry.root_scope().child(JobScopeKind.RUNNER)
+            self._job = ThreadJob(self._registry.new_job_id(), self._run)
+            self._registry.submit(
+                self._job,
+                scope=scope,
+                lane=JobLane.BACKGROUND,
+                admission=AdmissionPolicy(),
+            )
         self.notify()
 
     def notify(self) -> None:
@@ -98,7 +119,11 @@ class SyncCoordinator:
             return
         self._stop.set()
         self._wake.set()
-        self._thread.join(timeout)
+        if self._job is not None:
+            self._job.cancel("sync coordinator closed")
+            self._job.wait(timeout)
+        else:
+            self._thread.join(timeout)
 
     def _run(self) -> None:
         while True:

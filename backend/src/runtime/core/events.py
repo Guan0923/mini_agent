@@ -9,6 +9,12 @@ from backend.domain.runtime_state import NodeFrame
 from backend.domain.state import utc_now
 
 RuntimeEventKind = Literal[
+    "job_queued",
+    "job_started",
+    "job_succeeded",
+    "job_failed",
+    "job_cancelled",
+    "job_degraded",
     "run_started",
     "run_suspended",
     "run_resumed",

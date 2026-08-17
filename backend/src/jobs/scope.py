@@ -106,6 +106,11 @@ class JobScope:
         return self._owner
 
     @property
+    def registry(self) -> JobRegistry:
+        """Registry that owns this scope, for carrier adapters only."""
+        return self._registry
+
+    @property
     def depth(self) -> int:
         depth = 0
         current = self._parent

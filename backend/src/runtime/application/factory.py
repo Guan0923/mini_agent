@@ -8,6 +8,7 @@ from typing import Literal
 
 from backend.configuration import ClientPaths, UserConfigStore, initialize_config, load_config, section
 from backend.domain import DEFAULT_TIME_ZONE
+from backend.jobs import JobRegistry, JobScope, JobScopeKind
 from backend.mcp.client import ExternalMcpResources, start_external_tools
 from backend.mcp.config import McpSettings, prepare_mcp_plan
 from backend.planning import LLMPlanner, RuleBasedPlanner
@@ -53,6 +54,8 @@ def build_application(
     session_provisioner_cleanup: object | None = None,
     project_id: str | None = None,
     upload_root: Path | None = None,
+    job_registry: JobRegistry | None = None,
+    job_user_id: str | None = None,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     base_config = initialize_config(resolved_paths, workspace)
@@ -81,15 +84,24 @@ def build_application(
         upload_files,
     )
     if model_config is None:
-        runner = _build_subagent_runner(*runner_args, **({"project_id": project_id} if project_id else {}))
+        runner = _build_subagent_runner(
+            *runner_args,
+            **({"project_id": project_id} if project_id else {}),
+            **({"job_registry": job_registry} if job_registry is not None else {}),
+            **({"job_user_id": job_user_id} if job_user_id is not None else {}),
+        )
     else:
         runner = _build_subagent_runner(
             *runner_args,
             model_config=model_config,
             **({"project_id": project_id} if project_id else {}),
+            **({"job_registry": job_registry} if job_registry is not None else {}),
+            **({"job_user_id": job_user_id} if job_user_id is not None else {}),
         )
     try:
-        sync_coordinator = _build_sync_coordinator(config, store)
+        sync_coordinator = _build_sync_coordinator(
+            config, store, **({"job_registry": job_registry} if job_registry is not None else {})
+        )
     except Exception:
         runner.close()
         raise
@@ -141,6 +153,8 @@ def _build_subagent_runner(
     *,
     model_config: ModelConfig | None = None,
     project_id: str | None = None,
+    job_registry: JobRegistry | None = None,
+    job_user_id: str | None = None,
 ) -> AgentRunner:
     resolved_paths = paths or client_paths()
     skill_settings = SkillSettings.from_config(config)
@@ -159,10 +173,21 @@ def _build_subagent_runner(
             user_preferences=user_preferences,
             model_config=model_config,
             project_id=project_id,
+            job_registry=job_registry,
+            job_user_id=job_user_id,
         )
 
     coordinator = SubagentCoordinator(child_factory, workspace, subagent_settings)
-    external = _external_resources(workspace, resolved_paths, config)
+    mcp_scope: JobScope | None = None
+    if job_registry is not None:
+        mcp_scope = job_registry.root_scope().child(JobScopeKind.USER, user_id=job_user_id)
+    external = _external_resources(
+        workspace,
+        resolved_paths,
+        config,
+        job_registry=job_registry,
+        job_scope=mcp_scope,
+    )
     try:
         tools = build_tool_registry(
             workspace,
@@ -187,6 +212,8 @@ def _build_subagent_runner(
             user_preferences=user_preferences,
             model_config=model_config,
             project_id=project_id,
+            job_registry=job_registry,
+            job_user_id=job_user_id,
         )
     except Exception:
         external.close()
@@ -208,6 +235,8 @@ def _build_runner(
     user_preferences: str = "",
     model_config: ModelConfig | None = None,
     project_id: str | None = None,
+    job_registry: JobRegistry | None = None,
+    job_user_id: str | None = None,
 ) -> AgentRunner:
     skills = SkillCatalog.discover(global_root=paths.skills_dir)
     project_skill_gate = (
@@ -228,6 +257,12 @@ def _build_runner(
             tools.read_only_specs(),
             user_preferences=user_preferences,
         )
+    runner_scope = None
+    if job_registry is not None:
+        owner_scope = job_registry.root_scope()
+        if job_user_id is not None:
+            owner_scope = owner_scope.child(JobScopeKind.USER, user_id=job_user_id)
+        runner_scope = owner_scope.child(JobScopeKind.RUNNER)
     return AgentRunner(
         planner=planner,
         tools=tools,
@@ -242,6 +277,8 @@ def _build_runner(
         workspace_root=str(workspace.resolve()),
         subagents=subagents,
         resources=resources,
+        job_registry=job_registry,
+        job_scope=runner_scope,
     )
 
 
@@ -249,13 +286,18 @@ def _external_resources(
     workspace: Path,
     paths: ClientPaths,
     config: dict[str, object],
+    *,
+    job_registry: JobRegistry | None = None,
+    job_scope: JobScope | None = None,
 ) -> ExternalMcpResources:
     del workspace
     plan = prepare_mcp_plan(paths)
-    return start_external_tools(
-        plan.effective_servers(),
-        McpSettings.from_config(config),
-    )
+    kwargs = {}
+    if job_registry is not None:
+        kwargs["job_registry"] = job_registry
+    if job_scope is not None:
+        kwargs["job_scope"] = job_scope
+    return start_external_tools(plan.effective_servers(), McpSettings.from_config(config), **kwargs)
 
 
 def _settings_for(
@@ -282,7 +324,9 @@ def _settings_for(
     )
 
 
-def _build_sync_coordinator(config: dict[str, object], store: SQLiteSessionStore) -> SyncCoordinator | None:
+def _build_sync_coordinator(
+    config: dict[str, object], store: SQLiteSessionStore, *, job_registry: JobRegistry | None = None
+) -> SyncCoordinator | None:
     sync = section(config, "sync")
     url = sync.get("url")
     token = sync.get("token")
@@ -294,6 +338,7 @@ def _build_sync_coordinator(config: dict[str, object], store: SQLiteSessionStore
     coordinator = SyncCoordinator(
         SyncClient(device_id, RequestsSyncTransport(url, token, device_id)),
         store,
+        job_registry=job_registry,
     )
     store.set_sync_listener(coordinator.notify)
     coordinator.start()

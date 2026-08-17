@@ -235,7 +235,7 @@ export interface SkillInfo {
 }
 
 export interface StreamMessage {
-  type: "event" | "done" | "error" | NodeFrameType;
+  type: "event" | "done" | "error" | "job" | NodeFrameType;
   kind?: string;
   message?: string;
   data?: Record<string, unknown>;
@@ -247,4 +247,5 @@ export interface StreamMessage {
   run_id?: string;
   mode?: ChatMode;
   node?: RuntimeStateNode;
+  job_id?: string;
 }

@@ -25,6 +25,7 @@ class ToolInvocationContext:
     session_id: str | None = None
     timezone: str = DEFAULT_TIME_ZONE
     clock: Callable[[], str] = utc_now
+    job_scope: object | None = None
 
 
 ToolHandler = Callable[..., str]

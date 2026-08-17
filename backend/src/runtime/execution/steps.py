@@ -174,7 +174,12 @@ class ToolStepExecutor:
                     result = invoke_with_context(
                         tool,
                         tool_message.arguments,
-                        ToolInvocationContext(runtime.state.session_id, runtime.state.timezone, runtime.services.clock),
+                        ToolInvocationContext(
+                            runtime.state.session_id,
+                            runtime.state.timezone,
+                            runtime.services.clock,
+                            runtime.services.job_scope,
+                        ),
                         confirmed=True,
                     )
                 else:

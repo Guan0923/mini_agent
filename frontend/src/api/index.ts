@@ -6,3 +6,4 @@ export * from "./chat";
 export * from "./files";
 export * from "./sync";
 export * from "./projects";
+export * from "./jobs";

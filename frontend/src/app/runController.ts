@@ -1,4 +1,5 @@
 import { streamChat, streamResume } from "../api";
+import { cancelJob } from "../api";
 import type { ChatMessage, RuntimeNodeFrame, StreamMessage } from "../types";
 import type { ActiveRun, ChatRunRequest } from "./types";
 import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "./runtimeDetailProjection";
@@ -33,7 +34,10 @@ export function createRunController(callbacks: RunControllerCallbacks) {
     const onMessage = (message: StreamMessage) => {
       const active = callbacks.activeRuns.get(request.conversationId);
       if (active?.controller !== controller || controller.signal.aborted) return;
-      if ((message.type === "node.create" || message.type === "node.update" || message.type === "node.delete") && message.node) {
+      if (message.type === "job" && message.job_id) {
+        if (active?.controller === controller) active.jobId = message.job_id;
+        return;
+      } else if ((message.type === "node.create" || message.type === "node.update" || message.type === "node.delete") && message.node) {
         nodeProtocol = true;
         const frame: RuntimeNodeFrame = { type: message.type, node: message.node };
         callbacks.applyRuntimeNodeFrame?.(frame);
@@ -149,6 +153,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
   function stopConversation(id: string): void {
     const active = callbacks.activeRuns.get(id);
     if (!active) return;
+    if (active.jobId) void cancelJob(active.jobId).catch(() => undefined);
     active.controller.abort();
     callbacks.updateLastMessage(id, (item) => ({
       ...item,
