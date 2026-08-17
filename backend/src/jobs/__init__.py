@@ -26,6 +26,8 @@ from .errors import (
     JobRegistrationError,
     JobScopeClosed,
 )
+from .output import CommandError, MessageErrorFormatter, format_command_output
+from .process_group import ProcessFactory, ProcessGroup, TreeTerminator
 from .registry import CloseReport, JobQuery, JobRegistry, ScopedJobInfo
 from .safety import ClassNameErrorFormatter, ErrorFormatter
 from .scheduling import (
@@ -38,13 +40,18 @@ from .scheduling import (
     SlotMode,
 )
 from .scope import JobOwner, JobScope, JobScopeKind
+from .service_job import ServiceDriver, ServiceHealth, ServiceJob
+from .subprocess_job import SubprocessJob
+from .thread_job import ThreadJob
 
 __all__ = [
     "AdmissionPolicy",
     "ClassNameErrorFormatter",
     "Clock",
     "CloseReport",
+    "CommandError",
     "ErrorFormatter",
+    "format_command_output",
     "Job",
     "JobAdmissionRejected",
     "JobAdmissionTimeout",
@@ -67,9 +74,18 @@ __all__ = [
     "JobStateError",
     "JobStateListener",
     "LaneLimits",
+    "MessageErrorFormatter",
+    "ProcessFactory",
+    "ProcessGroup",
     "QueueMode",
     "ScopedJobInfo",
+    "ServiceDriver",
+    "ServiceHealth",
+    "ServiceJob",
     "SlotLease",
     "SlotMode",
+    "SubprocessJob",
     "TERMINAL_STATES",
+    "ThreadJob",
+    "TreeTerminator",
 ]
