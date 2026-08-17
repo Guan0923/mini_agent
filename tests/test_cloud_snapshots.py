@@ -195,7 +195,9 @@ def test_legacy_snapshot_uploads_migrate_on_restore(tmp_path: Path, monkeypatch)
 
         restored_paths = ClientPaths(tmp_path / USER_ID)
         restored_paths.ensure_session("session_1")
-        assert (restored_paths.session_uploads("session_1") / "old.png").read_bytes() == b"\x89PNG\r\n\x1a\nlegacy-upload"
+        assert (
+            restored_paths.session_uploads("session_1") / "old.png"
+        ).read_bytes() == b"\x89PNG\r\n\x1a\nlegacy-upload"
         assert not (restored_paths.session_root("session_1") / "uploads").exists()
     finally:
         manager.close()

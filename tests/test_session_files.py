@@ -250,7 +250,6 @@ def test_chat_rejects_missing_and_forged_references(client: TestClient, state: W
 
 def test_reference_survives_chat_node_transcript_and_rewind(client: TestClient, state: WebAppState) -> None:
     from backend.api.sessions.routes import _store
-    from backend.domain import NodeWriter, message_payload
     from backend.runtime.node_bridge import RuntimeEventNodeBridge
 
     identity = client.get("/api/auth/me").json()
@@ -295,7 +294,6 @@ def test_reference_survives_chat_node_transcript_and_rewind(client: TestClient, 
 
 def test_branch_copies_uploads_and_references(client: TestClient, state: WebAppState) -> None:
     from backend.api.sessions.routes import _store
-    from backend.domain import NodeWriter, message_payload
     from backend.runtime.node_bridge import RuntimeEventNodeBridge
 
     identity = client.get("/api/auth/me").json()
@@ -367,7 +365,6 @@ def test_binary_and_image_references_never_reach_model_text(client: TestClient, 
 
     # Structured turns skip the legacy expander entirely, so the binary path
     # is never replaced with file contents.
-    from backend.runtime.conversation.references import FileReferenceExpander
 
     expander = FileReferenceExpander(_NeverReadFiles())
     expanded = expander.expand("看看 @image.png", structured=True)
