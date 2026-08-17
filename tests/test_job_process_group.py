@@ -57,19 +57,28 @@ def _retry_until(lambda_):  # noqa: ANN001
 
 
 def _pid_alive(pid: int) -> bool:
-    """True if a *detached* process (not Popen-held) still exists.
+    """True if a process (not Popen-held by this test) still exists.
 
-    On Windows a terminated but not-yet-reaped process raises ``OSError``
-    (WinError 11) or ``ProcessLookupError``; a Popen-held handle never raises,
-    so this helper is only meaningful for processes whose handle we do not own.
+    ``os.kill(pid, 0)`` is only reliable on POSIX. On Windows a terminating or
+    already-reaped process can raise ``OSError``/``SystemError`` with varying
+    WinError codes, and a Popen-held handle never raises, so we probe with
+    ``tasklist`` instead, which is authoritative and deterministic.
     """
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, OSError):
-        return False
-    except PermissionError:
-        return True  # exists but owned by another user
-    return True
+    if not IS_WINDOWS:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, OSError):
+            return False
+        except PermissionError:
+            return True  # exists but owned by another user
+        return True
+    output = subprocess.run(
+        ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout
+    return str(pid) in output
 
 
 def make_env(tmp_path) -> dict[str, str]:
@@ -99,6 +108,29 @@ class StubPopen:
     def kill(self) -> None:
         self.killed = True
         self._returncode = -9
+
+
+class UnconfirmablePopen:
+    """A Popen stand-in whose root never confirms exit.
+
+    ``poll()`` and ``wait()`` persistently return ``None`` and ``kill()`` does
+    not flip the return code, so ``ProcessGroup.terminate()`` reaches its
+    "unconfirmed termination" fallback: it marks ``termination_uncertain`` and
+    still reports the known root PID via ``pids``.
+    """
+
+    def __init__(self, pid: int = 5555) -> None:
+        self.pid = pid
+        self.kill_calls = 0
+
+    def poll(self) -> int | None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        return None
+
+    def kill(self) -> None:
+        self.kill_calls += 1
 
 
 class RecordingTerminator:
@@ -220,6 +252,30 @@ def test_terminate_kills_process_group_root(tmp_path) -> None:
     # unreliable on Windows while the handle is still held.
     assert _retry_until(lambda: group.poll() is not None)
     assert group.termination_uncertain is False
+
+
+def test_terminate_marks_unconfirmed_when_root_never_exits(tmp_path) -> None:
+    """When the root cannot be confirmed to exit, mark uncertain and report PID."""
+    stub = UnconfirmablePopen(pid=7777)
+    terminator = RecordingTerminator()
+
+    def factory(*args, **kwargs):
+        return stub
+
+    group = ProcessGroup(
+        _nowait_cmd(),
+        make_env(tmp_path),
+        cwd=str(tmp_path),
+        popen_factory=factory,
+        tree_terminator=terminator,
+        termination_timeout=0.01,
+    )
+    assert group.start() == 7777
+    group.terminate()  # must not raise
+    assert group.termination_uncertain is True
+    assert stub.kill_calls >= 1  # root kill fallback was attempted
+    # The known root PID is still reported while termination is unconfirmed.
+    assert group.pids == (7777,)
 
 
 def test_terminate_is_idempotent_when_already_exited(tmp_path) -> None:
@@ -356,7 +412,7 @@ def test_terminate_kills_whole_tree_windows(tmp_path) -> None:
     child_pid = int(child_pid_file.read_text(encoding="ascii").strip())
     assert child_pid != pid
     group.terminate()
-    # Root is Popen-held → authoritative via poll(); child is detached → os.kill.
+    # Root is Popen-held → authoritative via poll(); child is probed via tasklist.
     root_gone = _retry_until(lambda: group.poll() is not None)
     assert root_gone, f"root pid {pid} still running after terminate"
     assert _retry_until(lambda: not _pid_alive(child_pid)), f"child pid {child_pid} still alive after terminate"
