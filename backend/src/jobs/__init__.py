@@ -41,6 +41,7 @@ from .scheduling import (
 )
 from .scope import JobOwner, JobScope, JobScopeKind
 from .subprocess_job import SubprocessJob
+from .thread_job import ThreadJob
 
 __all__ = [
     "AdmissionPolicy",
@@ -81,5 +82,6 @@ __all__ = [
     "SlotMode",
     "SubprocessJob",
     "TERMINAL_STATES",
+    "ThreadJob",
     "TreeTerminator",
 ]
