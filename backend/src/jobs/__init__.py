@@ -26,6 +26,7 @@ from .errors import (
     JobRegistrationError,
     JobScopeClosed,
 )
+from .process_group import ProcessFactory, ProcessGroup, TreeTerminator
 from .registry import CloseReport, JobQuery, JobRegistry, ScopedJobInfo
 from .safety import ClassNameErrorFormatter, ErrorFormatter
 from .scheduling import (
@@ -67,9 +68,12 @@ __all__ = [
     "JobStateError",
     "JobStateListener",
     "LaneLimits",
+    "ProcessFactory",
+    "ProcessGroup",
     "QueueMode",
     "ScopedJobInfo",
     "SlotLease",
     "SlotMode",
     "TERMINAL_STATES",
+    "TreeTerminator",
 ]
