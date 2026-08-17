@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
+    "@rc-component/listy": "^1.2.3",
     "antd": "^6.5.3",
     "markdown-it": "^15.0.0",
     "markdown-it-texmath": "^1.0.0",

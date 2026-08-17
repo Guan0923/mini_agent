@@ -25,6 +25,7 @@ import type {
   Conversation,
   DecisionRequest,
   DisplayMode,
+  FileReference,
   Page,
   PermissionMode,
   ReasoningEffort,
@@ -70,6 +71,7 @@ interface ChatRunRequest {
   providerName?: string;
   model?: RuntimeNodeModel;
   sourceNodeId?: string;
+  references?: FileReference[];
 }
 
 function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
@@ -111,6 +113,7 @@ export default function ChatPage({
   const [commandMenuDismissedFor, setCommandMenuDismissedFor] = useState<string | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingDraft, setEditingDraft] = useState("");
+  const [references, setReferences] = useState<FileReference[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const taRef = useRef<TextAreaRef>(null);
   const editRef = useRef<TextAreaRef>(null);
@@ -302,6 +305,7 @@ export default function ChatPage({
     prompt: string | null,
     resume = false,
     sourceNodeId?: string | null,
+    references?: FileReference[],
   ) {
     const controller = new AbortController();
     abortRef.current = controller;
@@ -396,13 +400,13 @@ export default function ChatPage({
         const chatSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
         const options = chatSourceNodeId
           ? (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId }
-            : { sessionId, sourceNodeId: chatSourceNodeId, providerName: requestProviderName, model: requestModel, mode, permissionMode, reasoningEffort })
+            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, references }
+            : { sessionId, sourceNodeId: chatSourceNodeId, providerName: requestProviderName, model: requestModel, mode, permissionMode, reasoningEffort, references })
           // An empty tree has no dynamic runtime configuration to submit. Keep
           // the stable positional call for clients embedding ChatPage while
           // all established sessions use the explicit v0.3 config object.
           : (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel }
+            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, references }
             : sessionId);
         const result = await streamChat(
           prompt ?? "",
@@ -445,6 +449,7 @@ export default function ChatPage({
     prompt: string | null,
     resume = false,
     sourceNodeId: string | null = conversation?.lastNodeId ?? null,
+    references?: FileReference[],
   ) {
     if (onRun) {
       await onRun({
@@ -458,15 +463,20 @@ export default function ChatPage({
         providerName: requestProviderName,
         model: requestModel,
         sourceNodeId: sourceNodeId ?? undefined,
+        references,
       });
       return;
     }
-    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId);
+    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId, references);
   }
 
-  async function runPrompt(prompt: string, target?: { conversationId: string; sessionId: string; sourceNodeId?: string }) {
+  async function runPrompt(
+    prompt: string,
+    target?: { conversationId: string; sessionId: string; sourceNodeId?: string },
+    references?: FileReference[],
+  ) {
     const { conversationId, sessionId } = target ?? await ensureSession();
-    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [] };
+    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [], references };
     const assistantMessage: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", events: [], running: true };
     onUpdate(conversationId, (current) => ({
       ...current,
@@ -483,6 +493,7 @@ export default function ChatPage({
       prompt,
       false,
       target ? target.sourceNodeId ?? null : conversation?.lastNodeId ?? null,
+      references,
     );
   }
 
@@ -531,7 +542,8 @@ export default function ChatPage({
       return;
     }
     setInput("");
-    await runPrompt(prompt);
+    await runPrompt(prompt, undefined, references.length > 0 ? references : undefined);
+    setReferences([]);
   }
 
   async function chooseDecision(request: DecisionRequest, choice: string, options?: { supplement?: string; answers?: Record<string, string[]> }) {

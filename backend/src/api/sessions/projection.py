@@ -136,16 +136,28 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
         blocks = _blocks(message)
         if role == "user":
             content = "".join(_text(block.get("text")) for block in blocks if block.get("type") in {"text", "bash"})
-            result.append(
-                {
-                    "id": f"{node.session_id}:{node.id}",
-                    "run_id": None,
-                    "role": "user",
-                    "content": content,
-                    "events": [],
-                    "source_node_id": node.parent_id or None,
-                }
-            )
+            payload: dict[str, Any] = {
+                "id": f"{node.session_id}:{node.id}",
+                "run_id": None,
+                "role": "user",
+                "content": content,
+                "events": [],
+                "source_node_id": node.parent_id or None,
+            }
+            references = message.get("references")
+            if isinstance(references, list) and all(isinstance(item, dict) for item in references):
+                payload["references"] = [
+                    {
+                        "source": str(item.get("source") or ""),
+                        "path": str(item.get("path") or ""),
+                    }
+                    for item in references
+                    if isinstance(item.get("source"), str)
+                    and isinstance(item.get("path"), str)
+                    and item["source"] in {"project", "upload"}
+                    and item["path"]
+                ]
+            result.append(payload)
             current_assistant = None
             continue
         if role not in {"assistant", "tool_result"}:

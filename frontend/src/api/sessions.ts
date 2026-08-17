@@ -1,4 +1,4 @@
-import type { ChatMessage, RuntimeStateNode } from "../types";
+import type { ChatMessage, FileReference, RuntimeStateNode } from "../types";
 import { normalizeRuntimeNode } from "../app/runtimeNodeNormalization";
 import { jsonBody, requestJson } from "./request";
 
@@ -31,6 +31,7 @@ export interface SessionMessage {
   error?: string;
   running?: boolean;
   source_node_id?: string | null;
+  references?: FileReference[];
 }
 
 export interface TimezoneInfo {
