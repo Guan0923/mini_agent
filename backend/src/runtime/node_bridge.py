@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from backend.domain.runtime_state import (
@@ -73,6 +73,7 @@ class RuntimeEventNodeBridge:
         running_mode: str = "agent",
         cwd: str = "",
         thinking_level: str = "medium",
+        references: Sequence[Mapping[str, str]] | None = None,
         emit: Callable[[NodeFrame], None],
     ) -> None:
         self.store = store
@@ -98,6 +99,10 @@ class RuntimeEventNodeBridge:
         self.running_mode = running_mode
         self.cwd = cwd
         self.thinking_level = thinking_level or "medium"
+        # Structured file references travel as user-message metadata on the
+        # canonical user node.  They are deliberately never injected into the
+        # prompt text; the agent reads referenced files through its tools.
+        self.references = [dict(item) for item in references or []]
         self.writer = NodeWriter(store, emit=emit)
         self.parent: RuntimeState | None = None
         self.assistant: RuntimeState | None = None
@@ -342,7 +347,11 @@ class RuntimeEventNodeBridge:
         user_node = self.writer.create(
             session_id=self.session_id,
             parent=self.parent,
-            data=message_payload("user", self.prompt),
+            data=message_payload(
+                "user",
+                self.prompt,
+                **({"references": self.references} if self.references else {}),
+            ),
             user=self.user,
             provider_name=self.provider_name,
             model=self.model_config,

@@ -24,8 +24,17 @@ class FileReferenceExpander:
         self._max_file_chars = max_file_chars
         self._max_total_chars = max_total_chars
 
-    def expand(self, task: str) -> str:
-        """Expand every file reference in a task, preserving surrounding punctuation."""
+    def expand(self, task: str, *, structured: bool = False) -> str:
+        """Expand every file reference in a task, preserving surrounding punctuation.
+
+        ``structured`` suppresses expansion entirely: when the caller already
+        validated structured ``references`` metadata, the ``@path`` tokens in
+        the prompt are presentation-only and must never be replaced with file
+        contents (the agent reads files on demand through its tools).
+        """
+
+        if structured:
+            return task
 
         matches = list(_FILE_REFERENCE_PATTERN.finditer(task))
         if not matches:

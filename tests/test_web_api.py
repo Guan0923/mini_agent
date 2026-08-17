@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.api.app import create_app
@@ -213,7 +214,8 @@ def test_runtime_config_patch_rejects_a_sealed_node_even_when_it_is_a_leaf(tmp_p
     state, client, identity, session, store, bridge = _active_runtime_client(tmp_path)
     try:
         user_node = next(
-            node for node in store.load_nodes(session["session_id"])
+            node
+            for node in store.load_nodes(session["session_id"])
             if node.data_type == "message" and node.role == "user"
         )
         response = client.patch(
@@ -457,3 +459,61 @@ def test_rewind_inherits_title_provenance_and_retitles_without_first_user(tmp_pa
         assert manual_payload["title_is_custom"] is True
         store.start_turn(manual_payload["session_id"], "run-manual", "提问")
         assert store.get_session_summary(manual_payload["session_id"]).title == "手工标题"
+
+
+def test_chat_request_accepts_and_limits_structured_references() -> None:
+    from backend.api.chat.routes import ChatRequest, FileReference
+
+    request = ChatRequest(
+        prompt="查看引用文件",
+        session_id="session_1",
+        references=[FileReference(source="upload", path="notes.md")],
+    )
+    assert request.references[0].source == "upload"
+    assert request.references[0].path == "notes.md"
+
+    with pytest.raises(Exception):
+        ChatRequest(prompt="x", references=[{"source": "other", "path": "x"}])
+
+
+def test_references_persist_on_user_node_and_expander_is_skipped(tmp_path: Path) -> None:
+    from backend.runtime.node_bridge import RuntimeEventNodeBridge
+    from backend.storage.sqlite import SQLiteSessionStore
+
+    state = WebAppState(tmp_path / "web")
+    client = TestClient(create_app(state))
+    user = client.post("/api/auth/guest").json()["user"]
+    store = SQLiteSessionStore(state.user_paths(user["id"]), f"web_{user['id']}")
+    session = store.create_session("引用测试")
+    frames: list[object] = []
+    bridge = RuntimeEventNodeBridge(
+        store,
+        session_id=session.session_id,
+        prompt="请分析 @notes.md 的内容",
+        user=user["id"],
+        provider="deepseek",
+        provider_name="deepseek",
+        model="deepseek-chat",
+        references=[{"source": "upload", "path": "notes.md"}],
+        emit=frames.append,
+    )
+    bridge.start()
+    nodes = store.load_nodes(session.session_id)
+    user_nodes = [node for node in nodes if node.role == "user"]
+    assert user_nodes, "bridge must persist a user node"
+    assert user_nodes[-1].message.get("references") == [{"source": "upload", "path": "notes.md"}]
+
+
+def test_structured_references_do_not_expand_file_contents() -> None:
+    from backend.runtime.conversation.references import FileReferenceExpander
+
+    expander = FileReferenceExpander(_ReadOnlyFiles())
+    task = "请查看 @readme.md 的说明"
+    assert expander.expand(task, structured=True) == task
+
+
+class _ReadOnlyFiles:
+    """Minimal files double proving the expander never reads with structured refs."""
+
+    def read_text(self, _path: str) -> str:
+        raise AssertionError("structured references must not read file contents")
