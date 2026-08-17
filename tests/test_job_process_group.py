@@ -435,3 +435,29 @@ def test_terminate_kills_whole_tree_posix(tmp_path) -> None:
     group.terminate()
     assert _retry_until(lambda: group.poll() is not None), f"root pid {pid} still running"
     assert _retry_until(lambda: not _pid_alive(child_pid)), f"child pid {child_pid} still alive after terminate"
+
+
+# ---------------------------------------------------------------------------
+# Optional stdout/stderr capture (Task 2 extension)
+# ---------------------------------------------------------------------------
+
+
+def test_piped_streams_are_captured_via_communicate(tmp_path) -> None:
+    env = make_env(tmp_path)
+    argv = [sys.executable, "-c", "print('out', flush=True); print('err', file=__import__('sys').stderr, flush=True)"]
+    group = ProcessGroup(argv, env, cwd=str(tmp_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    group.start()
+    stdout, stderr = group.communicate(timeout=10)
+    assert group.wait(timeout=10) == 0
+    assert stdout is not None and b"out" in stdout
+    assert stderr is not None and b"err" in stderr
+
+
+def test_default_devnull_streams_return_none_via_communicate(tmp_path) -> None:
+    env = make_env(tmp_path)
+    group = ProcessGroup([sys.executable, "-c", "print('should vanish')"], env, cwd=str(tmp_path))
+    group.start()
+    stdout, stderr = group.communicate(timeout=10)
+    assert group.wait(timeout=10) == 0
+    assert stdout is None
+    assert stderr is None

@@ -51,6 +51,11 @@ class ProcessGroup:
             Windows, :func:`os.killpg` on POSIX).
         termination_timeout: Deadline in seconds for asserting the root process
             exits after a terminate (used for the Windows ``taskkill`` wait).
+        stdout: Stream the child's standard output is wired to; defaults to
+            :data:`subprocess.DEVNULL`. Pass :data:`subprocess.PIPE` to capture
+            it and drain it via :meth:`communicate`.
+        stderr: Stream the child's standard error is wired to; defaults to
+            :data:`subprocess.DEVNULL`.
 
     Thread safety: an instance may be used concurrently by a cancel/close
     thread and a monitor thread; all public methods synchronize on an internal
@@ -67,6 +72,8 @@ class ProcessGroup:
         popen_factory: ProcessFactory = subprocess.Popen,
         tree_terminator: TreeTerminator | None = None,
         termination_timeout: float = 5.0,
+        stdout: int | None = subprocess.DEVNULL,
+        stderr: int | None = subprocess.DEVNULL,
     ) -> None:
         self._argv = list(argv)
         self._env = dict(env)
@@ -75,6 +82,8 @@ class ProcessGroup:
         self._popen_factory = popen_factory
         self._tree_terminator = tree_terminator
         self._termination_timeout = termination_timeout
+        self._stdout = stdout
+        self._stderr = stderr
 
         self._lock = threading.Lock()
         self._process: subprocess.Popen[str] | None = None
@@ -96,8 +105,8 @@ class ProcessGroup:
             "cwd": self._cwd,
             "env": self._env,
             "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
+            "stdout": self._stdout,
+            "stderr": self._stderr,
         }
         if self._is_windows:
             process_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
@@ -132,6 +141,24 @@ class ProcessGroup:
             return process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return None
+
+    def communicate(
+        self,
+        timeout: float | None = None,
+    ) -> tuple[bytes | None, bytes | None]:
+        """Interact with the child and collect its captured ``stdout``/``stderr``.
+
+        Drains the piped streams (reading them concurrently when both are
+        pipes) and waits for the root process. When ``timeout`` elapses before
+        the process exits, :class:`subprocess.TimeoutExpired` propagates from
+        this method. Returns ``(stdout_bytes, stderr_bytes)``; bytes are
+        ``None`` for streams that were not piped.
+        """
+        with self._lock:
+            process = self._process
+        if process is None:
+            return None, None
+        return process.communicate(timeout=timeout)
 
     def terminate(self) -> None:
         """Terminate the whole tree, then ensure the root process exits.
