@@ -827,7 +827,7 @@ export default function ChatPage({
   return (
     <div className="chat-page">
       <div className="chat-content">
-        <div className="chat-scroll" ref={chatScrollRef}>
+        <div className="chat-scroll" ref={chatScrollRef} data-conversation-scroll>
           <div className="chat-scroll-content">
             <div className="chat-messages">
               {messages.length === 0 ? (
@@ -836,7 +836,12 @@ export default function ChatPage({
                   <p className="welcome-sub">向你的智能体提问，它会调用文件、Shell、Web 等工具完成任务</p>
                 </div>
               ) : messages.map((message) => message.role === "user" ? (
-                <div className="message user" id={conversationTurnId(message.id)} key={message.id}>
+                <div
+                  className="message user"
+                  id={conversationTurnId(message.id)}
+                  data-chat-anchor-key={message.id}
+                  key={message.id}
+                >
                   <div className={editingMessageId === message.id ? "message-content is-editing" : "message-content"}>
                     {editingMessageId === message.id ? (
                       <div className="message-edit" aria-label="编辑用户消息">
@@ -898,9 +903,9 @@ export default function ChatPage({
                   onFork={onFork ? () => forkMessage(message.id) : undefined}
                 />
               ))}
-            </div>
-            {!isMobile ? <ConversationTimeline messages={messages} scrollContainerRef={chatScrollRef} /> : null}
           </div>
+          </div>
+          {!isMobile ? <ConversationTimeline messages={messages} scrollContainerRef={chatScrollRef} /> : null}
         </div>
       </div>
       <Composer

@@ -1,0 +1,79 @@
+.strip {
+  position: absolute;
+  width: 46px;
+  display: block;
+  pointer-events: auto;
+  z-index: 5;
+}
+
+.row {
+  position: relative;
+  display: flex;
+  width: 46px;
+  height: 12px;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 0 0 4px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tick {
+  display: block;
+  width: 18px;
+  height: 3px;
+  border-radius: 1.5px;
+  background: rgba(50, 50, 50, 0.55);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  transition: background 120ms ease, width 120ms ease;
+}
+
+.tip {
+  position: absolute;
+  left: 32px;
+  width: 340px;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface, #fff);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.tipTime {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tipText {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@keyframes hitPulse {
+  0% { outline: 2px solid var(--accent); outline-offset: 4px; }
+  100% { outline: 2px solid transparent; outline-offset: 4px; }
+}
+
+:global(.conversation-timeline-hit) {
+  animation: hitPulse 1.2s ease-out;
+  border-radius: 8px;
+}
+
+@media (max-width: 767px) {
+  .strip {
+    display: none;
+  }
+}

@@ -32,6 +32,10 @@ export interface SessionMessage {
   running?: boolean;
   source_node_id?: string | null;
   references?: FileReference[];
+  timeline_seq?: number;
+  timeline_time?: number;
+  timeline_text?: string;
+  timeline_source?: "user" | "steering";
 }
 
 export interface TimezoneInfo {

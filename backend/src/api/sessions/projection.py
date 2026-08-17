@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from backend.domain import terminal_error_payload, terminal_error_text
@@ -22,6 +23,36 @@ def _text(value: Any) -> str:
 def _blocks(message: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     content = message.get("content")
     return [item for item in content if isinstance(item, Mapping)] if isinstance(content, list) else []
+
+
+def _timeline_text(blocks: list[Mapping[str, Any]]) -> str:
+    """Fold canonical content blocks into the timeline preview text."""
+
+    text_parts: list[str] = []
+    has_other = False
+    for block in blocks:
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            value = str(block["text"]).strip()
+            if value:
+                text_parts.append(value)
+        else:
+            has_other = True
+    text = " ".join(text_parts).strip()
+    if not text and has_other:
+        return "[非文本内容]"
+    if text and has_other:
+        return f"{text} …"
+    return text
+
+
+def _timeline_time(node: Any) -> int:
+    """Convert a canonical UTC timestamp to epoch milliseconds."""
+
+    try:
+        value = datetime.fromisoformat(str(getattr(node, "timestamp", "")))
+        return max(0, int(value.timestamp() * 1000))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return 0
 
 
 def _terminal_error(node: Any, message: Mapping[str, Any] | None = None) -> str | None:
@@ -109,6 +140,7 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
 
     result: list[dict[str, Any]] = []
     current_assistant: dict[str, Any] | None = None
+    timeline_seq = 0
     for node in _ordered_nodes(nodes):
         data = getattr(node, "data", {})
         if not isinstance(data, Mapping):
@@ -135,6 +167,10 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
         role = str(message.get("role") or "")
         blocks = _blocks(message)
         if role == "user":
+            timeline_seq += 1
+            source = str(message.get("source") or "user")
+            if source not in {"user", "steering"}:
+                source = "user"
             content = "".join(_text(block.get("text")) for block in blocks if block.get("type") in {"text", "bash"})
             payload: dict[str, Any] = {
                 "id": f"{node.session_id}:{node.id}",
@@ -143,6 +179,10 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
                 "content": content,
                 "events": [],
                 "source_node_id": node.parent_id or None,
+                "timeline_seq": timeline_seq,
+                "timeline_time": _timeline_time(node),
+                "timeline_text": _timeline_text(blocks),
+                "timeline_source": source,
             }
             references = message.get("references")
             if isinstance(references, list) and all(isinstance(item, dict) for item in references):

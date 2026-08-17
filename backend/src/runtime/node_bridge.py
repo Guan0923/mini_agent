@@ -350,6 +350,7 @@ class RuntimeEventNodeBridge:
             data=message_payload(
                 "user",
                 self.prompt,
+                source="user",
                 **({"references": self.references} if self.references else {}),
             ),
             user=self.user,
@@ -524,7 +525,12 @@ class RuntimeEventNodeBridge:
         node = self.writer.create(
             session_id=self.session_id,
             parent=self.last_node,
-            data=message_payload("user", content, **({"run_id": self.run_id} if self.run_id else {})),
+            data=message_payload(
+                "user",
+                content,
+                source="steering",
+                **({"run_id": self.run_id} if self.run_id else {}),
+            ),
             provider_name=self.provider_name,
             model=self.model_config,
             permission_mode=self.permission_mode,

@@ -137,6 +137,10 @@ export function transcriptToMessages(transcript: SessionMessage[]): ChatMessage[
     runId: message.run_id ?? undefined,
     sourceNodeId: message.source_node_id ?? undefined,
     references: message.references,
+    timelineSeq: message.timeline_seq,
+    timelineTime: message.timeline_time,
+    timelineText: message.timeline_text,
+    timelineSource: message.timeline_source,
   }));
 }
 
