@@ -10,16 +10,44 @@ export async function uploadSessionFiles(
 ): Promise<SessionFileInfo[]> {
   const form = new FormData();
   for (const file of files) form.append("files", file, file.name);
-  const response = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/files`), {
-    method: "POST",
-    body: form,
-    credentials: "include",
-  });
+  const response = await fetchWithProgress(
+    apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/files`),
+    form,
+    onProgress,
+  );
   if (!response.ok) {
     if (response.status === 401) notifyUnauthorized();
     throw new ApiError(response.status, await errorFrom(response));
   }
   return response.json() as Promise<SessionFileInfo[]>;
+}
+
+/** fetch() with upload progress, using XHR under the hood. */
+function fetchWithProgress(
+  url: string,
+  body: FormData,
+  onProgress?: (percent: number) => void,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (event) => {
+      if (onProgress && event.lengthComputable) {
+        onProgress(Math.round((event.loaded / event.total) * 100));
+      }
+    };
+    xhr.onload = () => {
+      const response = new Response(xhr.response, {
+        status: xhr.status,
+        statusText: xhr.statusText,
+        headers: { "Content-Type": xhr.getResponseHeader("Content-Type") ?? "application/json" },
+      });
+      resolve(response);
+    };
+    xhr.onerror = () => reject(new Error("上传请求失败"));
+    xhr.send(body);
+  });
 }
 
 /** Search project + upload roots for one session. */
