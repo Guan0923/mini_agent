@@ -35,18 +35,20 @@ class CommandError(RuntimeError):
 
 
 class MessageErrorFormatter:
-    """Pass exception messages through verbatim as the error text.
+    """Pass crafted command-result messages through; everything else stays safe.
 
     Intended for job result messages produced by :class:`CommandError`, so a
     caller can align ``JobInfo.error`` with the exact strings
-    :class:`~backend.tools.command.WorkspaceCommand` emits. The default job
-    formatter (:class:`~backend.jobs.ClassNameErrorFormatter`) discards the
-    message; this formatter is opt-in and must render only the crafted safe
-    messages job code constructs.
+    :class:`~backend.tools.command.WorkspaceCommand` emits. For any other
+    exception it falls back to emitting only the class name, so raw launch
+    ``OSError``/``FileNotFoundError`` strings (which embed command lines and
+    executable paths — global constraint 4) never leak into ``JobInfo.error``.
     """
 
     def format_error(self, exception: BaseException) -> str:
-        return str(exception)
+        if isinstance(exception, CommandError):
+            return str(exception)
+        return type(exception).__name__
 
 
 def format_command_output(

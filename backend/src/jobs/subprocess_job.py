@@ -152,7 +152,12 @@ class SubprocessJob(Job):
                 stdout, stderr = self._group.communicate(timeout=30.0)
                 exit_code = self._group.poll()
                 self._capture(stdout, stderr)
-                self._finish_timeout(exit_code)
+                # If the user canceled around the timeout boundary, honor that
+                # instead of reporting a timeout failure.
+                if self.info().cancel_requested_at is not None:
+                    self._mark_cancelled(exit_code=exit_code)
+                else:
+                    self._finish_timeout(exit_code)
                 return
 
             exit_code = self._group.poll()

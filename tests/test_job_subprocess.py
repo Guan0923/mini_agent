@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -283,6 +284,81 @@ def test_output_algorithm_matches_tools_command() -> None:
     ]
     for stdout, stderr in samples:
         assert format_command_output(stdout, stderr) == wc._format_output(stdout, stderr)
+
+
+# ---------------------------------------------------------------------------
+# Result-message + cancellation edge cases (Task 2 review fixes)
+# ---------------------------------------------------------------------------
+
+
+def test_launch_failure_with_message_formatter_never_leaks_command_line(tmp_path) -> None:
+    executable = str(tmp_path / "no-such-tool.exe")
+
+    def failing_factory(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        raise FileNotFoundError(f"no such executable: {args[0][0]}")
+
+    job = make_job(tmp_path, argv=[executable, "--flag"], error_formatter=MessageErrorFormatter())
+    with pytest.raises(FileNotFoundError):
+        job.start()
+    info = job.info()
+    assert info.state is JobState.FAILED
+    # MessageErrorFormatter may only pass through crafted CommandError texts;
+    # any other exception must fall back to a bare class name (global
+    # constraint 4: command lines/executable paths never enter JobInfo.error).
+    assert info.error == "FileNotFoundError"
+    assert executable not in (info.error or "")
+    assert "no-such-tool" not in (info.error or "")
+
+
+def test_cancel_landing_on_timeout_boundary_is_cancelled_not_failed(tmp_path) -> None:
+    """A user cancel that arrives while the timeout branch is about to fire must
+    resolve to ``cancelled``, never ``failed`` with a timeout message."""
+    entered_timeout = threading.Event()
+    release = threading.Event()
+
+    class GatedTimeoutPopen:
+        pid = 8888
+        _returncode: int | None = None
+        first_communicate = True
+
+        def poll(self) -> int | None:
+            return self._returncode
+
+        def wait(self, timeout: float | None = None) -> int | None:
+            return self._returncode
+
+        def kill(self) -> None:
+            self._returncode = -9
+
+        def communicate(self, timeout: float | None = None):
+            if self.first_communicate:
+                self.first_communicate = False
+                raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+            entered_timeout.set()
+            release.wait(30)
+            return b"", b""
+
+    stub = GatedTimeoutPopen()
+    job = SubprocessJob(
+        "job-cancel-timeout",
+        ["fake", "executable"],
+        make_env(tmp_path),
+        str(tmp_path),
+        timeout_seconds=30.0,
+        error_formatter=MessageErrorFormatter(),
+        popen_factory=lambda *args, **kwargs: stub,
+        tree_terminator=lambda process: None,
+    )
+    job.start()
+    # Wait until the monitor thread is blocked after entering the timeout branch.
+    assert entered_timeout.wait(5), "monitor never entered the timeout branch"
+    assert job.cancel() is True
+    release.set()
+    assert job.wait(timeout=5) is True
+    info = job.info()
+    assert info.state is JobState.CANCELLED
+    assert info.error is None
+    assert "timed out" not in (info.error or "")
 
 
 # ---------------------------------------------------------------------------
