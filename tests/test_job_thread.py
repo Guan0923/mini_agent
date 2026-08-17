@@ -89,6 +89,32 @@ def test_target_raises_marks_failed_with_formatted_error() -> None:
     assert info.error == "ValueError"
 
 
+def test_exception_after_cancel_is_failed_not_cancelled() -> None:
+    """A target that raises an unrelated exception after a cancel was requested
+    is ``failed`` (formatted error), never ``cancelled``: cancellation wins only
+    when the target returns normally."""
+    entered = threading.Event()
+    raise_now = threading.Event()
+
+    def target() -> None:
+        entered.set()
+        # Wait for the test to request cancellation, then raise.
+        raise_now.wait(10)
+        raise ValueError("boom")
+
+    job = make_job("job-raise-after-cancel", target)
+    job.start()
+    assert entered.wait(5), "target never started"
+    assert job.info().state is JobState.RUNNING
+    assert job.cancel() is True  # job is provably still running
+    raise_now.set()
+    assert job.wait(timeout=5) is True
+    info = job.info()
+    assert info.state is JobState.FAILED
+    assert info.cancel_requested_at is not None  # the cancel was still recorded
+    assert info.error == "ValueError"  # class name via the default formatter
+
+
 # ---------------------------------------------------------------------------
 # Cooperative cancellation
 # ---------------------------------------------------------------------------

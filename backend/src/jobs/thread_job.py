@@ -3,8 +3,14 @@
 A :class:`ThreadJob` runs a Python callable on a daemon thread started by
 :meth:`~ThreadJob.start` and drives it to a terminal lifecycle state from that
 same thread: a normal return becomes ``succeeded``, a raised exception becomes
-``failed`` (formatted via the injected :class:`ErrorFormatter`), and a return
-observed after a cancellation request becomes ``cancelled``.
+``failed`` (formatted via the injected :class:`ErrorFormatter`), and a normal
+return observed after a cancellation request becomes ``cancelled``.
+
+The outcome contract is: **a raising target is always ``failed``, even when a
+cancellation has been requested**; cancellation wins *only* when the target
+returns normally and a cancel request is already recorded.  A target that
+cannot stop cooperatively and instead raises is never silently disguised as a
+cancellation.
 
 Cancellation is strictly *cooperative*: the job never tries to force-kill the
 Python thread.  It holds a :class:`threading.Event` that :meth:`subclass
@@ -148,18 +154,17 @@ class ThreadJob(Job):
         try:
             try:
                 self._target(*self._args, **kwargs)
+            except BaseException as exc:
+                # A raising target is always failed, even when a cancellation
+                # was requested: cancellation wins only when the target RETURNS
+                # normally, never over a genuine exception.
+                self._mark_failed(exc)
+            else:
                 cancelled = self.info().cancel_requested_at is not None
                 if cancelled:
                     self._mark_cancelled()
                 else:
                     self._mark_succeeded()
-            except BaseException as exc:
-                if self.info().cancel_requested_at is not None:
-                    # A concurrent cancel sealed first; never surface a failure
-                    # for a job that was asked to stop.
-                    self._mark_cancelled()
-                else:
-                    self._mark_failed(exc)
         except JobStateError:
             # A concurrent cancel/close already sealed the terminal state.
             pass
