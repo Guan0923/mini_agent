@@ -29,7 +29,12 @@ vi.mock("../api", () => api);
 const settings = {
   profile: { email: "user@example.com", display_name: "旧名字", agent_preferences: "" },
   agent_config: { tone: "balanced", verbosity: "balanced", initiative: "balanced", custom_instructions: "" },
-  runtime_config: { max_tool_calls: 32 },
+  runtime_config: { max_tool_calls: 32, terminal_type: "cmd" as const },
+  terminal_options: [
+    { value: "cmd" as const, label: "命令提示符（cmd）" },
+    { value: "powershell" as const, label: "Windows PowerShell" },
+  ],
+  terminal_notice: null,
   provider_config: {
     id: "provider-1",
     is_active: true,
@@ -130,6 +135,23 @@ describe("UserSettingsModal", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "云同步" }));
     expect(screen.getByRole("switch", { name: "自动保存到云端" })).not.toBeChecked();
     expect(screen.getByRole("combobox", { name: "自动保存规则" })).toBeDisabled();
+  });
+
+  it("shows detected terminals and saves the selected Ant Design option", async () => {
+    renderModal();
+    await screen.findByDisplayValue("user@example.com");
+    await userEvent.click(screen.getByRole("menuitem", { name: "运行配置" }));
+
+    const terminal = screen.getByRole("combobox", { name: "启动终端" });
+    fireEvent.mouseDown(terminal);
+    expect(screen.getByRole("option", { name: "Windows PowerShell" })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Windows PowerShell", { selector: ".ant-select-item-option-content" }));
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(api.updateRuntimeConfig).toHaveBeenCalledWith({
+      max_tool_calls: 32,
+      terminal_type: "powershell",
+    }));
   });
 
   it("saves cloud preferences and starts a background cloud snapshot", async () => {

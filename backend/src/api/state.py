@@ -10,8 +10,10 @@ from threading import RLock
 from typing import Any
 
 from backend.configuration import ClientPaths, validate_identity_id
+from backend.domain.terminal import TERMINAL_LABELS
 from backend.jobs import JobRegistry
 from backend.storage.projects import ProjectStore
+from backend.tools.terminal import available_terminal_executables, effective_terminal_type
 
 from .auth.mail import NullMailer
 
@@ -239,6 +241,24 @@ class WebAppState:
                 display_name_default="游客用户" if identity.is_guest else (email or "用户"),
             )
         result = self.settings.settings_for_user(user_id, email=email)
+        if os.name == "nt":
+            available = available_terminal_executables(is_windows=True)
+            runtime = result.get("runtime_config")
+            current = dict(runtime) if isinstance(runtime, dict) else {}
+            requested = current.get("terminal_type", "cmd")
+            effective = effective_terminal_type(requested, is_windows=True)
+            notice: str | None = None
+            if not available:
+                notice = "未检测到当前系统可用的终端。"
+            elif effective != requested:
+                notice = "已保存的终端当前不可用，本次已回退到可用终端。"
+            current["terminal_type"] = effective
+            result["runtime_config"] = current
+            result["terminal_options"] = [{"value": name, "label": TERMINAL_LABELS[name]} for name in available]
+            result["terminal_notice"] = notice
+        else:
+            result["terminal_options"] = []
+            result["terminal_notice"] = None
         preferences = getattr(self.settings, "sync_preferences_for_user", None)
         sync_state = getattr(self.settings, "sync_state_for_user", None)
         result["sync_preferences"] = (

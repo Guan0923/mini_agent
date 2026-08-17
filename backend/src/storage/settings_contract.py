@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS, validate_time_zone
+from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, normalize_terminal_type
 
 DEFAULT_PROFILE: dict[str, str] = {"display_name": "", "agent_preferences": ""}
 DEFAULT_AGENT_CONFIG: dict[str, object] = {
@@ -36,7 +37,7 @@ DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
     "api_key_configured": False,
 }
 DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {}
-DEFAULT_RUNTIME_CONFIG: dict[str, object] = {"max_tool_calls": 32}
+DEFAULT_RUNTIME_CONFIG: dict[str, object] = {"max_tool_calls": 32, "terminal_type": DEFAULT_TERMINAL_TYPE}
 
 
 def normalize_runtime_config(current: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:
@@ -48,7 +49,8 @@ def normalize_runtime_config(current: Mapping[str, object], values: Mapping[str,
     max_tool_calls = raw
     if not 1 <= max_tool_calls <= 1000:
         raise ValueError("max_tool_calls must be between 1 and 1000")
-    return {"max_tool_calls": max_tool_calls}
+    terminal_type = normalize_terminal_type(values.get("terminal_type", current.get("terminal_type")))
+    return {"max_tool_calls": max_tool_calls, "terminal_type": terminal_type}
 
 
 def normalize_agent_config(current: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:
@@ -88,9 +90,11 @@ def normalize_provider_config(current: Mapping[str, object], values: Mapping[str
     provider_name = str(explicit_name if explicit_name is not None else fallback_name or "deepseek").strip()
     if not provider_name:
         raise ValueError("provider_name is required")
-    provider = str(
-        values.get("provider_type", values.get("provider", current.get("provider", "deepseek"))) or "deepseek"
-    ).strip().lower()
+    provider = (
+        str(values.get("provider_type", values.get("provider", current.get("provider", "deepseek"))) or "deepseek")
+        .strip()
+        .lower()
+    )
     base_url = str(values.get("base_url", current.get("base_url", "")) or "").strip()
     model = str(values.get("model", current.get("model", "")) or "").strip()
     tokenizer_model = str(

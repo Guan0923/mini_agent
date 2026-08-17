@@ -88,7 +88,7 @@ class UserSettingsStore(AuthSettingsMixin):
                     "timezone": "Asia/Shanghai",
                     "location_enabled": False,
                 },
-                "runtime": {"log_full_messages": True, "max_tool_calls": 32},
+                "runtime": {"log_full_messages": True, "max_tool_calls": 32, "terminal_type": "cmd"},
                 "capabilities": {"skills": True, "rag": False, "plugins": False, "mcp": False},
                 "providers": {"active_id": ""},
                 "sync": {

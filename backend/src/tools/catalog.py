@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 
+from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, TerminalType
+
 from .base import Tool
 from .default_tools import build_default_tools
 from .filesystem import WorkspaceFiles
@@ -19,6 +21,7 @@ def _build_tools(
     web_fetch: SafeWebFetcher | None = None,
     workspace_files: WorkspaceFiles | None = None,
     upload_files: WorkspaceFiles | None = None,
+    terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
 ) -> tuple[Tool, ...]:
     """Create the standard tool set for one workspace."""
 
@@ -28,6 +31,7 @@ def _build_tools(
         search=web_search,
         fetcher=web_fetch,
         upload_files=upload_files,
+        terminal_type=terminal_type,
     )
 
 
@@ -38,6 +42,7 @@ def build_tool_registry(
     web_fetch: SafeWebFetcher | None = None,
     workspace_files: WorkspaceFiles | None = None,
     upload_files: WorkspaceFiles | None = None,
+    terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
     extra_tools: Iterable[Tool] = (),
 ) -> ToolRegistry:
     """Build the standard workspace tool registry."""
@@ -50,6 +55,7 @@ def build_tool_registry(
                 web_fetch=web_fetch,
                 workspace_files=workspace_files,
                 upload_files=upload_files,
+                terminal_type=terminal_type,
             ),
             *extra_tools,
         )
