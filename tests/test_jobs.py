@@ -475,3 +475,83 @@ class TestNotifications:
         job.cancel()
         job._mark_cancelled()
         assert calls == ["started", "cancellation_requested", "cancelled"]
+
+
+class TestDynamicListeners:
+    def test_add_listener_receives_subsequent_changes(self) -> None:
+        listener = RecordingListener()
+        job = make_job()
+        job.add_listener(listener)
+        job.start()
+        job._mark_succeeded()
+        assert listener.changes == [
+            (JobState.PENDING, JobState.RUNNING, "started"),
+            (JobState.RUNNING, JobState.SUCCEEDED, "succeeded"),
+        ]
+
+    def test_remove_listener_stops_notifications(self) -> None:
+        listener = RecordingListener()
+        job = make_job()
+        job.add_listener(listener)
+        job.remove_listener(listener)
+        job.start()
+        assert listener.changes == []
+
+    def test_remove_absent_listener_is_a_noop(self) -> None:
+        listener = RecordingListener()
+        job = make_job()
+        job.remove_listener(listener)
+        job.start()
+        assert listener.changes == []
+
+    def test_constructed_and_added_listeners_both_notified(self) -> None:
+        constructed = RecordingListener()
+        added = RecordingListener()
+        job = make_job(listener=constructed)
+        job.add_listener(added)
+        job.start()
+        job._mark_succeeded()
+        assert constructed.changes == added.changes != []
+
+    def test_added_listener_failure_does_not_break_other_listeners(self) -> None:
+        failing = RecordingListener(raise_on=JobState.PENDING)
+        healthy = RecordingListener()
+        job = make_job()
+        job.add_listener(failing)
+        job.add_listener(healthy)
+        job.start()
+        assert job.info().state is JobState.RUNNING
+        assert healthy.changes == [(JobState.PENDING, JobState.RUNNING, "started")]
+
+    def test_added_listener_can_read_info_without_deadlock(self) -> None:
+        observed: list[JobState] = []
+
+        class ReadingListener:
+            def on_job_state_change(self, change: JobStateChange) -> None:
+                observed.append(change.job_info.state)
+
+        job = make_job()
+        job.add_listener(ReadingListener())
+        job.start()
+        job._mark_succeeded()
+        assert observed == [JobState.RUNNING, JobState.SUCCEEDED]
+
+    def test_concurrent_add_remove_does_not_corrupt_dispatch(self) -> None:
+        job = make_job()
+        listener = RecordingListener()
+        stop = threading.Event()
+
+        def churn() -> None:
+            while not stop.is_set():
+                job.add_listener(listener)
+                job.remove_listener(listener)
+
+        thread = threading.Thread(target=churn)
+        thread.start()
+        try:
+            job.start()
+            job._mark_succeeded()
+        finally:
+            stop.set()
+            thread.join()
+        assert job.info().state is JobState.SUCCEEDED

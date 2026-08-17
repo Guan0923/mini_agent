@@ -119,7 +119,9 @@ class Job(ABC):
         self._kind = kind
         self._clock = clock or (lambda: datetime.now(UTC))
         self._error_formatter = error_formatter or ClassNameErrorFormatter()
-        self._listener = listener
+        self._listeners: set[JobStateListener] = set()
+        if listener is not None:
+            self._listeners.add(listener)
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._state = JobState.PENDING
@@ -199,6 +201,20 @@ class Job(ABC):
                 exit_code=self._exit_code,
                 cancel_requested_at=self._cancel_requested_at,
             )
+
+    def add_listener(self, listener: JobStateListener) -> None:
+        """Register a state listener; it receives every change from now on.
+
+        Listeners may be attached before :meth:`start` so a registry never
+        misses a fast-completing job.  Dispatch stays outside the job lock.
+        """
+        with self._lock:
+            self._listeners.add(listener)
+
+    def remove_listener(self, listener: JobStateListener) -> None:
+        """Stop delivering state changes to a previously added listener."""
+        with self._lock:
+            self._listeners.discard(listener)
 
     # -- protected lifecycle helpers for adapters ---------------------------
 
@@ -285,11 +301,13 @@ class Job(ABC):
     def _notify(self, previous: JobState, reason: str) -> None:
         """Dispatch a state change outside the lock; listener failures never
         corrupt job state."""
-        listener = self._listener
-        if listener is None:
+        with self._lock:
+            listeners = tuple(self._listeners)
+        if not listeners:
             return
         change = JobStateChange(job_info=self.info(), previous_state=previous, reason=reason)
-        try:
-            listener.on_job_state_change(change)
-        except Exception:
-            logger.exception("job state listener failed for job %r", self._id)
+        for listener in listeners:
+            try:
+                listener.on_job_state_change(change)
+            except Exception:
+                logger.exception("job state listener failed for job %r", self._id)
