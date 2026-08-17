@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import time
 from pathlib import Path
@@ -153,5 +154,48 @@ def test_snapshot_round_trip_restores_session_workspace(tmp_path: Path, monkeypa
         assert restored["status"] == "complete", restored.get("error")
         assert note.read_text(encoding="utf-8") == "snapshot content"
         assert settings.profile_for_user(USER_ID)["display_name"] == "User"
+    finally:
+        manager.close()
+
+
+def test_legacy_snapshot_uploads_migrate_on_restore(tmp_path: Path, monkeypatch) -> None:
+    """Old snapshots carrying runtime/<sid>/uploads auto-migrate into workspace/uploads."""
+
+    keys = MemoryKeyStore()
+    monkeypatch.setattr(crypto, "_LOCAL_KEY_STORE", keys)
+    settings = PerUserSettingsRepository(tmp_path)
+    settings.update_profile(USER_ID, display_name="User", agent_preferences="")
+    paths = ClientPaths(tmp_path / USER_ID)
+    paths.ensure_session("session_1")
+    connection = sqlite3.connect(paths.session_db("session_1"))
+    try:
+        connection.execute("CREATE TABLE session_runs (status TEXT)")
+        connection.commit()
+    finally:
+        connection.close()
+    # Simulate a pre-canonical layout: uploads next to the workspace.
+    legacy = paths.session_root("session_1") / "uploads"
+    legacy.mkdir()
+    (legacy / "old.png").write_bytes(b"\x89PNG\r\n\x1a\nlegacy-upload")
+
+    cloud = MemoryCloudRepository()
+    manager = SnapshotManager(tmp_path, settings, cloud)  # type: ignore[arg-type]
+    manager.key_store = keys
+    try:
+        save = manager.start_save(USER_ID)
+        saved = _wait_for_job(manager, USER_ID, str(save["id"]))
+        assert saved["status"] == "complete", saved
+        snapshot_id = str(saved["snapshot_id"])
+
+        # Wipe the local session and restore from the legacy snapshot.
+        shutil.rmtree(paths.session_root("session_1"))
+        restore = manager.start_restore(USER_ID, snapshot_id)
+        restored = _wait_for_job(manager, USER_ID, str(restore["id"]))
+        assert restored["status"] == "complete", restored.get("error")
+
+        restored_paths = ClientPaths(tmp_path / USER_ID)
+        restored_paths.ensure_session("session_1")
+        assert (restored_paths.session_uploads("session_1") / "old.png").read_bytes() == b"\x89PNG\r\n\x1a\nlegacy-upload"
+        assert not (restored_paths.session_root("session_1") / "uploads").exists()
     finally:
         manager.close()
