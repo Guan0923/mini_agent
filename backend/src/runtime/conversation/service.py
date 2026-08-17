@@ -264,13 +264,14 @@ class ConversationService(ConversationSessionController):
             isolated_runtime.save()
             if paths is not None and not provisioned:
                 paths.ensure_session(isolated_session.session_id)
+                # Uploads live below the workspace in the canonical layout, so
+                # a single workspace copy carries them.  Migrate a legacy
+                # sibling uploads directory first so old sessions are copied
+                # completely.
+                paths.migrate_legacy_uploads(source_session.session_id)
                 _copy_session_tree(
                     paths.session_workspace(source_session.session_id),
                     paths.session_workspace(isolated_session.session_id),
-                )
-                _copy_session_tree(
-                    paths.session_uploads(source_session.session_id),
-                    paths.session_uploads(isolated_session.session_id),
                 )
         except Exception:
             if provisioned and self._session_provisioner_cleanup is not None:
