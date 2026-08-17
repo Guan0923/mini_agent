@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import time
 from pathlib import Path
+
 from backend.configuration import ClientPaths
 from backend.storage.auth import crypto
 from backend.storage.user_settings import PerUserSettingsRepository
