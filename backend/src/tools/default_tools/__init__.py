@@ -7,6 +7,7 @@ from pathlib import Path
 from ..base import Tool
 from ..command import WorkspaceCommand
 from ..filesystem import WorkspaceFiles
+from ..read_pdf import read_pdf_tool
 from ..web import DdgrWebSearch, SafeWebFetcher
 from .command import command_tool
 from .filesystem import filesystem_mutation_tools, filesystem_read_tools
@@ -29,6 +30,7 @@ def build_default_tools(
         *time_tools(),
         *todo_tools(),
         *filesystem_read_tools(workspace_files),
+        read_pdf_tool(workspace),
         *web_tools(search or DdgrWebSearch(), fetcher or SafeWebFetcher()),
         *filesystem_mutation_tools(workspace_files),
         command_tool(WorkspaceCommand(workspace)),

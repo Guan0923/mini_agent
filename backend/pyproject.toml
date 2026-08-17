@@ -24,6 +24,9 @@ dependencies = [
     "tokenizers>=0.21,<1",
     "tiktoken>=0.9,<1",
     "uvicorn>=0.34,<1",
+    "pymupdf>=1.26,<2",
+    "rapidocr>=3.4,<4",
+    "onnxruntime>=1.22,<2",
 ]
 
 [project.optional-dependencies]
