@@ -1,9 +1,11 @@
 import { Button, Drawer, Input, Progress, Select, Space, Tooltip } from "antd";
-import { ArrowUpOutlined, SettingOutlined, StopOutlined } from "@ant-design/icons";
+import { ArrowUpOutlined, PaperClipOutlined, SettingOutlined, StopOutlined } from "@ant-design/icons";
 import type { TextAreaRef } from "antd/es/input/TextArea";
-import type { KeyboardEvent, RefObject } from "react";
-import type { ChatMode, PermissionMode, ReasoningEffort, TodoItem } from "../../types";
+import { useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject } from "react";
+import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, TodoItem } from "../../types";
 import IconAction from "../../components/IconAction";
+import type { FileCandidate } from "../../commands/fileCompletion";
+import { sessionFileContentUrl } from "../../api/files";
 import { SessionTodoPanel } from "./todoPanel";
 
 const REASONING_LABELS: Record<ReasoningEffort, string> = { low: "低", medium: "中", high: "高", xhigh: "超高", max: "最大" };
@@ -26,6 +28,7 @@ export interface ComposerProps {
   openSettingsSelect: SettingsSelectKey | null;
   settingsOpen: boolean;
   taRef: RefObject<TextAreaRef>;
+  sessionId?: string;
   onInputChange: (value: string) => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onComplete: (index?: number) => void;
@@ -40,9 +43,63 @@ export interface ComposerProps {
   onSend: () => void;
   disabled?: boolean;
   disabledReason?: string;
+  // File references: completion menu + pending reference strip.
+  fileCandidates: FileCandidate[];
+  fileMenuVisible: boolean;
+  activeFileIndex: number;
+  fileMenuQuery: string;
+  references: FileReference[];
+  onFileComplete: (index?: number) => void;
+  onActiveFileChange: (index: number) => void;
+  onRemoveReference: (index: number) => void;
+  onPickFiles: (files: FileList | File[]) => void;
+  uploadsDisabled?: boolean;
+  pendingUploads: Array<{
+    uid: string;
+    name: string;
+    isImage: boolean;
+    status: "uploading" | "done" | "error";
+    percent: number;
+    path?: string;
+    error?: string;
+  }>;
+  onRemoveUpload: (index: number) => void;
+  onRetryUpload: (index: number) => void;
+  onUploadPreview: (index: number) => void;
 }
 
 export default function Composer(props: ComposerProps) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  function openFilePicker() {
+    if (props.disabled || props.uploadsDisabled) return;
+    fileInputRef.current?.click();
+  }
+
+  function handleFilesChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = event.target.files;
+    if (files && files.length > 0) props.onPickFiles(files);
+    event.target.value = "";
+  }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length > 0 && !props.disabled && !props.uploadsDisabled) {
+      event.preventDefault();
+      props.onPickFiles(files);
+    }
+  }
+
+  function handleDrop(event: React.DragEvent<HTMLDivElement>) {
+    setDragOver(false);
+    const files = event.dataTransfer?.files;
+    if (files && files.length > 0 && !props.disabled && !props.uploadsDisabled) {
+      event.preventDefault();
+      props.onPickFiles(files);
+    }
+  }
+
   const settingsControls = (
     <Space className="composer-settings-controls" size={[6, 6]} wrap>
       <Select className="mode-picker" placement="topLeft" open={props.openSettingsSelect === "mode"} aria-label="运行模式" disabled={false} value={props.mode} options={[{ value: "agent", label: "⚙ Agent" }, { value: "plan", label: "📋 Plan" }]} onChange={props.onModeChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "mode" : null)} />
@@ -57,17 +114,68 @@ export default function Composer(props: ComposerProps) {
   );
   return (
     <div className={`composer${props.todos && props.todos.length > 0 ? " has-todo" : ""}`}>
+      {props.fileMenuVisible && (
+        <div className="command-menu file-menu" role="listbox" aria-label="文件补全">
+          {props.fileCandidates.length === 0 ? (
+            <div className="command-menu-empty">没有匹配的文件（“{props.fileMenuQuery}”）</div>
+          ) : (
+            props.fileCandidates.map((candidate, index) => (
+              <button
+                key={`${candidate.reference.source}:${candidate.reference.path}`}
+                className={`command-item file-item${index === props.activeFileIndex ? " selected" : ""}`}
+                onMouseEnter={() => props.onActiveFileChange(index)}
+                onClick={() => props.onFileComplete(index)}
+              >
+                <span className="file-item-name">{candidate.label}</span>
+                <span className="file-item-path">{candidate.reference.path}</span>
+                <span className={`file-source-badge ${candidate.reference.source}`}>{candidate.sourceLabel}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
       {props.commandMenuVisible && <div className="command-menu">{props.filteredCommands.map((command, index) => <button key={command.name} className={`command-item${index === props.activeCommandIndex ? " selected" : ""}`} onMouseEnter={() => props.onActiveCommandChange(index)} onClick={() => props.onComplete(index)}><span className="command-name">{command.name}</span><span className="command-desc">{command.label} · {command.description}</span></button>)}</div>}
       <div className="composer-box-anchor">
+        {props.pendingUploads.length > 0 ? (
+          <div className="composer-uploads" aria-label="上传进度">
+            {props.pendingUploads.map((upload, index) => (
+              <span key={upload.uid} className={`composer-upload status-${upload.status}`}>
+                {upload.isImage && upload.status === "done" && upload.path && props.sessionId ? (
+                  <img className="composer-upload-thumb" src={sessionFileContentUrl(props.sessionId, "upload", upload.path)} alt={upload.name} onClick={() => props.onUploadPreview(index)} />
+                ) : <span className="composer-upload-icon">📄</span>}
+                <span className="composer-upload-name" title={upload.name}>{upload.name}</span>
+                {upload.status === "uploading" ? <Progress size="small" percent={upload.percent} showInfo={false} className="composer-upload-progress" /> : null}
+                {upload.status === "error" ? <span className="composer-upload-error" title={upload.error}>上传失败</span> : null}
+                {upload.status === "error" ? <Button type="text" size="small" onClick={() => props.onRetryUpload(index)}>重试</Button> : null}
+                <Button type="text" size="small" className="composer-upload-remove" aria-label={`移除 ${upload.name}`} onClick={() => props.onRemoveUpload(index)}>×</Button>
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {props.references.length > 0 ? (
+          <div className="composer-references" aria-label="待发送引用">
+            {props.references.map((reference, index) => (
+              <span key={`${reference.source}:${reference.path}`} className="composer-reference">
+                <span className={`file-source-badge ${reference.source}`}>{reference.source === "upload" ? "会话上传" : "项目文件"}</span>
+                <span className="composer-reference-path">{reference.path}</span>
+                <Button type="text" size="small" className="composer-reference-remove" aria-label={`移除引用 ${reference.path}`} onClick={() => props.onRemoveReference(index)}>×</Button>
+              </span>
+            ))}
+          </div>
+        ) : null}
         {props.todos && props.todos.length > 0 ? (
           <div className="composer-todo-anchor">
             <SessionTodoPanel todos={props.todos} busy={props.busy} />
           </div>
         ) : null}
-        <div className="composer-box">
-          <Input.TextArea className="composer-input" ref={props.taRef} value={props.input} disabled={props.disabled} onChange={(event) => props.onInputChange(event.target.value)} onKeyDown={props.onKeyDown} placeholder={props.disabledReason || "输入任务，按 Enter 发送"} autoSize={{ minRows: 1, maxRows: 8 }} />
-          <div className="composer-toolbar">{props.isMobile ? <IconAction className="run-settings-trigger" label="运行设置" icon={<SettingOutlined />} disabled={false} onClick={props.onOpenSettings} /> : settingsControls}</div>
-          {props.busy ? <Tooltip title="停止"><Button className="send-btn stop" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /> </Tooltip> : <Tooltip title={props.disabledReason || "发送"}><Button className="send-btn" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送" onClick={props.onSend} disabled={props.disabled || !props.input.trim()} /></Tooltip>}
+        <div className={`composer-box${dragOver ? " is-dragging" : ""}`} onDragOver={(event) => { if (!props.disabled) { event.preventDefault(); setDragOver(true); } }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}>
+          <input ref={fileInputRef} type="file" multiple hidden aria-hidden="true" onChange={handleFilesChange} />
+          <Input.TextArea className="composer-input" ref={props.taRef} value={props.input} disabled={props.disabled} onChange={(event) => props.onInputChange(event.target.value)} onKeyDown={props.onKeyDown} onPaste={handlePaste} placeholder={props.disabledReason || "输入任务，按 Enter 发送"} autoSize={{ minRows: 1, maxRows: 8 }} />
+          <div className="composer-toolbar">
+            <IconAction className="file-upload-trigger" label="上传文件" icon={<PaperClipOutlined />} disabled={props.disabled || props.uploadsDisabled} onClick={openFilePicker} />
+            {props.isMobile ? <IconAction className="run-settings-trigger" label="运行设置" icon={<SettingOutlined />} disabled={false} onClick={props.onOpenSettings} /> : settingsControls}
+          </div>
+          {props.busy ? <Tooltip title="停止"><Button className="send-btn stop" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /> </Tooltip> : <Tooltip title={props.disabledReason || "发送"}><Button className="send-btn" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送" onClick={props.onSend} disabled={props.disabled || (!props.input.trim() && props.references.length === 0)} /></Tooltip>}
         </div>
       </div>
       <Drawer className="run-settings-drawer" title="运行设置" placement="bottom" open={props.settingsOpen} onClose={props.onCloseSettings}>{settingsControls}</Drawer>
