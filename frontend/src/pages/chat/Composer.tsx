@@ -113,7 +113,10 @@ export default function Composer(props: ComposerProps) {
     </Space>
   );
   return (
-    <div className={`composer${props.todos && props.todos.length > 0 ? " has-todo" : ""}`}>
+    <div
+      className={`composer${props.todos && props.todos.length > 0 ? " has-todo" : ""}`}
+      data-composer-seat
+    >
       {props.fileMenuVisible && (
         <div className="command-menu file-menu" role="listbox" aria-label="文件补全">
           {props.fileCandidates.length === 0 ? (

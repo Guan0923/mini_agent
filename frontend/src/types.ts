@@ -116,6 +116,11 @@ export interface ChatMessage {
   decision?: DecisionRequest;
   /** Structured file references attached to a user message. */
   references?: FileReference[];
+  /** Durable user-message metadata used by the desktop timeline overlay. */
+  timelineSeq?: number;
+  timelineTime?: number;
+  timelineText?: string;
+  timelineSource?: "user" | "steering";
 }
 
 export interface Conversation {

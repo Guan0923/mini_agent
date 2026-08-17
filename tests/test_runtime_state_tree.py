@@ -419,6 +419,45 @@ def test_root_is_not_returned_as_model_context_or_transcript_message() -> None:
     assert project_node_transcript([root, user])[0]["source_node_id"] == root.id
 
 
+def test_transcript_projects_timeline_metadata_for_user_and_steering_messages() -> None:
+    root = create_root_node("s", timestamp="2026-01-01T00:00:00+00:00")
+    user = RuntimeState.create(
+        session_id="s",
+        parent=root,
+        id="user-1",
+        timestamp="2026-01-01T00:00:01+00:00",
+        data=message_payload("user", [{"type": "text", "text": " first "}, {"type": "reasoning", "text": "hidden"}], source="user"),
+        status="success",
+    )
+    steering = RuntimeState.create(
+        session_id="s",
+        parent=user,
+        id="steering-1",
+        timestamp="2026-01-01T00:00:02+00:00",
+        data=message_payload("user", "steer", source="steering"),
+        status="success",
+    )
+    assistant = RuntimeState.create(
+        session_id="s",
+        parent=steering,
+        id="assistant-1",
+        timestamp="2026-01-01T00:00:03+00:00",
+        data=message_payload("assistant", "answer"),
+        status="success",
+    )
+
+    transcript = project_node_transcript([root, user, steering, assistant])
+
+    assert [item["role"] for item in transcript] == ["user", "user", "assistant"]
+    assert transcript[0]["timeline_seq"] == 1
+    assert transcript[0]["timeline_time"] == 1_767_225_601_000
+    assert transcript[0]["timeline_text"] == "first …"
+    assert transcript[0]["timeline_source"] == "user"
+    assert transcript[1]["timeline_seq"] == 2
+    assert transcript[1]["timeline_source"] == "steering"
+    assert "timeline_seq" not in transcript[2]
+
+
 def test_transcript_projects_structured_references_on_user_messages() -> None:
     root = create_root_node("s")
     tree = RuntimeStateTree([root])

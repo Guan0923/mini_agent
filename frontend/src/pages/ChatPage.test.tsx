@@ -393,7 +393,16 @@ describe("ChatPage run lifecycle", () => {
     expect(scrollTo).toHaveBeenCalledWith({ top: 1200, behavior: "smooth" });
   });
 
-  it("keeps Timeline inside the same scroll container as messages", () => {
+  it("mounts the Timeline as a left-edge overlay for the same scroll container", () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function getBoundingClientRect(this: HTMLElement) {
+      if (this.classList.contains("chat-scroll")) {
+        return { top: 40, left: 100, right: 900, bottom: 640, width: 800, height: 600, x: 100, y: 40, toJSON: () => ({}) };
+      }
+      if (this.dataset.composerSeat !== undefined) {
+        return { top: 650, left: 0, right: 900, bottom: 700, width: 900, height: 50, x: 0, y: 650, toJSON: () => ({}) };
+      }
+      return { top: 0, left: 0, right: 900, bottom: 700, width: 900, height: 700, x: 0, y: 0, toJSON: () => ({}) };
+    });
     const initial: Conversation = {
       id: "conversation-timeline-layout",
       title: "Timeline 布局",
@@ -406,13 +415,30 @@ describe("ChatPage run lifecycle", () => {
     const scroll = container.querySelector(".chat-scroll");
     const content = scroll?.querySelector(":scope > .chat-scroll-content");
     const messages = content?.querySelector(":scope > .chat-messages");
-    const timeline = content?.querySelector(":scope > .conversation-timeline");
+    const timeline = container.querySelector("[aria-label='消息时间轴']");
 
     expect(scroll).toBeInTheDocument();
     expect(content).toBeInTheDocument();
     expect(messages).toBeInTheDocument();
     expect(timeline).toBeInTheDocument();
-    expect(timeline?.parentElement).toBe(content);
+    expect(timeline?.parentElement).toBe(scroll);
+    expect(scroll).toHaveAttribute("data-conversation-scroll");
+    expect(container.querySelector("[data-chat-anchor-key='user-layout']")).toBeInTheDocument();
+  });
+
+  it("does not mount the Timeline on mobile viewports", () => {
+    const originalInnerWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
+    const initial: Conversation = {
+      id: "conversation-mobile-timeline",
+      title: "移动端布局",
+      messages: [{ id: "user-mobile", role: "user", content: "移动消息", events: [] }],
+    };
+
+    const { container } = render(<Harness initial={initial} />);
+
+    expect(container.querySelector("[aria-label='消息时间轴']")).toBeNull();
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
   });
 
   it("renders the session todo panel merged inside the composer", () => {
