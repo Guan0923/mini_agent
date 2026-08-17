@@ -185,3 +185,45 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
             read_only=False,
         ),
     )
+
+
+def upload_file_read_tool(files: WorkspaceFiles) -> Tool:
+    """Read-only access to one session's uploaded files.
+
+    Uploads live below the session workspace and must stay readable even when
+    the agent's cwd is an external project folder, so they get their own
+    confined, read-only tool instead of reusing the cwd-scoped ``read_file``.
+    """
+
+    return Tool(
+        "read_upload_file",
+        (
+            "Reads a bounded line range from one UTF-8 text file in the current session's uploaded "
+            "files. The path is relative to the session upload directory. Output uses LF line endings "
+            "and includes the returned and total line ranges."
+        ),
+        files.read_file,
+        object_schema(
+            {
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Uploads-relative file path.",
+                },
+                "start_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 1,
+                    "description": "One-based first line to return.",
+                },
+                "max_lines": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1_000,
+                    "default": 200,
+                    "description": "Maximum number of lines to return.",
+                },
+            },
+            ["path"],
+        ),
+    )

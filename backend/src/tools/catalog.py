@@ -18,6 +18,7 @@ def _build_tools(
     web_search: DdgrWebSearch | None = None,
     web_fetch: SafeWebFetcher | None = None,
     workspace_files: WorkspaceFiles | None = None,
+    upload_files: WorkspaceFiles | None = None,
 ) -> tuple[Tool, ...]:
     """Create the standard tool set for one workspace."""
 
@@ -26,6 +27,7 @@ def _build_tools(
         files=workspace_files,
         search=web_search,
         fetcher=web_fetch,
+        upload_files=upload_files,
     )
 
 
@@ -35,6 +37,7 @@ def build_tool_registry(
     web_search: DdgrWebSearch | None = None,
     web_fetch: SafeWebFetcher | None = None,
     workspace_files: WorkspaceFiles | None = None,
+    upload_files: WorkspaceFiles | None = None,
     extra_tools: Iterable[Tool] = (),
 ) -> ToolRegistry:
     """Build the standard workspace tool registry."""
@@ -46,6 +49,7 @@ def build_tool_registry(
                 web_search=web_search,
                 web_fetch=web_fetch,
                 workspace_files=workspace_files,
+                upload_files=upload_files,
             ),
             *extra_tools,
         )

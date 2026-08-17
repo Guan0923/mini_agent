@@ -156,3 +156,40 @@ def test_registry_wraps_unexpected_handler_exceptions_as_tool_error() -> None:
 
     with pytest.raises(ToolError, match="RuntimeError: boom"):
         registry.invoke("boom_tool", {})
+
+
+def test_upload_file_tool_reads_only_inside_uploads_root(tmp_path: Path) -> None:
+    from backend.tools import WorkspaceFiles, build_tool_registry
+
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    (upload_root / "notes.md").write_text("line one\nline two\n", encoding="utf-8")
+    registry = build_tool_registry(tmp_path, upload_files=WorkspaceFiles(upload_root))
+
+    assert "read_upload_file" in registry.names()
+    assert "read_upload_file" in registry.read_only_names()
+    result = registry.invoke("read_upload_file", {"path": "notes.md"})
+    assert "line one" in result
+    assert "lines 1-2 of 2" in result
+
+    with pytest.raises(ToolError, match="inside the workspace"):
+        registry.invoke("read_upload_file", {"path": "../outside.txt"})
+
+
+def test_build_application_registers_upload_tool_when_root_provided(tmp_path: Path) -> None:
+    from backend.configuration import ClientPaths
+    from backend.runtime import build_application
+
+    paths = ClientPaths(tmp_path)
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    (upload_root / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    application = build_application(tmp_path, paths=paths, planner_name="rule", upload_root=upload_root)
+    try:
+        runner = application.runner
+        tool_names = runner.tools.names()
+        assert "read_upload_file" in tool_names
+        result = runner.tools.invoke("read_upload_file", {"path": "data.csv"})
+        assert "1,2" in result
+    finally:
+        application.close()

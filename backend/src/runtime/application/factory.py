@@ -52,6 +52,7 @@ def build_application(
     session_provisioner: object | None = None,
     session_provisioner_cleanup: object | None = None,
     project_id: str | None = None,
+    upload_root: Path | None = None,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     base_config = initialize_config(resolved_paths, workspace)
@@ -66,6 +67,7 @@ def build_application(
     device_id = str(section(config, "sync").get("device_id") or f"local_{resolved_paths.root.name}")
     store = SQLiteSessionStore(resolved_paths, device_id)
     files = WorkspaceFiles(workspace)
+    upload_files = WorkspaceFiles(upload_root) if upload_root is not None else None
     runner_args = (
         workspace,
         planner_name,
@@ -76,6 +78,7 @@ def build_application(
         files,
         resolved_paths,
         user_preferences,
+        upload_files,
     )
     if model_config is None:
         runner = _build_subagent_runner(*runner_args, **({"project_id": project_id} if project_id else {}))
@@ -134,6 +137,7 @@ def _build_subagent_runner(
     files: WorkspaceFiles | None = None,
     paths: ClientPaths | None = None,
     user_preferences: str = "",
+    upload_files: WorkspaceFiles | None = None,
     *,
     model_config: ModelConfig | None = None,
     project_id: str | None = None,
@@ -147,7 +151,7 @@ def _build_subagent_runner(
             workspace,
             planner_name,
             settings,
-            build_tool_registry(workspace),
+            build_tool_registry(workspace, upload_files=upload_files),
             hooks,
             checkpoints,
             resolved_paths,
@@ -163,6 +167,7 @@ def _build_subagent_runner(
         tools = build_tool_registry(
             workspace,
             workspace_files=files,
+            upload_files=upload_files,
             extra_tools=(
                 *delegation_tools(subagent_settings.max_tasks_per_batch),
                 *external,
