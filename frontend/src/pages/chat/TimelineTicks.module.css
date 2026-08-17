@@ -32,9 +32,10 @@
 
 .tip {
   position: absolute;
-  left: 32px;
+  left: 51px;
   width: 340px;
   box-sizing: border-box;
+  text-align: left;
   padding: 10px 12px;
   overflow-y: auto;
   border: 1px solid var(--border);
@@ -42,7 +43,7 @@
   background: var(--surface, #fff);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
   z-index: 2;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .tipTime {

@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useRef } from "react";
+import { StrictMode, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../../types";
 import ConversationTimeline, { buildTimelineEntries, fmtTime, timelineTextOf } from "./ConversationTimeline";
@@ -33,9 +33,9 @@ function TimelineHarness({ messages }: { messages: readonly ChatMessage[] }) {
             {item.content}
           </div>
         ))}
+        <ConversationTimeline messages={messages} scrollContainerRef={scrollRef} />
       </div>
       <div data-composer-seat />
-      <ConversationTimeline messages={messages} scrollContainerRef={scrollRef} />
     </div>
   );
 }
@@ -82,19 +82,27 @@ describe("ConversationTimeline", () => {
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
     const user = userEvent.setup();
     render(
-      <TimelineHarness
-        messages={[
-          message("user-1", "user", "first", { timelineSeq: 1, timelineTime: Date.UTC(2026, 0, 2, 3, 4, 5) }),
-          message("user-2", "user", "second", { timelineSeq: 2, timelineText: "second preview" }),
-        ]}
-      />,
+      <StrictMode>
+        <TimelineHarness
+          messages={[
+            message("user-1", "user", "first", { timelineSeq: 1, timelineTime: Date.UTC(2026, 0, 2, 3, 4, 5) }),
+            message("user-2", "user", "second", { timelineSeq: 2, timelineText: "second preview" }),
+          ]}
+        />
+      </StrictMode>,
     );
 
     const rows = screen.getAllByRole("button");
     expect(rows).toHaveLength(2);
     await user.hover(rows[1]!);
-    expect(screen.getByRole("tooltip")).toHaveTextContent("second preview");
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveTextContent("second preview");
     expect((rows[1]!.firstElementChild as HTMLElement).style.width).toBe("42px");
+
+    const parentWheel = vi.fn();
+    document.querySelector(".chat-scroll")?.addEventListener("wheel", parentWheel);
+    fireEvent.wheel(tooltip, { deltaY: 160 });
+    expect(parentWheel).not.toHaveBeenCalled();
 
     fireEvent.click(rows[0]!);
     expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", behavior: "smooth" });

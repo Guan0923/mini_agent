@@ -113,8 +113,13 @@ export default function ConversationTimeline({ messages, scrollContainerRef }: C
   const [hover, setHover] = useState(-1);
   const aliveRef = useRef(true);
 
-  useEffect(() => () => {
-    aliveRef.current = false;
+  useEffect(() => {
+    // React StrictMode intentionally re-runs mount effects in development.
+    // Re-arm the guard on the second setup so timeline clicks keep working.
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -213,7 +218,12 @@ export default function ConversationTimeline({ messages, scrollContainerRef }: C
         >
           <span className={css.tick} style={tickStyle(index)} />
           {hover === index ? (
-            <span className={css.tip} style={{ top: `${tipTop}px`, maxHeight: `${tipMax}px` }} role="tooltip">
+            <span
+              className={css.tip}
+              style={{ top: `${tipTop}px`, maxHeight: `${tipMax}px` }}
+              role="tooltip"
+              onWheelCapture={(event) => event.stopPropagation()}
+            >
               <span className={css.tipTime}>{fmtTime(entry.time)}</span>
               <span className={css.tipText}>{entry.text || "（空消息）"}</span>
             </span>
