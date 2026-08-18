@@ -208,6 +208,7 @@
   min-width: 0;
   padding-top: 4px;
   line-height: 1.7;
+  color: #000000;
 }
 
 .assistant-run-frame {
@@ -245,15 +246,51 @@
   gap: 4px;
 }
 
-.runtime-details {
+.runtime-collapse.runtime-details {
   margin-bottom: 12px;
-  background: rgba(247, 248, 250, 0.75);
 }
 
-.runtime-details .ant-collapse-header {
-  align-items: center !important;
-  font-size: 13px;
-  font-weight: 600;
+.runtime-collapse.ant-collapse,
+.runtime-collapse .ant-collapse-item,
+.runtime-collapse .ant-collapse-panel,
+.runtime-collapse .ant-collapse-header,
+.runtime-collapse .ant-collapse-content,
+.runtime-collapse .ant-collapse-content-box,
+.runtime-collapse .ant-collapse-body {
+  border: 0 !important;
+  background: transparent !important;
+}
+
+.runtime-collapse .ant-collapse-header,
+.runtime-collapse .ant-collapse-title,
+.runtime-collapse .ant-collapse-header-text,
+.runtime-collapse .ant-collapse-expand-icon,
+.runtime-collapse .ant-collapse-content,
+.runtime-collapse .ant-collapse-content-box,
+.runtime-collapse .ant-collapse-body,
+.runtime-collapse .runtime-details-body,
+.runtime-collapse .thinking-content,
+.runtime-collapse .runtime-tool-body,
+.runtime-collapse .markdown,
+.runtime-collapse .tool-line,
+.runtime-collapse .tool-result,
+.runtime-collapse .tool-result-label,
+.runtime-collapse .tool-result summary,
+.runtime-collapse .tool-result pre,
+.runtime-collapse .tool-payload,
+.runtime-collapse .tool-call-id,
+.runtime-collapse .mono,
+.runtime-collapse .error-text {
+  color: #efefef !important;
+}
+
+.runtime-collapse .ant-collapse-header:hover,
+.runtime-collapse .markdown a {
+  color: #efefef !important;
+}
+
+.runtime-collapse .shimmer-text:not(.is-active) {
+  color: #efefef !important;
 }
 
 .runtime-details-body {

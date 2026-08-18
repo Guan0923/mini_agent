@@ -191,7 +191,8 @@ function RuntimeDetails({ msg, configuredDisplay }: { msg: ChatMessage; configur
 
   return (
     <Collapse
-      className="runtime-details"
+      className="runtime-collapse runtime-details"
+      ghost
       size="small"
       activeKey={activeKey}
       onChange={(key) => setActiveKey(Array.isArray(key) ? key.map(String) : [String(key)])}
@@ -268,7 +269,8 @@ function RunSegments({ msg, configuredDisplay }: { msg: ChatMessage; configuredD
       return (
         <Collapse
           key={segment.segment_id}
-          className="runtime-tool-batch"
+          className="runtime-collapse runtime-tool-batch"
+          ghost
           size="small"
           activeKey={activeKeys.includes(segment.segment_id) ? [segment.segment_id] : []}
           onChange={(keys) => toggle(segment.segment_id, keys)}
@@ -279,14 +281,15 @@ function RunSegments({ msg, configuredDisplay }: { msg: ChatMessage; configuredD
     return (
       <Collapse
         key={segment.segment_id}
-        className="runtime-tool-batch"
+        className="runtime-collapse runtime-tool-batch"
+        ghost
         size="small"
         activeKey={activeKeys.includes(segment.segment_id) ? [segment.segment_id] : []}
         onChange={(keys) => toggle(segment.segment_id, keys)}
         items={[{
           key: segment.segment_id,
           label: "并行工具调用",
-          children: <Collapse size="small" items={tools.map((tool) => ({ key: tool.call_id, label: `${tool.name} · ${tool.status}`, children: presentationToolBody(tool, display) }))} />,
+          children: <Collapse className="runtime-collapse" ghost size="small" items={tools.map((tool) => ({ key: tool.call_id, label: `${tool.name} · ${tool.status}`, children: presentationToolBody(tool, display) }))} />,
         }]}
       />
     );
@@ -303,7 +306,8 @@ function RunSegments({ msg, configuredDisplay }: { msg: ChatMessage; configuredD
         return (
           <Collapse
             key={segment.segment_id}
-            className="runtime-thinking-segment"
+            className="runtime-collapse runtime-thinking-segment"
+            ghost
             size="small"
             activeKey={activeKeys.includes(segment.segment_id) ? [segment.segment_id] : []}
             onChange={(keys) => toggle(segment.segment_id, keys)}
