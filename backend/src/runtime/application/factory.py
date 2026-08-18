@@ -14,6 +14,7 @@ from backend.mcp.client import ExternalMcpResources, start_external_tools
 from backend.mcp.config import McpSettings, prepare_mcp_plan
 from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.providers import LLMClient, ModelConfig
+from backend.rag import EmbeddingProfile, KnowledgeBaseService, knowledge_base_search_tool
 from backend.skills import ProjectSkillGate, ProjectSkillTrustStore, SkillCatalog
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.sync import RequestsSyncTransport, SyncClient, SyncCoordinator
@@ -163,13 +164,14 @@ def _build_subagent_runner(
     resolved_paths = paths or client_paths()
     skill_settings = SkillSettings.from_config(config)
     subagent_settings = SubagentSettings.from_config(config)
+    rag_tool = _rag_tool_for_config(resolved_paths, config, job_user_id, project_id)
 
     def child_factory() -> AgentRunner:
         return _build_runner(
             workspace,
             planner_name,
             settings,
-            build_tool_registry(workspace, upload_files=upload_files, terminal_type=terminal_type),
+            build_tool_registry(workspace, upload_files=upload_files, terminal_type=terminal_type, rag_tool=rag_tool),
             hooks,
             checkpoints,
             resolved_paths,
@@ -198,6 +200,7 @@ def _build_subagent_runner(
             workspace_files=files,
             upload_files=upload_files,
             terminal_type=terminal_type,
+            rag_tool=rag_tool,
             extra_tools=(
                 *delegation_tools(subagent_settings.max_tasks_per_batch),
                 *external,
@@ -242,6 +245,7 @@ def _build_runner(
     project_id: str | None = None,
     job_registry: JobRegistry | None = None,
     job_user_id: str | None = None,
+    rag_tool: object | None = None,
 ) -> AgentRunner:
     skills = SkillCatalog.discover(global_root=paths.skills_dir)
     project_skill_gate = (
@@ -333,6 +337,28 @@ def _terminal_type_for_config(config: dict[str, object]) -> str:
     runtime = config.get("runtime")
     values = runtime if isinstance(runtime, dict) else {}
     return effective_terminal_type(values.get("terminal_type", DEFAULT_TERMINAL_TYPE))
+
+
+def _rag_tool_for_config(
+    paths: ClientPaths,
+    config: dict[str, object],
+    user_id: str | None,
+    project_id: str | None,
+):
+    """Create the per-user search tool only when RAG is explicitly enabled."""
+
+    if not user_id:
+        return None
+    raw = config.get("rag")
+    rag = raw if isinstance(raw, dict) else {}
+    if not bool(rag.get("enabled", False)):
+        return None
+    profile = EmbeddingProfile.create(
+        base_url=str(rag.get("embedding_base_url", "http://127.0.0.1:11434")),
+        model=str(rag.get("embedding_model", "bge-m3")),
+    )
+    service = KnowledgeBaseService(paths.root)
+    return knowledge_base_search_tool(service, user_id=user_id, profile=profile, config=rag, project_id=project_id)
 
 
 def _build_sync_coordinator(

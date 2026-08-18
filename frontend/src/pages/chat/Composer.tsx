@@ -5,11 +5,12 @@ import { useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent
 import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, TodoItem } from "../../types";
 import IconAction from "../../components/IconAction";
 import type { FileCandidate } from "../../commands/fileCompletion";
+import type { RagMode } from "../../api/chat";
 import { sessionFileContentUrl } from "../../api/files";
 import { SessionTodoPanel } from "./todoPanel";
 
 const REASONING_LABELS: Record<ReasoningEffort, string> = { low: "低", medium: "中", high: "高", xhigh: "超高", max: "最大" };
-export type SettingsSelectKey = "mode" | "permission" | "reasoning";
+export type SettingsSelectKey = "mode" | "permission" | "reasoning" | "rag";
 
 export interface ComposerProps {
   input: string;
@@ -21,6 +22,8 @@ export interface ComposerProps {
   mode: ChatMode;
   permissionMode: PermissionMode;
   reasoningEffort: ReasoningEffort;
+  ragMode: RagMode;
+  ragEnabled: boolean;
   todos: TodoItem[] | null;
   usagePercent?: number;
   usageTotalTokens?: number | null;
@@ -36,6 +39,7 @@ export interface ComposerProps {
   onModeChange: (mode: ChatMode) => void;
   onPermissionChange: (mode: PermissionMode) => void;
   onReasoningChange: (effort: ReasoningEffort) => void;
+  onRagModeChange: (mode: RagMode) => void;
   onSettingsSelectChange: (key: SettingsSelectKey | null) => void;
   onOpenSettings: () => void;
   onCloseSettings: () => void;
@@ -104,6 +108,7 @@ export default function Composer(props: ComposerProps) {
     <Space className="composer-settings-controls" size={[6, 6]} wrap>
       <Select className="mode-picker" placement="topLeft" open={props.openSettingsSelect === "mode"} aria-label="运行模式" disabled={false} value={props.mode} options={[{ value: "agent", label: "⚙ Agent" }, { value: "plan", label: "📋 Plan" }]} onChange={props.onModeChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "mode" : null)} />
       <Select className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "permission"} aria-label="权限模式" disabled={false} value={props.permissionMode} options={[{ value: "approval_for_me", label: "逐次审批" }, { value: "full_access", label: "完全访问" }]} onChange={props.onPermissionChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "permission" : null)} />
+      {props.ragEnabled ? <Select className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "rag"} aria-label="知识库模式" value={props.ragMode} options={[{ value: "off", label: "知识库：关闭" }, { value: "tool", label: "知识库：工具" }, { value: "forced", label: "知识库：强制" }]} onChange={props.onRagModeChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "rag" : null)} /> : null}
       <Space size={4} align="center">
         <Tooltip title={props.usageTotalTokens == null ? "暂无 token usage" : `${props.usageTotalTokens.toLocaleString()} / ${(props.usageContextLength ?? 0).toLocaleString()} tokens`}>
           <Progress type="circle" size={32} percent={Math.max(0, Math.min(100, props.usagePercent ?? 0))} format={() => props.usageTotalTokens == null ? "–" : props.usageTotalTokens >= 1000 ? `${(props.usageTotalTokens / 1000).toFixed(1)}k` : String(props.usageTotalTokens)} />

@@ -26,6 +26,7 @@ def build_default_tools(
     fetcher: SafeWebFetcher | None = None,
     upload_files: WorkspaceFiles | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
+    rag_tool: Tool | None = None,
 ) -> tuple[Tool, ...]:
     """Build tools in the stable order exposed to planners."""
 
@@ -41,6 +42,8 @@ def build_default_tools(
     ]
     if upload_files is not None:
         tools.append(upload_file_read_tool(upload_files))
+    if rag_tool is not None:
+        tools.append(rag_tool)
     return tuple(tools)
 
 

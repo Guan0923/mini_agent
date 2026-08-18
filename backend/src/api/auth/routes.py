@@ -93,6 +93,16 @@ class RuntimeConfigPayload(BaseModel):
     terminal_type: Literal["cmd", "git_bash", "powershell", "pwsh", "wsl"] = "cmd"
 
 
+class RagConfigPayload(BaseModel):
+    enabled: StrictBool = False
+    algorithm: Literal["hybrid", "bm25", "vector"] = "hybrid"
+    bm25_candidate_k: StrictInt = Field(default=20, ge=1, le=100)
+    vector_candidate_k: StrictInt = Field(default=20, ge=1, le=100)
+    top_k: StrictInt = Field(default=8, ge=1, le=20)
+    embedding_base_url: str = Field(default="http://127.0.0.1:11434", min_length=8, max_length=500)
+    embedding_model: str = Field(default="bge-m3", min_length=1, max_length=200)
+
+
 class ProviderConfigPayload(BaseModel):
     provider_name: str = Field(min_length=1, max_length=80)
     protocol: str = Field(default="chat_completions", min_length=1, max_length=40)
@@ -426,6 +436,19 @@ def update_runtime_config(
         if os.name == "nt" and body.terminal_type not in available_terminal_executables(is_windows=True):
             raise ValueError("selected terminal is not available on this system")
         return request.app.state.web.settings.update_runtime_config(identity.id, values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.put("/rag-config")
+def update_rag_config(
+    body: RagConfigPayload,
+    request: Request,
+    identity: Annotated[UserIdentity, Depends(require_user)],
+) -> dict[str, object]:
+    _origin_guard(request)
+    try:
+        return request.app.state.web.settings.update_rag_config(identity.id, body.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

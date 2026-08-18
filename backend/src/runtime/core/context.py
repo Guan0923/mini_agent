@@ -212,6 +212,7 @@ class RuntimeExchange:
     context: dict[str, Any] = field(default_factory=dict)
     on_reasoning: Callable[[str], None] | None = None
     on_content: Callable[[str], None] | None = None
+    required_tool_name: str | None = None
 
     def reset(self) -> None:
         self.operation = None
@@ -230,6 +231,7 @@ class RuntimeExchange:
         self.context = {}
         self.on_reasoning = None
         self.on_content = None
+        self.required_tool_name = None
 
 
 def new_tool_call_id() -> str:

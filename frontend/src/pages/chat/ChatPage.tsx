@@ -14,6 +14,7 @@ import {
   submitDecision,
   uploadSessionFiles,
 } from "../../api";
+import type { RagMode } from "../../api/chat";
 import type { ProviderConfig } from "../../api";
 import { HELP_TEXT, parseCommand } from "../../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../../commands/completion";
@@ -45,6 +46,7 @@ interface Props {
   conversation: Conversation | null;
   displayMode?: DisplayMode;
   providerConfig?: ProviderConfig | null;
+  ragEnabled?: boolean;
   mode?: ChatMode;
   onModeChange?: (mode: ChatMode) => void;
   onUpdate: (id: string, updater: (conversation: Conversation) => Conversation) => void;
@@ -103,6 +105,7 @@ export default function ChatPage({
   conversation,
   displayMode: configuredDisplayMode,
   providerConfig,
+  ragEnabled = false,
   mode: selectedMode,
   onModeChange = () => undefined,
   onUpdate,
@@ -126,6 +129,7 @@ export default function ChatPage({
   const [localBusy, setLocalBusy] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("approval_for_me");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
+  const [ragMode, setRagMode] = useState<RagMode>("off");
   const [providerName, setProviderName] = useState("unknown");
   const [runtimeModel, setRuntimeModel] = useState<RuntimeNodeModel>(DEFAULT_RUNTIME_NODE_MODEL);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -543,8 +547,9 @@ export default function ChatPage({
               requestProviderName,
               requestModel,
               mode,
+              ragMode,
             )
-          : await streamResume(sessionId, onMessage, controller.signal, permissionMode, reasoningEffort, undefined, requestProviderName, requestModel, mode);
+          : await streamResume(sessionId, onMessage, controller.signal, permissionMode, reasoningEffort, undefined, requestProviderName, requestModel, mode, ragMode);
         if (result === "aborted") setLast({
           running: false,
           status: "已停止",
@@ -570,14 +575,14 @@ export default function ChatPage({
         const chatSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
         const options = chatSourceNodeId
           ? (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, references }
-            : { sessionId, sourceNodeId: chatSourceNodeId, providerName: requestProviderName, model: requestModel, mode, permissionMode, reasoningEffort, references })
+            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, references, ragMode }
+            : { sessionId, sourceNodeId: chatSourceNodeId, providerName: requestProviderName, model: requestModel, mode, permissionMode, reasoningEffort, references, ragMode })
           // An empty tree has no dynamic runtime configuration to submit. Keep
           // the stable positional call for clients embedding ChatPage while
           // all established sessions use the explicit v0.3 config object.
           : (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, references }
-            : sessionId);
+            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, references, ragMode }
+            : (ragMode !== "off" ? { sessionId, ragMode } : sessionId));
         const result = await streamChat(
           prompt ?? "",
           onMessage,
@@ -923,6 +928,8 @@ export default function ChatPage({
         mode={mode}
         permissionMode={permissionMode}
         reasoningEffort={reasoningEffort}
+        ragMode={ragMode}
+        ragEnabled={ragEnabled}
         todos={todo}
         usagePercent={usagePercent}
         usageTotalTokens={activeUsage?.total ?? null}
@@ -937,6 +944,7 @@ export default function ChatPage({
         onModeChange={(value) => { onModeChange(value); void updateRuntimeConfig({ running_mode: value }); setOpenSettingsSelect(null); }}
         onPermissionChange={(value) => { setPermissionMode(value); void updateRuntimeConfig({ permission_mode: value }); setOpenSettingsSelect(null); }}
         onReasoningChange={(value) => { setReasoningEffort(value); setRuntimeModel((current) => ({ ...current, reasoning_effort: value })); void updateRuntimeConfig({ model: { reasoning_effort: value } }); setOpenSettingsSelect(null); }}
+        onRagModeChange={(value) => { setRagMode(value); setOpenSettingsSelect(null); }}
         onSettingsSelectChange={setOpenSettingsSelect}
         onOpenSettings={() => setSettingsOpen(true)}
         onCloseSettings={() => setSettingsOpen(false)}

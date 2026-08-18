@@ -2,6 +2,7 @@ import {
   App as AntApp,
   Alert,
   Button,
+  Card,
   AutoComplete,
   Collapse,
   Form,
@@ -34,18 +35,21 @@ import {
   updateAgentConfig,
   updateProfile,
   updateRuntimeConfig,
+  updateRagConfig,
   updateProviderConfigById,
   updateSyncPreferences,
   type AgentConfig,
   type ProviderConfig,
   type UserSettings,
   type RuntimeConfig,
+  type RagConfig,
+  type RagCapabilities,
   type CloudSnapshot,
   type SyncJob,
 } from "../api";
 import type { AuthUser } from "../types";
 
-type SettingsSection = "profile" | "agent" | "runtime" | "provider_add" | "provider_manage" | "cloud";
+type SettingsSection = "profile" | "agent" | "runtime" | "rag" | "provider_add" | "provider_manage" | "cloud";
 
 type ProviderDraft = {
   provider_name: string;
@@ -66,6 +70,7 @@ interface UserSettingsModalProps {
   activeSessionId?: string;
   onAgentConfigUpdate?: (config: AgentConfig) => void;
   onProviderConfigUpdate?: (config: ProviderConfig) => void;
+  onRagConfigUpdate?: (config: RagConfig) => void;
   onUserUpdate: (user: Partial<AuthUser>) => void;
 }
 
@@ -118,6 +123,16 @@ const defaultSyncState = {
   updated_at: null,
 };
 
+const defaultRagConfig: RagConfig = {
+  enabled: false,
+  algorithm: "hybrid",
+  bm25_candidate_k: 20,
+  vector_candidate_k: 20,
+  top_k: 8,
+  embedding_base_url: "http://127.0.0.1:11434",
+  embedding_model: "bge-m3",
+};
+
 function snapshot(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
@@ -136,6 +151,7 @@ export default function UserSettingsModal({
   activeSessionId,
   onAgentConfigUpdate,
   onProviderConfigUpdate,
+  onRagConfigUpdate,
 }: UserSettingsModalProps) {
   const { modal, message } = AntApp.useApp();
   const [section, setSection] = useState<SettingsSection>("profile");
@@ -154,6 +170,7 @@ export default function UserSettingsModal({
   const [syncJob, setSyncJob] = useState<SyncJob | null>(null);
   const [cloudSnapshots, setCloudSnapshots] = useState<CloudSnapshot[]>([]);
   const [cloudLoading, setCloudLoading] = useState(false);
+  const [ragCapabilities, setRagCapabilities] = useState<RagCapabilities | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -183,6 +200,7 @@ export default function UserSettingsModal({
             ...(next.runtime_config ?? { max_tool_calls: 32, terminal_type: "cmd" }),
             terminal_type: next.runtime_config?.terminal_type ?? "cmd",
           },
+          rag_config: { ...defaultRagConfig, ...(next.rag_config ?? {}) },
           terminal_options: next.terminal_options ?? [],
           terminal_notice: next.terminal_notice ?? null,
         };
@@ -195,6 +213,7 @@ export default function UserSettingsModal({
         setSavedProviderDrafts(drafts);
         setModelOptions({});
         setModelsLoading({});
+        setRagCapabilities(null);
         if ((next.cloud_sync_available ?? user?.kind !== "guest") && user?.kind !== "guest") void refreshCloud();
       })
       .catch((cause) => {
@@ -210,6 +229,7 @@ export default function UserSettingsModal({
           provider_configs: [],
           capability_config: {},
           runtime_config: { max_tool_calls: 32, terminal_type: "cmd" },
+          rag_config: defaultRagConfig,
           terminal_options: [],
           terminal_notice: null,
           timezone_options: [],
@@ -231,6 +251,16 @@ export default function UserSettingsModal({
       mounted = false;
     };
   }, [open, user?.display_name, user?.agent_preferences, user?.email]);
+
+  useEffect(() => {
+    if (!open || section !== "rag") return;
+    let active = true;
+    void fetch("/api/rag/capabilities", { credentials: "include" })
+      .then((response) => response.ok ? response.json() as Promise<RagCapabilities> : Promise.reject(new Error("capabilities unavailable")))
+      .then((capabilities) => { if (active) setRagCapabilities(capabilities); })
+      .catch(() => { if (active) setRagCapabilities(null); });
+    return () => { active = false; };
+  }, [open, section]);
 
   useEffect(() => {
     if (!open || !syncJob || !["queued", "running"].includes(syncJob.status)) return;
@@ -361,6 +391,11 @@ export default function UserSettingsModal({
         const runtime = await updateRuntimeConfig(settings.runtime_config);
         updateSettings({ runtime_config: runtime });
         setSaved((current) => (current ? { ...current, runtime_config: runtime } : current));
+      } else if (section === "rag") {
+        const rag = await updateRagConfig(settings.rag_config ?? defaultRagConfig);
+        updateSettings({ rag_config: rag });
+        setSaved((current) => (current ? { ...current, rag_config: rag } : current));
+        onRagConfigUpdate?.(rag);
       } else if (section === "provider_add") {
         const provider = await addProviderConfig({
           provider_name: providerAddDraft.provider_name,
@@ -525,6 +560,7 @@ export default function UserSettingsModal({
     { key: "profile", label: "个人简介" },
     { key: "agent", label: "Agent 配置" },
     { key: "runtime", label: "运行配置" },
+    { key: "rag", label: "知识库配置" },
     { key: "provider_add", label: "添加提供商" },
     { key: "provider_manage", label: "Provider 与模型" },
     { key: "cloud", label: "云同步" },
@@ -704,6 +740,51 @@ export default function UserSettingsModal({
               </Typography.Paragraph>
             </Form.Item>
           </Form>
+        )}
+        {section === "rag" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16, width: "100%" }}>
+            <Card title="知识库开关" size="small">
+              <Form layout="vertical">
+                <Form.Item label="启用知识库检索" extra="关闭只停用聊天检索，不会删除已导入的文件和索引。">
+                  <Switch checked={settings.rag_config?.enabled ?? false} onChange={(enabled) => updateSettings({ rag_config: { ...(settings.rag_config ?? defaultRagConfig), enabled } })} />
+                </Form.Item>
+              </Form>
+            </Card>
+            <Card title="检索策略" size="small">
+              <Form layout="vertical">
+                <Form.Item label="算法">
+                  <Select
+                    value={settings.rag_config?.algorithm ?? "hybrid"}
+                    disabled={!ragCapabilities || ragCapabilities.algorithms.length === 0}
+                    options={(ragCapabilities?.algorithms ?? []).map((algorithm) => ({ value: algorithm, label: algorithm === "hybrid" ? "Hybrid" : algorithm === "bm25" ? "BM25" : "Vector" }))}
+                    onChange={(algorithm) => updateSettings({ rag_config: { ...(settings.rag_config ?? defaultRagConfig), algorithm } })}
+                  />
+                </Form.Item>
+                <Space wrap>
+                  <Form.Item label="BM25 候选 K"><InputNumber min={1} max={100} step={1} precision={0} value={settings.rag_config?.bm25_candidate_k ?? 20} onChange={(value) => value != null && updateSettings({ rag_config: { ...(settings.rag_config ?? defaultRagConfig), bm25_candidate_k: value } })} /></Form.Item>
+                  <Form.Item label="Vector 候选 K"><InputNumber min={1} max={100} step={1} precision={0} value={settings.rag_config?.vector_candidate_k ?? 20} onChange={(value) => value != null && updateSettings({ rag_config: { ...(settings.rag_config ?? defaultRagConfig), vector_candidate_k: value } })} /></Form.Item>
+                  <Form.Item label="最终 Top-K"><InputNumber min={1} max={20} step={1} precision={0} value={settings.rag_config?.top_k ?? 8} onChange={(value) => value != null && updateSettings({ rag_config: { ...(settings.rag_config ?? defaultRagConfig), top_k: value } })} /></Form.Item>
+                </Space>
+                {ragCapabilities && ragCapabilities.algorithms.length === 0 ? <Alert type="warning" showIcon title="当前没有可用的检索算法" description="请检查 SQLite FTS5、Qdrant 和 Ollama 服务状态。" /> : null}
+              </Form>
+            </Card>
+            <Card title="Embedding Profile" size="small">
+              <Form layout="vertical">
+                <Form.Item label="Ollama Base URL"><Input value={settings.rag_config?.embedding_base_url ?? defaultRagConfig.embedding_base_url} onChange={(event) => updateSettings({ rag_config: { ...(settings.rag_config ?? defaultRagConfig), embedding_base_url: event.target.value } })} /></Form.Item>
+                <Form.Item label="Embedding 模型">
+                  <Select
+                    value={settings.rag_config?.embedding_model ?? "bge-m3"}
+                    disabled={!ragCapabilities || ragCapabilities.embedding_models.length === 0}
+                    options={(ragCapabilities?.embedding_models ?? []).map((model) => ({ value: model, label: model }))}
+                    onChange={(embedding_model) => updateSettings({ rag_config: { ...(settings.rag_config ?? defaultRagConfig), embedding_model } })}
+                    notFoundContent="暂无健康检查通过的模型"
+                  />
+                </Form.Item>
+                <Typography.Paragraph type="secondary">维度：{ragCapabilities?.dimension ?? 1024} · 已导入文件：{ragCapabilities?.imported_files ?? 0} · Qdrant：{ragCapabilities?.qdrant_healthy ? "正常" : "不可用"} · Ollama：{ragCapabilities?.ollama_healthy ? "正常" : "不可用"}</Typography.Paragraph>
+                <Typography.Paragraph type="secondary">固定切块规则：700 tokens / 100 overlap / jieba 预分词</Typography.Paragraph>
+              </Form>
+            </Card>
+          </div>
         )}
         {section === "provider_add" && (
           <Form layout="vertical">

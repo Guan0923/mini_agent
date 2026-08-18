@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<1",
     "huggingface-hub>=0.30,<2",
+    "jieba>=0.42,<1",
     "jsonschema>=4.23,<5",
     "mcp>=1.28,<2",
     "mdit-py-plugins>=0.6,<1",

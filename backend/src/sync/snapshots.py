@@ -688,6 +688,10 @@ class SnapshotManager:
                     if session.is_symlink() or not session.is_dir():
                         raise ValueError("Restored runtime contains an invalid session directory.")
                     restored_paths.ensure_session(session.name)
+                if restored_paths.rag_dir.joinpath("knowledge.db").is_file():
+                    from backend.rag import KnowledgeBaseService
+
+                    KnowledgeBaseService(restored_paths.root).requeue_ingestions()
                 invalidate = getattr(self.settings, "invalidate", None)
                 if callable(invalidate):
                     invalidate(job.user_id)

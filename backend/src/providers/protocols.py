@@ -82,6 +82,7 @@ class ResponsesAdapter:
         overrides = runtime.exchange.context.get("request_parameters")
         if isinstance(overrides, Mapping):
             parameters.update(overrides)
+        required_tool_name = parameters.get("required_tool_name")
         items: list[dict[str, Any]] = []
         for message in runtime.exchange.messages or runtime.state.messages:
             if isinstance(message, SystemMessage | UserMessage):
@@ -127,6 +128,8 @@ class ResponsesAdapter:
                 {"type": "function", "name": spec.name, "description": spec.description, "parameters": spec.parameters}
                 for spec in tools
             ]
+        if isinstance(required_tool_name, str) and required_tool_name:
+            payload["tool_choice"] = {"type": "function", "name": required_tool_name}
         if runtime.exchange.output_mode == "json":
             payload["text"] = {"format": {"type": "json_object"}}
         runtime.exchange.request = payload
@@ -289,6 +292,7 @@ class MessagesAdapter:
         overrides = runtime.exchange.context.get("request_parameters")
         if isinstance(overrides, Mapping):
             parameters.update(overrides)
+        required_tool_name = parameters.get("required_tool_name")
         system: list[dict[str, Any]] = []
         messages: list[dict[str, Any]] = []
         for message in runtime.exchange.messages or runtime.state.messages:
@@ -335,6 +339,8 @@ class MessagesAdapter:
                 {"name": spec.name, "description": spec.description, "input_schema": spec.parameters}
                 for spec in runtime.exchange.allowed_tools
             ]
+        if isinstance(required_tool_name, str) and required_tool_name:
+            payload["tool_choice"] = {"type": "tool", "name": required_tool_name}
         runtime.exchange.request = payload
         return payload
 
