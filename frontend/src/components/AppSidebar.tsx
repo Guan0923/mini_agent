@@ -707,7 +707,7 @@ export default function AppSidebar({
         height: "100%",
         minHeight: 0,
         padding: 16,
-        background: "#fff",
+        background: "#f4f7f8",
       }}
     >
       <Button
@@ -742,6 +742,7 @@ export default function AppSidebar({
         <Badge className="sidebar-utility-badge" count={archivedCount} size="small" offset={[5, 0]}>
           <Button
             type={page === "trash" ? "default" : "text"}
+            className="sidebar-create-button"
             block
             icon={<DeleteOutlined />}
             onClick={() => onNavigate("trash")}
@@ -753,6 +754,7 @@ export default function AppSidebar({
         </Badge>
         <Button
           type={page === "benchmark" ? "default" : "text"}
+          className="sidebar-create-button"
           block
           icon={<BarChartOutlined />}
           onClick={() => onNavigate("benchmark")}

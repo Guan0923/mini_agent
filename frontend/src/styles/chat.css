@@ -4,6 +4,7 @@
   display: flex;
   flex-direction: column;
   height: 100%;
+  background: #ffffff;
 }
 
 /* ---------- Message file references ---------- */
@@ -215,13 +216,13 @@
   position: relative;
   min-width: 0;
   padding: 12px 14px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: 12px;
   background: #fff;
 }
 
 .assistant-run-frame.is-running {
-  border-color: rgba(79, 107, 255, 0.4);
+  border-color: transparent;
 }
 
 .avatar {
@@ -281,16 +282,21 @@
 .runtime-collapse .tool-call-id,
 .runtime-collapse .mono,
 .runtime-collapse .error-text {
-  color: #efefef !important;
+  color: #a8a9aa !important;
 }
 
 .runtime-collapse .ant-collapse-header:hover,
 .runtime-collapse .markdown a {
-  color: #efefef !important;
+  color: #a8a9aa !important;
 }
 
 .runtime-collapse .shimmer-text:not(.is-active) {
-  color: #efefef !important;
+  color: #a8a9aa !important;
+}
+
+.runtime-collapse .tool-line.failed,
+.runtime-collapse .error-text {
+  color: #dc2626 !important;
 }
 
 .runtime-details-body {
@@ -300,23 +306,20 @@
 }
 
 .thinking-content {
-  color: var(--text);
+  color: #a8a9aa;
   line-height: 1.65;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .shimmer-text {
-  color: var(--text);
+  color: #a8a9aa;
 }
 
 .shimmer-text.is-active {
-  color: transparent;
-  background: linear-gradient(90deg, var(--muted) 20%, var(--accent) 48%, var(--text) 55%, var(--muted) 80%);
-  background-size: 220% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  animation: runtime-summary-shimmer 1.8s linear infinite;
+  color: #a8a9aa;
+  background: none;
+  animation: none;
 }
 
 @keyframes runtime-summary-shimmer {
@@ -333,7 +336,7 @@
 
 .tool-line {
   font-size: 12.5px;
-  color: #6b7280;
+  color: #a8a9aa;
   background: #f7f8fa;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -375,6 +378,7 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #f7f8fa;
+  color: #a8a9aa;
 }
 
 .tool-result-label {

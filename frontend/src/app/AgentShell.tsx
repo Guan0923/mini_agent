@@ -129,7 +129,7 @@ export default function AgentShell(props: AgentShellProps) {
   );
   return (
     <Layout className="app-shell" style={{ minHeight: "100vh", height: "100vh" }}>
-      {!isMobile && <Layout.Sider width={280} theme="light" style={{ background: "#fff" }}>{sidebar}</Layout.Sider>}
+      {!isMobile && <Layout.Sider width={280} theme="light" style={{ background: "#f4f7f8", boxShadow: "4px 0 12px rgba(0, 0, 0, 0.08)", zIndex: 1 }}>{sidebar}</Layout.Sider>}
       {isMobile && <Drawer title="会话列表" placement="left" width={280} open={mobileSidebarOpen} onClose={closeMobile} styles={{ body: { padding: 0 } }}>{sidebar}</Drawer>}
       <Layout style={{ minWidth: 0, minHeight: 0 }}>
         {isMobile && <div className="mobile-sidebar-bar"><Button type="text" icon={<MenuOutlined />} onClick={() => setMobileSidebarOpen(true)} aria-label="打开会话列表">会话列表</Button></div>}
