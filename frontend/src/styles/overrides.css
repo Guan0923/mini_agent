@@ -25,6 +25,44 @@
   color: var(--text);
 }
 
+.sidebar-create-button.ant-btn {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  color: #000000 !important;
+  background: #ffffff !important;
+  border-color: #000000 !important;
+  box-shadow: none !important;
+  transition: color 350ms ease, border-color 350ms ease;
+}
+
+.sidebar-create-button.ant-btn::before {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: block;
+  background: #efefef;
+  content: "";
+  pointer-events: none;
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 350ms ease;
+}
+
+.sidebar-create-button.ant-btn:not(:disabled):hover::before {
+  transform: scaleX(1);
+  transform-origin: left center;
+}
+
+.sidebar-create-button.ant-btn:not(:disabled):not(:hover)::before {
+  transform-origin: right center;
+}
+
+.sidebar-create-button.ant-btn > * {
+  position: relative;
+  z-index: 1;
+}
+
 .history-list-item {
   display: block;
   width: 100%;

@@ -711,7 +711,8 @@ export default function AppSidebar({
       }}
     >
       <Button
-        type="primary"
+        type="default"
+        className="sidebar-create-button"
         size="large"
         block
         icon={<PlusOutlined />}
@@ -723,6 +724,7 @@ export default function AppSidebar({
 
       <Button
         type="default"
+        className="sidebar-create-button"
         block
         icon={<FolderOpenOutlined />}
         loading={projectLoading}

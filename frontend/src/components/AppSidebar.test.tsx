@@ -55,6 +55,40 @@ function renderSidebar(archivedCount = 0, conversations: Conversation[] = [conve
 }
 
 describe("AppSidebar utility navigation", () => {
+  it("uses the shared create-button style for new conversations and projects", async () => {
+    const user = userEvent.setup();
+    const onNew = vi.fn();
+    const onNewProject = vi.fn();
+
+    render(
+      <AppSidebar
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
+        conversations={[conversation]}
+        archivedCount={0}
+        currentId={conversation.id}
+        page="chat"
+        onNew={onNew}
+        onNewProject={onNewProject}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    const newConversationButton = screen.getByRole("button", { name: "新建对话" });
+    const newProjectButton = screen.getByRole("button", { name: "新建项目" });
+    expect(newConversationButton).toHaveClass("sidebar-create-button");
+    expect(newProjectButton).toHaveClass("sidebar-create-button");
+
+    await user.click(newConversationButton);
+    await user.click(newProjectButton);
+    expect(onNew).toHaveBeenCalledOnce();
+    expect(onNewProject).toHaveBeenCalledOnce();
+  });
+
   it("shows the unread archive count and navigates from both utility buttons", async () => {
     const user = userEvent.setup();
     const { onNavigate, view } = renderSidebar(2);
