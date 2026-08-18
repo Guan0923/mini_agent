@@ -38,6 +38,7 @@ function Harness({
   onStopRun,
   onConversationUpdate,
   providerConfig,
+  ragEnabled = false,
 }: {
   initial?: Conversation | null;
   onEnsureSession?: (id: string) => Promise<string>;
@@ -47,6 +48,7 @@ function Harness({
   onStopRun?: (conversationId: string) => void;
   onConversationUpdate?: (conversation: Conversation) => void;
   providerConfig?: ProviderConfig | null;
+  ragEnabled?: boolean;
 }) {
   const [conversation, setConversation] = React.useState<Conversation | null>(initial);
 
@@ -54,6 +56,7 @@ function Harness({
     <ChatPage
       conversation={conversation}
       providerConfig={providerConfig}
+      ragEnabled={ragEnabled}
       onUpdate={(id, updater) => setConversation((current) => {
         if (current?.id !== id) return current;
         const next = updater(current);
@@ -263,6 +266,29 @@ describe("ChatPage run lifecycle", () => {
     await user.click(screen.getByRole("combobox", { name: "思考等级" }));
     await user.click(screen.getByRole("option", { name: "high" }));
     expect(screen.getAllByText("high", { exact: true }).length).toBeGreaterThan(0);
+  });
+
+  it("uses the global RAG setting without a composer knowledge-base selector", async () => {
+    mocks.streamChat.mockImplementation(
+      (_prompt: string, onMessage: (message: StreamMessage) => void) => {
+        onMessage({ type: "done", status: "completed", final_answer: "已完成" });
+        return Promise.resolve("completed" as const);
+      },
+    );
+    const user = userEvent.setup();
+    render(<Harness ragEnabled />);
+
+    expect(screen.queryByRole("combobox", { name: "知识库模式" })).not.toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("输入任务，按 Enter 发送"), "查询知识库");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("已完成")).toBeInTheDocument();
+    expect(mocks.streamChat).toHaveBeenCalledWith(
+      "查询知识库",
+      expect.any(Function),
+      expect.any(AbortSignal),
+      expect.objectContaining({ ragMode: "tool" }),
+    );
   });
 
   it("uses the Provider and model selected in user settings for the next run", async () => {

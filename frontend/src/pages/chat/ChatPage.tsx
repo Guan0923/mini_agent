@@ -129,7 +129,7 @@ export default function ChatPage({
   const [localBusy, setLocalBusy] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("approval_for_me");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
-  const [ragMode, setRagMode] = useState<RagMode>("off");
+  const ragMode: RagMode = ragEnabled ? "tool" : "off";
   const [providerName, setProviderName] = useState("unknown");
   const [runtimeModel, setRuntimeModel] = useState<RuntimeNodeModel>(DEFAULT_RUNTIME_NODE_MODEL);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -928,8 +928,6 @@ export default function ChatPage({
         mode={mode}
         permissionMode={permissionMode}
         reasoningEffort={reasoningEffort}
-        ragMode={ragMode}
-        ragEnabled={ragEnabled}
         todos={todo}
         usagePercent={usagePercent}
         usageTotalTokens={activeUsage?.total ?? null}
@@ -944,7 +942,6 @@ export default function ChatPage({
         onModeChange={(value) => { onModeChange(value); void updateRuntimeConfig({ running_mode: value }); setOpenSettingsSelect(null); }}
         onPermissionChange={(value) => { setPermissionMode(value); void updateRuntimeConfig({ permission_mode: value }); setOpenSettingsSelect(null); }}
         onReasoningChange={(value) => { setReasoningEffort(value); setRuntimeModel((current) => ({ ...current, reasoning_effort: value })); void updateRuntimeConfig({ model: { reasoning_effort: value } }); setOpenSettingsSelect(null); }}
-        onRagModeChange={(value) => { setRagMode(value); setOpenSettingsSelect(null); }}
         onSettingsSelectChange={setOpenSettingsSelect}
         onOpenSettings={() => setSettingsOpen(true)}
         onCloseSettings={() => setSettingsOpen(false)}
