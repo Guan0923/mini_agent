@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from backend.domain.runtime_state import (
     DEFAULT_COMPACTION_RETENTION,
@@ -108,6 +108,10 @@ class RuntimeEventNodeBridge:
         self.assistant: RuntimeState | None = None
         self.last_node: RuntimeState | None = None
         self.assistant_blocks: list[dict[str, Any]] = []
+        # Call IDs declared by the current assistant response. Per-tool
+        # lifecycle events may arrive after the first result seals the
+        # dynamic assistant, so this set keeps the whole batch together.
+        self.batch_call_ids: set[str] = set()
         self.response_text = ""
         self.run_id = ""
         self.abort_category: TerminalErrorCategory | None = None
@@ -132,6 +136,7 @@ class RuntimeEventNodeBridge:
         runtime.state.model_snapshot = dict(self.model_config)
         runtime.state.permission_mode = self.permission_mode
         runtime.state.running_mode = self.running_mode
+        runtime.services.runtime_node_event = self.handle
         # Model requests must read the canonical path, not the legacy
         # RuntimeState.messages transcript.  The callback is intentionally
         # lazy: the dynamic assistant sidecar changes while a response/tool
@@ -362,6 +367,7 @@ class RuntimeEventNodeBridge:
         )
         self.last_node = self.writer.delete(user_node.session_id, user_node.id)
         self.started = True
+        self.batch_call_ids = set()
         # Create the assistant sidecar before the first provider boundary so
         # runtime-config updates always target a dynamic leaf.  Its durable
         # placeholder is filtered from model context until it has content.
@@ -544,6 +550,62 @@ class RuntimeEventNodeBridge:
             self.last_node = self.writer.delete(self.session_id, self.assistant.id, status=status)
             self.assistant = None
 
+    def _tool_call_in_context(self, call_id: str) -> bool:
+        """Return whether a tool call was already declared on this path."""
+
+        return bool(call_id and call_id in self.batch_call_ids)
+
+    def _persist_tool_result(
+        self,
+        message: str,
+        data: Mapping[str, Any],
+        *,
+        status: Literal["succeeded", "failed"],
+        emit: bool = True,
+    ) -> None:
+        """Persist one tool result without creating a duplicate assistant."""
+
+        if self.assistant is not None:
+            self._seal_assistant("success")
+        tool_name = str(data.get("tool") or data.get("name") or "")
+        lowered = tool_name.lower()
+        replay_safe = data.get("replay_safe")
+        if replay_safe is None:
+            replay_safe = not any(token in lowered for token in ("bash", "shell", "command", "write", "mcp"))
+        result_value = data.get("result", data.get("error", message))
+        result_block: dict[str, Any] = {
+            "type": "tool_result",
+            "call_id": str(data.get("call_id") or "call_unknown"),
+            "content": result_value,
+            "status": status,
+            "replay_safe": bool(replay_safe),
+        }
+        if tool_name:
+            result_block["tool"] = tool_name
+        if data.get("side_effect") is not None:
+            result_block["side_effect"] = bool(data["side_effect"])
+        previous_emit = self.writer.emit
+        if not emit:
+            self.writer.emit = lambda _frame: None
+        try:
+            result = self.writer.create(
+                session_id=self.session_id,
+                parent=self.last_node,
+                data=message_payload("tool_result", result_block, **({"run_id": self.run_id} if self.run_id else {})),
+                provider_name=self.provider_name,
+                model=self.model_config,
+                permission_mode=self.permission_mode,
+                running_mode=self.running_mode,
+                cwd=self.cwd,
+            )
+            self.last_node = self.writer.delete(
+                result.session_id,
+                result.id,
+                status="success" if status == "succeeded" else "failed",
+            )
+        finally:
+            self.writer.emit = previous_emit
+
     def _ancestor_path(self, source: RuntimeState | None) -> list[RuntimeState]:
         """Load the current cross-session path when the store exposes it."""
 
@@ -594,6 +656,7 @@ class RuntimeEventNodeBridge:
         self.assistant = None
         self.last_node = None
         self.assistant_blocks = []
+        self.batch_call_ids = set()
         self.response_text = ""
         self.run_id = ""
         self.abort_category = None
@@ -643,6 +706,7 @@ class RuntimeEventNodeBridge:
         self.assistant = None
         self.last_node = self.parent if same_session else None
         self.assistant_blocks = []
+        self.batch_call_ids = set()
         self.response_text = ""
         self.run_id = ""
         self.abort_category = None
@@ -657,17 +721,18 @@ class RuntimeEventNodeBridge:
         if self.closed or not self.started:
             return
         kind = getattr(event, "kind", "")
+        message = str(getattr(event, "message", "") or "")
+        data = getattr(event, "data", {})
+        if not isinstance(data, Mapping):
+            data = {}
         if kind in _HIDDEN_RECOVERABLE_EVENTS:
             # Recoverable diagnostics stay out of user-facing nodes, but a
             # terminal error arriving immediately afterwards still needs the
             # most specific category for its visible terminal explanation.
             if kind == "tool_failed":
                 self._remember_abort("tool", code="tool_failed")
+                self._persist_tool_result(message, data, status="failed", emit=False)
             return
-        message = str(getattr(event, "message", "") or "")
-        data = getattr(event, "data", {})
-        if not isinstance(data, Mapping):
-            data = {}
         event_session_id = data.get("session_id")
         if isinstance(event_session_id, str) and event_session_id and event_session_id != self.session_id:
             self._switch_session(event_session_id, str(data.get("task") or self.prompt))
@@ -686,6 +751,8 @@ class RuntimeEventNodeBridge:
         if isinstance(usage, Mapping):
             self._apply_usage(usage)
         if kind in {"model_request", "response_start", "thinking_start"}:
+            if kind in {"model_request", "response_start"}:
+                self.batch_call_ids = set()
             self._ensure_assistant()
         elif kind in {"response_delta", "response"} and message:
             self._ensure_assistant()
@@ -701,16 +768,19 @@ class RuntimeEventNodeBridge:
             raw = data.get("message")
             if isinstance(raw, Mapping):
                 blocks: list[dict[str, Any]] = []
+                batch_call_ids: set[str] = set()
                 if isinstance(raw.get("reasoning"), str) and raw["reasoning"]:
                     blocks.append({"type": "reasoning", "text": raw["reasoning"]})
                 if isinstance(raw.get("content"), str) and raw["content"]:
                     blocks.append({"type": "text", "text": raw["content"]})
                 for tool in raw.get("tool_messages", []) if isinstance(raw.get("tool_messages"), list) else []:
                     if isinstance(tool, Mapping):
+                        call_id = str(tool.get("call_id") or "call_unknown")
+                        batch_call_ids.add(call_id)
                         blocks.append(
                             {
                                 "type": "tool_call",
-                                "call_id": str(tool.get("call_id") or "call_unknown"),
+                                "call_id": call_id,
                                 "name": str(tool.get("name") or "unknown"),
                                 "arguments": dict(tool.get("arguments") or {}),
                                 "replay_safe": bool(tool.get("replay_safe", tool.get("retryable", True) is not False)),
@@ -718,13 +788,24 @@ class RuntimeEventNodeBridge:
                         )
                 self._ensure_assistant()
                 self.assistant_blocks = blocks
+                self.batch_call_ids = batch_call_ids
                 self.response_text = str(raw.get("content") or "")
                 self._update_assistant()
                 self._apply_usage(raw.get("node_usage") or raw.get("usage"))
         elif kind == "tool_call":
-            self._ensure_assistant()
             tool_name = str(data.get("tool") or data.get("name") or message or "unknown")
             call_id = str(data.get("call_id") or "call_unknown")
+            # The assistant_message event can already contain the entire
+            # batch. After the first result seals that assistant, subsequent
+            # per-tool events must not create a duplicate assistant node for
+            # a call that is already present in the current batch.
+            if self.assistant is None and self._tool_call_in_context(call_id):
+                return
+            if self.batch_call_ids and call_id not in self.batch_call_ids:
+                if self.assistant is not None:
+                    self._seal_assistant("success")
+                self.batch_call_ids = set()
+            self._ensure_assistant()
             replay_safe = data.get("replay_safe")
             if replay_safe is None:
                 lowered = tool_name.lower()
@@ -744,38 +825,7 @@ class RuntimeEventNodeBridge:
                 )
             self._update_assistant()
         elif kind == "tool_result":
-            if self.assistant is not None:
-                self._seal_assistant("success")
-            tool_name = str(data.get("tool") or data.get("name") or "")
-            lowered = tool_name.lower()
-            replay_safe = data.get("replay_safe")
-            if replay_safe is None:
-                replay_safe = not any(token in lowered for token in ("bash", "shell", "command", "write", "mcp"))
-            result_value = data.get("result", data.get("error", message))
-            result_block: dict[str, Any] = {
-                "type": "tool_result",
-                "call_id": str(data.get("call_id") or "call_unknown"),
-                "content": result_value,
-                "status": "failed" if kind == "tool_failed" else "succeeded",
-                "replay_safe": bool(replay_safe),
-            }
-            if tool_name:
-                result_block["tool"] = tool_name
-            if data.get("side_effect") is not None:
-                result_block["side_effect"] = bool(data["side_effect"])
-            result = self.writer.create(
-                session_id=self.session_id,
-                parent=self.last_node,
-                data=message_payload("tool_result", result_block, **({"run_id": self.run_id} if self.run_id else {})),
-                provider_name=self.provider_name,
-                model=self.model_config,
-                permission_mode=self.permission_mode,
-                running_mode=self.running_mode,
-                cwd=self.cwd,
-            )
-            self.last_node = self.writer.delete(
-                result.session_id, result.id, status="success" if kind == "tool_result" else "failed"
-            )
+            self._persist_tool_result(message, data, status="succeeded")
         elif kind == "model_error":
             self._remember_abort(self._model_error_category(data), code=str(data.get("error_type") or "model_error"))
         elif kind == "error":

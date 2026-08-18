@@ -245,6 +245,7 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
 
     result: list[ChatMessage] = []
     tool_calls: dict[str, tuple[AssistantMessage, int]] = {}
+    completed_results: dict[str, tuple[str, str, str]] = {}
 
     def block_text(block: Mapping[str, Any]) -> str:
         value = block.get("text")
@@ -289,22 +290,10 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                     assistant.tool_messages[index].content = text
                     assistant.tool_messages[index].status = status  # type: ignore[assignment]
                 elif call_id:
-                    # A recovered tree may contain a result without its
-                    # assistant placeholder.  Preserve it as a standalone
-                    # assistant tool message rather than dropping evidence.
-                    orphan = AssistantMessage(
-                        content=None,
-                        tool_messages=[
-                            ToolMessage(
-                                name=str(block.get("tool") or "unknown"),
-                                call_id=call_id,
-                                arguments={},
-                                content=text,
-                                status=status,  # type: ignore[arg-type]
-                            )
-                        ],
-                    )
-                    result.append(orphan)
+                    # A result can precede the assistant that declared the
+                    # call after recovery or a split tool batch.  Hold it
+                    # until the call is encountered on this path.
+                    completed_results[call_id] = (str(block.get("tool") or "unknown"), text, status)
             continue
         if role != "assistant":
             continue
@@ -317,11 +306,17 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
             call_id = str(block.get("call_id") or "")
             if not call_id:
                 continue
+            # A split canonical batch can repeat a call on a later assistant
+            # node. Keep the first declaration and merge results by call_id.
+            if call_id in tool_calls:
+                continue
+            completed = completed_results.pop(call_id, None)
             tool = ToolMessage(
                 name=str(block.get("name") or block.get("tool") or "unknown"),
                 call_id=call_id,
                 arguments=dict(block.get("arguments") or {}) if isinstance(block.get("arguments"), Mapping) else {},
-                status="pending",
+                content=completed[1] if completed is not None else None,
+                status=completed[2] if completed is not None else "pending",  # type: ignore[arg-type]
             )
             tools.append(tool)
         assistant = AssistantMessage(
@@ -329,9 +324,31 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
             reasoning="".join(reasoning_parts) or None,
             tool_messages=tools,
         )
-        result.append(assistant)
-        for index, tool in enumerate(tools):
-            tool_calls[tool.call_id] = (assistant, index)
+        if assistant.content or assistant.reasoning or tools:
+            result.append(assistant)
+            for index, tool in enumerate(tools):
+                tool_calls[tool.call_id] = (assistant, index)
+                completed = completed_results.pop(tool.call_id, None)
+                if completed is not None:
+                    tool.content = completed[1]
+                    tool.status = completed[2]  # type: ignore[assignment]
+    # Preserve genuinely orphaned results as evidence, but do not duplicate a
+    # result matched to an assistant call above.
+    for call_id, (tool_name, text, status) in completed_results.items():
+        result.append(
+            AssistantMessage(
+                content=None,
+                tool_messages=[
+                    ToolMessage(
+                        name=tool_name,
+                        call_id=call_id,
+                        arguments={},
+                        content=text,
+                        status=status,  # type: ignore[arg-type]
+                    )
+                ],
+            )
+        )
     return result
 
 
@@ -347,6 +364,8 @@ class RuntimeServices:
     checkpoint_store: object | None = None
     runtime_store: RuntimeStore | None = None
     on_event: EventHandler | None = None
+    # Hidden recoverable events still need to update the canonical node tree.
+    runtime_node_event: EventHandler | None = None
     interrupt: InterruptHandler | None = None
     steering: SteeringHandler | None = None
     cancel_requested: CancellationHandler | None = None

@@ -24,6 +24,7 @@ import Composer, { type SettingsSelectKey } from "./Composer";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import { latestTodoList } from "./todoPanel";
 import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "../../app/runtimeDetailProjection";
+import { applyRunSegment } from "../../app/runSegmentReducer";
 import { DEFAULT_RUNTIME_NODE_MODEL, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
 import type {
   ChatMessage,
@@ -480,12 +481,16 @@ export default function ChatPage({
       let sawDone = false;
       let finalNode: import("../../types").RuntimeStateNode | undefined;
       const onMessage = (message: StreamMessage) => {
-        if (message.type === "event") {
+        if (message.type === "run_segment") {
+          if (message.segment) updateLast((item) => applyRunSegment(item, message.segment!), conversationId);
+          const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
+          if (runId) setLast({ runId }, conversationId);
+        } else if (message.type === "event") {
           const kind = message.kind ?? "";
           if (kind === "response_delta" && !nodeProtocol) {
             const content = (message.data?.content as string | undefined) ?? message.message ?? "";
             if (content) appendDelta(content, conversationId);
-          } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result") {
+          } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result" || kind === "tool_failed") {
             updateLast((item) => appendLegacyRuntimeEvent(item, {
               kind,
               message: message.message ?? "",

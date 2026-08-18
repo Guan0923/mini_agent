@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from backend.domain import AssistantMessage, ChatMessage, SystemMessage, ToolSpec, UserMessage
+from backend.domain import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, ToolSpec, UserMessage
 from backend.runtime.core.context import AgentRuntime
 
 from ..errors import ModelRequestError
@@ -52,6 +52,13 @@ def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
         raise ModelRequestError("DeepSeek messages must contain at least one message.")
     wire: list[dict[str, Any]] = []
     seen_call_ids: set[str] = set()
+    completed_tools: dict[str, ToolMessage] = {}
+    for item in source:
+        if not isinstance(item, AssistantMessage):
+            continue
+        for tool in item.tool_messages:
+            if tool.call_id and tool.status != "pending" and tool.content is not None:
+                completed_tools[tool.call_id] = tool
     for position, message in enumerate(source):
         if isinstance(message, SystemMessage):
             options = _provider_options(message)
@@ -121,22 +128,36 @@ def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
             continue
 
         tool_calls: list[dict[str, Any]] = []
+        emitted_tools: list[ToolMessage] = []
         for tool in message.tool_messages:
             if tool.call_id in seen_call_ids:
-                raise ModelRequestError(f"Duplicate tool call id in message history: {tool.call_id}.")
+                # A recovered canonical path may contain the same call on a
+                # later assistant node.  The first declaration is retained;
+                # its result is resolved from the complete history above.
+                continue
             seen_call_ids.add(tool.call_id)
-            if tool.status == "pending" or tool.content is None:
+            effective = tool
+            completed = completed_tools.get(tool.call_id)
+            if (tool.status == "pending" or tool.content is None) and completed is not None:
+                effective = completed
+            if effective.status == "pending" or effective.content is None:
                 raise ModelRequestError(f"Tool call {tool.call_id} has no result and cannot be sent to DeepSeek.")
+            emitted_tools.append(effective)
             tool_calls.append(
                 {
-                    "id": tool.call_id,
+                    "id": effective.call_id,
                     "type": "function",
                     "function": {
-                        "name": tool.name,
-                        "arguments": json.dumps(tool.arguments, ensure_ascii=False, separators=(",", ":")),
+                        "name": effective.name,
+                        "arguments": json.dumps(effective.arguments, ensure_ascii=False, separators=(",", ":")),
                     },
                 }
             )
+        if not emitted_tools:
+            if not isinstance(message.content, str) or not message.content.strip():
+                continue
+            wire.append({"role": "assistant", "content": message.content})
+            continue
         assistant: dict[str, Any] = {
             "role": "assistant",
             "content": message.content,
@@ -154,9 +175,7 @@ def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
             label="assistant message",
         )
         wire.append(assistant)
-        wire.extend(
-            {"role": "tool", "tool_call_id": tool.call_id, "content": tool.content} for tool in message.tool_messages
-        )
+        wire.extend({"role": "tool", "tool_call_id": tool.call_id, "content": tool.content} for tool in emitted_tools)
     return wire
 
 

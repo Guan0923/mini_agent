@@ -3,6 +3,7 @@ import { cancelJob } from "../api";
 import type { ChatMessage, RuntimeNodeFrame, StreamMessage } from "../types";
 import type { ActiveRun, ChatRunRequest } from "./types";
 import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "./runtimeDetailProjection";
+import { applyRunSegment } from "./runSegmentReducer";
 
 export interface RunControllerCallbacks {
   activeRuns: Map<string, ActiveRun>;
@@ -43,12 +44,17 @@ export function createRunController(callbacks: RunControllerCallbacks) {
         callbacks.applyRuntimeNodeFrame?.(frame);
         callbacks.updateConversation?.(request.conversationId, (conversation) => integrateRuntimeNodeFrame(conversation, frame));
         if (message.type === "node.delete") finalNode = message.node;
+      } else if (message.type === "run_segment") {
+        const segment = message.segment;
+        if (segment) callbacks.updateLastMessage(request.conversationId, (item) => applyRunSegment(item, segment));
+        const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
+        if (runId) callbacks.updateLastMessage(request.conversationId, (item) => ({ ...item, runId }));
       } else if (message.type === "event") {
         const kind = message.kind ?? "";
         if (kind === "response_delta" && !nodeProtocol) {
           const content = (message.data?.content as string | undefined) ?? message.message ?? "";
           if (content) callbacks.updateLastMessage(request.conversationId, (item) => ({ ...item, content: item.content + content }));
-        } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result") {
+        } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result" || kind === "tool_failed") {
           callbacks.updateLastMessage(request.conversationId, (item) => appendLegacyRuntimeEvent(item, {
             kind,
             message: message.message ?? "",

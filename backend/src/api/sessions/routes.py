@@ -558,8 +558,14 @@ def get_session_transcript(
             if payload["role"] != "assistant" or not run_id:
                 continue
             events = store.load_runtime_messages(session_id, run_id=str(run_id))
+            segments: dict[str, dict] = {}
             for event in events:
                 event_data = dict(event.data)
+                if event.kind == "run_segment":
+                    segment_id = str(event_data.get("segment_id") or "")
+                    if segment_id:
+                        segments[segment_id] = event_data
+                    continue
                 if event.kind in {"thinking", "thinking_start", "thinking_delta"}:
                     if not any(item.get("kind") == "thinking" for item in payload["events"]):
                         payload["events"].append({"kind": "thinking", "message": event.message, "data": event_data})
@@ -585,6 +591,8 @@ def get_session_transcript(
                     }
                 elif event.kind == "cancelled" and "status" not in payload:
                     payload["status"] = str(event.data.get("status") or event.message or "cancelled")
+            if segments:
+                payload["segments"] = sorted(segments.values(), key=lambda item: int(item.get("sequence") or 0))
             if any(event.kind == "run_started" for event in events) and not any(
                 event.kind == "run_finished" for event in events
             ):
@@ -605,8 +613,14 @@ def get_session_transcript(
         # Query by run rather than relying on event payloads to carry an ID.
         # Older runtime records may predate the enriched event envelope.
         events = store.load_runtime_messages(session_id, run_id=run_id) if run_id else []
+        segments: dict[str, dict] = {}
         if record["role"] == "assistant":
             for event in events:
+                if event.kind == "run_segment":
+                    segment_id = str(event.data.get("segment_id") or "")
+                    if segment_id:
+                        segments[segment_id] = dict(event.data)
+                    continue
                 if event.kind in {
                     "thinking",
                     "thinking_start",
@@ -630,6 +644,8 @@ def get_session_transcript(
                     }
                 elif event.kind == "cancelled" and "status" not in payload:
                     payload["status"] = str(event.data.get("status") or event.message or "cancelled")
+            if segments:
+                payload["segments"] = sorted(segments.values(), key=lambda item: int(item.get("sequence") or 0))
             if any(event.kind == "run_started" for event in events) and not any(
                 event.kind == "run_finished" for event in events
             ):

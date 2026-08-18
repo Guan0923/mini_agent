@@ -10,6 +10,7 @@ import pytest
 
 from backend.api.sessions.projection import project_node_transcript
 from backend.configuration import ClientPaths
+from backend.domain import AssistantMessage
 from backend.domain.runtime_state import (
     APP_VERSION,
     FAILED_TERMINAL_MESSAGE,
@@ -27,6 +28,7 @@ from backend.domain.runtime_state import (
 )
 from backend.providers.canonical import to_chat_completions, to_messages, to_responses
 from backend.providers.token_usage import normalize_provider_usage
+from backend.runtime.core.context import _chat_messages_from_nodes
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.storage.sqlite import SQLiteSessionStore
@@ -804,6 +806,65 @@ def test_legacy_execution_bridge_emits_only_node_lifecycle_frames(tmp_path: Path
     assert [frame.type for frame in frames][-1] == "node.delete"
     assert all(frame.type in {"node.create", "node.update", "node.delete"} for frame in frames)
     assert store.load_nodes(session.session_id)[-1].data["message"]["content"][0]["text"] == "AB"
+
+
+def test_bridge_keeps_multi_tool_batch_on_one_assistant_node() -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(store, session_id="s", prompt="hello", emit=lambda _frame: None)
+    bridge.start()
+    bridge.handle(
+        RuntimeEvent(
+            "assistant_message",
+            data={
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_messages": [
+                        {"name": "glob", "call_id": "call_a", "arguments": {}},
+                        {"name": "run_command", "call_id": "call_b", "arguments": {}},
+                    ],
+                }
+            },
+        )
+    )
+    bridge.handle(RuntimeEvent("tool_call", "glob", {"tool": "glob", "call_id": "call_a"}))
+    bridge.handle(RuntimeEvent("tool_result", "glob result", {"tool": "glob", "call_id": "call_a"}))
+    bridge.handle(RuntimeEvent("tool_call", "run_command", {"tool": "run_command", "call_id": "call_b"}))
+    bridge.handle(RuntimeEvent("tool_result", "command result", {"tool": "run_command", "call_id": "call_b"}))
+
+    context = bridge.model_context()
+    messages = _chat_messages_from_nodes(context)
+    assistants = [message for message in messages if isinstance(message, AssistantMessage) and message.tool_messages]
+    assert len(assistants) == 1
+    assert [(tool.call_id, tool.status, tool.content) for tool in assistants[0].tool_messages] == [
+        ("call_a", "succeeded", "glob result"),
+        ("call_b", "succeeded", "command result"),
+    ]
+
+
+def test_hidden_tool_failure_closes_canonical_tool_call() -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(store, session_id="s", prompt="hello", emit=lambda _frame: None)
+    bridge.start()
+    bridge.handle(
+        RuntimeEvent(
+            "assistant_message",
+            data={
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_messages": [{"name": "run_command", "call_id": "call_a", "arguments": {}}],
+                }
+            },
+        )
+    )
+    bridge.handle(RuntimeEvent("tool_failed", "command failed", {"tool": "run_command", "call_id": "call_a"}))
+
+    messages = _chat_messages_from_nodes(bridge.model_context())
+    assistants = [message for message in messages if isinstance(message, AssistantMessage) and message.tool_messages]
+    assert len(assistants) == 1
+    assert assistants[0].tool_messages[0].status == "failed"
+    assert assistants[0].tool_messages[0].content == "command failed"
 
 
 def test_bridge_switches_to_handoff_session_without_mixing_nodes() -> None:

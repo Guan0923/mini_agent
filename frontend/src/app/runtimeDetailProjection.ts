@@ -239,7 +239,7 @@ export function appendLegacyRuntimeEvent(message: ChatMessage, event: ToolEvent)
     if (index >= 0) events[index] = { ...events[index], data: { ...events[index].data, streaming: false } };
     return { ...message, events };
   }
-  if (["tool_call", "tool_result"].includes(event.kind)) {
+  if (["tool_call", "tool_result", "tool_failed"].includes(event.kind)) {
     return { ...message, events: [...message.events, event] };
   }
   return message;

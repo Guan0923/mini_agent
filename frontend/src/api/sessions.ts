@@ -1,4 +1,4 @@
-import type { ChatMessage, FileReference, RuntimeStateNode } from "../types";
+import type { ChatMessage, FileReference, RunPresentationSegment, RuntimeStateNode } from "../types";
 import { normalizeRuntimeNode } from "../app/runtimeNodeNormalization";
 import { jsonBody, requestJson } from "./request";
 
@@ -26,6 +26,7 @@ export interface SessionMessage {
   role: "user" | "assistant";
   content: string;
   events?: ChatMessage["events"];
+  segments?: RunPresentationSegment[];
   status?: string;
   metrics?: ChatMessage["metrics"];
   error?: string;

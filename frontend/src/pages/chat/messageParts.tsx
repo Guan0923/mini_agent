@@ -1,7 +1,7 @@
 import { Alert, Avatar, BorderBeam, Collapse, App as AntApp, message as staticMessage } from "antd";
 import { BranchesOutlined, CopyOutlined, EditOutlined, FileTextOutlined, RollbackOutlined, ToolOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
-import type { ChatMessage, DecisionRequest, DisplayMode, FileReference, ToolEvent } from "../../types";
+import type { ChatMessage, DecisionRequest, DisplayMode, FileReference, RunPresentationSegment, RunPresentationTool, ToolEvent } from "../../types";
 import { effectiveDisplayMode } from "../../app/displayMode";
 import { fileReferenceAvailable, sessionFileContentUrl } from "../../api";
 import DecisionCard from "../../components/DecisionCard";
@@ -224,6 +224,97 @@ function RuntimeDetails({ msg, configuredDisplay }: { msg: ChatMessage; configur
   );
 }
 
+function presentationToolBody(tool: RunPresentationTool, display: DisplayMode) {
+  const status = tool.status === "pending" ? "等待执行" : tool.status === "succeeded" ? "已完成" : "失败";
+  return (
+    <div className="runtime-tool-body">
+      <div className="tool-line">
+        <ToolOutlined aria-hidden="true" /> <b>{tool.name}</b> <span className={`tool-status ${tool.status}`}>{status}</span>
+        {display === "developer" ? <span className="tool-call-id">call ID: {tool.call_id}</span> : null}
+      </div>
+      {display === "verbose" || display === "developer" ? <pre className="tool-payload">{jsonText(tool.arguments)}</pre> : null}
+      {tool.result && display !== "minimal" ? <pre className="tool-result">{jsonText(tool.result)}</pre> : null}
+      {tool.error ? <pre className="tool-result error-text">{tool.error}</pre> : null}
+      {display === "developer" ? <pre className="tool-payload">{jsonText(tool)}</pre> : null}
+    </div>
+  );
+}
+
+function RunSegments({ msg, configuredDisplay }: { msg: ChatMessage; configuredDisplay: DisplayMode }) {
+  const display = effectiveDisplayMode(configuredDisplay);
+  const segments = msg.segments ?? [];
+  const [activeKeys, setActiveKeys] = useState<string[]>(() =>
+    segments.filter((segment) => msg.running && (segment.segment_type === "thinking" || segment.segment_type === "tool_batch"))
+      .map((segment) => segment.segment_id),
+  );
+
+  useEffect(() => {
+    const streaming = segments
+      .filter((segment) => segment.status === "streaming" && (segment.segment_type === "thinking" || segment.segment_type === "tool_batch"))
+      .map((segment) => segment.segment_id);
+    if (streaming.length) setActiveKeys((current) => [...new Set([...current, ...streaming])]);
+  }, [segments]);
+
+  function toggle(key: string, keys: string | string[]) {
+    const next = Array.isArray(keys) ? keys.map(String) : [String(keys)];
+    setActiveKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...new Set([...current, ...next])]);
+  }
+
+  function renderToolBatch(segment: RunPresentationSegment) {
+    const tools = segment.tools ?? [];
+    if (!tools.length) return null;
+    if (tools.length === 1) {
+      const tool = tools[0];
+      return (
+        <Collapse
+          key={segment.segment_id}
+          className="runtime-tool-batch"
+          size="small"
+          activeKey={activeKeys.includes(segment.segment_id) ? [segment.segment_id] : []}
+          onChange={(keys) => toggle(segment.segment_id, keys)}
+          items={[{ key: segment.segment_id, label: `调用 ${tool.name}`, children: presentationToolBody(tool, display) }]}
+        />
+      );
+    }
+    return (
+      <Collapse
+        key={segment.segment_id}
+        className="runtime-tool-batch"
+        size="small"
+        activeKey={activeKeys.includes(segment.segment_id) ? [segment.segment_id] : []}
+        onChange={(keys) => toggle(segment.segment_id, keys)}
+        items={[{
+          key: segment.segment_id,
+          label: "并行工具调用",
+          children: <Collapse size="small" items={tools.map((tool) => ({ key: tool.call_id, label: `${tool.name} · ${tool.status}`, children: presentationToolBody(tool, display) }))} />,
+        }]}
+      />
+    );
+  }
+
+  return (
+    <div className="runtime-segments">
+      {segments.map((segment) => {
+        if (segment.segment_type === "response") {
+          return segment.text ? <div className="runtime-segment-response" key={segment.segment_id}><MarkdownContent text={segment.text} /></div> : null;
+        }
+        if (segment.segment_type === "tool_batch") return renderToolBatch(segment);
+        const thought = display === "minimal" ? summarizeThinking(segment.text ?? "") : segment.text ?? "";
+        return (
+          <Collapse
+            key={segment.segment_id}
+            className="runtime-thinking-segment"
+            size="small"
+            activeKey={activeKeys.includes(segment.segment_id) ? [segment.segment_id] : []}
+            onChange={(keys) => toggle(segment.segment_id, keys)}
+            items={[{ key: segment.segment_id, label: "思考", children: display === "minimal" ? <ShimmerText active={segment.status === "streaming"}>{thought || "正在思考…"}</ShimmerText> : <MarkdownContent text={thought || "正在思考…"} /> }]}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 export function AssistantMessage({
   msg,
   display,
@@ -239,10 +330,10 @@ export function AssistantMessage({
 }) {
   const frame = (
     <div className={msg.running ? "assistant-run-frame is-running" : "assistant-run-frame"}>
-      <RuntimeDetails msg={msg} configuredDisplay={display} />
+      {msg.segments?.length ? <RunSegments msg={msg} configuredDisplay={display} /> : <RuntimeDetails msg={msg} configuredDisplay={display} />}
       {msg.decision ? <DecisionCard request={msg.decision} onSubmit={(choice, options) => onDecision(msg.decision!, choice, options)} /> : null}
       {msg.error ? <Alert className="error-text" type="error" showIcon title={`⚠️ ${msg.error}`} /> : null}
-      {msg.content ? <MarkdownContent text={msg.content} /> : null}
+      {!msg.segments?.length && msg.content ? <MarkdownContent text={msg.content} /> : null}
       {!msg.error && !msg.content && msg.running && !msg.decision ? <div className="thinking" role="status" aria-label="思考中" data-state="thinking" aria-live="polite"><span className="dot" /><span className="dot" /><span className="dot" /></div> : null}
       {display !== "minimal" && (msg.status || (msg.metrics && msg.metrics.duration_ms != null)) ? <div className="meta">{msg.status ?? ""}{msg.status && msg.metrics && msg.metrics.duration_ms != null ? " · " : ""}{msg.metrics && msg.metrics.duration_ms != null ? `${(msg.metrics.duration_ms / 1000).toFixed(1)}s · ${msg.metrics.model_calls ?? 0} 次模型调用 · ${msg.metrics.tool_calls ?? 0} 次工具调用` : null}</div> : null}
       <MessageActions msg={msg} busy={busy} onFork={onFork} />

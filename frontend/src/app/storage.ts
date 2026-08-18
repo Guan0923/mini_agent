@@ -130,6 +130,7 @@ export function transcriptToMessages(transcript: SessionMessage[]): ChatMessage[
     role: message.role,
     content: message.content,
     events: message.events ?? [],
+    segments: message.segments,
     status: message.status,
     metrics: message.metrics,
     error: message.error,

@@ -107,6 +107,7 @@ class PlanProposalWorkflow(PlanControlMixin):
                 if cancel_if_requested(runtime):
                     return None
                 if outcome.interrupt is not None:
+                    _fail_pending_tools(runtime, response, "Not executed because tool execution was interrupted.")
                     runtime.state.active_message = None
                     runtime.state.active_tool_index = None
                     if outcome.interrupt.choice == "cancel":

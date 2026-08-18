@@ -40,6 +40,29 @@ export interface ToolEvent {
   data?: Record<string, unknown>;
 }
 
+export type RunSegmentType = "thinking" | "response" | "tool_batch";
+export type RunSegmentStatus = "streaming" | "completed" | "failed";
+export type RunPresentationToolStatus = "pending" | "succeeded" | "failed";
+
+export interface RunPresentationTool {
+  call_id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  status: RunPresentationToolStatus;
+  result?: string;
+  error?: string;
+}
+
+export interface RunPresentationSegment {
+  sequence: number;
+  segment_id: string;
+  segment_type: RunSegmentType;
+  status: RunSegmentStatus;
+  text?: string;
+  final?: boolean;
+  tools?: RunPresentationTool[];
+}
+
 export type TodoStatus = "pending" | "in_progress" | "completed";
 
 export interface TodoItem {
@@ -106,6 +129,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   events: ToolEvent[];
+  segments?: RunPresentationSegment[];
   status?: string;
   metrics?: Metrics;
   error?: string;
@@ -240,7 +264,7 @@ export interface SkillInfo {
 }
 
 export interface StreamMessage {
-  type: "event" | "done" | "error" | "job" | NodeFrameType;
+  type: "event" | "done" | "error" | "job" | "run_segment" | NodeFrameType;
   kind?: string;
   message?: string;
   data?: Record<string, unknown>;
@@ -253,4 +277,5 @@ export interface StreamMessage {
   mode?: ChatMode;
   node?: RuntimeStateNode;
   job_id?: string;
+  segment?: RunPresentationSegment;
 }

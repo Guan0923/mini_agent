@@ -366,6 +366,13 @@ def _stream(
     def sink(item) -> None:
         if cancel_requested.is_set():
             return
+        if not isinstance(item, dict) and getattr(item, "kind", "") == "run_segment":
+            payload = dict(item.data)
+            payload.setdefault("session_id", session_id)
+            # Keep the segment both as a convenient typed envelope and as
+            # top-level fields matching the public SSE presentation contract.
+            q.put({"type": "run_segment", "segment": payload, **payload})
+            return
         bridge = bridge_ref["bridge"]
         if isinstance(item, dict):
             if bridge is not None:

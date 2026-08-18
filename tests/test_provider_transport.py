@@ -1,9 +1,10 @@
 import pytest
 import requests
 
-from backend.domain import AssistantMessage, ToolSpec, UserMessage
+from backend.domain import AssistantMessage, ToolMessage, ToolSpec, UserMessage
 from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.providers import DeepSeek, LLMClient, ModelConfig, ModelRequestError
+from backend.providers.deepseek.messages import _wire_messages_from
 from backend.runtime import AgentRunner, PreparedResponse
 from backend.tools import ToolRegistry
 
@@ -382,6 +383,37 @@ def test_response_rejects_duplicate_tool_call_ids() -> None:
 
     with pytest.raises(ModelRequestError, match="Duplicate DeepSeek tool call id"):
         deepseek_for_test().prepare_response(runtime)
+
+
+def test_wire_messages_merges_duplicate_canonical_tool_calls() -> None:
+    messages = [
+        AssistantMessage(
+            content=None,
+            tool_messages=[
+                ToolMessage(name="glob", call_id="call_a", arguments={}, content="glob", status="succeeded"),
+                ToolMessage(name="run_command", call_id="call_b", arguments={}, status="pending"),
+            ],
+        ),
+        AssistantMessage(
+            content=None,
+            tool_messages=[
+                ToolMessage(
+                    name="run_command",
+                    call_id="call_b",
+                    arguments={},
+                    content="command",
+                    status="succeeded",
+                )
+            ],
+        ),
+    ]
+
+    wire = _wire_messages_from(messages)
+    assistant = [item for item in wire if item.get("role") == "assistant"]
+    tools = [item for item in wire if item.get("role") == "tool"]
+    assert len(assistant) == 1
+    assert [call["id"] for call in assistant[0]["tool_calls"]] == ["call_a", "call_b"]
+    assert [item["tool_call_id"] for item in tools] == ["call_a", "call_b"]
 
 
 @pytest.mark.parametrize("status_code", [429, 503])
