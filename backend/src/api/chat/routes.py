@@ -363,11 +363,19 @@ def _stream(
     q: queue.Queue = queue.Queue()
     done = threading.Event()
     cancel_requested = threading.Event()
+    job_registry = getattr(state, "job_registry", None)
+    job_holder: dict[str, ThreadJob | None] = {"job": None}
     finished: dict = {}
     bridge_ref: dict[str, RuntimeEventNodeBridge | None] = {"bridge": None}
 
+    def cancellation_requested() -> bool:
+        job = job_holder["job"]
+        if job is not None and job.is_cancelled():
+            cancel_requested.set()
+        return cancel_requested.is_set()
+
     def sink(item) -> None:
-        if cancel_requested.is_set():
+        if cancellation_requested():
             return
         if not isinstance(item, dict) and getattr(item, "kind", "") == "run_segment":
             payload = dict(item.data)
@@ -432,18 +440,18 @@ def _stream(
         q.put({"type": "event", "kind": item.kind, "message": item.message, "data": payload})
 
     def enqueue_terminal(item: dict) -> None:
-        if not cancel_requested.is_set():
+        if not cancellation_requested():
             q.put(item)
 
     owner_id = identity.id if identity is not None else None
     interactive_interrupt = make_interactive_interrupt(
         sink,
-        cancel_requested=cancel_requested.is_set,
+        cancel_requested=cancellation_requested,
         owner_id=owner_id,
     )
     full_access_interrupt = make_interactive_interrupt(
         sink,
-        cancel_requested=cancel_requested.is_set,
+        cancel_requested=cancellation_requested,
         auto_approve_tools=True,
         owner_id=owner_id,
     )
@@ -476,6 +484,8 @@ def _stream(
     def worker() -> None:
         app = None
         try:
+            outer_job = job_holder["job"]
+            job_parent_id = outer_job.info().id if outer_job is not None else None
             workspace = (
                 state.session_workspace(identity.id, session_id)
                 if identity is not None and session_id is not None
@@ -505,6 +515,8 @@ def _stream(
                     load_model_config=False,
                     workspace=workspace,
                     project_id=bound_project.project_id if bound_project is not None else None,
+                    job_registry=job_registry,
+                    job_parent_id=job_parent_id,
                     rag_mode=rag_mode,
                 )
             else:
@@ -516,6 +528,8 @@ def _stream(
                     model_config=model_config,
                     config_override=runtime_config,
                     default_timezone=default_timezone,
+                    job_registry=job_registry,
+                    job_parent_id=job_parent_id,
                     **path_options,
                 )
             conversation = app.open_conversation(session_id) if session_id else app.open_conversation()
@@ -571,7 +585,7 @@ def _stream(
                         running_mode=mode,
                         cwd=str(workspace),
                         references=references,
-                        emit=lambda frame: q.put(frame.to_dict()) if not cancel_requested.is_set() else None,
+                        emit=lambda frame: q.put(frame.to_dict()) if not cancellation_requested() else None,
                     )
                     bridge_ref["bridge"].apply_runtime_config(
                         {
@@ -608,7 +622,7 @@ def _stream(
                     mode=mode,
                     on_event=sink,
                     interrupt=interrupt,
-                    cancel_requested=cancel_requested.is_set,
+                    cancel_requested=cancellation_requested,
                     request_parameters=request_parameters,
                     references=references or [],
                 )
@@ -617,7 +631,7 @@ def _stream(
                     conversation,
                     interrupt,
                     sink,
-                    cancel_requested.is_set,
+                    cancellation_requested,
                     _model_request_parameters(request_model, effective_reasoning),
                 )
             active_session = getattr(conversation, "active_session", None)
@@ -782,8 +796,6 @@ def _stream(
                     pass
             done.set()
 
-    job_registry = getattr(state, "job_registry", None)
-    job_holder: dict[str, ThreadJob | None] = {"job": None}
     if job_registry is not None:
         parent_scope = getattr(state, "system_job_scope", job_registry.root_scope())
         user_scope = parent_scope.child(

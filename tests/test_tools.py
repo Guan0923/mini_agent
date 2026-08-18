@@ -1,10 +1,23 @@
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from backend.tools import Tool, ToolError, ToolRegistry, WorkspaceCommand
+from backend.jobs import (
+    AdmissionPolicy,
+    JobKind,
+    JobLane,
+    JobLimitPolicy,
+    JobRegistry,
+    JobScopeKind,
+    JobState,
+    LaneLimits,
+    ThreadJob,
+)
+from backend.tools import Tool, ToolError, ToolInvocationContext, ToolRegistry, WorkspaceCommand
+from backend.tools.default_tools.command import command_tool
 
 
 class FakeProcess:
@@ -16,17 +29,17 @@ class FakeProcess:
         returncode: int = 0,
         times_out: bool = False,
     ) -> None:
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = returncode
+        self.stdout = stdout.encode()
+        self.stderr = stderr.encode()
+        self.returncode: int | None = None if times_out else returncode
         self.times_out = times_out
         self.pid = 1234
         self.communicate_calls: list[int | None] = []
         self.killed = False
 
-    def communicate(self, timeout: int | None = None) -> tuple[str, str]:
+    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
         self.communicate_calls.append(timeout)
-        if self.times_out and timeout is not None:
+        if self.times_out and len(self.communicate_calls) == 1 and timeout is not None:
             raise subprocess.TimeoutExpired(["shell"], timeout)
         return self.stdout, self.stderr
 
@@ -36,6 +49,9 @@ class FakeProcess:
     def kill(self) -> None:
         self.killed = True
         self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        return self.returncode
 
 
 def test_command_tool_uses_powershell_on_windows_and_workspace_cwd(tmp_path: Path) -> None:
@@ -64,7 +80,7 @@ def test_command_tool_uses_powershell_on_windows_and_workspace_cwd(tmp_path: Pat
         "New-Item -ItemType Directory demo",
     ]
     options = calls[0][1]
-    assert options["cwd"] == tmp_path.resolve()
+    assert options["cwd"] == str(tmp_path.resolve())
     assert options["stdin"] == subprocess.DEVNULL
     assert options["stdout"] == subprocess.PIPE
     assert options["stderr"] == subprocess.PIPE
@@ -177,7 +193,7 @@ def test_command_timeout_terminates_the_process_tree(tmp_path: Path, is_windows:
 
     assert "stdout:\npartial" in str(exc_info.value)
     assert terminated == [1234]
-    assert process.communicate_calls == [2, None]
+    assert process.communicate_calls == [2, 30.0]
 
 
 def test_command_output_uses_one_shared_limit_and_preserves_both_streams(tmp_path: Path) -> None:
@@ -194,6 +210,115 @@ def test_command_output_uses_one_shared_limit_and_preserves_both_streams(tmp_pat
     assert output.startswith("stdout:\n")
     assert "\nstderr:\n" in output
     assert "output truncated" in output
+
+
+def test_command_job_reuses_parent_slot_and_is_visible_in_shared_registry(tmp_path: Path) -> None:
+    limits = {lane: LaneLimits(max_running=1, max_queued=1) for lane in JobLane}
+    registry = JobRegistry(policy=JobLimitPolicy(system=limits, user=limits, runner=limits))
+    user_scope = registry.root_scope().child(
+        JobScopeKind.USER,
+        user_id="user-1",
+        session_id="session-1",
+    )
+    runner_scope = user_scope.child(JobScopeKind.RUNNER)
+    parent_job_id = registry.new_job_id()
+    run_scope = runner_scope.child(
+        JobScopeKind.RUN,
+        run_id="run-1",
+        parent_job_id=parent_job_id,
+    )
+    commands = WorkspaceCommand(
+        tmp_path,
+        is_windows=False,
+        popen_factory=lambda _args, **_kwargs: FakeProcess(stdout="managed\n"),
+        environment={},
+    )
+    tools = ToolRegistry([command_tool(commands)])
+    result: dict[str, str] = {}
+
+    def invoke_command() -> None:
+        result["output"] = tools.invoke_with_context(
+            "run_command",
+            {"command": "echo managed"},
+            ToolInvocationContext(
+                session_id="session-1",
+                job_scope=run_scope,
+            ),
+            confirmed=True,
+        )
+
+    parent_job = ThreadJob(parent_job_id, invoke_command)
+    registry.submit(
+        parent_job,
+        scope=user_scope,
+        lane=JobLane.FOREGROUND,
+        admission=AdmissionPolicy(),
+    )
+
+    assert parent_job.wait(2.0)
+    assert parent_job.info().state is JobState.SUCCEEDED
+    assert result["output"] == "stdout:\nmanaged\n"
+    command_records = [
+        item
+        for item in registry.list_for_user("user-1", session_id="session-1")
+        if item.info.kind is JobKind.SUBPROCESS
+    ]
+    assert len(command_records) == 1
+    assert command_records[0].parent_job_id == parent_job_id
+    assert command_records[0].lane is JobLane.FOREGROUND
+    assert command_records[0].info.state is JobState.SUCCEEDED
+    assert command_records[0].slot_mode.value == "inherit"
+    registry.close_all(timeout=2.0)
+
+
+def test_command_runtime_cancellation_terminates_managed_process(tmp_path: Path) -> None:
+    started = threading.Event()
+    stopped = threading.Event()
+    terminated: list[int] = []
+
+    class BlockingProcess:
+        pid = 4321
+        returncode: int | None = None
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            started.set()
+            assert stopped.wait(2.0)
+            return b"partial", b""
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int | None:
+            stopped.wait(timeout)
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+            stopped.set()
+
+    process = BlockingProcess()
+
+    def terminate(candidate: BlockingProcess) -> None:
+        terminated.append(candidate.pid)
+        candidate.returncode = -9
+        stopped.set()
+
+    command = WorkspaceCommand(
+        tmp_path,
+        is_windows=False,
+        popen_factory=lambda _args, **_kwargs: process,
+        tree_terminator=terminate,
+        environment={},
+    )
+
+    with pytest.raises(ToolError, match="cancelled") as exc_info:
+        command.run_with_context(
+            ToolInvocationContext(cancel_requested=started.is_set),
+            "slow command",
+        )
+
+    assert terminated == [4321]
+    assert "stdout:\npartial" in str(exc_info.value)
 
 
 def test_command_tool_requires_confirmation_and_validates_timeout(tmp_path: Path) -> None:

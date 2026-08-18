@@ -2,8 +2,7 @@
 
 Uses real short-lived ``sys.executable`` children for lifecycle behaviour, a
 cross-platform grandchild-spawning child for tree-termination, and a fake
-``popen_factory`` for start failures. Output formatting is compared against
-the private ``WorkspaceCommand._format_output`` to prove algorithm parity.
+``popen_factory`` for start failures and direct output-format contract checks.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
@@ -23,7 +21,6 @@ from backend.jobs import (
     format_command_output,
 )
 from backend.jobs.base import JobKind, JobState
-from backend.tools.command import WorkspaceCommand
 
 IS_WINDOWS = os.name == "nt"
 
@@ -271,19 +268,8 @@ def test_output_truncated_at_budget_with_omitted_marker(tmp_path) -> None:
     assert "… output truncated" in job.output
 
 
-def test_output_algorithm_matches_tools_command() -> None:
-    wc = WorkspaceCommand(Path.cwd())
-    samples = [
-        (b"hello\n", b""),
-        (b"", b"error text"),
-        (b"a" * 30_000, b"b" * 30_000),
-        (b"short", b"x" * 50_000),
-        (None, b"only stderr"),
-        (b"stdout only", None),
-        (b"", b""),
-    ]
-    for stdout, stderr in samples:
-        assert format_command_output(stdout, stderr) == wc._format_output(stdout, stderr)
+def test_output_formatter_sections_both_streams() -> None:
+    assert format_command_output(b"hello\n", b"error text") == "stdout:\nhello\n\nstderr:\nerror text"
 
 
 # ---------------------------------------------------------------------------

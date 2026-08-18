@@ -33,6 +33,7 @@ def build_user_application(
     session_provisioner_cleanup: Callable[[str], None] | None = None,
     project_id: str | None = None,
     job_registry: JobRegistry | None = None,
+    job_parent_id: str | None = None,
     rag_mode: str = "tool",
 ) -> AgentApplication:
     """Build an application with the canonical per-user runtime settings."""
@@ -73,6 +74,7 @@ def build_user_application(
         "upload_root": _session_upload_root(state, user_id, session_id),
         "job_registry": job_registry or getattr(state, "job_registry", None),
         "job_user_id": user_id,
+        "job_parent_id": job_parent_id,
     }
     # Preserve compatibility with embedders/tests that inject the historical
     # builder signature while still passing hooks to the canonical factory.

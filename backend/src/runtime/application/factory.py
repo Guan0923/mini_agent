@@ -59,6 +59,7 @@ def build_application(
     upload_root: Path | None = None,
     job_registry: JobRegistry | None = None,
     job_user_id: str | None = None,
+    job_parent_id: str | None = None,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     base_config = initialize_config(resolved_paths, workspace)
@@ -92,6 +93,7 @@ def build_application(
             **({"project_id": project_id} if project_id else {}),
             **({"job_registry": job_registry} if job_registry is not None else {}),
             **({"job_user_id": job_user_id} if job_user_id is not None else {}),
+            **({"job_parent_id": job_parent_id} if job_parent_id is not None else {}),
         )
     else:
         runner = _build_subagent_runner(
@@ -100,6 +102,7 @@ def build_application(
             **({"project_id": project_id} if project_id else {}),
             **({"job_registry": job_registry} if job_registry is not None else {}),
             **({"job_user_id": job_user_id} if job_user_id is not None else {}),
+            **({"job_parent_id": job_parent_id} if job_parent_id is not None else {}),
         )
     try:
         sync_coordinator = _build_sync_coordinator(
@@ -158,6 +161,7 @@ def _build_subagent_runner(
     project_id: str | None = None,
     job_registry: JobRegistry | None = None,
     job_user_id: str | None = None,
+    job_parent_id: str | None = None,
     terminal_type: str | None = None,
 ) -> AgentRunner:
     terminal_type = terminal_type or _terminal_type_for_config(config)
@@ -181,6 +185,7 @@ def _build_subagent_runner(
             project_id=project_id,
             job_registry=job_registry,
             job_user_id=job_user_id,
+            job_parent_id=job_parent_id,
         )
 
     coordinator = SubagentCoordinator(child_factory, workspace, subagent_settings)
@@ -222,6 +227,7 @@ def _build_subagent_runner(
             project_id=project_id,
             job_registry=job_registry,
             job_user_id=job_user_id,
+            job_parent_id=job_parent_id,
         )
     except Exception:
         external.close()
@@ -245,6 +251,7 @@ def _build_runner(
     project_id: str | None = None,
     job_registry: JobRegistry | None = None,
     job_user_id: str | None = None,
+    job_parent_id: str | None = None,
     rag_tool: object | None = None,
 ) -> AgentRunner:
     skills = SkillCatalog.discover(global_root=paths.skills_dir)
@@ -288,6 +295,7 @@ def _build_runner(
         resources=resources,
         job_registry=job_registry,
         job_scope=runner_scope,
+        parent_job_id=job_parent_id,
     )
 
 

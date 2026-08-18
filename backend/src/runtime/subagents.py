@@ -28,7 +28,13 @@ class ChildRunner(Protocol):
     tools: object
 
     def new_runtime(
-        self, *, task: str, session_id: str | None = None, on_event: object = None, interrupt: object = None
+        self,
+        *,
+        task: str,
+        session_id: str | None = None,
+        on_event: object = None,
+        interrupt: object = None,
+        parent_job_id: str | None = None,
     ) -> AgentRuntime: ...
 
     def run(self, runtime: AgentRuntime) -> object: ...
@@ -137,8 +143,9 @@ class SubagentCoordinator:
         assert parent_scope is not None
         for task in tasks:
             task_scope = parent_scope.child(JobScopeKind.TASK)
+            job_id = registry.new_job_id()
 
-            def run_task(task=task) -> None:
+            def run_task(task=task, job_id=job_id) -> None:
                 try:
                     results[task.id] = self._run_task(
                         parent_interrupt is not None,
@@ -147,12 +154,13 @@ class SubagentCoordinator:
                         task,
                         controls[task.id],
                         batch_control,
+                        job_id,
                     )
                 except BaseException as exc:
                     task_exceptions[task.id] = exc
                     raise
 
-            job = ThreadJob(registry.new_job_id(), run_task)
+            job = ThreadJob(job_id, run_task)
             jobs[task.id] = job
             registry.submit(
                 job,
@@ -247,6 +255,7 @@ class SubagentCoordinator:
         task: SubagentTask,
         control: _TaskControl,
         batch_control: _TaskControl,
+        parent_job_id: str,
     ) -> dict[str, Any]:
         control.start()
         bridge.event("subagent_started", "Subagent started", batch_id=batch_id, task_id=task.id)
@@ -280,7 +289,12 @@ class SubagentCoordinator:
                 control.resume()
                 batch_control.resume()
 
-        child_runtime = runner.new_runtime(task=task.task, session_id=new_session_id(), interrupt=interrupt)
+        child_runtime = runner.new_runtime(
+            task=task.task,
+            session_id=new_session_id(),
+            interrupt=interrupt,
+            parent_job_id=parent_job_id,
+        )
         child_runtime.services.cancel_requested = control.cancel.is_set
         try:
             child_run = runner.run(child_runtime)

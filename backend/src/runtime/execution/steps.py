@@ -179,6 +179,7 @@ class ToolStepExecutor:
                             runtime.state.timezone,
                             runtime.services.clock,
                             runtime.services.job_scope,
+                            runtime.services.cancel_requested,
                         ),
                         confirmed=True,
                     )

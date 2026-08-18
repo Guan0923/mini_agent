@@ -36,4 +36,5 @@ def command_tool(commands: WorkspaceCommand) -> Tool:
         ),
         requires_confirmation=True,
         read_only=False,
+        context_handler=commands.run_with_context,
     )

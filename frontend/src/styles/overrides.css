@@ -208,6 +208,11 @@
   max-width: none;
 }
 
+.composer-settings-controls .ant-space-item {
+  display: flex;
+  align-items: center;
+}
+
 .composer-toolbar {
   flex-wrap: nowrap;
 }

@@ -148,8 +148,8 @@ def test_workspace_command_filters_sensitive_environment_variables(tmp_path: Pat
         returncode = 0
 
         @staticmethod
-        def communicate(timeout: int | None = None) -> tuple[str, str]:
-            return "", ""
+        def communicate(timeout: float | None = None) -> tuple[bytes, bytes]:
+            return b"", b""
 
         def poll(self) -> int:
             return self.returncode

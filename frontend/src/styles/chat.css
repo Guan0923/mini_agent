@@ -98,7 +98,7 @@
 .message {
   display: flex;
   gap: 12px;
-  max-width: 830px;
+  max-width: 1038px;
   margin: 0 auto 22px;
   padding: 0 20px;
   font-size: 17px;
@@ -375,6 +375,9 @@
 }
 
 .tool-result {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -404,17 +407,23 @@
   padding: 4px 0;
 }
 
-.tool-result pre {
+.tool-result pre,
+pre.tool-result {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   font-size: 12px;
   background: #f7f8fa;
   border-radius: 8px;
-  padding: 10px 0 0;
+  padding: 10px;
   margin: 0;
-  overflow-x: auto;
-  max-height: 220px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
+  max-height: 120px;
+  overflow: auto;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 /* markdown content */

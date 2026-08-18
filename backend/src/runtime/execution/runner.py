@@ -62,6 +62,7 @@ class AgentRunner:
         provider_config_resolver=None,
         job_registry: JobRegistry | None = None,
         job_scope: JobScope | None = None,
+        parent_job_id: str | None = None,
     ) -> None:
         self.planner = planner
         self.tools = tools
@@ -75,6 +76,7 @@ class AgentRunner:
         self.job_registry = job_registry or JobRegistry()
         self._owns_job_registry = job_registry is None
         self.job_scope = job_scope or self.job_registry.root_scope().child(JobScopeKind.RUNNER)
+        self._parent_job_id = parent_job_id
         self._closed = False
         self.settings = RunnerSettings(
             max_transport_retries=max_transport_retries,
@@ -100,6 +102,7 @@ class AgentRunner:
         on_event=None,
         interrupt=None,
         confirm=None,
+        parent_job_id: str | None = None,
     ) -> AgentRuntime:
         runtime = self.empty_runtime(
             session_id=session_id or new_session_id(),
@@ -130,6 +133,7 @@ class AgentRunner:
             JobScopeKind.RUN,
             session_id=runtime.state.session_id,
             run_id=runtime.state.current_run.run_id,
+            parent_job_id=parent_job_id or self._parent_job_id,
         )
         runtime.services.on_event = on_event
         runtime.services.interrupt = interrupt
@@ -185,6 +189,7 @@ class AgentRunner:
                 JobScopeKind.RUN,
                 session_id=runtime.state.session_id,
                 run_id=runtime.state.current_run.run_id,
+                parent_job_id=self._parent_job_id,
             )
         runtime.state.runner_settings = self.settings
         return runtime

@@ -2,7 +2,7 @@ import { App as AntApp } from "antd";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../../types";
-import { AssistantMessage, summarizeThinking } from "./messageParts";
+import { AssistantMessage, summarizeThinking, ToolLine } from "./messageParts";
 
 describe("runtime thinking summary", () => {
   it("uses the first non-empty paragraph and trims its edges", () => {
@@ -81,6 +81,9 @@ describe("assistant runtime Collapse presentation", () => {
     const nestedToolHeader = expandedCollapses[2].querySelector(".ant-collapse-header");
     expect(nestedToolHeader).not.toBeNull();
     fireEvent.click(nestedToolHeader as HTMLElement);
+    const runtimeResult = container.querySelector("pre.tool-result");
+    expect(runtimeResult).not.toBeNull();
+    expect(runtimeResult).toHaveTextContent("工具结果一");
 
     const firstHeader = collapses[0].querySelector(".ant-collapse-header");
     expect(firstHeader).not.toBeNull();
@@ -91,5 +94,48 @@ describe("assistant runtime Collapse presentation", () => {
     expect(screen.getByText("工具结果一")).toBeInTheDocument();
     expect(screen.getByText("最终答案")).toBeInTheDocument();
     expect(screen.getByText("最终答案").closest(".runtime-collapse")).toBeNull();
+  });
+
+  it("keeps legacy tool results inside a pre block", () => {
+    const result = "第一行\n第二行\n第三行\n第四行\n第五行\n第六行";
+    const { container } = render(
+      <ToolLine
+        ev={{ kind: "tool_result", message: result, data: { tool: "读取文件", result } }}
+        display="developer"
+      />,
+    );
+
+    const resultBlock = container.querySelector(".tool-result > pre");
+    expect(resultBlock).not.toBeNull();
+    expect(resultBlock?.textContent).toBe(result);
+    const payloadBlock = container.querySelector("pre.tool-payload");
+    expect(payloadBlock).not.toBeNull();
+    expect(payloadBlock).not.toHaveClass("tool-result");
+  });
+
+  it("keeps final answer Markdown code blocks separate from tool results", () => {
+    const message: ChatMessage = {
+      id: "assistant-markdown-code",
+      role: "assistant",
+      content: "```text\n最终答案代码\n```",
+      events: [],
+      segments: [],
+    };
+
+    const { container } = render(
+      <AntApp>
+        <AssistantMessage
+          msg={message}
+          display="verbose"
+          busy={false}
+          onDecision={vi.fn().mockResolvedValue(undefined)}
+        />
+      </AntApp>,
+    );
+
+    const answerCode = container.querySelector(".markdown pre");
+    expect(answerCode).not.toBeNull();
+    expect(answerCode).not.toHaveClass("tool-result");
+    expect(answerCode).toHaveTextContent("最终答案代码");
   });
 });
