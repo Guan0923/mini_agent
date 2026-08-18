@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate, useOutletContext } from "react-router-dom";
-import type { OceanTransition } from "../components/OceanScene";
+import type { BeachEnvironment, OceanTransition } from "../components/OceanScene";
 import PublicLayout, { AUTH_EFFECTS_STORAGE_KEY, type PublicOutletContext } from "./PublicLayout";
 import AuthLayout, { AuthTransitionLink } from "./auth/AuthLayout";
 
@@ -9,6 +9,7 @@ const oceanMock = vi.hoisted(() => ({
   props: null as null | {
     transition?: OceanTransition | null;
     effectsEnabled?: boolean;
+    environment?: BeachEnvironment;
     onFallbackChange?: (fallback: boolean) => void;
   },
 }));
@@ -67,6 +68,7 @@ describe("PublicLayout", () => {
     localStorage.clear();
     oceanMock.props = null;
     vi.useRealTimers();
+    Object.defineProperty(navigator, "geolocation", { configurable: true, value: undefined });
   });
 
   it("defaults the switch on and keeps one ocean DOM node through home-to-auth emergence", () => {
@@ -226,5 +228,50 @@ describe("PublicLayout", () => {
 
     fireEvent.click(screen.getByRole("link", { name: "登录" }));
     expect(screen.getByText("登录表单").closest(".auth-card")).not.toHaveClass("auth-card--emerge");
+  });
+
+  it("keeps location light off until the user explicitly grants a position", () => {
+    const getCurrentPosition = vi.fn((success: PositionCallback) => {
+      success({ coords: { latitude: 31.23, longitude: 121.47 } as GeolocationCoordinates } as GeolocationPosition);
+    });
+    Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition } });
+
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <PublicRouteFixture />
+      </MemoryRouter>,
+    );
+
+    const locationButton = screen.getByRole("button", { name: "位置光照" });
+    expect(locationButton).toHaveAttribute("aria-pressed", "false");
+    expect(getCurrentPosition).not.toHaveBeenCalled();
+    expect(oceanMock.props?.environment).toMatchObject({ locationEnabled: false, timeZone: "Asia/Shanghai", coordinates: null });
+
+    fireEvent.click(locationButton);
+    expect(getCurrentPosition).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "已启用位置光照" })).toHaveAttribute("aria-pressed", "true");
+    expect(oceanMock.props?.environment?.locationEnabled).toBe(true);
+    expect(oceanMock.props?.environment?.coordinates).toEqual({ latitude: 31.23, longitude: 121.47 });
+
+    fireEvent.click(screen.getByRole("button", { name: "已启用位置光照" }));
+    expect(screen.getByRole("button", { name: "位置光照" })).toHaveAttribute("aria-pressed", "false");
+    expect(oceanMock.props?.environment).toMatchObject({ locationEnabled: false, timeZone: "Asia/Shanghai", coordinates: null });
+  });
+
+  it("falls back to Beijing time when location permission is denied", () => {
+    const getCurrentPosition = vi.fn((_success: PositionCallback, error?: PositionErrorCallback) => {
+      error?.({ code: 1, message: "denied" } as GeolocationPositionError);
+    });
+    Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition } });
+
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <PublicRouteFixture />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "位置光照" }));
+    expect(screen.getByText("定位权限被拒绝，已使用北京时间。")).toBeInTheDocument();
+    expect(oceanMock.props?.environment).toMatchObject({ locationEnabled: false, timeZone: "Asia/Shanghai", coordinates: null });
   });
 });
