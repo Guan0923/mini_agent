@@ -1,7 +1,8 @@
 import { Switch, Tooltip } from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate, useNavigationType } from "react-router-dom";
-import OceanScene, { type OceanTransition } from "../components/OceanScene";
+import OceanScene, { type BeachEnvironment, type OceanTransition } from "../components/OceanScene";
+import { DEFAULT_TIME_ZONE } from "../components/beach/sunPosition";
 
 export const AUTH_EFFECTS_STORAGE_KEY = "mini-agent-auth-effects-enabled";
 export type AuthTarget = "login" | "register" | "forgot-password";
@@ -35,6 +36,12 @@ interface ExitSnapshot extends AuthSnapshot {
 const SWITCH_OUT_MS = 320;
 const EMERGE_MS = 1050;
 const EXIT_MS = 900;
+
+const DEFAULT_BEACH_ENVIRONMENT: BeachEnvironment = {
+  locationEnabled: false,
+  timeZone: DEFAULT_TIME_ZONE,
+  coordinates: null,
+};
 
 function readEffectsPreference(): boolean {
   try {
@@ -73,6 +80,10 @@ export default function PublicLayout() {
   const [transition, setTransition] = useState<AuthTransition | null>(null);
   const [exitSnapshot, setExitSnapshot] = useState<ExitSnapshot | null>(null);
   const [oceanFallback, setOceanFallback] = useState(false);
+  const [beachEnvironment, setBeachEnvironment] = useState<BeachEnvironment>(DEFAULT_BEACH_ENVIRONMENT);
+  const [locationStatus, setLocationStatus] = useState<"idle" | "requesting" | "enabled" | "error">("idle");
+  const [locationError, setLocationError] = useState("");
+  const locationMessageTimerRef = useRef<number | null>(null);
   const authEffectsEnabled = effectsPreference && !oceanFallback;
 
   const clearTimers = useCallback(() => {
@@ -106,6 +117,67 @@ export default function PublicLayout() {
     }
     if (!enabled) cancelTransition(true);
   }, [cancelTransition]);
+
+  const resetBeachLocation = useCallback(() => {
+    if (locationMessageTimerRef.current !== null) {
+      window.clearTimeout(locationMessageTimerRef.current);
+      locationMessageTimerRef.current = null;
+    }
+    setBeachEnvironment(DEFAULT_BEACH_ENVIRONMENT);
+    setLocationStatus("idle");
+    setLocationError("");
+  }, []);
+
+  const showLocationError = useCallback((message: string) => {
+    if (locationMessageTimerRef.current !== null) window.clearTimeout(locationMessageTimerRef.current);
+    setLocationStatus("error");
+    setLocationError(message);
+    locationMessageTimerRef.current = window.setTimeout(() => {
+      locationMessageTimerRef.current = null;
+      setLocationStatus("idle");
+      setLocationError("");
+    }, 4_500);
+  }, []);
+
+  const requestBeachLocation = useCallback(() => {
+    if (locationStatus === "requesting") return;
+    if (locationMessageTimerRef.current !== null) {
+      window.clearTimeout(locationMessageTimerRef.current);
+      locationMessageTimerRef.current = null;
+    }
+    if (!navigator.geolocation) {
+      setBeachEnvironment(DEFAULT_BEACH_ENVIRONMENT);
+      showLocationError("当前浏览器不支持定位，已使用北京时间。");
+      return;
+    }
+    setLocationStatus("requesting");
+    setLocationError("");
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        const latitude = Number(coords.latitude);
+        const longitude = Number(coords.longitude);
+        if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+          resetBeachLocation();
+          showLocationError("定位数据无效，已使用北京时间。");
+          return;
+        }
+        let timeZone = DEFAULT_TIME_ZONE;
+        try {
+          timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || DEFAULT_TIME_ZONE;
+        } catch {
+          // Keep the deterministic default when the browser cannot expose its IANA zone.
+        }
+        setBeachEnvironment({ locationEnabled: true, timeZone, coordinates: { latitude, longitude } });
+        setLocationStatus("enabled");
+        setLocationError("");
+      },
+      (cause) => {
+        resetBeachLocation();
+        showLocationError(cause.code === 1 ? "定位权限被拒绝，已使用北京时间。" : "暂时无法定位，已使用北京时间。");
+      },
+      { maximumAge: 300_000, timeout: 10_000 },
+    );
+  }, [locationStatus, resetBeachLocation, showLocationError]);
 
   const openAuth = useCallback((target: AuthTarget, options?: { search?: string }) => {
     const destination = targetPath(target, options?.search);
@@ -188,6 +260,9 @@ export default function PublicLayout() {
   }, [authEffectsEnabled, cancelTransition, location.pathname, navigationType, schedule]);
 
   useEffect(() => () => clearTimers(), [clearTimers]);
+  useEffect(() => () => {
+    if (locationMessageTimerRef.current !== null) window.clearTimeout(locationMessageTimerRef.current);
+  }, []);
 
   const oceanTransition = useMemo<OceanTransition | null>(() => {
     if (!authEffectsEnabled || !transition) return null;
@@ -207,7 +282,12 @@ export default function PublicLayout() {
 
   return (
     <div className="public-shell">
-      <OceanScene transition={oceanTransition} effectsEnabled={authEffectsEnabled} onFallbackChange={setOceanFallback} />
+      <OceanScene
+        transition={oceanTransition}
+        effectsEnabled={authEffectsEnabled}
+        environment={beachEnvironment}
+        onFallbackChange={setOceanFallback}
+      />
       <Outlet context={outletContext} />
       {exitSnapshot ? (
         <div className="auth-exit-snapshot" aria-hidden="true">
@@ -221,12 +301,26 @@ export default function PublicLayout() {
           </div>
         </div>
       ) : null}
-      <Tooltip title={oceanFallback ? "当前设备或浏览器已启用静态海面，认证特效不可用。" : "控制登录与注册卡片的水花过渡。"}>
-        <div className="auth-effects-toggle">
-          <Switch size="small" checked={authEffectsEnabled} disabled={oceanFallback} onChange={setAuthEffectsEnabled} aria-label="认证特效" />
-          <span>认证特效</span>
+      <div className="public-controls">
+        <div className="location-control">
+          <button
+            type="button"
+            className={`location-button${locationStatus === "enabled" ? " location-button--enabled" : ""}`}
+            aria-pressed={locationStatus === "enabled"}
+            disabled={locationStatus === "requesting"}
+            onClick={locationStatus === "enabled" ? resetBeachLocation : requestBeachLocation}
+          >
+            {locationStatus === "requesting" ? "正在获取位置…" : locationStatus === "enabled" ? "已启用位置光照" : "位置光照"}
+          </button>
+          {locationError ? <span className="location-control-status" role="status" aria-live="polite">{locationError}</span> : null}
         </div>
-      </Tooltip>
+        <Tooltip title={oceanFallback ? "当前设备或浏览器已启用静态海滩，认证特效不可用。" : "控制登录与注册卡片的水花过渡。"}>
+          <div className="auth-effects-toggle">
+            <Switch size="small" checked={authEffectsEnabled} disabled={oceanFallback} onChange={setAuthEffectsEnabled} aria-label="认证特效" />
+            <span>认证特效</span>
+          </div>
+        </Tooltip>
+      </div>
     </div>
   );
 }

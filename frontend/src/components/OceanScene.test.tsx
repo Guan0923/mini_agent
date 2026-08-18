@@ -14,17 +14,22 @@ const threeState = vi.hoisted(() => {
   };
   const surfaceGeometry = { dispose: vi.fn() };
   const particleGeometry = { setAttribute: vi.fn(), dispose: vi.fn() };
+  const coastlineGeometry = { setAttribute: vi.fn(), dispose: vi.fn() };
+  const skyGeometry = { dispose: vi.fn() };
   const state: {
     shouldThrow: boolean;
     materialOptions: Array<Record<string, any>>;
     materials: Array<{ dispose: ReturnType<typeof vi.fn> }>;
-  } = { shouldThrow: false, materialOptions: [], materials: [] };
+    bufferGeometryCalls: number;
+  } = { shouldThrow: false, materialOptions: [], materials: [], bufferGeometryCalls: 0 };
 
   return {
     state,
     renderer,
     surfaceGeometry,
     particleGeometry,
+    coastlineGeometry,
+    skyGeometry,
     WebGLRenderer: vi.fn(() => {
       if (state.shouldThrow) throw new Error("WebGL unavailable");
       return renderer;
@@ -37,7 +42,11 @@ const threeState = vi.hoisted(() => {
       updateProjectionMatrix: vi.fn(),
     })),
     PlaneGeometry: vi.fn(() => surfaceGeometry),
-    BufferGeometry: vi.fn(() => particleGeometry),
+    BufferGeometry: vi.fn(() => {
+      state.bufferGeometryCalls += 1;
+      return state.bufferGeometryCalls === 1 ? particleGeometry : coastlineGeometry;
+    }),
+    SphereGeometry: vi.fn(() => skyGeometry),
     BufferAttribute: vi.fn((array: Float32Array, itemSize: number) => ({ array, itemSize })),
     ShaderMaterial: vi.fn((options: Record<string, any>) => {
       state.materialOptions.push(options);
@@ -45,8 +54,19 @@ const threeState = vi.hoisted(() => {
       state.materials.push(material);
       return material;
     }),
-    Mesh: vi.fn(() => ({ rotation: { x: 0 } })),
+    Mesh: vi.fn(() => ({ rotation: { x: 0 }, position: { set: vi.fn() }, renderOrder: 0 })),
     Points: vi.fn(() => ({ position: { set: vi.fn() } })),
+    Vector3: class Vector3 {
+      constructor(public x = 0, public y = 0, public z = 0) {}
+      set(x: number, y: number, z: number) { this.x = x; this.y = y; this.z = z; return this; }
+      clone() { return new Vector3(this.x, this.y, this.z); }
+      lerp(target: Vector3, alpha: number) {
+        this.x += (target.x - this.x) * alpha;
+        this.y += (target.y - this.y) * alpha;
+        this.z += (target.z - this.z) * alpha;
+        return this;
+      }
+    },
   };
 });
 
@@ -56,11 +76,14 @@ vi.mock("three", () => ({
   PerspectiveCamera: threeState.PerspectiveCamera,
   PlaneGeometry: threeState.PlaneGeometry,
   BufferGeometry: threeState.BufferGeometry,
+  SphereGeometry: threeState.SphereGeometry,
   BufferAttribute: threeState.BufferAttribute,
   ShaderMaterial: threeState.ShaderMaterial,
   Mesh: threeState.Mesh,
   Points: threeState.Points,
+  Vector3: threeState.Vector3,
   DoubleSide: 2,
+  BackSide: 4,
   AdditiveBlending: 3,
   SRGBColorSpace: "srgb",
   ACESFilmicToneMapping: 1,
@@ -83,6 +106,7 @@ describe("OceanScene", () => {
     threeState.PerspectiveCamera.mockClear();
     threeState.PlaneGeometry.mockClear();
     threeState.BufferGeometry.mockClear();
+    threeState.SphereGeometry.mockClear();
     threeState.BufferAttribute.mockClear();
     threeState.ShaderMaterial.mockClear();
     threeState.Mesh.mockClear();
@@ -92,8 +116,13 @@ describe("OceanScene", () => {
     threeState.surfaceGeometry.dispose.mockClear();
     threeState.particleGeometry.setAttribute.mockClear();
     threeState.particleGeometry.dispose.mockClear();
+    threeState.coastlineGeometry.setAttribute.mockClear();
+    threeState.coastlineGeometry.dispose.mockClear();
+    threeState.skyGeometry.dispose.mockClear();
+    threeState.state.bufferGeometryCalls = 0;
     Object.defineProperty(navigator, "hardwareConcurrency", { configurable: true, value: 4 });
     Object.defineProperty(navigator, "deviceMemory", { configurable: true, value: 4 });
+    Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 });
     window.matchMedia = ((query: string) => ({
       matches: reducedMotion,
       media: query,
@@ -135,6 +164,49 @@ describe("OceanScene", () => {
     expect(threeState.state.materials[0].dispose).toHaveBeenCalledOnce();
     expect(threeState.state.materials[1].dispose).toHaveBeenCalledOnce();
     expect(threeState.renderer.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("adds the beach layers and updates sun uniforms from the environment", () => {
+    const { container, unmount } = render(
+      <OceanScene environment={{ locationEnabled: true, timeZone: "Asia/Shanghai", coordinates: { latitude: 31.23, longitude: 121.47 } }} />,
+    );
+    const surface = threeState.state.materialOptions[0];
+    const sky = threeState.state.materialOptions[2];
+    const coastline = threeState.state.materialOptions[3];
+
+    expect(threeState.SphereGeometry).toHaveBeenCalledOnce();
+    expect(surface.vertexShader).toContain("shorelineY");
+    expect(surface.fragmentShader).toContain("uWetSandStrength");
+    expect(sky.fragmentShader).toContain("cloudNoise");
+    expect(coastline.fragmentShader).toContain("uSkyPhase");
+
+    act(() => frameCallback?.(performance.now() + 100));
+    expect(surface.uniforms.uSunIntensity.value).toBeGreaterThanOrEqual(0);
+    expect(surface.uniforms.uSunDirection.value.y).toBeGreaterThan(-1);
+    expect(container.querySelector(".ocean-scene")).toBeInTheDocument();
+
+    unmount();
+    expect(threeState.skyGeometry.dispose).toHaveBeenCalledOnce();
+    expect(threeState.coastlineGeometry.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("uses the mobile quality profile on touch devices", () => {
+    Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 1 });
+    render(<OceanScene />);
+    expect(threeState.PlaneGeometry).toHaveBeenCalledWith(320, 320, 112, 84);
+    expect(threeState.renderer.setPixelRatio).toHaveBeenCalledWith(1);
+  });
+
+  it("falls back on context loss and resumes after context restoration", () => {
+    const { container } = render(<OceanScene />);
+    const canvas = container.querySelector("canvas");
+    expect(canvas).toBeTruthy();
+
+    act(() => canvas?.dispatchEvent(new Event("webglcontextlost", { cancelable: true })));
+    expect(container.querySelector(".ocean-scene-fallback")).toBeInTheDocument();
+    act(() => canvas?.dispatchEvent(new Event("webglcontextrestored")));
+    expect(threeState.WebGLRenderer).toHaveBeenCalledTimes(2);
+    expect(container.querySelector(".ocean-scene-fallback")).not.toBeInTheDocument();
   });
 
   it("starts and decays phase-aware eruption uniforms", () => {

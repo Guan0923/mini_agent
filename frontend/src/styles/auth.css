@@ -21,8 +21,8 @@
   overflow: hidden;
   pointer-events: none;
   background:
-    radial-gradient(circle at 18% 10%, rgba(255, 248, 215, 0.72), transparent 30%),
-    linear-gradient(155deg, #e6fbf3 0%, #9ce6df 42%, #45b9cb 100%);
+    radial-gradient(ellipse at 30% 12%, rgba(255, 235, 181, 0.74), transparent 28%),
+    linear-gradient(180deg, #277fca 0%, #8fd9e6 42%, #e9c27a 74%, #d89546 100%);
 }
 
 .ocean-canvas {
@@ -42,8 +42,8 @@
 
 .ocean-scene-fallback {
   background:
-    radial-gradient(circle at 18% 12%, rgba(255, 249, 218, 0.78), transparent 30%),
-    linear-gradient(155deg, #def8ee 0%, #8bddd7 46%, #32aabe 100%);
+    radial-gradient(ellipse at 30% 12%, rgba(255, 239, 192, 0.82), transparent 30%),
+    linear-gradient(180deg, #4c9ed0 0%, #b2e1e4 44%, #e7c27f 72%, #d49243 100%);
 }
 
 .ocean-scene-fallback::after {
@@ -52,10 +52,12 @@
   left: -10%;
   right: -10%;
   bottom: -8%;
-  height: 72%;
-  opacity: 0.34;
-  background: repeating-radial-gradient(ellipse at 50% 100%, transparent 0 25px, rgba(241, 255, 249, 0.42) 26px 28px, transparent 29px 54px);
-  transform: perspective(300px) rotateX(58deg);
+  height: 68%;
+  opacity: 0.42;
+  background:
+    linear-gradient(166deg, transparent 0 44%, rgba(247, 255, 247, 0.68) 44.5% 45.4%, transparent 46% 49%, rgba(247, 255, 247, 0.42) 49.4% 50%, transparent 50.5%),
+    repeating-radial-gradient(ellipse at 44% 100%, transparent 0 22px, rgba(247, 255, 247, 0.3) 23px 25px, transparent 26px 52px);
+  transform: perspective(360px) rotateX(58deg) rotateZ(-3deg);
 }
 
 .landing-content,

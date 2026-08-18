@@ -98,9 +98,10 @@
 .message {
   display: flex;
   gap: 12px;
-  max-width: 820px;
+  max-width: 830px;
   margin: 0 auto 22px;
   padding: 0 20px;
+  font-size: 17px;
 }
 
 .message.user {
