@@ -82,6 +82,8 @@ describe("AppSidebar utility navigation", () => {
     const newProjectButton = screen.getByRole("button", { name: "新建项目" });
     expect(newConversationButton).toHaveClass("sidebar-create-button");
     expect(newProjectButton).toHaveClass("sidebar-create-button");
+    expect(newConversationButton).not.toHaveClass("ant-btn-lg");
+    expect(newProjectButton).not.toHaveClass("ant-btn-lg");
 
     await user.click(newConversationButton);
     await user.click(newProjectButton);

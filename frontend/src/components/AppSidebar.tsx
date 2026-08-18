@@ -713,7 +713,6 @@ export default function AppSidebar({
       <Button
         type="default"
         className="sidebar-create-button"
-        size="large"
         block
         icon={<PlusOutlined />}
         onClick={() => void onNew()}
