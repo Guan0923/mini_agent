@@ -93,6 +93,17 @@ afterEach(() => {
 });
 
 describe("ChatPage run lifecycle", () => {
+  it("renders the composer reveal structure without changing its interaction surface", () => {
+    const { container } = render(<Harness />);
+
+    expect(container.querySelector(".composer.composer-reveal-shell")).toBeInTheDocument();
+    expect(container.querySelector(".composer-box-anchor")).toBeInTheDocument();
+    expect(container.querySelector(".composer-input[data-reveal-index='3']")).toBeInTheDocument();
+    expect(container.querySelector(".composer-toolbar[data-reveal-index='4']")).toBeInTheDocument();
+    expect(container.querySelector(".send-btn[data-reveal-index='5']")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("输入任务，按 Enter 发送")).toBeEnabled();
+  });
+
   it("stops the active stream and removes the thinking indicator immediately", async () => {
     let resolveStream: ((result: "aborted") => void) | undefined;
     mocks.streamChat.mockImplementation(

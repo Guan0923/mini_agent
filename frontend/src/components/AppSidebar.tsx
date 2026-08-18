@@ -30,6 +30,8 @@ import {
   FolderOpenOutlined,
   WarningOutlined,
   SettingOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
 } from "@ant-design/icons";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { AuthUser, Conversation, Page } from "../types";
@@ -59,6 +61,9 @@ interface AppSidebarProps {
   onSignOut: () => void | Promise<void>;
   onProfileUpdate?: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
   onOpenSettings?: () => void;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+  revealKey?: number;
 }
 
 interface ProfilePopoverProps {
@@ -557,6 +562,9 @@ export default function AppSidebar({
   onSignOut,
   onProfileUpdate,
   onOpenSettings,
+  collapsed = false,
+  onToggleCollapse,
+  revealKey = 0,
 }: AppSidebarProps) {
   const { modal } = AntApp.useApp();
   const projectStorageKey = `mini-agent-project-collapse:${user?.id ?? "anonymous"}`;
@@ -710,88 +718,107 @@ export default function AppSidebar({
         background: "#f4f7f8",
       }}
     >
-      <Button
-        type="default"
-        className="sidebar-create-button"
-        block
-        icon={<PlusOutlined />}
-        onClick={() => void onNew()}
-        aria-label="新建对话"
-      >
-        新建对话
-      </Button>
+      <div className={`sidebar-reveal-shell${page === "chat" ? " sidebar-reveal-active" : ""}`} key={revealKey}>
+        <div className="sidebar-header sidebar-reveal-item" data-reveal-index="0">
+          <Typography.Text className="sidebar-project-title">Mini-Agent</Typography.Text>
+          {onToggleCollapse ? (
+            <Button
+              className="sidebar-collapse-button"
+              type="text"
+              size="small"
+              icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+              onClick={onToggleCollapse}
+              aria-label={collapsed ? "展开侧边栏" : "折叠侧边栏"}
+              aria-expanded={!collapsed}
+              aria-controls="chat-sidebar"
+            />
+          ) : null}
+        </div>
 
-      <Button
-        type="default"
-        className="sidebar-create-button"
-        block
-        icon={<FolderOpenOutlined />}
-        loading={projectLoading}
-        onClick={() => void onNewProject?.()}
-        aria-label="新建项目"
-        style={{ marginTop: 8, textAlign: "left" }}
-      >
-        新建项目
-      </Button>
-
-      {projectHistory}
-      {ordinaryHistory}
-
-      <Divider style={{ margin: "12px 0" }} />
-      <div className="sidebar-utility-links">
-        <Badge className="sidebar-utility-badge" count={archivedCount} size="small" offset={[5, 0]}>
+        <div className="sidebar-primary-actions sidebar-reveal-item" data-reveal-index="1">
           <Button
-            type={page === "trash" ? "default" : "text"}
+            type="default"
             className="sidebar-create-button"
             block
-            icon={<DeleteOutlined />}
-            onClick={() => onNavigate("trash")}
-            aria-label={`回收站${archivedCount ? ` (${archivedCount})` : ""}`}
-            style={{ textAlign: "left" }}
+            icon={<PlusOutlined />}
+            onClick={() => void onNew()}
+            aria-label="新建对话"
           >
-            回收站
+            新建对话
           </Button>
-        </Badge>
-        <Button
-          type={page === "benchmark" ? "default" : "text"}
-          className="sidebar-create-button"
-          block
-          icon={<BarChartOutlined />}
-          onClick={() => onNavigate("benchmark")}
-          aria-label="Benchmark"
-          style={{ textAlign: "left" }}
-        >
-          Benchmark
-        </Button>
-      </div>
 
-      <div style={{ marginTop: 16 }}>
-        <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>
-          Mini-Agent
-        </Typography.Text>
-        <div className="sidebar-profile-row">
-          {onOpenSettings ? (
-            <Button
-              className="profile-trigger"
-              type="text"
-              icon={<UserOutlined />}
-              onClick={onOpenSettings}
-              aria-label={"个人简介：" + displayName}
-            >
-              <ProfileLabel label={displayName} />
-            </Button>
-          ) : (
-            <ProfilePopover user={user} onSave={onProfileUpdate} />
-          )}
           <Button
-            type="text"
-            size="small"
-            icon={<LogoutOutlined />}
-            onClick={() => void onSignOut()}
-            aria-label="退出"
+            type="default"
+            className="sidebar-create-button"
+            block
+            icon={<FolderOpenOutlined />}
+            loading={projectLoading}
+            onClick={() => void onNewProject?.()}
+            aria-label="新建项目"
+            style={{ marginTop: 8, textAlign: "left" }}
           >
-            退出
+            新建项目
           </Button>
+        </div>
+
+        <div className="sidebar-project-history sidebar-reveal-item" data-reveal-index="2">{projectHistory}</div>
+        <div className="sidebar-ordinary-history sidebar-reveal-item" data-reveal-index="3">{ordinaryHistory}</div>
+
+        <div className="sidebar-utility-section sidebar-reveal-item" data-reveal-index="4">
+          <Divider style={{ margin: "12px 0" }} />
+          <div className="sidebar-utility-links">
+            <Badge className="sidebar-utility-badge" count={archivedCount} size="small" offset={[5, 0]}>
+              <Button
+                type={page === "trash" ? "default" : "text"}
+                className="sidebar-create-button"
+                block
+                icon={<DeleteOutlined />}
+                onClick={() => onNavigate("trash")}
+                aria-label={`回收站${archivedCount ? ` (${archivedCount})` : ""}`}
+                style={{ textAlign: "left" }}
+              >
+                回收站
+              </Button>
+            </Badge>
+            <Button
+              type={page === "benchmark" ? "default" : "text"}
+              className="sidebar-create-button"
+              block
+              icon={<BarChartOutlined />}
+              onClick={() => onNavigate("benchmark")}
+              aria-label="Benchmark"
+              style={{ textAlign: "left" }}
+            >
+              Benchmark
+            </Button>
+          </div>
+        </div>
+
+        <div className="sidebar-footer sidebar-reveal-item" data-reveal-index="5">
+          <div className="sidebar-profile-row">
+            {onOpenSettings ? (
+              <Button
+                className="profile-trigger"
+                type="text"
+                icon={<UserOutlined />}
+                onClick={onOpenSettings}
+                aria-label={"个人简介：" + displayName}
+              >
+                <ProfileLabel label={displayName} />
+              </Button>
+            ) : (
+              <ProfilePopover user={user} onSave={onProfileUpdate} />
+            )}
+            <Button
+              type="text"
+              size="small"
+              icon={<LogoutOutlined />}
+              onClick={() => void onSignOut()}
+              aria-label="退出"
+            >
+              退出
+            </Button>
+          </div>
         </div>
       </div>
     </div>

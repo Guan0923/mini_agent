@@ -69,9 +69,15 @@ export default function AgentShell(props: AgentShellProps) {
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [chatRevealKey, setChatRevealKey] = useState(0);
   useEffect(() => {
-    if (!isMobile) setMobileSidebarOpen(false);
+    if (isMobile) setSidebarCollapsed(false);
+    else setMobileSidebarOpen(false);
   }, [isMobile]);
+  useEffect(() => {
+    if (props.page === "chat") setChatRevealKey((current) => current + 1);
+  }, [props.page]);
   const closeMobile = () => setMobileSidebarOpen(false);
   const navigate = (page: Page) => {
     props.onNavigate(page);
@@ -127,13 +133,20 @@ export default function AgentShell(props: AgentShellProps) {
       }}
       onProfileUpdate={props.onProfileUpdate}
       onOpenSettings={() => props.setSettingsOpen(true)}
+      collapsed={sidebarCollapsed}
+      onToggleCollapse={() => {
+        if (isMobile) closeMobile();
+        else setSidebarCollapsed((current) => !current);
+      }}
+      revealKey={chatRevealKey}
     />
   );
   return (
-    <Layout className="app-shell" style={{ minHeight: "100vh", height: "100vh" }}>
-      {!isMobile && <Layout.Sider width={280} theme="light" style={{ background: "#f4f7f8", boxShadow: "4px 0 12px rgba(0, 0, 0, 0.08)", zIndex: 1 }}>{sidebar}</Layout.Sider>}
+    <Layout className={`app-shell${sidebarCollapsed && !isMobile ? " app-shell--sidebar-collapsed" : ""}`} style={{ minHeight: "100vh", height: "100vh" }}>
+      {!isMobile && <Layout.Sider id="chat-sidebar" width={280} collapsed={sidebarCollapsed} collapsedWidth={0} trigger={null} theme="light" style={{ background: "#f4f7f8", boxShadow: "4px 0 12px rgba(0, 0, 0, 0.08)", zIndex: 1 }}>{sidebar}</Layout.Sider>}
       {isMobile && <Drawer title="会话列表" placement="left" width={280} open={mobileSidebarOpen} onClose={closeMobile} styles={{ body: { padding: 0 } }}>{sidebar}</Drawer>}
       <Layout style={{ minWidth: 0, minHeight: 0 }}>
+        {sidebarCollapsed && !isMobile ? <Button className="sidebar-reopen-button" type="default" size="small" onClick={() => setSidebarCollapsed(false)} aria-label="展开侧边栏" aria-expanded={false} aria-controls="chat-sidebar" icon={<MenuOutlined />} /> : null}
         {isMobile && <div className="mobile-sidebar-bar"><Button type="text" icon={<MenuOutlined />} onClick={() => setMobileSidebarOpen(true)} aria-label="打开会话列表">会话列表</Button></div>}
         <Layout.Content className="main" style={{ minHeight: 0 }}>
           {props.actionError && <Alert className="global-error" type="error" showIcon message={props.actionError} action={<IconAction label="关闭错误" icon={<CloseOutlined />} onClick={props.onClearError} />} />}

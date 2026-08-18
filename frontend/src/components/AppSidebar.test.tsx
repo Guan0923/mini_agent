@@ -55,6 +55,61 @@ function renderSidebar(archivedCount = 0, conversations: Conversation[] = [conve
 }
 
 describe("AppSidebar utility navigation", () => {
+  it("renders the project title and collapse control in the sidebar header", async () => {
+    const user = userEvent.setup();
+    const onToggleCollapse = vi.fn();
+    render(
+      <AppSidebar
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
+        conversations={[conversation]}
+        archivedCount={0}
+        currentId={conversation.id}
+        page="chat"
+        onNew={vi.fn()}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onSignOut={vi.fn()}
+        collapsed={false}
+        onToggleCollapse={onToggleCollapse}
+        revealKey={4}
+      />,
+    );
+
+    const header = document.querySelector(".sidebar-header");
+    expect(header).not.toBeNull();
+    expect(screen.getByText("Mini-Agent", { selector: ".sidebar-project-title" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "折叠侧边栏" })).toHaveAttribute("aria-expanded", "true");
+    expect(document.querySelectorAll(".sidebar-reveal-item")).toHaveLength(6);
+    await user.click(screen.getByRole("button", { name: "折叠侧边栏" }));
+    expect(onToggleCollapse).toHaveBeenCalledOnce();
+  });
+
+  it("uses expand semantics when the sidebar is collapsed", () => {
+    render(
+      <AppSidebar
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
+        conversations={[conversation]}
+        archivedCount={0}
+        currentId={conversation.id}
+        page="chat"
+        onNew={vi.fn()}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onSignOut={vi.fn()}
+        collapsed
+        onToggleCollapse={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "展开侧边栏" })).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("uses the shared create-button style for new conversations and projects", async () => {
     const user = userEvent.setup();
     const onNew = vi.fn();

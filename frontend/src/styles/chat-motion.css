@@ -1,0 +1,168 @@
+@keyframes chat-sidebar-reveal {
+  from {
+    opacity: 0;
+    transform: translate3d(-24px, 14px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes chat-composer-reveal {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 28px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.sidebar-reveal-shell {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.sidebar-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  min-height: 34px;
+  margin-bottom: 16px;
+}
+
+.sidebar-project-title {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-collapse-button {
+  justify-self: end;
+  color: var(--muted);
+}
+
+.sidebar-collapse-button:hover,
+.sidebar-collapse-button:focus-visible {
+  color: var(--accent);
+  background: rgba(8, 127, 141, 0.1);
+}
+
+.sidebar-primary-actions,
+.sidebar-project-history,
+.sidebar-ordinary-history,
+.sidebar-utility-section,
+.sidebar-footer {
+  flex-shrink: 0;
+}
+
+.sidebar-ordinary-history {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sidebar-footer {
+  margin-top: 16px;
+}
+
+.sidebar-reveal-active .sidebar-reveal-item {
+  --sidebar-reveal-delay: calc(var(--sidebar-reveal-index, 0) * 68ms);
+  opacity: 0;
+  animation: chat-sidebar-reveal 420ms cubic-bezier(0.22, 0.72, 0.24, 1) var(--sidebar-reveal-delay) both;
+  will-change: opacity, transform;
+}
+
+.sidebar-reveal-active .sidebar-reveal-item[data-reveal-index="0"] { --sidebar-reveal-index: 0; }
+.sidebar-reveal-active .sidebar-reveal-item[data-reveal-index="1"] { --sidebar-reveal-index: 1; }
+.sidebar-reveal-active .sidebar-reveal-item[data-reveal-index="2"] { --sidebar-reveal-index: 2; }
+.sidebar-reveal-active .sidebar-reveal-item[data-reveal-index="3"] { --sidebar-reveal-index: 3; }
+.sidebar-reveal-active .sidebar-reveal-item[data-reveal-index="4"] { --sidebar-reveal-index: 4; }
+.sidebar-reveal-active .sidebar-reveal-item[data-reveal-index="5"] { --sidebar-reveal-index: 5; }
+
+.composer-reveal-shell {
+  opacity: 0;
+  animation: chat-composer-reveal 520ms cubic-bezier(0.22, 0.72, 0.24, 1) both;
+  will-change: opacity, transform;
+}
+
+.composer-reveal-shell .composer-reveal-item {
+  --composer-reveal-delay: calc((var(--composer-reveal-index, 0) + 1) * 68ms);
+  opacity: 0;
+  animation: chat-composer-reveal 420ms cubic-bezier(0.22, 0.72, 0.24, 1) var(--composer-reveal-delay) both;
+  will-change: opacity, transform;
+}
+
+.composer-reveal-shell .composer-reveal-item[data-reveal-index="0"] { --composer-reveal-index: 0; }
+.composer-reveal-shell .composer-reveal-item[data-reveal-index="1"] { --composer-reveal-index: 1; }
+.composer-reveal-shell .composer-reveal-item[data-reveal-index="2"] { --composer-reveal-index: 2; }
+.composer-reveal-shell .composer-reveal-item[data-reveal-index="3"] { --composer-reveal-index: 3; }
+.composer-reveal-shell .composer-reveal-item[data-reveal-index="4"] { --composer-reveal-index: 4; }
+.composer-reveal-shell .composer-reveal-item[data-reveal-index="5"] { --composer-reveal-index: 5; }
+
+.sidebar-reopen-button {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 20;
+  min-width: 34px;
+  min-height: 34px;
+  border-color: var(--border);
+  border-radius: 10px;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.12);
+}
+
+.sidebar-reopen-button:hover,
+.sidebar-reopen-button:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.app-shell--sidebar-collapsed > .ant-layout {
+  width: 100%;
+  min-width: 0;
+}
+
+.app-shell--sidebar-collapsed .chat-page,
+.app-shell--sidebar-collapsed .chat-content,
+.app-shell--sidebar-collapsed .chat-scroll,
+.app-shell--sidebar-collapsed .composer {
+  width: 100%;
+  min-width: 0;
+}
+
+.app-shell--sidebar-collapsed .chat-messages,
+.app-shell--sidebar-collapsed .composer {
+  margin-inline: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-reveal-active .sidebar-reveal-item,
+  .composer-reveal-shell,
+  .composer-reveal-shell .composer-reveal-item {
+    opacity: 1;
+    transform: none;
+    animation: none;
+    will-change: auto;
+  }
+}
+
+@media (max-width: 767px) {
+  .sidebar-reopen-button {
+    display: none;
+  }
+
+  .sidebar-header {
+    margin-bottom: 12px;
+  }
+}

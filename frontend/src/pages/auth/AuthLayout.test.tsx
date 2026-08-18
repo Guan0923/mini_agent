@@ -14,9 +14,11 @@ describe("AuthLayout", () => {
     );
 
     expect(screen.queryByTestId("ocean-scene")).toBeNull();
-    expect(screen.getByRole("heading", { name: "欢迎回来" })).toBeTruthy();
+    const heading = screen.getByRole("heading", { name: "欢迎回来" });
+    const card = heading.closest(".auth-card");
+    expect(card).toHaveClass("auth-card--staggered-reveal");
+    expect(card?.querySelector(".auth-card-content")).toContainElement(screen.getByRole("button", { name: "继续" }));
     expect(screen.getByText("登录后继续你的智能体工作流。")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "继续" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "← 返回首页" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "← 返回首页" }).closest(".auth-back")).toHaveClass("auth-back--reveal");
   });
 });

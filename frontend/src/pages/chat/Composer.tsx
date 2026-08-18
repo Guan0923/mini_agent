@@ -114,7 +114,7 @@ export default function Composer(props: ComposerProps) {
   );
   return (
     <div
-      className={`composer${props.todos && props.todos.length > 0 ? " has-todo" : ""}`}
+      className={`composer composer-reveal-shell${props.todos && props.todos.length > 0 ? " has-todo" : ""}`}
       data-composer-seat
     >
       {props.fileMenuVisible && (
@@ -140,7 +140,7 @@ export default function Composer(props: ComposerProps) {
       {props.commandMenuVisible && <div className="command-menu">{props.filteredCommands.map((command, index) => <button key={command.name} className={`command-item${index === props.activeCommandIndex ? " selected" : ""}`} onMouseEnter={() => props.onActiveCommandChange(index)} onClick={() => props.onComplete(index)}><span className="command-name">{command.name}</span><span className="command-desc">{command.label} · {command.description}</span></button>)}</div>}
       <div className="composer-box-anchor">
         {props.pendingUploads.length > 0 ? (
-          <div className="composer-uploads" aria-label="上传进度">
+          <div className="composer-uploads composer-reveal-item" data-reveal-index="1" aria-label="上传进度">
             {props.pendingUploads.map((upload, index) => (
               <span key={upload.uid} className={`composer-upload status-${upload.status}`}>
                 {upload.isImage && upload.status === "done" && upload.path && props.sessionId ? (
@@ -156,7 +156,7 @@ export default function Composer(props: ComposerProps) {
           </div>
         ) : null}
         {props.references.length > 0 ? (
-          <div className="composer-references" aria-label="待发送引用">
+          <div className="composer-references composer-reveal-item" data-reveal-index="1" aria-label="待发送引用">
             {props.references.map((reference, index) => (
               <span key={`${reference.source}:${reference.path}`} className="composer-reference">
                 <span className={`file-source-badge ${reference.source}`}>{reference.source === "upload" ? "会话上传" : "项目文件"}</span>
@@ -167,18 +167,18 @@ export default function Composer(props: ComposerProps) {
           </div>
         ) : null}
         {props.todos && props.todos.length > 0 ? (
-          <div className="composer-todo-anchor">
+          <div className="composer-todo-anchor composer-reveal-item" data-reveal-index="1">
             <SessionTodoPanel todos={props.todos} busy={props.busy} />
           </div>
         ) : null}
-        <div className={`composer-box${dragOver ? " is-dragging" : ""}`} onDragOver={(event) => { if (!props.disabled) { event.preventDefault(); setDragOver(true); } }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}>
+        <div className={`composer-box composer-reveal-item${dragOver ? " is-dragging" : ""}`} data-reveal-index="2" onDragOver={(event) => { if (!props.disabled) { event.preventDefault(); setDragOver(true); } }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}>
           <input ref={fileInputRef} type="file" multiple hidden aria-hidden="true" onChange={handleFilesChange} />
-          <Input.TextArea className="composer-input" ref={props.taRef} value={props.input} disabled={props.disabled} onChange={(event) => props.onInputChange(event.target.value)} onKeyDown={props.onKeyDown} onPaste={handlePaste} placeholder={props.disabledReason || "输入任务，按 Enter 发送"} autoSize={{ minRows: 1, maxRows: 8 }} />
-          <div className="composer-toolbar">
+          <Input.TextArea className="composer-input composer-reveal-item" data-reveal-index="3" ref={props.taRef} value={props.input} disabled={props.disabled} onChange={(event) => props.onInputChange(event.target.value)} onKeyDown={props.onKeyDown} onPaste={handlePaste} placeholder={props.disabledReason || "输入任务，按 Enter 发送"} autoSize={{ minRows: 1, maxRows: 8 }} />
+          <div className="composer-toolbar composer-reveal-item" data-reveal-index="4">
             <IconAction className="file-upload-trigger" label="上传文件" icon={<PaperClipOutlined />} disabled={props.disabled || props.uploadsDisabled} onClick={openFilePicker} />
             {props.isMobile ? <IconAction className="run-settings-trigger" label="运行设置" icon={<SettingOutlined />} disabled={false} onClick={props.onOpenSettings} /> : settingsControls}
           </div>
-          {props.busy ? <Tooltip title="停止"><Button className="send-btn stop" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /> </Tooltip> : <Tooltip title={props.disabledReason || "发送"}><Button className="send-btn" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送" onClick={props.onSend} disabled={props.disabled || (!props.input.trim() && props.references.length === 0)} /></Tooltip>}
+          {props.busy ? <Tooltip title="停止"><Button className="send-btn stop composer-reveal-item" data-reveal-index="5" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /> </Tooltip> : <Tooltip title={props.disabledReason || "发送"}><Button className="send-btn composer-reveal-item" data-reveal-index="5" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送" onClick={props.onSend} disabled={props.disabled || (!props.input.trim() && props.references.length === 0)} /></Tooltip>}
         </div>
       </div>
       <Drawer className="run-settings-drawer" title="运行设置" placement="bottom" open={props.settingsOpen} onClose={props.onCloseSettings}>{settingsControls}</Drawer>
