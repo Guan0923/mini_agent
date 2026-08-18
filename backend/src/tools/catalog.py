@@ -22,6 +22,7 @@ def _build_tools(
     workspace_files: WorkspaceFiles | None = None,
     upload_files: WorkspaceFiles | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
+    rag_tool: Tool | None = None,
 ) -> tuple[Tool, ...]:
     """Create the standard tool set for one workspace."""
 
@@ -32,6 +33,7 @@ def _build_tools(
         fetcher=web_fetch,
         upload_files=upload_files,
         terminal_type=terminal_type,
+        rag_tool=rag_tool,
     )
 
 
@@ -44,6 +46,7 @@ def build_tool_registry(
     upload_files: WorkspaceFiles | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
     extra_tools: Iterable[Tool] = (),
+    rag_tool: Tool | None = None,
 ) -> ToolRegistry:
     """Build the standard workspace tool registry."""
 
@@ -56,6 +59,7 @@ def build_tool_registry(
                 workspace_files=workspace_files,
                 upload_files=upload_files,
                 terminal_type=terminal_type,
+                rag_tool=rag_tool,
             ),
             *extra_tools,
         )

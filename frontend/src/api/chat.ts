@@ -2,6 +2,8 @@ import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, RuntimeC
 import { apiUrl } from "./base";
 import { ApiError, errorFrom, notifyUnauthorized } from "./request";
 
+export type RagMode = "off" | "tool" | "forced";
+
 export interface StreamOptions {
   sessionId?: string;
   sourceNodeId?: string;
@@ -11,6 +13,7 @@ export interface StreamOptions {
   providerName?: string;
   model?: RuntimeConfigModel;
   references?: FileReference[];
+  ragMode?: RagMode;
 }
 
 async function streamEndpoint(
@@ -108,6 +111,7 @@ export async function streamChat(
       model: normalized.model,
       references: normalized.references,
       interactive: normalized.permissionMode != null,
+      ...(normalized.ragMode && normalized.ragMode !== "off" ? { rag_mode: normalized.ragMode } : {}),
     },
     onMessage,
     signal,
@@ -124,6 +128,7 @@ export async function streamResume(
   providerName?: string,
   model?: RuntimeConfigModel,
   mode?: ChatMode,
+  ragMode: RagMode = "off",
 ): Promise<"completed" | "aborted"> {
   return streamEndpoint(
     `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
@@ -135,6 +140,7 @@ export async function streamResume(
       model,
       ...(mode ? { mode } : {}),
       ...(mode ? { running_mode: mode } : {}),
+      ...(ragMode !== "off" ? { rag_mode: ragMode } : {}),
     },
     onMessage,
     signal,

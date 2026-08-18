@@ -85,6 +85,8 @@ class ModelRequestExecutor:
         overrides = exchange.context.get("request_parameters")
         if isinstance(overrides, dict):
             parameters.update(overrides)
+        required_tool = parameters.get("required_tool_name")
+        exchange.required_tool_name = required_tool if isinstance(required_tool, str) and required_tool else None
         context = ModelHookContext(
             run=RunHookInfo(
                 runtime.state.session_id,
@@ -104,12 +106,15 @@ class ModelRequestExecutor:
         previous_parameters = exchange.context.get("request_parameters")
         had_parameters = "request_parameters" in exchange.context
         try:
-            return runtime.services.hooks.run_model(
+            result = runtime.services.hooks.run_model(
                 context,
                 lambda hook_context: self._send(runtime, hook_context, output_mode),
                 self._hook_outcome,
                 runtime.services.publish or (lambda _event: None),
             )
+            if exchange.required_tool_name:
+                runtime.state.request_parameters.pop("required_tool_name", None)
+            return result
         finally:
             if had_parameters:
                 exchange.context["request_parameters"] = previous_parameters

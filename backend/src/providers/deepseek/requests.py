@@ -136,6 +136,7 @@ def _prepare_request(runtime: AgentRuntime) -> dict[str, Any]:
     if overrides is not None and not isinstance(overrides, Mapping):
         raise ModelRequestError("DeepSeek exchange request_parameters must be an object.")
     parameters.update(dict(overrides or {}))
+    required_tool_name = parameters.pop("required_tool_name", None)
     # The active dynamic node is the authoritative request configuration.
     snapshot = config.get("model_snapshot") or {}
     if isinstance(snapshot, Mapping):
@@ -180,6 +181,10 @@ def _prepare_request(runtime: AgentRuntime) -> dict[str, Any]:
     tool_names = {spec.name for spec in tools}
     if "tool_choice" in validated:
         payload["tool_choice"] = _validate_tool_choice(validated["tool_choice"], tool_names)
+    elif isinstance(required_tool_name, str) and required_tool_name:
+        payload["tool_choice"] = _validate_tool_choice(
+            {"type": "function", "function": {"name": required_tool_name}}, tool_names
+        )
     elif tools:
         payload["tool_choice"] = "auto"
     if runtime.exchange.output_mode == "tools" and payload.get("tool_choice") == "none":

@@ -228,6 +228,7 @@ class PerUserSettingsRepository:
             "update_profile",
             "update_agent_config",
             "update_runtime_config",
+            "update_rag_config",
             "update_provider_config",
             "add_provider_config",
             "update_provider_config_by_id",

@@ -88,6 +88,7 @@ class ChatRequest(BaseModel):
     model: RuntimeModelRequest | None = None
     source_node_id: str | None = None
     references: list[FileReference] = Field(default_factory=list, max_length=50)
+    rag_mode: Literal["off", "tool", "forced"] = "off"
 
     @model_validator(mode="after")
     def normalize_running_mode(self) -> ChatRequest:
@@ -114,6 +115,7 @@ class ResumeRequest(BaseModel):
     running_mode: Literal["agent", "plan"] | None = None
     provider_name: str | None = Field(default=None, min_length=1, max_length=80)
     model: RuntimeModelRequest | None = None
+    rag_mode: Literal["off", "tool", "forced"] = "off"
 
     @model_validator(mode="after")
     def normalize_running_mode(self) -> ResumeRequest:
@@ -335,6 +337,7 @@ def _stream(
     request_model: RuntimeModelRequest | None = None,
     references: list[dict[str, str]] | None = None,
     operation: Callable[..., object] | None = None,
+    rag_mode: Literal["off", "tool", "forced"] = "off",
 ):
     # ``WebAppState`` owns these process-local registries in production, but
     # callers such as focused SSE tests may provide a small state double.  A
@@ -502,6 +505,7 @@ def _stream(
                     load_model_config=False,
                     workspace=workspace,
                     project_id=bound_project.project_id if bound_project is not None else None,
+                    rag_mode=rag_mode,
                 )
             else:
                 app = build_application(
@@ -594,13 +598,18 @@ def _stream(
                         attach_bridge(bridge_ref["bridge"], events_external=True)
                     active_runtime_bridges[registry_key(active_session.session_id)] = bridge_ref["bridge"]
             if operation is None:
+                request_parameters = _model_request_parameters(request_model, effective_reasoning)
+                if rag_mode == "forced" and identity is not None:
+                    rag = state.settings.rag_config_for_user(identity.id)
+                    if bool(rag.get("enabled")):
+                        request_parameters["required_tool_name"] = "search_knowledge_base"
                 run_state = conversation.run_task(
                     prompt,
                     mode=mode,
                     on_event=sink,
                     interrupt=interrupt,
                     cancel_requested=cancel_requested.is_set,
-                    request_parameters=_model_request_parameters(request_model, effective_reasoning),
+                    request_parameters=request_parameters,
                     references=references or [],
                 )
             else:
@@ -876,6 +885,7 @@ async def chat(
             model_config=_model_config_snapshot(state, identity.id),
             runtime_config=state.runtime_config_for_user(identity.id),
             references=references,
+            rag_mode=body.rag_mode,
         ),
         media_type="text/event-stream",
     )
@@ -917,6 +927,8 @@ async def resume(
     _validate_source_node(store, session_id, body.source_node_id, resume=True)
 
     def operation(conversation, interrupt, sink, cancel_requested, request_parameters):
+        if body.rag_mode == "forced" and bool(state.settings.rag_config_for_user(identity.id).get("enabled")):
+            request_parameters["required_tool_name"] = "search_knowledge_base"
         return conversation.resume_session(
             session_id,
             on_event=sink,
@@ -944,6 +956,7 @@ async def resume(
             runtime_config=state.runtime_config_for_user(identity.id),
             default_timezone=str(state.agent_config_for_user(identity.id).get("timezone", DEFAULT_TIME_ZONE)),
             operation=operation,
+            rag_mode=body.rag_mode,
         ),
         media_type="text/event-stream",
     )
