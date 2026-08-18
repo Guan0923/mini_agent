@@ -1,4 +1,4 @@
-"""DeepSeek adapter entry point and tokenizer integration."""
+"""Chat Completions adapter entry point and tokenizer integration."""
 
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ from .streaming import _parse_stream
 
 
 def _prepare_response(runtime: AgentRuntime) -> PreparedResponse:
-    """Convert a DeepSeek JSON response or SSE event iterator into one assistant message."""
+    """Convert a Chat Completions JSON response or SSE event iterator."""
 
     raw = runtime.exchange.raw_response
     if raw is None:
-        raise ModelRequestError("DeepSeek response is missing from runtime.exchange.raw_response.")
+        raise ModelRequestError("Chat Completions response is missing from runtime.exchange.raw_response.")
     try:
         prepared = _parse_response(raw) if isinstance(raw, Mapping) else _parse_stream(runtime, raw)
     except ModelTransportError:
@@ -48,8 +48,8 @@ def _default_tokenizer_loader(identifier: str) -> Any:
     return Tokenizer.from_pretrained(identifier)
 
 
-class DeepSeek:
-    """Convert runtime messages to and from the DeepSeek wire format."""
+class ChatCompletions:
+    """Convert runtime messages to and from the Chat Completions wire format."""
 
     def __init__(
         self,
@@ -70,7 +70,7 @@ class DeepSeek:
         tools: list[ToolSpec],
         request_parameters: dict[str, Any],
     ) -> int:
-        """Return the legacy request budget including the configured output ceiling."""
+        """Return the request budget including the configured output ceiling."""
 
         return self.estimate_input_tokens(messages, tools, request_parameters) + self._max_tokens(request_parameters)
 
@@ -86,7 +86,7 @@ class DeepSeek:
         if tools:
             payload["tools"] = [_tool_definition(spec) for spec in tools]
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        return len(self._get_tokenizer().encode(serialized).ids)
+        return self._estimate_serialized(serialized)
 
     def estimate_output_tokens(self, message: AssistantMessage) -> int:
         """Estimate streamed output until the provider returns final usage."""
@@ -97,7 +97,7 @@ class DeepSeek:
             "tool_calls": [{"name": tool.name, "arguments": tool.arguments} for tool in message.tool_messages],
         }
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        return len(self._get_tokenizer().encode(serialized).ids)
+        return self._estimate_serialized(serialized)
 
     def _max_tokens(self, request_parameters: dict[str, Any]) -> int:
         max_tokens = request_parameters.get("max_tokens", self.config.max_tokens)
@@ -108,6 +108,8 @@ class DeepSeek:
     def _get_tokenizer(self) -> Any:
         if self._tokenizer is not None:
             return self._tokenizer
+        if not self.config.tokenizer_model:
+            return None
         try:
             self._tokenizer = self._tokenizer_loader(self.config.tokenizer_model)
         except Exception as exc:
@@ -116,6 +118,15 @@ class DeepSeek:
                 f"{self.config.tokenizer_model!r}. Check network/cache access or set TOKENIZER_MODEL."
             ) from exc
         return self._tokenizer
+
+    def _estimate_serialized(self, serialized: str) -> int:
+        tokenizer = self._get_tokenizer()
+        if tokenizer is None:
+            # A protocol adapter must remain usable without a vendor-specific
+            # tokenizer.  Four UTF-8 JSON characters per token is deliberately
+            # conservative and matches the fallback used by other protocols.
+            return max(1, len(serialized) // 4)
+        return max(1, len(tokenizer.encode(serialized).ids))
 
     @property
     def endpoint(self) -> str:

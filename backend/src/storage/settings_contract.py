@@ -27,13 +27,13 @@ SUPPORTED_DISPLAY_MODES = frozenset({"minimal", "medium", "verbose", "developer"
 DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
     "id": "",
     "is_active": False,
-    "provider_name": "deepseek",
+    "provider_name": "default",
     "protocol": "chat_completions",
     "base_url": "",
     "model": "",
     "max_tokens": 8192,
     "context_size": 1024000,
-    "tokenizer_model": "deepseek-ai/DeepSeek-V3",
+    "tokenizer_model": "",
     "api_key_configured": False,
 }
 DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {}
@@ -86,20 +86,23 @@ def normalize_provider_config(current: Mapping[str, object], values: Mapping[str
     if protocol not in {"chat_completions", "responses", "messages"}:
         raise ValueError("protocol must be chat_completions, responses, or messages")
     explicit_name = values.get("provider_name")
-    fallback_name = current.get("provider_name") or current.get("provider") or values.get("provider") or "deepseek"
-    provider_name = str(explicit_name if explicit_name is not None else fallback_name or "deepseek").strip()
+    fallback_name = current.get("provider_name") or current.get("provider") or values.get("provider") or "default"
+    provider_name = str(explicit_name if explicit_name is not None else fallback_name or "default").strip()
+    if provider_name.casefold() == "deepseek":
+        provider_name = "default"
     if not provider_name:
         raise ValueError("provider_name is required")
-    provider = (
-        str(values.get("provider_type", values.get("provider", current.get("provider", "deepseek"))) or "deepseek")
-        .strip()
-        .lower()
-    )
+    if len(provider_name) > 80:
+        raise ValueError("provider_name exceeds 80 characters")
+    # ``provider``/``provider_type`` are legacy adapter-kind fields.  The
+    # protocol is now the sole adapter selector; keep the database column
+    # populated with that canonical value for old schema compatibility.
+    provider = protocol
     base_url = str(values.get("base_url", current.get("base_url", "")) or "").strip()
     model = str(values.get("model", current.get("model", "")) or "").strip()
-    tokenizer_model = str(
-        values.get("tokenizer_model", current.get("tokenizer_model", "deepseek-ai/DeepSeek-V3")) or ""
-    ).strip()
+    tokenizer_model = str(values.get("tokenizer_model", current.get("tokenizer_model", "")) or "").strip()
+    if tokenizer_model.casefold().startswith("deepseek-ai/"):
+        tokenizer_model = ""
     if len(base_url) > 2000 or len(model) > 300 or len(tokenizer_model) > 300:
         raise ValueError("provider fields exceed their length limits")
     try:

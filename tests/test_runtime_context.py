@@ -40,22 +40,22 @@ def test_runtime_state_round_trips_complete_session_state() -> None:
     state = RuntimeState(
         session_id="session_1",
         messages=[
-            UserMessage(name="alice", content="Calculate.", provider_options={"deepseek": {"extra_body": {}}}),
+            UserMessage(name="alice", content="Calculate.", provider_options={"chat_completions": {"extra_body": {}}}),
             AssistantMessage(
                 logprobs={"content": []},
                 tool_messages=[tool],
-                provider_options={"deepseek": {"response": {"created": 1}}},
+                provider_options={"chat_completions": {"response": {"created": 1}}},
             ),
         ],
-        provider="deepseek",
-        model="deepseek-test",
+        provider="chat_completions",
+        model="chat_completions-test",
         request_parameters={"max_tokens": 512},
         tool_specs=[
             ToolSpec(
                 "run_command",
                 "Calculate",
                 {"type": "object"},
-                provider_options={"deepseek": {"strict": True}},
+                provider_options={"chat_completions": {"strict": True}},
             )
         ],
         current_run=RunState(task="Calculate.", mode="agent"),
@@ -66,16 +66,16 @@ def test_runtime_state_round_trips_complete_session_state() -> None:
     restored = RuntimeState.from_dict(state.to_dict())
 
     assert restored.session_id == state.session_id
-    assert restored.provider == "deepseek"
+    assert restored.provider == "chat_completions"
     assert restored.request_parameters == {"max_tokens": 512}
     assert restored.usage == {"total_tokens": 12}
     assert restored.current_run is not None and restored.current_run.task == "Calculate."
     restored_assistant = restored.messages[1]
     assert isinstance(restored_assistant, AssistantMessage)
     assert restored_assistant.logprobs == {"content": []}
-    assert restored_assistant.provider_options == {"deepseek": {"response": {"created": 1}}}
+    assert restored_assistant.provider_options == {"chat_completions": {"response": {"created": 1}}}
     assert restored_assistant.tool_messages[0] == tool
-    assert restored.tool_specs[0].provider_options == {"deepseek": {"strict": True}}
+    assert restored.tool_specs[0].provider_options == {"chat_completions": {"strict": True}}
 
 
 def test_postgres_persists_and_reloads_runtime_snapshot(tmp_path: Path) -> None:

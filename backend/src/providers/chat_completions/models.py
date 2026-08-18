@@ -1,4 +1,4 @@
-"""DeepSeek response value objects."""
+"""Chat Completions response value objects."""
 
 from __future__ import annotations
 
@@ -10,14 +10,14 @@ from backend.runtime.core.context import PreparedResponse
 
 
 @dataclass(frozen=True)
-class DeepSeekToolCall:
+class ChatToolCall:
     id: str
     name: str
     arguments: str
 
 
 @dataclass(frozen=True)
-class DeepSeekUsage:
+class ChatUsage:
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
@@ -28,7 +28,7 @@ class DeepSeekUsage:
 
 
 @dataclass
-class DeepSeekCompletion(PreparedResponse):
+class ChatCompletion(PreparedResponse):
     """Compatibility view over the provider-neutral prepared response."""
 
     @property
@@ -40,15 +40,15 @@ class DeepSeekCompletion(PreparedResponse):
         return self.message.reasoning
 
     @property
-    def tool_calls(self) -> list[DeepSeekToolCall]:
+    def tool_calls(self) -> list[ChatToolCall]:
         return [
-            DeepSeekToolCall(tool.call_id, tool.name, json.dumps(tool.arguments, ensure_ascii=False))
+            ChatToolCall(tool.call_id, tool.name, json.dumps(tool.arguments, ensure_ascii=False))
             for tool in self.message.tool_messages
         ]
 
 
 @dataclass(frozen=True)
-class DeepSeekStreamDelta:
+class ChatStreamDelta:
     content: str | None
     reasoning_content: str | None
     finish_reason: str | None = None

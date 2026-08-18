@@ -3,8 +3,8 @@ import requests
 
 from backend.domain import AssistantMessage, ToolMessage, ToolSpec, UserMessage
 from backend.planning import LLMPlanner, RuleBasedPlanner
-from backend.providers import DeepSeek, LLMClient, ModelConfig, ModelRequestError
-from backend.providers.deepseek.messages import _wire_messages_from
+from backend.providers import ChatCompletions, LLMClient, ModelConfig, ModelRequestError
+from backend.providers.chat_completions.messages import _wire_messages_from
 from backend.runtime import AgentRunner, PreparedResponse
 from backend.tools import ToolRegistry
 
@@ -132,8 +132,8 @@ def runtime_for_stream():
     return runtime
 
 
-def deepseek_for_test() -> DeepSeek:
-    return DeepSeek(ModelConfig("secret", "https://example.test/v1", "demo"))
+def chat_completions_for_test() -> ChatCompletions:
+    return ChatCompletions(ModelConfig("secret", "https://example.test/v1", "demo"))
 
 
 def test_llm_client_accepts_an_injected_provider_adapter() -> None:
@@ -184,7 +184,7 @@ def test_model_events_include_wire_bodies_and_transport_metadata() -> None:
     assert response.data["transport"]["duration_ms"] >= 0
 
 
-def test_deepseek_json_wire_request_forces_thinking_disabled() -> None:
+def test_chat_completions_json_wire_request_forces_thinking_disabled() -> None:
     session = SequencedSession(
         [
             FakeJsonResponse(
@@ -275,7 +275,7 @@ def test_request_preparation_failure_replaces_stale_diagnostics() -> None:
     with pytest.raises(ModelRequestError, match="at least one message") as exc_info:
         client.run(runtime)
 
-    assert exc_info.value.diagnostics["provider"] == "deepseek"
+    assert exc_info.value.diagnostics["provider"] == "chat_completions"
     assert exc_info.value.diagnostics["request_outcome"] == "failed"
     assert "stale" not in exc_info.value.diagnostics.values()
     assert client.consume_request_diagnostics() == exc_info.value.diagnostics
@@ -338,7 +338,7 @@ def test_non_stream_tool_calls_rejects_falsey_non_array() -> None:
     }
 
     with pytest.raises(ModelRequestError, match="tool_calls must be an array"):
-        deepseek_for_test().prepare_response(runtime)
+        chat_completions_for_test().prepare_response(runtime)
 
 
 @pytest.mark.parametrize(
@@ -357,7 +357,7 @@ def test_stream_fields_reject_falsey_invalid_types(delta: object, error: str) ->
     runtime.exchange.raw_response = iter([{"choices": [{"index": 0, "delta": delta, "finish_reason": "stop"}]}])
 
     with pytest.raises(ModelRequestError, match=error):
-        deepseek_for_test().prepare_response(runtime)
+        chat_completions_for_test().prepare_response(runtime)
 
 
 def test_response_rejects_duplicate_tool_call_ids() -> None:
@@ -381,8 +381,8 @@ def test_response_rejects_duplicate_tool_call_ids() -> None:
         ]
     }
 
-    with pytest.raises(ModelRequestError, match="Duplicate DeepSeek tool call id"):
-        deepseek_for_test().prepare_response(runtime)
+    with pytest.raises(ModelRequestError, match="Duplicate Chat Completions tool call id"):
+        chat_completions_for_test().prepare_response(runtime)
 
 
 def test_wire_messages_merges_duplicate_canonical_tool_calls() -> None:
@@ -514,7 +514,7 @@ def test_stream_retries_only_before_the_first_event(monkeypatch) -> None:
     assert second.closed is True
 
 
-def test_deepseek_invalid_tool_arguments_are_regenerated_before_execution() -> None:
+def test_chat_completions_invalid_tool_arguments_are_regenerated_before_execution() -> None:
     invalid = {
         "choices": [
             {

@@ -10,15 +10,9 @@ from .canonical import (
     to_messages,
     to_responses,
 )
+from .chat_completions import ChatCompletion, ChatCompletions, ChatStreamDelta, ChatToolCall, ChatUsage
 from .client import LLMClient, ProviderAdapter
 from .config import ModelConfig
-from .deepseek import (
-    DeepSeek,
-    DeepSeekCompletion,
-    DeepSeekStreamDelta,
-    DeepSeekToolCall,
-    DeepSeekUsage,
-)
 from .errors import ModelConfigurationError, ModelRequestError, ModelTransportError
 from .protocols import ChatCompletionsAdapter, MessagesAdapter, ResponsesAdapter
 from .transport import JsonHttpTransport
@@ -26,11 +20,11 @@ from .transport import JsonHttpTransport
 __all__ = [
     "ChatCompletionsAdapter",
     "CanonicalProviderAdapter",
-    "DeepSeek",
-    "DeepSeekCompletion",
-    "DeepSeekStreamDelta",
-    "DeepSeekToolCall",
-    "DeepSeekUsage",
+    "ChatCompletions",
+    "ChatCompletion",
+    "ChatStreamDelta",
+    "ChatToolCall",
+    "ChatUsage",
     "LLMClient",
     "JsonHttpTransport",
     "MessagesAdapter",

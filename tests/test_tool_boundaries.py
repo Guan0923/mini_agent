@@ -120,7 +120,7 @@ def test_env_file_loading_is_pure_and_process_values_take_precedence(tmp_path: P
     assert config.base_url == "https://file.test/v1"
     assert config.model == "process-model"
     assert config.max_tokens == 1024
-    assert config.provider == "deepseek"
+    assert config.provider == "chat_completions"
     assert "API_KEY" not in os.environ
 
 

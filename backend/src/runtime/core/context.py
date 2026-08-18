@@ -18,6 +18,7 @@ from backend.domain import (
     ToolSpec,
     UserMessage,
     message_to_dict,
+    normalize_provider_options,
 )
 from backend.domain.messages import messages_from_dicts
 from backend.domain.runtime_state import RuntimeState as RuntimeTreeNode
@@ -148,9 +149,17 @@ class RuntimeState:
             workspace_root=(str(data["workspace_root"]) if data.get("workspace_root") is not None else None),
             timezone=str(data.get("timezone") or DEFAULT_TIME_ZONE),
             messages=messages_from_dicts([dict(item) for item in data.get("messages", [])]),
-            provider=str(data.get("provider") or "unknown"),
+            provider=(
+                "chat_completions"
+                if str(data.get("provider") or "").casefold() == "deepseek"
+                else str(data.get("provider") or "unknown")
+            ),
             model=str(data.get("model") or "unknown"),
-            provider_name=str(data.get("provider_name") or data.get("provider") or "unknown"),
+            provider_name=(
+                "default"
+                if str(data.get("provider_name") or data.get("provider") or "").casefold() == "deepseek"
+                else str(data.get("provider_name") or data.get("provider") or "unknown")
+            ),
             model_snapshot=dict(data.get("model_snapshot") or {}),
             permission_mode=str(data.get("permission_mode") or "approval_for_me"),
             running_mode=str(data.get("running_mode") or "agent"),
@@ -161,11 +170,7 @@ class RuntimeState:
                     name=str(item["name"]),
                     description=str(item.get("description") or ""),
                     parameters=dict(item.get("parameters") or {}),
-                    provider_options={
-                        str(provider): dict(options)
-                        for provider, options in (item.get("provider_options") or {}).items()
-                        if isinstance(options, dict)
-                    },
+                    provider_options=normalize_provider_options(item.get("provider_options")),
                 )
                 for item in data.get("tool_specs", [])
             ],

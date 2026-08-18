@@ -4,7 +4,7 @@
  * This is a local port of Guan0923/dsh-message-timeline. The original
  * project is MIT licensed; this adaptation keeps its tick sizing, Gaussian
  * hover treatment, tooltip and jump behavior while reading this app's
- * transcript projection instead of DeepSeek Harness session faces.
+ * transcript projection instead of provider-specific session faces.
  */
 import {
   useEffect,

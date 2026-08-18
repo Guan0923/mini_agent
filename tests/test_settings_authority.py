@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from uuid import uuid4
@@ -198,6 +199,7 @@ def test_legacy_preferences_fill_an_empty_database_field_without_overwriting_nam
     reopened = UserSettingsStore(root / "user.db")
     assert reopened.profile_for_user(user_id) == {"display_name": "自定义名", "agent_preferences": "旧偏好"}
 
+
 def test_provider_names_are_case_insensitive_unique_and_renamable(tmp_path) -> None:
     user_id = str(uuid4())
     store = UserSettingsStore(tmp_path / user_id / "user.db")
@@ -227,3 +229,55 @@ def test_provider_names_are_case_insensitive_unique_and_renamable(tmp_path) -> N
     renamed = store.update_provider_config_by_id(user_id, first["id"], {"provider_name": "work-openai-v2"})
     assert renamed["provider_name"] == "work-openai-v2"
     assert store.model_config_for_provider_name(user_id, "WORK-OPENAI-V2").model == "demo"
+
+    with pytest.raises(ValueError, match="exceeds 80"):
+        store.update_provider_config_by_id(user_id, first["id"], {"provider_name": "x" * 81})
+
+
+def test_legacy_provider_name_migration_resolves_default_collision(tmp_path) -> None:
+    user_id = str(uuid4())
+    store = UserSettingsStore(tmp_path / user_id / "user.db")
+    current = store.update_provider_config(
+        user_id,
+        {
+            "provider_name": "default",
+            "protocol": "responses",
+            "base_url": "https://example.test/v1",
+            "model": "primary",
+        },
+    )
+    legacy = {
+        "id": "provider-old-12345678",
+        "is_active": False,
+        "provider": "deepseek",
+        "provider_name": "deepseek",
+        "protocol": "chat_completions",
+        "base_url": "https://legacy.test/v1",
+        "model": "legacy",
+        "max_tokens": 8192,
+        "context_size": 1024000,
+        "tokenizer_model": "deepseek-ai/DeepSeek-V3",
+        "api_key_ciphertext": "",
+    }
+    with sqlite3.connect(store.path) as connection:
+        raw = connection.execute(
+            "SELECT provider_configs_json FROM user_provider_settings WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
+        records = json.loads(raw)
+        records.append(legacy)
+        connection.execute(
+            "UPDATE user_provider_settings SET provider_configs_json = ? WHERE user_id = ?",
+            (json.dumps(records), user_id),
+        )
+        connection.commit()
+
+    migrated = store.provider_configs_for_user(user_id)
+
+    assert migrated[0]["id"] == current["id"]
+    assert migrated[0]["provider_name"] == "default"
+    assert migrated[1]["provider_name"] == "default-12345678"
+    assert migrated[1]["tokenizer_model"] == ""
+    model_config = store.model_config_for_provider_name(user_id, "DEFAULT-12345678")
+    assert model_config.provider == "chat_completions"
+    assert model_config.provider_name == "default-12345678"

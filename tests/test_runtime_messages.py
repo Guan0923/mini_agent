@@ -172,7 +172,7 @@ def test_checkpoint_and_jsonl_share_the_same_ordered_runtime_timestamps(tmp_path
 
 
 def test_model_exchange_messages_are_logged_as_normalized_request_and_response(tmp_path: Path) -> None:
-    planner = LLMPlanner(StaticCompletionClient(provider_options={"deepseek": {"raw": "not logged"}}), [], [])
+    planner = LLMPlanner(StaticCompletionClient(provider_options={"chat_completions": {"raw": "not logged"}}), [], [])
     runner = AgentRunner(planner, ToolRegistry())
 
     state = runner.run(runner.new_runtime(task="say hello"))

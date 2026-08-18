@@ -110,7 +110,7 @@ class ProviderConfigPayload(BaseModel):
     model: str = Field(default="", max_length=300)
     max_tokens: int = Field(default=8192, ge=1, le=384000)
     context_size: int = Field(default=1024000, ge=1)
-    tokenizer_model: str = Field(default="deepseek-ai/DeepSeek-V3", max_length=300)
+    tokenizer_model: str = Field(default="", max_length=300)
     api_key: str | None = Field(default=None, max_length=4096)
 
 
@@ -122,7 +122,7 @@ class ProviderConfigPatch(BaseModel):
 
 class ProviderModelDiscoveryPayload(BaseModel):
     config_id: str | None = Field(default=None, max_length=160)
-    provider_name: str = Field(default="deepseek", min_length=1, max_length=80)
+    provider_name: str = Field(default="default", min_length=1, max_length=80)
     protocol: str = Field(default="chat_completions", min_length=1, max_length=40)
     base_url: str = Field(default="", max_length=2000)
     api_key: str | None = Field(default=None, max_length=4096)

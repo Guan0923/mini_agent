@@ -9,6 +9,23 @@ from pathlib import Path
 
 from .errors import ModelConfigurationError
 
+SUPPORTED_PROTOCOLS = frozenset({"chat_completions", "responses", "messages"})
+DEFAULT_PROVIDER_NAME = "default"
+
+
+def _normalize_provider_name(value: object) -> str:
+    name = str(value or DEFAULT_PROVIDER_NAME).strip()
+    if not name or name.casefold() == "deepseek":
+        return DEFAULT_PROVIDER_NAME
+    return name
+
+
+def _normalize_tokenizer_model(value: object) -> str:
+    tokenizer = str(value or "").strip()
+    if tokenizer.casefold().startswith("deepseek-ai/"):
+        return ""
+    return tokenizer
+
 
 def load_env_file(path: Path) -> dict[str, str]:
     if not path.exists():
@@ -33,10 +50,13 @@ class ModelConfig:
     model: str
     timeout_seconds: int = 45
     max_tokens: int = 8192
-    provider: str = "deepseek"
-    provider_name: str = "deepseek"
+    # ``provider`` is retained for runtime/state compatibility.  It is the
+    # internal adapter kind and is normalized to ``protocol`` below; the
+    # user-facing configuration identity is ``provider_name``.
+    provider: str = "chat_completions"
+    provider_name: str = DEFAULT_PROVIDER_NAME
     context_size: int = 1_024_000
-    tokenizer_model: str = "deepseek-ai/DeepSeek-V3"
+    tokenizer_model: str = ""
     protocol: str | None = None
     protocol_explicit: bool = field(init=False, repr=False, compare=False)
 
@@ -45,7 +65,7 @@ class ModelConfig:
         protocol = str(self.protocol or "chat_completions").strip().lower()
         if protocol == "chat":
             protocol = "chat_completions"
-        if protocol not in {"chat_completions", "responses", "messages"}:
+        if protocol not in SUPPORTED_PROTOCOLS:
             raise ModelConfigurationError("protocol must be chat_completions, responses, or messages")
         if not self.base_url or not self.model:
             raise ModelConfigurationError("base_url and model are required")
@@ -53,8 +73,9 @@ class ModelConfig:
             raise ModelConfigurationError("Invalid model token limits.")
         object.__setattr__(self, "protocol", protocol)
         object.__setattr__(self, "protocol_explicit", protocol_explicit)
-        if self.provider_name == "deepseek" and self.provider != "deepseek":
-            object.__setattr__(self, "provider_name", self.provider)
+        object.__setattr__(self, "provider", protocol)
+        object.__setattr__(self, "provider_name", _normalize_provider_name(self.provider_name))
+        object.__setattr__(self, "tokenizer_model", _normalize_tokenizer_model(self.tokenizer_model))
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, object]) -> ModelConfig:
@@ -65,10 +86,10 @@ class ModelConfig:
                 model=str(values.get("model") or ""),
                 timeout_seconds=int(values.get("timeout_seconds", 45)),
                 max_tokens=int(values.get("max_tokens", 8192)),
-                provider=str(values.get("provider") or "deepseek"),
-                provider_name=str(values.get("provider_name") or values.get("provider") or "deepseek"),
+                provider=str(values.get("provider") or values.get("protocol") or "chat_completions"),
+                provider_name=str(values.get("provider_name") or values.get("provider") or DEFAULT_PROVIDER_NAME),
                 context_size=int(values.get("context_size", 1_024_000)),
-                tokenizer_model=str(values.get("tokenizer_model") or "deepseek-ai/DeepSeek-V3"),
+                tokenizer_model=str(values.get("tokenizer_model") or ""),
                 protocol=str(values.get("protocol") or "chat_completions"),
             )
         except (TypeError, ValueError) as exc:
@@ -90,10 +111,10 @@ class ModelConfig:
             values["BASE_URL"],
             values["MODEL"],
             max_tokens=max_tokens,
-            provider=values.get("PROVIDER", "deepseek").strip().lower(),
-            provider_name=values.get("PROVIDER_NAME", values.get("PROVIDER", "deepseek")).strip(),
+            provider=values.get("PROVIDER", values.get("PROTOCOL", "chat_completions")).strip().lower(),
+            provider_name=values.get("PROVIDER_NAME", values.get("PROVIDER", DEFAULT_PROVIDER_NAME)).strip(),
             context_size=context_size,
-            tokenizer_model=values.get("TOKENIZER_MODEL", "deepseek-ai/DeepSeek-V3").strip(),
+            tokenizer_model=values.get("TOKENIZER_MODEL", "").strip(),
             protocol=values.get("PROTOCOL", "chat_completions").strip().lower(),
         )
 
@@ -111,10 +132,10 @@ class ModelConfig:
                 str(values["base_url"]),
                 str(values["model"]),
                 max_tokens=int(values.get("max_tokens", 8192)),
-                provider=str(values.get("provider", "deepseek")).strip().lower(),
-                provider_name=str(values.get("provider_name", values.get("provider", "deepseek"))).strip(),
+                provider=str(values.get("provider", values.get("protocol", "chat_completions"))).strip().lower(),
+                provider_name=str(values.get("provider_name", values.get("provider", DEFAULT_PROVIDER_NAME))).strip(),
                 context_size=int(values.get("context_size", 1_024_000)),
-                tokenizer_model=str(values.get("tokenizer_model", "deepseek-ai/DeepSeek-V3")).strip(),
+                tokenizer_model=str(values.get("tokenizer_model", "")).strip(),
                 protocol=str(values.get("protocol", "chat_completions")).strip().lower(),
             )
         except (TypeError, ValueError) as exc:

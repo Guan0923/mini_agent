@@ -53,7 +53,6 @@ type SettingsSection = "profile" | "agent" | "runtime" | "rag" | "provider_add" 
 
 type ProviderDraft = {
   provider_name: string;
-  provider_type: string;
   protocol: ProviderConfig["protocol"];
   base_url: string;
   model: string;
@@ -87,19 +86,18 @@ const defaultAgent: AgentConfig = {
 const defaultProvider: ProviderConfig = {
   id: "",
   is_active: false,
-  provider_name: "deepseek",
+  provider_name: "default",
   protocol: "chat_completions",
   base_url: "",
   model: "",
   max_tokens: 8192,
   context_size: 1024000,
-  tokenizer_model: "deepseek-ai/DeepSeek-V3",
+  tokenizer_model: "",
   api_key_configured: false,
 };
 
 const defaultProviderDraft: ProviderDraft = {
   provider_name: defaultProvider.provider_name,
-  provider_type: "deepseek",
   protocol: defaultProvider.protocol,
   base_url: defaultProvider.base_url,
   model: defaultProvider.model,
@@ -184,10 +182,13 @@ export default function UserSettingsModal({
         // key at this UI boundary keeps older cached settings renderable while
         // all writes continue to use the new provider_name contract.
         const rawProviders = next.provider_configs ?? (next.provider_config?.id ? [next.provider_config] : []);
-        const providers = rawProviders.map((provider) => ({
-          ...provider,
-          provider_name: provider.provider_name || (provider as ProviderConfig & { provider?: string }).provider || "",
-        }));
+        const providers = rawProviders.map((provider) => {
+          const providerName = provider.provider_name || (provider as ProviderConfig & { provider?: string }).provider || "default";
+          return {
+            ...provider,
+            provider_name: providerName.toLowerCase() === "deepseek" ? "default" : providerName,
+          };
+        });
         const currentProvider = providers.find((provider) => provider.is_active)
           ?? (next.provider_config?.id ? next.provider_config : defaultProvider);
         const normalized = {
@@ -399,7 +400,6 @@ export default function UserSettingsModal({
       } else if (section === "provider_add") {
         const provider = await addProviderConfig({
           provider_name: providerAddDraft.provider_name,
-          provider_type: providerAddDraft.provider_type,
           protocol: providerAddDraft.protocol,
           base_url: providerAddDraft.base_url,
           model: providerAddDraft.model,
@@ -476,7 +476,7 @@ export default function UserSettingsModal({
     setProviderDrafts((current) => ({ ...current, [id]: { ...(current[id] ?? { provider_name: "", model: "", api_key: "" }), ...patch } }));
   }
 
-  async function discoverModels(id: string, values: { provider_name: string; provider_type?: string; protocol: ProviderConfig["protocol"]; base_url: string; api_key?: string }) {
+  async function discoverModels(id: string, values: { provider_name: string; protocol: ProviderConfig["protocol"]; base_url: string; api_key?: string }) {
     setModelsLoading((current) => ({ ...current, [id]: true }));
     setError("");
     try {
@@ -801,7 +801,7 @@ export default function UserSettingsModal({
                   onChange={(protocol) => setProviderAddDraft((current) => ({ ...current, protocol }))}
                 />
               </Form.Item>
-              <Form.Item label="提供商" style={{ flex: 1 }}>
+              <Form.Item label="配置名称" style={{ flex: 1 }}>
                 <Input
                   value={providerAddDraft.provider_name}
                   onChange={(event) => setProviderAddDraft((current) => ({ ...current, provider_name: event.target.value }))}
@@ -826,7 +826,6 @@ export default function UserSettingsModal({
                 loading={modelsLoading.new}
                 onClick={() => void discoverModels("new", {
                   provider_name: providerAddDraft.provider_name,
-                  provider_type: providerAddDraft.provider_type,
                   protocol: providerAddDraft.protocol,
                   base_url: providerAddDraft.base_url,
                   api_key: providerAddDraft.api_key,
@@ -872,7 +871,7 @@ export default function UserSettingsModal({
                     label: <span>{provider.provider_name} · {provider.model || "未选择模型"} {provider.is_active ? <Tag color="green">当前使用</Tag> : null}</span>,
                     children: (
                       <Form layout="vertical">
-                        <Form.Item label="提供商名称"><Input value={draft.provider_name} onChange={(event) => updateProviderDraft(provider.id, { provider_name: event.target.value })} /></Form.Item>
+                        <Form.Item label="配置名称"><Input value={draft.provider_name} onChange={(event) => updateProviderDraft(provider.id, { provider_name: event.target.value })} /></Form.Item>
                         <Form.Item label="Base URL"><Input value={provider.base_url} disabled /></Form.Item>
                         <Form.Item label="模型">
                           <AutoComplete
@@ -886,7 +885,6 @@ export default function UserSettingsModal({
                             loading={modelsLoading[provider.id]}
                             onClick={() => void discoverModels(provider.id, {
                               provider_name: provider.provider_name,
-                              provider_type: "deepseek",
                               protocol: provider.protocol,
                               base_url: provider.base_url,
                               api_key: draft.api_key,

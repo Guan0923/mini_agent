@@ -31,9 +31,9 @@ class ProviderFailurePlanner:
 
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         raise ModelRequestError(
-            "DeepSeek JSON mode returned empty content.",
+            "ChatCompletions JSON mode returned empty content.",
             diagnostics={
-                "provider": "deepseek",
+                "provider": "chat_completions",
                 "finish_reason": "stop",
                 "content_chars": 0,
                 "reasoning_chars": 42,
@@ -53,7 +53,7 @@ def test_jsonl_error_includes_provider_diagnostics(tmp_path: Path) -> None:
 
     assert state.status == "failed"
     assert error["data"]["provider_diagnostics"] == {
-        "provider": "deepseek",
+        "provider": "chat_completions",
         "finish_reason": "stop",
         "content_chars": 0,
         "reasoning_chars": 42,

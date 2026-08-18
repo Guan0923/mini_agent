@@ -137,6 +137,25 @@ describe("UserSettingsModal", () => {
     expect(screen.getByRole("combobox", { name: "自动保存规则" })).toBeDisabled();
   });
 
+  it("normalizes a legacy DeepSeek provider name to the neutral default", async () => {
+    const legacyProvider = {
+      ...settings.provider_config,
+      provider: "deepseek",
+      provider_name: "deepseek",
+    };
+    api.getSettings.mockResolvedValue({
+      ...settings,
+      provider_config: legacyProvider,
+      provider_configs: [legacyProvider],
+    });
+
+    renderModal();
+    await screen.findByDisplayValue("user@example.com");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
+
+    expect(screen.getByText(/default · demo/)).toBeInTheDocument();
+  });
+
   it("shows detected terminals and saves the selected Ant Design option", async () => {
     renderModal();
     await screen.findByDisplayValue("user@example.com");

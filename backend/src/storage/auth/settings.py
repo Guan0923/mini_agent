@@ -68,6 +68,52 @@ def normalize_rag_config(
 
 
 class AuthSettingsMixin:
+    @staticmethod
+    def _normalize_provider_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Normalize legacy vendor fields at the settings boundary.
+
+        The database keeps the old ``provider`` column for schema
+        compatibility, but runtime selection is protocol-driven and the
+        public identity is always ``provider_name``.
+        """
+
+        normalized: list[dict[str, object]] = []
+        used_names: set[str] = set()
+        reserved_names = {
+            str(item.get("provider_name") or item.get("provider") or "").strip().casefold()
+            for item in records
+            if str(item.get("provider_name") or item.get("provider") or "").strip()
+            and str(item.get("provider_name") or item.get("provider") or "").strip().casefold() != "deepseek"
+        }
+        for raw in records:
+            item = dict(raw)
+            protocol = str(item.get("protocol") or "chat_completions").strip().lower()
+            if protocol not in {"chat_completions", "responses", "messages"}:
+                protocol = "chat_completions"
+            raw_name = str(item.get("provider_name") or item.get("provider") or "").strip()
+            is_legacy_default = not raw_name or raw_name.casefold() == "deepseek"
+            name = raw_name
+            if is_legacy_default:
+                name = "default"
+            folded = name.casefold()
+            if folded in used_names or (is_legacy_default and folded in reserved_names):
+                suffix = str(item.get("id") or "legacy")[-8:]
+                name = f"{name}-{suffix}"
+                folded = name.casefold()
+                counter = 2
+                while folded in used_names or folded in reserved_names:
+                    name = f"default-{suffix}-{counter}"
+                    folded = name.casefold()
+                    counter += 1
+            used_names.add(folded)
+            tokenizer_model = str(item.get("tokenizer_model") or "").strip()
+            if tokenizer_model.casefold().startswith("deepseek-ai/"):
+                tokenizer_model = ""
+            item.update({"provider": protocol, "provider_name": name, "protocol": protocol})
+            item["tokenizer_model"] = tokenizer_model
+            normalized.append(item)
+        return normalized
+
     def _config_store(self, user_id: str) -> UserConfigStore | None:
         store = getattr(self, "config_store", None)
         return store if isinstance(store, UserConfigStore) else None
@@ -263,7 +309,12 @@ class AuthSettingsMixin:
 
     @staticmethod
     def _public_provider(record: Mapping[str, object]) -> dict[str, object]:
-        provider_name = str(record.get("provider_name") or record.get("provider") or "deepseek")
+        provider_name = str(record.get("provider_name") or record.get("provider") or "default")
+        if provider_name.casefold() == "deepseek":
+            provider_name = "default"
+        tokenizer_model = str(record.get("tokenizer_model") or "")
+        if tokenizer_model.casefold().startswith("deepseek-ai/"):
+            tokenizer_model = ""
         return {
             "id": str(record.get("id") or ""),
             "is_active": bool(record.get("is_active")),
@@ -273,7 +324,7 @@ class AuthSettingsMixin:
             "model": str(record.get("model") or ""),
             "max_tokens": int(record.get("max_tokens") or 8192),
             "context_size": int(record.get("context_size") or 1024000),
-            "tokenizer_model": str(record.get("tokenizer_model") or "deepseek-ai/DeepSeek-V3"),
+            "tokenizer_model": tokenizer_model,
             "api_key_configured": bool(record.get("api_key_ciphertext")),
         }
 
@@ -293,29 +344,33 @@ class AuthSettingsMixin:
             except (TypeError, ValueError):
                 records = []
             if isinstance(records, list) and records:
-                return [dict(item) for item in records if isinstance(item, dict) and item.get("id")]
+                return self._normalize_provider_records(
+                    [dict(item) for item in records if isinstance(item, dict) and item.get("id")]
+                )
             # Databases created before the multi-provider JSON column was
             # introduced still contain one complete provider in the explicit
             # columns.  Preserve that configuration instead of silently
             # falling back to the built-in defaults; the next write upgrades
             # it into the normal records list.
             if row["provider"] or row["base_url"] or row["model"] or row["api_key_ciphertext"]:
-                provider = str(row["provider"] or "deepseek")
-                return [
-                    {
-                        "id": "provider-legacy",
-                        "is_active": True,
-                        "provider": provider,
-                        "provider_name": provider,
-                        "protocol": str(row["protocol"] or "chat_completions"),
-                        "base_url": str(row["base_url"] or ""),
-                        "model": str(row["model"] or ""),
-                        "max_tokens": int(row["max_tokens"] or 8192),
-                        "context_size": int(row["context_size"] or 1024000),
-                        "tokenizer_model": str(row["tokenizer_model"] or "deepseek-ai/DeepSeek-V3"),
-                        "api_key_ciphertext": str(row["api_key_ciphertext"] or ""),
-                    }
-                ]
+                provider = str(row["provider"] or "chat_completions")
+                return self._normalize_provider_records(
+                    [
+                        {
+                            "id": "provider-legacy",
+                            "is_active": True,
+                            "provider": provider,
+                            "provider_name": provider,
+                            "protocol": str(row["protocol"] or "chat_completions"),
+                            "base_url": str(row["base_url"] or ""),
+                            "model": str(row["model"] or ""),
+                            "max_tokens": int(row["max_tokens"] or 8192),
+                            "context_size": int(row["context_size"] or 1024000),
+                            "tokenizer_model": str(row["tokenizer_model"] or ""),
+                            "api_key_ciphertext": str(row["api_key_ciphertext"] or ""),
+                        }
+                    ]
+                )
             return []
 
         if connection is None:
@@ -350,13 +405,14 @@ class AuthSettingsMixin:
             return
         now = time.time()
         active = active or {
-            "provider": "deepseek",
+            "provider": "chat_completions",
+            "provider_name": "default",
             "protocol": "chat_completions",
             "base_url": "",
             "model": "",
             "max_tokens": 8192,
             "context_size": 1024000,
-            "tokenizer_model": "deepseek-ai/DeepSeek-V3",
+            "tokenizer_model": "",
             "api_key_ciphertext": "",
         }
         connection.execute(
@@ -373,13 +429,13 @@ class AuthSettingsMixin:
                 updated_at = excluded.updated_at""",
             (
                 user_id,
-                active.get("provider", "deepseek"),
+                active.get("protocol", "chat_completions"),
                 active.get("protocol", "chat_completions"),
                 active.get("base_url", ""),
                 active.get("model", ""),
                 int(active.get("max_tokens", 8192)),
                 int(active.get("context_size", 1024000)),
-                active.get("tokenizer_model", "deepseek-ai/DeepSeek-V3"),
+                active.get("tokenizer_model", ""),
                 active.get("api_key_ciphertext", ""),
                 json.dumps(records, ensure_ascii=False),
                 now,

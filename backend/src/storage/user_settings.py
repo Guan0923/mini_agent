@@ -18,13 +18,13 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS user_provider_settings (
     user_id TEXT PRIMARY KEY,
-    provider TEXT NOT NULL DEFAULT 'deepseek',
+    provider TEXT NOT NULL DEFAULT 'chat_completions',
     protocol TEXT NOT NULL DEFAULT 'chat_completions',
     base_url TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL DEFAULT '',
     max_tokens INTEGER NOT NULL DEFAULT 8192,
     context_size INTEGER NOT NULL DEFAULT 1024000,
-    tokenizer_model TEXT NOT NULL DEFAULT 'deepseek-ai/DeepSeek-V3',
+    tokenizer_model TEXT NOT NULL DEFAULT '',
     api_key_ciphertext TEXT NOT NULL DEFAULT '',
     provider_configs_json TEXT NOT NULL DEFAULT '[]',
     updated_at REAL NOT NULL
