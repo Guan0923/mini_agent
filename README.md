@@ -58,13 +58,15 @@ mini-agent --resume session_xxx
 
 ```toml
 [model]
-provider = "deepseek"
+provider = "chat_completions"
+provider_name = "default"
+protocol = "chat_completions"
 api_key = "replace-with-your-key"
-base_url = "https://api.deepseek.com"
-model = "deepseek-chat"
+base_url = "https://api.example.com/v1"
+model = "replace-with-your-model"
 max_tokens = 8192
 context_size = 1024000
-tokenizer_model = "deepseek-ai/DeepSeek-V3"
+tokenizer_model = ""
 
 [runtime]
 log_full_messages = true
@@ -175,7 +177,7 @@ TUI -> ConversationService -> AgentRunner -> workflows -> planner / tools
                                   +-> RuntimeEvent / checkpoints
 
 MCP stdio -> McpToolAdapter -> safe ToolRegistry subset
-LLMClient -> JsonHttpTransport <-> DeepSeek adapter
+LLMClient -> JsonHttpTransport <-> protocol adapter
 SQLite     <-> local sessions / RuntimeState / audit / checkpoints / outbox
 Local backend HTTP client <-> cloud API <-> PostgreSQL account records, key envelopes and latest three ciphertext snapshots
 Browser/TUI <-> loopback backend API; cloud never owns Agent Runtime or workspace files
@@ -185,7 +187,7 @@ JSONL      <-> ~/.mini_agent-cache/logs/<user_id> redacted diagnostics
 - `backend/src/domain/`：provider-neutral message、plan、session、skill 和 run state。
 - `backend/src/planning/`：规则/LLM planner、上下文管理、模型请求生命周期和结构化输出。
 - `backend/src/runtime/`：应用装配、conversation、workflow、Plan mode、hooks、恢复和 Subagent 协调。
-- `backend/src/providers/`：通用 HTTP/SSE transport、Provider 门面和 DeepSeek wire adapter。
+- `backend/src/providers/`：通用 HTTP/SSE transport、Provider 门面以及 Chat Completions、Responses、Messages 协议适配器。
 - `backend/src/tools/`：ToolRegistry、JSON Schema、文件、网页、命令和 delegation tool。
 - `backend/src/mcp/`：只读 MCP adapter 与分层外部 stdio MCP client。
 - `backend/src/storage/sqlite.py`、`backend/src/sync/`：本地会话存储、同步客户端和快照端口；`backend/src/cloud/`：cloud HTTPS client 与 HTTP snapshot adapter。

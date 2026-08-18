@@ -10,17 +10,13 @@ from typing import Any
 from backend.domain import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, ToolSpec, UserMessage
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 
+from .chat_completions import ChatCompletions
 from .config import ModelConfig
-from .deepseek import DeepSeek
 from .errors import ModelRequestError, ProviderOutputError
 
 
-class ChatCompletionsAdapter(DeepSeek):
-    """OpenAI-compatible Chat Completions adapter.
-
-    DeepSeek remains the strict legacy implementation; the wire protocol is
-    independent of the vendor name.
-    """
+class ChatCompletionsAdapter(ChatCompletions):
+    """OpenAI-compatible Chat Completions adapter."""
 
     pass
 

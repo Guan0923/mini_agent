@@ -13,10 +13,9 @@ from backend.domain import (
 )
 from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.providers import (
-    DeepSeek,
+    ChatCompletions,
     LLMClient,
     ModelConfig,
-    ModelConfigurationError,
     ModelRequestError,
 )
 from backend.runtime import AgentRunner, PreparedResponse
@@ -31,8 +30,8 @@ def runtime_for(*, messages=None, tools=None):
     return runtime
 
 
-def deepseek_for_test() -> DeepSeek:
-    return DeepSeek(ModelConfig("secret", "https://example.test/v1", "demo"))
+def chat_completions_for_test() -> ChatCompletions:
+    return ChatCompletions(ModelConfig("secret", "https://example.test/v1", "demo"))
 
 
 def test_prepare_request_expands_nested_tool_messages() -> None:
@@ -59,7 +58,7 @@ def test_prepare_request_expands_nested_tool_messages() -> None:
         )
     ]
 
-    payload = deepseek_for_test().prepare_request(runtime)
+    payload = chat_completions_for_test().prepare_request(runtime)
 
     assert "response_format" not in payload
     assert payload["tools"][0]["function"]["name"] == "run_command"
@@ -80,7 +79,7 @@ def test_prepare_request_omits_empty_assistant_history() -> None:
     runtime = runtime_for(messages=messages)
     runtime.exchange.messages = messages
 
-    payload = deepseek_for_test().prepare_request(runtime)
+    payload = chat_completions_for_test().prepare_request(runtime)
 
     assert payload["messages"] == [
         {"role": "user", "content": "Start"},
@@ -88,7 +87,7 @@ def test_prepare_request_omits_empty_assistant_history() -> None:
     ]
 
 
-def test_prepare_request_supports_documented_deepseek_parameters() -> None:
+def test_prepare_request_supports_documented_chat_completions_parameters() -> None:
     messages = [UserMessage(name="alice", content="Use a tool.")]
     runtime = runtime_for(messages=messages)
     runtime.exchange.messages = messages
@@ -115,11 +114,11 @@ def test_prepare_request_supports_documented_deepseek_parameters() -> None:
             "run_command",
             "Calculate.",
             {"type": "object"},
-            provider_options={"deepseek": {"strict": True}},
+            provider_options={"chat_completions": {"strict": True}},
         )
     ]
 
-    payload = deepseek_for_test().prepare_request(runtime)
+    payload = chat_completions_for_test().prepare_request(runtime)
 
     assert payload["messages"] == [{"role": "user", "content": "Use a tool.", "name": "alice"}]
     assert payload["thinking"] == {"type": "enabled"}
@@ -150,7 +149,7 @@ def test_prepare_json_request_forces_thinking_off_and_drops_effort() -> None:
     }
     runtime.exchange.output_mode = "json"
 
-    payload = deepseek_for_test().prepare_request(runtime)
+    payload = chat_completions_for_test().prepare_request(runtime)
 
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["thinking"] == {"type": "disabled"}
@@ -172,14 +171,14 @@ def test_prepare_request_rejects_invalid_parameter_combinations(parameters, stre
     runtime.exchange.stream = stream
 
     with pytest.raises(ModelRequestError, match=error):
-        deepseek_for_test().prepare_request(runtime)
+        chat_completions_for_test().prepare_request(runtime)
 
 
 def test_prepare_response_preserves_usage_logprobs_and_tool_calls() -> None:
     runtime = runtime_for()
     runtime.exchange.raw_response = {
         "id": "chatcmpl-test",
-        "model": "deepseek-test",
+        "model": "chat_completions-test",
         "created": 1718345013,
         "object": "chat.completion",
         "system_fingerprint": "fp_test",
@@ -212,7 +211,7 @@ def test_prepare_response_preserves_usage_logprobs_and_tool_calls() -> None:
         },
     }
 
-    response = deepseek_for_test().prepare_response(runtime)
+    response = chat_completions_for_test().prepare_response(runtime)
 
     assert response.message.name == "assistant"
     assert response.message.role == "assistant"
@@ -231,7 +230,7 @@ def test_prepare_response_preserves_usage_logprobs_and_tool_calls() -> None:
     }
     assert response.provider_metadata["created"] == 1718345013
     assert response.provider_metadata["system_fingerprint"] == "fp_test"
-    assert response.message.provider_options["deepseek"]["response"]["choice_index"] == 0
+    assert response.message.provider_options["chat_completions"]["response"]["choice_index"] == 0
     assert runtime.state.turn_usage == response.usage
 
 
@@ -239,7 +238,7 @@ def test_prepare_response_uses_lowest_choice_and_preserves_alternatives() -> Non
     runtime = runtime_for()
     runtime.exchange.raw_response = {
         "id": "multi",
-        "model": "deepseek-test",
+        "model": "chat_completions-test",
         "choices": [
             {
                 "index": 1,
@@ -256,11 +255,11 @@ def test_prepare_response_uses_lowest_choice_and_preserves_alternatives() -> Non
         ],
     }
 
-    response = deepseek_for_test().prepare_response(runtime)
+    response = chat_completions_for_test().prepare_response(runtime)
 
     assert response.message.content == "Primary"
     assert response.finish_reason == "content_filter"
-    alternatives = response.message.provider_options["deepseek"]["response"]["alternative_choices"]
+    alternatives = response.message.provider_options["chat_completions"]["response"]["alternative_choices"]
     assert alternatives[0]["index"] == 1
 
 
@@ -287,7 +286,7 @@ def test_prepare_response_rejects_invalid_tool_arguments_before_execution() -> N
     }
 
     with pytest.raises(ModelRequestError, match="not valid JSON"):
-        deepseek_for_test().prepare_response(runtime)
+        chat_completions_for_test().prepare_response(runtime)
 
 
 def test_prepare_response_aggregates_streamed_reasoning_and_tool_arguments() -> None:
@@ -298,7 +297,7 @@ def test_prepare_response_aggregates_streamed_reasoning_and_tool_arguments() -> 
         [
             {
                 "id": "stream-1",
-                "model": "deepseek-test",
+                "model": "chat_completions-test",
                 "created": 1718345013,
                 "object": "chat.completion.chunk",
                 "system_fingerprint": "fp_stream",
@@ -346,7 +345,7 @@ def test_prepare_response_aggregates_streamed_reasoning_and_tool_arguments() -> 
         ]
     )
 
-    response = deepseek_for_test().prepare_response(runtime)
+    response = chat_completions_for_test().prepare_response(runtime)
 
     assert response.message.reasoning == "Think now."
     assert reasoning == ["Think ", "now."]
@@ -370,7 +369,7 @@ class FakeResponse:
     def json(self) -> dict:
         return {
             "id": "chatcmpl-test",
-            "model": "deepseek-test",
+            "model": "chat_completions-test",
             "choices": [
                 {
                     "message": {"role": "assistant", "content": "Hello", "reasoning_content": "Greet."},
@@ -426,7 +425,7 @@ class FailingSession:
         raise requests.Timeout("timeout")
 
 
-def test_llm_client_delegates_to_deepseek_runtime() -> None:
+def test_llm_client_delegates_to_chat_completions_runtime() -> None:
     session = FakeSession()
     client = LLMClient(
         ModelConfig("secret", "https://example.test/v1", "demo"),
@@ -437,7 +436,7 @@ def test_llm_client_delegates_to_deepseek_runtime() -> None:
 
     response = client.run(runtime)
 
-    assert isinstance(client.llm, DeepSeek)
+    assert isinstance(client.llm, ChatCompletions)
     assert session.request["url"] == "https://example.test/v1/chat/completions"
     assert session.request["json"]["messages"] == [{"role": "user", "content": "hello"}]
     assert response.message.content == "Hello"
@@ -445,7 +444,7 @@ def test_llm_client_delegates_to_deepseek_runtime() -> None:
     assert runtime.state.turn_usage["total_tokens"] == 4
 
 
-def test_llm_client_runs_deepseek_sse_lifecycle() -> None:
+def test_llm_client_runs_chat_completions_sse_lifecycle() -> None:
     session = FakeStreamSession()
     client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
     runtime = runtime_for()
@@ -471,15 +470,22 @@ def test_llm_client_attaches_provider_diagnostics_to_http_errors() -> None:
     with pytest.raises(ModelRequestError, match="Model request failed") as exc_info:
         client.run(runtime)
 
-    assert exc_info.value.diagnostics["provider"] == "deepseek"
+    assert exc_info.value.diagnostics["provider"] == "chat_completions"
     assert exc_info.value.diagnostics["request_outcome"] == "failed"
 
 
-def test_llm_client_rejects_unknown_provider() -> None:
-    config = ModelConfig("secret", "https://example.test/v1", "demo", provider="unknown")
+def test_llm_client_accepts_arbitrary_provider_name() -> None:
+    config = ModelConfig(
+        "secret",
+        "https://example.test/v1",
+        "demo",
+        provider="unknown",
+        provider_name="my-custom-api",
+    )
 
-    with pytest.raises(ModelConfigurationError, match="Unsupported model provider"):
-        LLMClient(config)
+    client = LLMClient(config)
+    assert client.config.provider_name == "my-custom-api"
+    assert client.config.provider == "chat_completions"
 
 
 def test_model_config_loads_provider_from_env_file(tmp_path, monkeypatch) -> None:
@@ -493,7 +499,59 @@ def test_model_config_loads_provider_from_env_file(tmp_path, monkeypatch) -> Non
 
     config = ModelConfig.from_env(env_path)
 
-    assert config.provider == "deepseek"
+    assert config.provider == "chat_completions"
+
+
+def test_model_config_migrates_legacy_vendor_defaults() -> None:
+    config = ModelConfig.from_mapping(
+        {
+            "api_key": "secret",
+            "base_url": "https://example.test/v1",
+            "model": "demo",
+            "provider": "deepseek",
+            "provider_name": "deepseek",
+            "protocol": "chat_completions",
+            "tokenizer_model": "deepseek-ai/DeepSeek-V3",
+        }
+    )
+
+    assert config.provider == "chat_completions"
+    assert config.provider_name == "default"
+    assert config.tokenizer_model == ""
+
+
+def test_runtime_state_migrates_legacy_provider_and_options() -> None:
+    state = runtime_for().state
+    payload = state.to_dict()
+    payload.update(
+        {
+            "provider": "deepseek",
+            "provider_name": "deepseek",
+            "messages": [
+                {
+                    "role": "user",
+                    "name": "user",
+                    "content": "hello",
+                    "provider_options": {"deepseek": {"extra_body": {"feature": True}}},
+                }
+            ],
+            "tool_specs": [
+                {
+                    "name": "lookup",
+                    "description": "Lookup",
+                    "parameters": {"type": "object"},
+                    "provider_options": {"deepseek": {"strict": True}},
+                }
+            ],
+        }
+    )
+
+    restored = type(state).from_dict(payload)
+
+    assert restored.provider == "chat_completions"
+    assert restored.provider_name == "default"
+    assert restored.messages[0].provider_options == {"chat_completions": {"extra_body": {"feature": True}}}
+    assert restored.tool_specs[0].provider_options == {"chat_completions": {"strict": True}}
 
 
 class ScriptedClient:

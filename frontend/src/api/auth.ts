@@ -138,7 +138,7 @@ export async function updateRuntimeConfig(config: RuntimeConfig): Promise<Runtim
 }
 
 export async function updateProviderConfig(
-  config: Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { provider_type?: string; api_key?: string },
+  config: Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { api_key?: string },
 ): Promise<ProviderConfig> {
   return requestJson<ProviderConfig>("/api/auth/provider-config", {
     method: "PUT",
@@ -148,7 +148,7 @@ export async function updateProviderConfig(
 }
 
 export async function addProviderConfig(
-  config: Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { provider_type?: string; api_key?: string },
+  config: Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { api_key?: string },
 ): Promise<ProviderConfig> {
   return requestJson<ProviderConfig>("/api/auth/provider-configs", {
     method: "POST",
@@ -184,7 +184,6 @@ export async function deleteProviderConfig(id: string): Promise<ProviderConfig[]
 export async function discoverProviderModels(values: {
   config_id?: string;
   provider_name: string;
-  provider_type?: string;
   protocol: ProviderConfig["protocol"];
   base_url: string;
   api_key?: string;

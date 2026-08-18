@@ -86,11 +86,18 @@ class ToolSpec:
     provider_options: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
-def _provider_options_from_dict(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    raw = data.get("provider_options")
+def normalize_provider_options(raw: Any) -> dict[str, dict[str, Any]]:
     if not isinstance(raw, dict):
         return {}
-    return {str(provider): dict(options) for provider, options in raw.items() if isinstance(options, dict)}
+    result = {str(provider): dict(options) for provider, options in raw.items() if isinstance(options, dict)}
+    legacy = result.pop("deepseek", None)
+    if legacy is not None and "chat_completions" not in result:
+        result["chat_completions"] = legacy
+    return result
+
+
+def _provider_options_from_dict(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return normalize_provider_options(data.get("provider_options"))
 
 
 def tool_message_to_dict(message: ToolMessage) -> dict[str, Any]:

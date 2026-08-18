@@ -324,13 +324,14 @@ def initialize_config(paths: ClientPaths, workspace: Path) -> dict[str, object]:
         return _ensure_device_id(paths, values)
     config: dict[str, dict[str, object]] = {
         "model": {
-            "provider": "deepseek",
+            "provider": "chat_completions",
+            "provider_name": "default",
             "protocol": "chat_completions",
             "base_url": "",
             "model": "",
             "max_tokens": 8192,
             "context_size": 1_024_000,
-            "tokenizer_model": "deepseek-ai/DeepSeek-V3",
+            "tokenizer_model": "",
         },
         "runtime": {"log_full_messages": True, "max_tool_calls": 32},
         "capabilities": {"skills": True, "rag": False, "plugins": False, "mcp": False},

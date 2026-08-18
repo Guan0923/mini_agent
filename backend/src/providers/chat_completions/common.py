@@ -1,4 +1,4 @@
-"""Shared DeepSeek option validation."""
+"""Shared Chat Completions option validation."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 from ..errors import ModelRequestError
 
-_PROVIDER = "deepseek"
+_PROVIDER = "chat_completions"
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _USER_ID = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 _DOCUMENTED_PARAMETERS = {
@@ -32,9 +32,14 @@ _MANAGED_PARAMETERS = {"messages", "model", "stream", "tools"}
 
 
 def _provider_options(value: Any) -> dict[str, Any]:
-    options = value.provider_options.get(_PROVIDER, {})
+    options = value.provider_options.get(_PROVIDER)
+    if options is None:
+        # Runtime messages written before the provider refactor used the
+        # vendor name as their namespace.  Read that shape once, while all
+        # newly created messages use the protocol namespace above.
+        options = value.provider_options.get("deepseek", {})
     if not isinstance(options, dict):
-        raise ModelRequestError("DeepSeek provider_options must be an object.")
+        raise ModelRequestError("Chat Completions provider_options must be an object.")
     return options
 
 
@@ -48,9 +53,9 @@ def _merge_extra_fields(
     if raw is None:
         return
     if not isinstance(raw, Mapping):
-        raise ModelRequestError(f"DeepSeek {label} extra_body must be an object.")
+        raise ModelRequestError(f"Chat Completions {label} extra_body must be an object.")
     collisions = protected.intersection(raw)
     if collisions:
         fields = ", ".join(sorted(collisions))
-        raise ModelRequestError(f"DeepSeek {label} extra_body cannot override: {fields}.")
+        raise ModelRequestError(f"Chat Completions {label} extra_body cannot override: {fields}.")
     target.update(copy.deepcopy(dict(raw)))

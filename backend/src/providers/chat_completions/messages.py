@@ -1,4 +1,4 @@
-"""Conversion from provider-neutral chat messages to DeepSeek wire messages."""
+"""Conversion from provider-neutral chat messages to Chat Completions wire messages."""
 
 from __future__ import annotations
 
@@ -14,29 +14,29 @@ from .common import _TOOL_NAME, _merge_extra_fields, _provider_options
 
 def _optional_name(message: SystemMessage | UserMessage | AssistantMessage) -> dict[str, str]:
     if not isinstance(message.name, str) or not message.name:
-        raise ModelRequestError("DeepSeek message name must be a non-empty string.")
+        raise ModelRequestError("Chat Completions message name must be a non-empty string.")
     return {"name": message.name} if message.name != message.role else {}
 
 
 def _tool_definition(spec: ToolSpec) -> dict[str, Any]:
     if not _TOOL_NAME.fullmatch(spec.name):
         raise ModelRequestError(
-            f"DeepSeek tool name {spec.name!r} must contain 1-64 letters, digits, underscores, or hyphens."
+            f"Chat Completions tool name {spec.name!r} must contain 1-64 letters, digits, underscores, or hyphens."
         )
     if not isinstance(spec.description, str):
-        raise ModelRequestError(f"DeepSeek tool {spec.name!r} description must be text.")
+        raise ModelRequestError(f"Chat Completions tool {spec.name!r} description must be text.")
     if not isinstance(spec.parameters, dict):
-        raise ModelRequestError(f"DeepSeek tool {spec.name!r} parameters must be a JSON Schema object.")
+        raise ModelRequestError(f"Chat Completions tool {spec.name!r} parameters must be a JSON Schema object.")
     function: dict[str, Any] = {"name": spec.name, "description": spec.description}
     if spec.parameters:
         function["parameters"] = spec.parameters
     options = _provider_options(spec)
     unknown = set(options) - {"strict", "extra_body"}
     if unknown:
-        raise ModelRequestError(f"Unknown DeepSeek tool option(s): {', '.join(sorted(unknown))}.")
+        raise ModelRequestError(f"Unknown Chat Completions tool option(s): {', '.join(sorted(unknown))}.")
     if "strict" in options:
         if not isinstance(options["strict"], bool):
-            raise ModelRequestError(f"DeepSeek tool {spec.name!r} strict must be boolean.")
+            raise ModelRequestError(f"Chat Completions tool {spec.name!r} strict must be boolean.")
         function["strict"] = options["strict"]
     _merge_extra_fields(
         function,
@@ -49,7 +49,7 @@ def _tool_definition(spec: ToolSpec) -> dict[str, Any]:
 
 def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
     if not source:
-        raise ModelRequestError("DeepSeek messages must contain at least one message.")
+        raise ModelRequestError("Chat Completions messages must contain at least one message.")
     wire: list[dict[str, Any]] = []
     seen_call_ids: set[str] = set()
     completed_tools: dict[str, ToolMessage] = {}
@@ -64,7 +64,9 @@ def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
             options = _provider_options(message)
             unknown = set(options) - {"extra_body"}
             if unknown:
-                raise ModelRequestError(f"Unknown DeepSeek system message option(s): {', '.join(sorted(unknown))}.")
+                raise ModelRequestError(
+                    f"Unknown Chat Completions system message option(s): {', '.join(sorted(unknown))}."
+                )
             item: dict[str, Any] = {"role": "system", "content": message.content or ""}
             item.update(_optional_name(message))
             _merge_extra_fields(
@@ -79,7 +81,9 @@ def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
             options = _provider_options(message)
             unknown = set(options) - {"extra_body"}
             if unknown:
-                raise ModelRequestError(f"Unknown DeepSeek user message option(s): {', '.join(sorted(unknown))}.")
+                raise ModelRequestError(
+                    f"Unknown Chat Completions user message option(s): {', '.join(sorted(unknown))}."
+                )
             item = {"role": "user", "content": message.content or ""}
             item.update(_optional_name(message))
             _merge_extra_fields(
@@ -95,12 +99,14 @@ def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
         options = _provider_options(message)
         unknown = set(options) - {"prefix", "extra_body", "response"}
         if unknown:
-            raise ModelRequestError(f"Unknown DeepSeek assistant message option(s): {', '.join(sorted(unknown))}.")
+            raise ModelRequestError(
+                f"Unknown Chat Completions assistant message option(s): {', '.join(sorted(unknown))}."
+            )
         prefix = options.get("prefix")
         if prefix is not None and not isinstance(prefix, bool):
-            raise ModelRequestError("DeepSeek assistant prefix must be boolean.")
+            raise ModelRequestError("Chat Completions assistant prefix must be boolean.")
         if prefix and position != len(source) - 1:
-            raise ModelRequestError("DeepSeek assistant prefix is only valid on the last input message.")
+            raise ModelRequestError("Chat Completions assistant prefix is only valid on the last input message.")
         if not message.tool_messages:
             # Runtime history may contain an in-flight placeholder or a
             # reasoning/control-only assistant node.  Those are valid inside
@@ -110,7 +116,7 @@ def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
             # without inventing user-visible text.
             if not isinstance(message.content, str) or not message.content.strip():
                 if prefix:
-                    raise ModelRequestError("DeepSeek assistant prefix requires non-empty content.")
+                    raise ModelRequestError("Chat Completions assistant prefix requires non-empty content.")
                 continue
             assistant: dict[str, Any] = {"role": "assistant", "content": message.content}
             assistant.update(_optional_name(message))
@@ -141,7 +147,9 @@ def _wire_messages_from(source: list[ChatMessage]) -> list[dict[str, Any]]:
             if (tool.status == "pending" or tool.content is None) and completed is not None:
                 effective = completed
             if effective.status == "pending" or effective.content is None:
-                raise ModelRequestError(f"Tool call {tool.call_id} has no result and cannot be sent to DeepSeek.")
+                raise ModelRequestError(
+                    f"Tool call {tool.call_id} has no result and cannot be sent to Chat Completions."
+                )
             emitted_tools.append(effective)
             tool_calls.append(
                 {

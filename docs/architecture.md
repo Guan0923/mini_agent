@@ -127,13 +127,13 @@ The deployable `cloud` FastAPI service is the only component that accesses Postg
 
 ```python
 LLMClient.run(runtime: AgentRuntime) -> PreparedResponse
-DeepSeek.prepare_request(runtime: AgentRuntime) -> dict[str, object]
-DeepSeek.prepare_response(runtime: AgentRuntime) -> PreparedResponse
+ChatCompletions.prepare_request(runtime: AgentRuntime) -> dict[str, object]
+ChatCompletions.prepare_response(runtime: AgentRuntime) -> PreparedResponse
 ```
 
-`JsonHttpTransport` owns HTTP status handling, JSON decoding, SSE event decoding, redirect policy, and response cleanup. `DeepSeek` only expands active chat messages, constructs the vendor payload, validates tool-call arguments, aggregates streamed fragments, and converts the response back to provider-neutral messages. Artifact snapshots are not accepted at the provider boundary.
+`JsonHttpTransport` owns HTTP status handling, JSON decoding, SSE event decoding, redirect policy, and response cleanup. `ChatCompletions` only expands active chat messages, constructs the protocol payload, validates tool-call arguments, aggregates streamed fragments, and converts the response back to provider-neutral messages. Artifact snapshots are not accepted at the provider boundary.
 
-Tool decisions use DeepSeek native Tool Calls. Another API should add its own adapter without changing domain messages or workflows.
+Tool decisions use the selected protocol's native tool-call shape. A service using any supported protocol can be configured without changing domain messages or workflows.
 
 ## Responsibilities
 
@@ -146,7 +146,7 @@ Tool decisions use DeepSeek native Tool Calls. Another API should add its own ad
   request lifecycle handling lives in `model_requests.py`, while structured output validation lives in `model_outputs.py`.
 - `tools` owns handlers, executable JSON Schema validation, registration, workspace confinement, and confirmation metadata.
   `catalog.py` is a thin composition boundary; grouped default definitions live under `tools/default_tools/`.
-- `providers` owns `LLMClient` selection, generic JSON/SSE transport, and vendor-specific request/response adapters.
+- `providers` owns `LLMClient` selection, generic JSON/SSE transport, and protocol-specific request/response adapters.
 - `storage.sqlite` persists local session state; `sync` owns snapshot packaging/jobs and the repository port, while `backend.cloud` owns the HTTPS adapter. PostgreSQL repositories and account authority exist only under `cloud/`.
 - `mcp` adapts the approval-free read-tool subset to stdio without depending on model or persistence services.
 - `tui` handles terminal commands, approval input, RuntimeEvent presentation, and the process-local full-screen transcript only. `application/` owns the CLI loop and command routing; `components/` owns completion and approvals; `screens/`, `rendering/`, `view_parts/`, and `widgets/` isolate Textual responsibilities. Worker threads enqueue display chunks; the Textual event loop owns all widget mutation and rendering.

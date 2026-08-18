@@ -72,8 +72,8 @@ def test_jobs_import_does_not_load_outer_layers_or_third_party() -> None:
     )
 
 
-def test_deepseek_adapter_does_not_own_http_transport() -> None:
-    imports = _package_imports(SOURCE / "providers" / "deepseek")
+def test_chat_completions_adapter_does_not_own_http_transport() -> None:
+    imports = _package_imports(SOURCE / "providers" / "chat_completions")
     assert "requests" not in imports
 
 

@@ -133,9 +133,9 @@ def _active_runtime_client(tmp_path: Path):
         session_id=session["session_id"],
         prompt="hello",
         user=identity["id"],
-        provider="deepseek",
-        provider_name="deepseek",
-        model="deepseek-chat",
+        provider="chat_completions",
+        provider_name="default",
+        model="demo-chat",
         emit=frames.append,
     )
     bridge.start()
@@ -491,9 +491,9 @@ def test_references_persist_on_user_node_and_expander_is_skipped(tmp_path: Path)
         session_id=session.session_id,
         prompt="请分析 @notes.md 的内容",
         user=user["id"],
-        provider="deepseek",
-        provider_name="deepseek",
-        model="deepseek-chat",
+        provider="chat_completions",
+        provider_name="default",
+        model="demo-chat",
         references=[{"source": "upload", "path": "notes.md"}],
         emit=frames.append,
     )

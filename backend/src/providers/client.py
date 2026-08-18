@@ -79,9 +79,7 @@ class LLMClient:
 
         captured = snapshot if isinstance(snapshot, dict) else None
         selected = str(
-            (captured or {}).get("provider_name")
-            or getattr(runtime.state, "provider_name", "")
-            or ""
+            (captured or {}).get("provider_name") or getattr(runtime.state, "provider_name", "") or ""
         ).strip()
         if self._config_resolver is not None and selected and selected.casefold() != "unknown":
             resolved = self._config_resolver(selected)
@@ -350,17 +348,6 @@ class LLMClient:
 
     @staticmethod
     def _create_llm(config: ModelConfig) -> ProviderAdapter:
-        supported_providers = {
-            "anthropic",
-            "azure",
-            "azure_openai",
-            "deepseek",
-            "gemini",
-            "google",
-            "openai",
-        }
-        if config.provider not in supported_providers:
-            raise ModelConfigurationError(f"Unsupported model provider: {config.provider!r}.")
         adapters = {
             "chat_completions": ChatCompletionsAdapter,
             "responses": ResponsesAdapter,
@@ -374,6 +361,7 @@ class LLMClient:
     def _request_diagnostics(self, stream: bool) -> dict[str, Any]:
         return {
             "provider": self.config.provider,
+            "provider_name": self.config.provider_name,
             "protocol": self.config.protocol,
             "operation": self.llm.operation,
             "model": self.config.model,

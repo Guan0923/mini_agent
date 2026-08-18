@@ -13,6 +13,7 @@ from .messages import (
     UserMessage,
     message_from_dict,
     message_to_dict,
+    normalize_provider_options,
 )
 from .plans import AgentAction
 from .runtime_state import (
@@ -158,6 +159,7 @@ __all__ = [
     "UserMessage",
     "message_from_dict",
     "message_to_dict",
+    "normalize_provider_options",
     "change_payload",
     "compaction_payload",
     "create_root_node",

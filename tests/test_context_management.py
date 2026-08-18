@@ -18,7 +18,7 @@ from backend.domain import (
 from backend.planning.context_management import ContextManager
 from backend.planning.llm import LLMPlanner
 from backend.planning.rule_based import RuleBasedPlanner
-from backend.providers import DeepSeek, ModelConfig, ModelConfigurationError
+from backend.providers import ChatCompletions, ModelConfig, ModelConfigurationError
 from backend.runtime import AgentRunner
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 from backend.runtime.core.events import CHECKPOINT_EVENT_KINDS
@@ -261,11 +261,17 @@ class RecordingTokenizer:
         return FakeEncoding(len(value))
 
 
-def test_deepseek_token_estimator_counts_wire_messages_tools_and_output_reserve() -> None:
+def test_chat_completions_token_estimator_counts_wire_messages_tools_and_output_reserve() -> None:
     tokenizer = RecordingTokenizer()
     loaded: list[str] = []
-    deepseek = DeepSeek(
-        ModelConfig("secret", "https://example.test/v1", "demo", max_tokens=7),
+    chat_completions = ChatCompletions(
+        ModelConfig(
+            "secret",
+            "https://example.test/v1",
+            "demo",
+            max_tokens=7,
+            tokenizer_model="custom-tokenizer",
+        ),
         tokenizer_loader=lambda identifier: loaded.append(identifier) or tokenizer,
     )
     tool_message = ToolMessage(
@@ -281,10 +287,10 @@ def test_deepseek_token_estimator_counts_wire_messages_tools_and_output_reserve(
     ]
     tools = [ToolSpec("lookup", "Look up text", {"type": "object", "properties": {"query": {"type": "string"}}})]
 
-    first = deepseek.estimate_tokens(messages, tools, {})
-    second = deepseek.estimate_tokens(messages, tools, {"max_tokens": 3})
+    first = chat_completions.estimate_tokens(messages, tools, {})
+    second = chat_completions.estimate_tokens(messages, tools, {"max_tokens": 3})
 
-    assert loaded == ["deepseek-ai/DeepSeek-V3"]
+    assert loaded == ["custom-tokenizer"]
     assert first == len(tokenizer.values[0]) + 7
     assert second == len(tokenizer.values[1]) + 3
     serialized = tokenizer.values[0]
@@ -295,17 +301,17 @@ def test_deepseek_token_estimator_counts_wire_messages_tools_and_output_reserve(
     assert json.loads(arguments) == {"query": "中文"}
 
 
-def test_deepseek_tokenizer_load_failure_is_actionable() -> None:
+def test_chat_completions_tokenizer_load_failure_is_actionable() -> None:
     def fail(_identifier: str):
         raise OSError("offline")
 
-    deepseek = DeepSeek(
-        ModelConfig("secret", "https://example.test/v1", "demo"),
+    chat_completions = ChatCompletions(
+        ModelConfig("secret", "https://example.test/v1", "demo", tokenizer_model="custom-tokenizer"),
         tokenizer_loader=fail,
     )
 
     with pytest.raises(ModelConfigurationError, match="TOKENIZER_MODEL"):
-        deepseek.estimate_tokens([UserMessage(content="hello")], [], {})
+        chat_completions.estimate_tokens([UserMessage(content="hello")], [], {})
 
 
 class ContextAwareClient:
@@ -407,14 +413,14 @@ def test_model_config_loads_context_defaults_and_overrides(tmp_path: Path) -> No
             "BASE_URL": "https://example.test/v1",
             "MODEL": "demo",
             "CONTEXT_SIZE": "2048000",
-            "TOKENIZER_MODEL": "deepseek-ai/custom-tokenizer",
+            "TOKENIZER_MODEL": "custom-tokenizer",
         },
     )
 
     assert default.context_size == 1_024_000
-    assert default.tokenizer_model == "deepseek-ai/DeepSeek-V3"
+    assert default.tokenizer_model == ""
     assert configured.context_size == 2_048_000
-    assert configured.tokenizer_model == "deepseek-ai/custom-tokenizer"
+    assert configured.tokenizer_model == "custom-tokenizer"
 
 
 def test_context_manager_publishes_usage_before_and_after_compression() -> None:
