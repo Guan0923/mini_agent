@@ -27,7 +27,7 @@ export const EMPTY_RUNTIME_NODE_USAGE: RuntimeNodeUsage = {
 
 const REASONING_EFFORTS = new Set<ReasoningEffort>(["low", "medium", "high", "xhigh", "max"]);
 const THINKING_MODES = new Set<ThinkingMode>(["enable", "disable"]);
-const PERMISSION_MODES = new Set<PermissionMode>(["approval_for_me", "full_access"]);
+const PERMISSION_MODES = new Set<PermissionMode>(["approval_for_me", "read_only", "workspace_write", "full_access"]);
 const RUNNING_MODES = new Set<ChatMode>(["agent", "plan"]);
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -80,7 +80,9 @@ export function normalizeRuntimeNode(node: RuntimeStateNode): RuntimeStateNode {
     ...node,
     provider_name: typeof node.provider_name === "string" ? node.provider_name : "unknown",
     model: normalizeRuntimeNodeModel(node.model),
-    permission_mode: PERMISSION_MODES.has(node.permission_mode) ? node.permission_mode : "approval_for_me",
+    permission_mode: node.permission_mode === "approval_for_me"
+      ? "read_only"
+      : (PERMISSION_MODES.has(node.permission_mode) ? node.permission_mode : "read_only"),
     running_mode: RUNNING_MODES.has(node.running_mode) ? node.running_mode : "agent",
     usage: {
       input_tokens: tokenCount(usage.input_tokens),

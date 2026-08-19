@@ -44,6 +44,7 @@ def test_chat_request_accepts_mode_session_and_permission() -> None:
         session_id="session_1",
         mode="plan",
         permission_mode="full_access",
+        full_access_acknowledged=True,
     )
 
     assert request.mode == "plan"
@@ -150,7 +151,7 @@ def test_runtime_config_patch_requires_a_live_dynamic_leaf(tmp_path: Path) -> No
         session = client.post("/api/sessions", json={}).json()
         response = client.patch(
             f"/api/sessions/{session['session_id']}/runtime-config",
-            json={"node_id": "node_missing", "permission_mode": "full_access"},
+            json={"node_id": "node_missing", "permission_mode": "full_access", "full_access_acknowledged": True},
         )
     assert response.status_code == 409
 
@@ -177,6 +178,7 @@ def test_runtime_config_patch_validates_atomically_and_switches_provider_default
                 "provider_name": "WORK-OPENAI",
                 "model": {"reasoning_effort": "high"},
                 "permission_mode": "full_access",
+                "full_access_acknowledged": True,
             },
         )
         assert response.status_code == 200, response.text
@@ -197,7 +199,7 @@ def test_runtime_config_patch_validates_atomically_and_switches_provider_default
         dynamic = bridge.writer.current(session["session_id"], node_id)
         assert dynamic.model["output_length"] == 16000
         assert dynamic.model["reasoning_effort"] == "high"
-        assert dynamic.permission_mode == "approval_for_me"
+        assert dynamic.permission_mode == "read_only"
 
         before = dynamic.to_dict()
         invalid = client.patch(
@@ -220,7 +222,7 @@ def test_runtime_config_patch_rejects_a_sealed_node_even_when_it_is_a_leaf(tmp_p
         )
         response = client.patch(
             f"/api/sessions/{session['session_id']}/runtime-config",
-            json={"node_id": user_node.id, "permission_mode": "full_access"},
+            json={"node_id": user_node.id, "permission_mode": "full_access", "full_access_acknowledged": True},
         )
         assert response.status_code == 409
     finally:

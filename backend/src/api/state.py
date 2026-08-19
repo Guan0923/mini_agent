@@ -12,6 +12,7 @@ from typing import Any
 from backend.configuration import ClientPaths, validate_identity_id
 from backend.domain.terminal import TERMINAL_LABELS
 from backend.jobs import JobRegistry
+from backend.sandbox import WindowsBrokerClient
 from backend.storage.projects import ProjectStore
 from backend.tools.terminal import available_terminal_executables, effective_terminal_type
 
@@ -38,6 +39,7 @@ class WebAppState:
         snapshot_repository: Any | None = None,
         project_picker: Callable[[], Path | None] | None = None,
         job_registry: JobRegistry | None = None,
+        sandbox_broker: WindowsBrokerClient | None = None,
     ) -> None:
         data_root = Path(data_root)
         if data_root.is_symlink():
@@ -53,6 +55,7 @@ class WebAppState:
         self.cloud_client = cloud_client
         self.project_picker = project_picker
         self.job_registry = job_registry or JobRegistry()
+        self.sandbox_broker = sandbox_broker or WindowsBrokerClient.from_system()
         self.system_job_scope = self.job_registry.root_scope()
         # Process-local active dynamic-node configuration registry.  It is
         # intentionally not persisted; the durable node remains the source of

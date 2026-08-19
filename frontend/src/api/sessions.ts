@@ -150,7 +150,8 @@ export async function patchRuntimeConfig(
     node_id: string;
     provider_name?: string;
     model?: Record<string, unknown>;
-    permission_mode?: "approval_for_me" | "full_access";
+    permission_mode?: "approval_for_me" | "read_only" | "workspace_write" | "full_access";
+    full_access_acknowledged?: boolean;
     running_mode?: "agent" | "plan";
   },
 ): Promise<Record<string, unknown>> {

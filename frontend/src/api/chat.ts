@@ -9,6 +9,7 @@ export interface StreamOptions {
   sourceNodeId?: string;
   mode?: ChatMode;
   permissionMode?: PermissionMode;
+  fullAccessAcknowledged?: boolean;
   reasoningEffort?: ReasoningEffort;
   providerName?: string;
   model?: RuntimeConfigModel;
@@ -106,6 +107,7 @@ export async function streamChat(
       mode: normalized.mode ?? "agent",
       ...(normalized.mode ? { running_mode: normalized.mode } : {}),
       permission_mode: normalized.permissionMode,
+      ...(normalized.fullAccessAcknowledged ? { full_access_acknowledged: true } : {}),
       reasoning_effort: normalized.reasoningEffort,
       provider_name: normalized.providerName,
       model: normalized.model,
@@ -129,11 +131,13 @@ export async function streamResume(
   model?: RuntimeConfigModel,
   mode?: ChatMode,
   ragMode: RagMode = "off",
+  fullAccessAcknowledged = false,
 ): Promise<"completed" | "aborted"> {
   return streamEndpoint(
     `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
     {
       permission_mode: permissionMode,
+      ...(fullAccessAcknowledged ? { full_access_acknowledged: true } : {}),
       reasoning_effort: reasoningEffort,
       source_node_id: sourceNodeId,
       provider_name: providerName,

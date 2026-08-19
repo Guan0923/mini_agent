@@ -69,7 +69,7 @@ class RuntimeEventNodeBridge:
         provider_name: str | None = None,
         model: str = "unknown",
         model_config: Mapping[str, Any] | None = None,
-        permission_mode: str = "approval_for_me",
+        permission_mode: str = "read_only",
         running_mode: str = "agent",
         cwd: str = "",
         thinking_level: str = "medium",
@@ -260,8 +260,8 @@ class RuntimeEventNodeBridge:
             self.permission_mode if config.get("permission_mode") is None else str(config["permission_mode"])
         )
         candidate_running = self.running_mode if config.get("running_mode") is None else str(config["running_mode"])
-        if candidate_permission not in {"approval_for_me", "full_access"}:
-            raise RuntimeStateValidationError("permission_mode must be approval_for_me or full_access.")
+        if candidate_permission not in {"approval_for_me", "read_only", "workspace_write", "full_access"}:
+            raise RuntimeStateValidationError("permission_mode must be read_only, workspace_write, or full_access.")
         if candidate_running not in {"agent", "plan"}:
             raise RuntimeStateValidationError("running_mode must be agent or plan.")
         updated: RuntimeState | None = self.last_node

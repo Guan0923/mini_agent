@@ -17,7 +17,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from backend.domain import DEFAULT_TIME_ZONE, FAILED_TERMINAL_MESSAGE, terminal_error_text
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
@@ -82,7 +82,8 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     mode: Literal["agent", "plan"] = "agent"
     running_mode: Literal["agent", "plan"] | None = None
-    permission_mode: Literal["approval_for_me", "full_access"] | None = None
+    permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None
+    full_access_acknowledged: StrictBool = False
     reasoning_effort: ReasoningEffort = "medium"
     provider_name: str | None = Field(default=None, min_length=1, max_length=80)
     model: RuntimeModelRequest | None = None
@@ -106,9 +107,16 @@ class ChatRequest(BaseModel):
         self.mode = self.running_mode
         return self
 
+    @model_validator(mode="after")
+    def require_full_access_acknowledgement(self) -> ChatRequest:
+        if self.permission_mode == "full_access" and not self.full_access_acknowledged:
+            raise ValueError("full_access requires explicit joint file and network confirmation")
+        return self
+
 
 class ResumeRequest(BaseModel):
-    permission_mode: Literal["approval_for_me", "full_access"] | None = None
+    permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None
+    full_access_acknowledged: StrictBool = False
     reasoning_effort: ReasoningEffort = "medium"
     source_node_id: str | None = None
     mode: Literal["agent", "plan"] = "agent"
@@ -127,6 +135,12 @@ class ResumeRequest(BaseModel):
         elif self.mode != "agent" and self.mode != self.running_mode:
             raise ValueError("mode and running_mode must match")
         self.mode = self.running_mode
+        return self
+
+    @model_validator(mode="after")
+    def require_full_access_acknowledgement(self) -> ResumeRequest:
+        if self.permission_mode == "full_access" and not self.full_access_acknowledged:
+            raise ValueError("full_access requires explicit joint file and network confirmation")
         return self
 
 
@@ -326,7 +340,7 @@ def _stream(
     session_id: str | None = None,
     source_node_id: str | None = None,
     mode: Literal["agent", "plan"] = "agent",
-    permission_mode: Literal["approval_for_me", "full_access"] | None = None,
+    permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None,
     reasoning_effort: ReasoningEffort = "medium",
     provider_name: str | None = None,
     model_snapshot: dict[str, object] | None = None,
@@ -581,7 +595,7 @@ def _stream(
                             "temperature": 1.0,
                             **(model_snapshot or {}),
                         },
-                        permission_mode=permission_mode or "approval_for_me",
+                        permission_mode=permission_mode or "read_only",
                         running_mode=mode,
                         cwd=str(workspace),
                         references=references,
@@ -591,7 +605,7 @@ def _stream(
                         {
                             "provider_name": provider_name,
                             "model": model_snapshot or {},
-                            "permission_mode": permission_mode or "approval_for_me",
+                            "permission_mode": permission_mode or "read_only",
                             "running_mode": mode,
                         }
                     )

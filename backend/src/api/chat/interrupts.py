@@ -14,6 +14,7 @@ from time import monotonic
 from typing import Any
 
 from backend.runtime.core.contracts import InterruptDecision, InterruptRequest
+from backend.sandbox import ApprovalDecision, ApprovalStore
 
 
 def auto_approve(request: InterruptRequest) -> InterruptDecision:
@@ -30,21 +31,29 @@ def auto_approve(request: InterruptRequest) -> InterruptDecision:
 
 
 class _PendingDecision:
-    def __init__(self, owner_id: str | None = None) -> None:
+    def __init__(self, owner_id: str | None = None, approval_context: dict[str, str] | None = None) -> None:
         self.event = threading.Event()
         self.result: dict[str, Any] = {}
         self.owner_id = owner_id
+        self.approval_context = approval_context
 
 
 class DecisionRegistry:
     """Thread-safe store of decisions the run is currently waiting on."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, approval_store: ApprovalStore | None = None) -> None:
         self._pending: dict[str, _PendingDecision] = {}
         self._lock = threading.Lock()
+        self.approval_store = approval_store or ApprovalStore()
 
-    def register(self, decision_id: str, owner_id: str | None = None) -> _PendingDecision:
-        pending = _PendingDecision(owner_id)
+    def register(
+        self,
+        decision_id: str,
+        owner_id: str | None = None,
+        *,
+        approval_context: dict[str, str] | None = None,
+    ) -> _PendingDecision:
+        pending = _PendingDecision(owner_id, approval_context)
         with self._lock:
             self._pending[decision_id] = pending
         return pending
@@ -63,6 +72,16 @@ class DecisionRegistry:
         if pending is None:
             return False
         pending.result.update(decision)
+        if pending.approval_context is not None and decision.get("choice") == ApprovalDecision.ALLOW_SESSION.value:
+            context = pending.approval_context
+            self.approval_store.decide(
+                session_id=context["session_id"],
+                command=context["command"],
+                cwd=context["cwd"],
+                permission_target=context["permission_target"],
+                network_target=context.get("network_target", ""),
+                decision=ApprovalDecision.ALLOW_SESSION,
+            )
         pending.event.set()
         return True
 
@@ -86,6 +105,9 @@ def make_interactive_interrupt(
 
     def decide(request: InterruptRequest) -> InterruptDecision:
         if request.kind == "tool" and auto_approve_tools:
+            return InterruptDecision("continue")
+        approval_context = _approval_context(request)
+        if approval_context is not None and registry.approval_store.allowed(**approval_context):
             return InterruptDecision("continue")
         decision_id = f"dec_{uuid.uuid4().hex}"
         questions = [
@@ -121,7 +143,7 @@ def make_interactive_interrupt(
                 },
             }
         )
-        pending = registry.register(decision_id, owner_id)
+        pending = registry.register(decision_id, owner_id, approval_context=approval_context)
         deadline = monotonic() + timeout
         while True:
             if pending.event.wait(timeout=min(0.1, max(0.0, deadline - monotonic()))):
@@ -144,7 +166,7 @@ def make_interactive_interrupt(
                     supplement=supplement if isinstance(supplement, str) and supplement else None,
                 )
             return InterruptDecision(
-                "continue" if choice == "continue" else "cancel",
+                "continue" if choice in {"continue", "allow_once", "allow_session"} else "cancel",
                 supplement=supplement if isinstance(supplement, str) and supplement else None,
             )
         if request.kind == "plan":
@@ -162,3 +184,19 @@ def make_interactive_interrupt(
         return InterruptDecision("continue")
 
     return decide
+
+
+def _approval_context(request: InterruptRequest) -> dict[str, str] | None:
+    if request.kind != "tool" or not isinstance(request.data, dict):
+        return None
+    values = request.data
+    session_id = values.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    return {
+        "session_id": session_id,
+        "command": str(values.get("command") or values.get("tool") or "tool"),
+        "cwd": str(values.get("cwd") or ""),
+        "permission_target": str(values.get("permission_target") or "workspace_write"),
+        "network_target": str(values.get("network_target") or ""),
+    }

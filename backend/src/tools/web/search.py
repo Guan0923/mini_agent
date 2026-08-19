@@ -89,7 +89,15 @@ class DuckDuckGoWebSearch:
     _MAX_SNIPPET_CHARS = 2_000
     _USER_AGENT = "Mini-Agent/0.1 (+https://example.invalid/mini-agent)"
 
-    def __init__(self, *, session: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        session: Any | None = None,
+        network_mode: str | None = None,
+        network_allowlist: tuple[tuple[str, int], ...] = (),
+    ) -> None:
+        self._network_mode = network_mode
+        self._network_allowlist = {(host.casefold(), port) for host, port in network_allowlist}
         if session is None:
             requests_session = requests.Session()
             # The endpoint is fixed and not user-controlled.  Avoid inheriting
@@ -100,6 +108,13 @@ class DuckDuckGoWebSearch:
             self._session = session
 
     def search(self, query: str, max_results: int = 5) -> str:
+        if self._network_mode == "no_network":
+            raise ToolError("Web search is disabled by the sandbox network policy.")
+        if self._network_mode == "restricted_network":
+            endpoint = urlsplit(self._ENDPOINT)
+            port = endpoint.port or (443 if endpoint.scheme == "https" else 80)
+            if (str(endpoint.hostname or "").casefold(), port) not in self._network_allowlist:
+                raise ToolError("Web search host is not in the sandbox network allowlist.")
         self._validate(query, max_results)
         try:
             response = self._session.get(

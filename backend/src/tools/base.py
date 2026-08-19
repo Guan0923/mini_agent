@@ -27,6 +27,7 @@ class ToolInvocationContext:
     clock: Callable[[], str] = utc_now
     job_scope: object | None = None
     cancel_requested: Callable[[], bool] | None = None
+    permission_mode: str | None = None
 
 
 ToolHandler = Callable[..., str]

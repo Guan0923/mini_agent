@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from .safety import ClassNameErrorFormatter, ErrorFormatter
 
@@ -74,6 +74,7 @@ class JobInfo:
     exit_code: int | None = None
     cancel_requested_at: datetime | None = None
     health: str | None = None
+    sandbox: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +133,7 @@ class Job(ABC):
         self._pids: tuple[int, ...] = ()
         self._exit_code: int | None = None
         self._cancel_requested_at: datetime | None = None
+        self._sandbox: dict[str, Any] | None = None
 
     # -- public API ---------------------------------------------------------
 
@@ -201,6 +203,7 @@ class Job(ABC):
                 pids=self._pids,
                 exit_code=self._exit_code,
                 cancel_requested_at=self._cancel_requested_at,
+                sandbox=dict(self._sandbox) if self._sandbox is not None else None,
             )
 
     def add_listener(self, listener: JobStateListener) -> None:
@@ -272,6 +275,12 @@ class Job(ABC):
             self._pids = tuple(pids)
             if exit_code is not None:
                 self._exit_code = exit_code
+
+    def _set_sandbox_info(self, value: dict[str, Any] | None) -> None:
+        """Attach a redacted sandbox projection to future JobInfo snapshots."""
+
+        with self._lock:
+            self._sandbox = dict(value) if value is not None else None
 
     @abstractmethod
     def _request_cancel(self) -> None:

@@ -63,6 +63,9 @@ class SubprocessJob(Job):
         error_formatter=None,
         clock=None,
         listener=None,
+        sandbox_policy=None,
+        sandbox_launcher=None,
+        resource_monitor=None,
     ) -> None:
         super().__init__(
             job_id,
@@ -88,6 +91,21 @@ class SubprocessJob(Job):
         self._output = ""
         self._stdout = ""
         self._stderr = ""
+        self.sandbox_policy = sandbox_policy
+        self.sandbox_launcher = sandbox_launcher
+        self.resource_monitor = resource_monitor
+        if sandbox_policy is not None:
+            raw = sandbox_policy.to_dict()
+            self._set_sandbox_info(
+                {
+                    "enforced": bool(raw.get("enforced", True)),
+                    "file_mode": raw.get("file_mode", "read_only"),
+                    "network_mode": raw.get("network_mode", "no_network"),
+                    "limits": raw.get("limits", {}),
+                    "failure_code": None,
+                    "cleanup_pending": False,
+                }
+            )
 
     # -- public API ---------------------------------------------------------
 
@@ -119,9 +137,17 @@ class SubprocessJob(Job):
         try:
             pid = self._group.start()
         except OSError as exc:
+            self._mark_sandbox_failure(getattr(exc, "code", "init_failed"))
+            self._mark_failed(exc)
+            raise
+        except Exception as exc:
+            self._mark_sandbox_failure(getattr(exc, "code", "init_failed"))
             self._mark_failed(exc)
             raise
         self._set_process_info((pid,))
+        if self.resource_monitor is not None:
+            self.resource_monitor.on_exceeded = self._resource_exceeded
+            self.resource_monitor.start()
         self._monitor_thread = threading.Thread(
             target=self._monitor,
             name=f"job-{self._id}-monitor",
@@ -140,6 +166,13 @@ class SubprocessJob(Job):
         """Stop the running subprocess by terminating the whole tree; the
         monitor thread observes the exit and seals the ``cancelled`` state."""
         self._group.terminate()
+
+    def _mark_sandbox_failure(self, code: object) -> None:
+        current = self.info().sandbox
+        if current is None:
+            return
+        current.update({"failure_code": str(code)})
+        self._set_sandbox_info(current)
 
     # -- monitor thread -----------------------------------------------------
 
@@ -179,6 +212,19 @@ class SubprocessJob(Job):
         except JobStateError:
             # A concurrent cancel/close already sealed the terminal state.
             pass
+        finally:
+            if self.resource_monitor is not None:
+                self.resource_monitor.stop()
+            if self.sandbox_launcher is not None:
+                process = getattr(self._group, "_process", None)
+                if not self.sandbox_launcher.cleanup(process):
+                    current = self.info().sandbox or {}
+                    current.update({"cleanup_pending": True, "failure_code": "cleanup_pending"})
+                    self._set_sandbox_info(current)
+
+    def _resource_exceeded(self, error: Exception) -> None:
+        self._mark_sandbox_failure("resource_exceeded")
+        self._group.terminate()
 
     def _finish_timeout(self, exit_code: int | None) -> None:
         self._mark_failed(

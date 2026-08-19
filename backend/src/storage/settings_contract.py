@@ -11,6 +11,7 @@ from collections.abc import Mapping
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS, validate_time_zone
 from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, normalize_terminal_type
+from backend.sandbox import NetworkMode, NetworkRule, PermissionMode, SandboxLimits, normalize_permission_mode
 
 DEFAULT_PROFILE: dict[str, str] = {"display_name": "", "agent_preferences": ""}
 DEFAULT_AGENT_CONFIG: dict[str, object] = {
@@ -38,6 +39,13 @@ DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
 }
 DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {}
 DEFAULT_RUNTIME_CONFIG: dict[str, object] = {"max_tool_calls": 32, "terminal_type": DEFAULT_TERMINAL_TYPE}
+DEFAULT_SANDBOX_CONFIG: dict[str, object] = {
+    "enabled": False,
+    "file_mode": PermissionMode.READ_ONLY.value,
+    "network_mode": NetworkMode.NO_NETWORK.value,
+    "network_allowlist": [],
+    "limits": SandboxLimits().to_dict(),
+}
 
 
 def normalize_runtime_config(current: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:
@@ -51,6 +59,65 @@ def normalize_runtime_config(current: Mapping[str, object], values: Mapping[str,
         raise ValueError("max_tool_calls must be between 1 and 1000")
     terminal_type = normalize_terminal_type(values.get("terminal_type", current.get("terminal_type")))
     return {"max_tool_calls": max_tool_calls, "terminal_type": terminal_type}
+
+
+def normalize_sandbox_config(
+    current: Mapping[str, object] | None = None,
+    values: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Validate the local-only sandbox settings contract."""
+
+    result = dict(DEFAULT_SANDBOX_CONFIG)
+    if isinstance(current, Mapping):
+        result.update(current)
+    if isinstance(values, Mapping):
+        result.update(values)
+    enabled = result.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("sandbox enabled must be a boolean")
+    file_mode = normalize_permission_mode(result.get("file_mode"))
+    network_mode = str(result.get("network_mode") or NetworkMode.NO_NETWORK.value)
+    try:
+        network = NetworkMode(network_mode)
+    except ValueError as exc:
+        raise ValueError("network_mode must be no_network, restricted_network, or full_network") from exc
+    raw_allowlist = result.get("network_allowlist") or []
+    if not isinstance(raw_allowlist, (list, tuple)):
+        raise ValueError("network_allowlist must be an array")
+    if len(raw_allowlist) > 128:
+        raise ValueError("network_allowlist must contain at most 128 rules")
+    allowlist: list[dict[str, object]] = []
+    for item in raw_allowlist:
+        if not isinstance(item, Mapping):
+            raise ValueError("network_allowlist entries must be objects")
+        try:
+            raw_port = item.get("port")
+            if isinstance(raw_port, bool) or not isinstance(raw_port, int):
+                raise ValueError("network port must be an integer")
+            rule = NetworkRule(str(item.get("host") or ""), raw_port)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("network_allowlist entry is invalid") from exc
+        allowlist.append({"host": rule.host, "port": rule.port})
+    if network is NetworkMode.RESTRICTED_NETWORK and not allowlist:
+        raise ValueError("restricted_network requires at least one network rule")
+    if file_mode is PermissionMode.FULL_ACCESS and network is not NetworkMode.FULL_NETWORK:
+        raise ValueError("full_access requires full_network")
+    if (
+        file_mode is PermissionMode.FULL_ACCESS
+        and isinstance(values, Mapping)
+        and values.get("file_mode") == PermissionMode.FULL_ACCESS.value
+        and not bool(values.get("full_access_acknowledged", False))
+        and not (isinstance(current, Mapping) and current.get("file_mode") == PermissionMode.FULL_ACCESS.value)
+    ):
+        raise ValueError("full_access requires explicit joint file and network confirmation")
+    limits = SandboxLimits.from_mapping(result.get("limits") if isinstance(result.get("limits"), Mapping) else None)
+    return {
+        "enabled": enabled,
+        "file_mode": file_mode.value,
+        "network_mode": network.value,
+        "network_allowlist": allowlist,
+        "limits": limits.to_dict(),
+    }
 
 
 def normalize_agent_config(current: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:

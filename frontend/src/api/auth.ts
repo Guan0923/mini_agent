@@ -61,6 +61,41 @@ export interface RuntimeConfig {
   terminal_type: TerminalType;
 }
 
+export type SandboxFileMode = "read_only" | "workspace_write" | "full_access";
+export type SandboxNetworkMode = "no_network" | "restricted_network" | "full_network";
+
+export interface SandboxLimits {
+  wall_seconds: number;
+  cpu_seconds: number;
+  memory_mib: number;
+  processes: number;
+  handles: number;
+  output_chars: number;
+  disk_mib: number;
+}
+
+export interface SandboxNetworkRule {
+  host: string;
+  port: number;
+}
+
+export interface SandboxConfig {
+  enabled: boolean;
+  file_mode: SandboxFileMode;
+  network_mode: SandboxNetworkMode;
+  network_allowlist: SandboxNetworkRule[];
+  limits: SandboxLimits;
+  full_access_acknowledged?: boolean;
+}
+
+export interface SandboxBrokerStatus {
+  installed: boolean;
+  healthy: boolean;
+  version?: string | null;
+  installation_id?: string | null;
+  detail?: string | null;
+}
+
 export interface RagConfig {
   enabled: boolean;
   algorithm: "hybrid" | "bm25" | "vector";
@@ -85,6 +120,7 @@ export interface UserSettings {
   provider_configs: ProviderConfig[];
   capability_config: Record<string, unknown>;
   runtime_config: RuntimeConfig;
+  sandbox_config: SandboxConfig;
   rag_config: RagConfig;
   terminal_options: TerminalOption[];
   terminal_notice: string | null;
@@ -135,6 +171,26 @@ export async function updateRuntimeConfig(config: RuntimeConfig): Promise<Runtim
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
+}
+
+export async function updateSandboxConfig(config: SandboxConfig): Promise<SandboxConfig> {
+  return requestJson<SandboxConfig>("/api/auth/sandbox-config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+}
+
+export async function getSandboxStatus(): Promise<SandboxBrokerStatus> {
+  return requestJson<SandboxBrokerStatus>("/api/sandbox/status");
+}
+
+export async function installSandboxBroker(): Promise<SandboxBrokerStatus> {
+  return requestJson<SandboxBrokerStatus>("/api/sandbox/install", { method: "POST" });
+}
+
+export async function repairSandboxBroker(): Promise<SandboxBrokerStatus> {
+  return requestJson<SandboxBrokerStatus>("/api/sandbox/repair", { method: "POST" });
 }
 
 export async function updateProviderConfig(

@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.jobs import TERMINAL_STATES, JobLane, JobQuery, JobState
+from backend.sandbox import SandboxLimits
 
 from .auth.dependencies import require_user
 from .auth.types import UserIdentity
@@ -49,6 +50,27 @@ def _iso(value: datetime | None) -> str | None:
 def _public(info: Any) -> dict[str, object]:
     job = info.info
     cancellable = job.state not in TERMINAL_STATES and job.cancel_requested_at is None
+    policy = getattr(job, "sandbox_policy", None)
+    sandbox = getattr(job, "sandbox", None)
+    if isinstance(sandbox, dict):
+        sandbox_projection = dict(sandbox)
+    elif policy is not None and callable(getattr(policy, "to_dict", None)):
+        raw = policy.to_dict()
+        sandbox_projection = {
+            "enforced": bool(raw.get("enforced", True)),
+            "file_mode": raw.get("file_mode", "read_only"),
+            "network_mode": raw.get("network_mode", "no_network"),
+            "limits": raw.get("limits", SandboxLimits().to_dict()),
+        }
+    else:
+        sandbox_projection = {
+            "enforced": False,
+            "file_mode": "read_only",
+            "network_mode": "no_network",
+            "limits": SandboxLimits().to_dict(),
+        }
+    sandbox_projection.setdefault("failure_code", None)
+    sandbox_projection.setdefault("cleanup_pending", False)
     return {
         "id": job.id,
         "kind": job.kind.value,
@@ -63,6 +85,7 @@ def _public(info: Any) -> dict[str, object]:
         "exit_code": job.exit_code,
         "cancel_requested": job.cancel_requested_at is not None,
         "cancellable": cancellable,
+        "sandbox": sandbox_projection,
     }
 
 

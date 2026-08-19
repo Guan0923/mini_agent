@@ -30,6 +30,9 @@ def submit_decision(
     allowed = {
         "continue",
         "cancel",
+        "deny",
+        "allow_once",
+        "allow_session",
         "supplement",
         "implement",
         "implement_clear_session",

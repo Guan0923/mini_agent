@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, TerminalType
+from backend.sandbox import SandboxLauncher
 
 from .base import Tool
 from .default_tools import build_default_tools
@@ -23,6 +24,9 @@ def _build_tools(
     upload_files: WorkspaceFiles | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
     rag_tool: Tool | None = None,
+    sandbox_launcher: SandboxLauncher | None = None,
+    sandbox_config: Mapping[str, object] | None = None,
+    network_mode: str | None = None,
 ) -> tuple[Tool, ...]:
     """Create the standard tool set for one workspace."""
 
@@ -34,6 +38,9 @@ def _build_tools(
         upload_files=upload_files,
         terminal_type=terminal_type,
         rag_tool=rag_tool,
+        sandbox_launcher=sandbox_launcher,
+        sandbox_config=sandbox_config,
+        network_mode=network_mode,
     )
 
 
@@ -47,6 +54,9 @@ def build_tool_registry(
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
     extra_tools: Iterable[Tool] = (),
     rag_tool: Tool | None = None,
+    sandbox_launcher: SandboxLauncher | None = None,
+    sandbox_config: Mapping[str, object] | None = None,
+    network_mode: str | None = None,
 ) -> ToolRegistry:
     """Build the standard workspace tool registry."""
 
@@ -60,6 +70,9 @@ def build_tool_registry(
                 upload_files=upload_files,
                 terminal_type=terminal_type,
                 rag_tool=rag_tool,
+                sandbox_launcher=sandbox_launcher,
+                sandbox_config=sandbox_config,
+                network_mode=network_mode,
             ),
             *extra_tools,
         )

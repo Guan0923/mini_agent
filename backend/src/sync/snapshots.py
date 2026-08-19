@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from uuid import uuid4
 
-from backend.configuration import ClientPaths, validate_identity_id
+from backend.configuration import ClientPaths, UserConfigStore, validate_identity_id
 from backend.jobs import AdmissionPolicy, JobLane, JobRegistry, JobScopeKind, QueueMode, ThreadJob
 from backend.storage.auth.crypto import UserDataKeyStore
 
@@ -384,6 +384,9 @@ class SnapshotManager:
             raise ValueError("Snapshot config.toml must be a regular file.")
         if paths.config_file.exists():
             shutil.copy2(paths.config_file, staging / "config.toml")
+            # Sandbox settings are device-local and must never enter a cloud
+            # snapshot. Remove only the staged copy's section.
+            UserConfigStore(staging / "config.toml").replace_section("sandbox", {})
         if paths.user_db.is_symlink() or (paths.user_db.exists() and not paths.user_db.is_file()):
             raise ValueError("Snapshot user.db must be a regular file.")
         if paths.user_db.exists():
@@ -737,6 +740,12 @@ class SnapshotManager:
                 raise ValueError(f"Snapshot replacement source contains a symbolic link: {source_item}")
             if source_item.exists() and not (source_item.is_file() or source_item.is_dir()):
                 raise ValueError(f"Snapshot replacement source contains a special file: {source_item}")
+        local_sandbox: dict[str, object] | None = None
+        target_config = target / "config.toml"
+        if target_config.is_file() and not target_config.is_symlink():
+            existing = UserConfigStore(target_config).read().get("sandbox")
+            if isinstance(existing, dict):
+                local_sandbox = dict(existing)
         target.mkdir(parents=True, exist_ok=True)
         for name in components:
             source_item = source / name
@@ -751,6 +760,8 @@ class SnapshotManager:
                 shutil.copytree(source_item, target_item)
             else:
                 shutil.copy2(source_item, target_item)
+        if local_sandbox is not None and (target / "config.toml").is_file():
+            UserConfigStore(target / "config.toml").replace_section("sandbox", local_sandbox)
 
     @classmethod
     def _restore_local_runtime_sessions(cls, source: Path, target: Path) -> None:

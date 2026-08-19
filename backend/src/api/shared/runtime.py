@@ -66,7 +66,11 @@ def build_user_application(
         "model_config": state.model_config_for_user(user_id)
         if load_model_config and model_config is None
         else model_config,
-        "config_override": {**runtime_config, "rag": rag_config},
+        "config_override": {
+            **runtime_config,
+            "rag": rag_config,
+            "sandbox_config": state.settings.sandbox_config_for_user(user_id),
+        },
         "default_timezone": str(state.agent_config_for_user(user_id).get("timezone", DEFAULT_TIME_ZONE)),
         "session_provisioner": session_provisioner,
         "session_provisioner_cleanup": session_provisioner_cleanup,
@@ -75,6 +79,7 @@ def build_user_application(
         "job_registry": job_registry or getattr(state, "job_registry", None),
         "job_user_id": user_id,
         "job_parent_id": job_parent_id,
+        "sandbox_session_id": session_id,
     }
     # Preserve compatibility with embedders/tests that inject the historical
     # builder signature while still passing hooks to the canonical factory.

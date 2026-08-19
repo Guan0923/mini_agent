@@ -115,9 +115,15 @@ class SafeWebFetcher:
         session: HttpSession | None = None,
         resolver: HostResolver = socket.getaddrinfo,
         doh_resolver: Callable[[str], list[str]] | None = None,
+        allow_private_network: bool = False,
+        network_mode: str | None = None,
+        network_allowlist: tuple[tuple[str, int], ...] = (),
     ) -> None:
         self._resolver = resolver
         self._doh_resolver = doh_resolver or self._resolve_with_doh
+        self._allow_private_network = allow_private_network
+        self._network_mode = network_mode
+        self._network_allowlist = {(host.casefold(), port) for host, port in network_allowlist}
         self._transport = _PinnedHttpTransport()
         if session is None:
             self._session: HttpSession | None = None
@@ -225,6 +231,14 @@ class SafeWebFetcher:
         assert parsed.hostname is not None
         host = parsed.hostname
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if self._network_mode == "no_network":
+            raise ToolError("Web fetch is disabled by the sandbox network policy.")
+        if self._network_mode == "restricted_network" and (host.casefold(), port) not in self._network_allowlist:
+            raise ToolError("Web host is not in the sandbox network allowlist.")
+        if self._network_mode == "restricted_network":
+            return self._resolve_all_addresses(host, port)
+        if self._allow_private_network:
+            return self._resolve_all_addresses(host, port)
         try:
             literal = ipaddress.ip_address(host)
         except ValueError:
@@ -260,6 +274,25 @@ class SafeWebFetcher:
             return resolved
         raise ToolError("Web fetch refuses loopback, private, link-local, or reserved network addresses.")
 
+    def _resolve_all_addresses(self, host: str, port: int) -> list[str]:
+        try:
+            addresses_info = self._resolver(host, port, type=socket.SOCK_STREAM)
+        except (socket.gaierror, OSError) as exc:
+            raise ToolError(f"Unable to resolve web host: {host}.") from exc
+        addresses: list[str] = []
+        for address_info in addresses_info or []:
+            try:
+                address = str(address_info[4][0]).split("%", 1)[0]
+                parsed_address = ipaddress.ip_address(address)
+            except (IndexError, ValueError) as exc:
+                raise ToolError(f"Web host resolved to an invalid address: {host}.") from exc
+            value = str(parsed_address)
+            if value not in addresses:
+                addresses.append(value)
+        if not addresses:
+            raise ToolError(f"Web host resolved without addresses: {host}.")
+        return addresses
+
     @staticmethod
     def _preferred_address(addresses: list[str]) -> str:
         if not addresses:
@@ -282,7 +315,7 @@ class SafeWebFetcher:
             ip = ipaddress.ip_address(address)
         except (IndexError, OSError, ValueError):
             return
-        if not ip.is_global:
+        if not ip.is_global and not self._allow_private_network:
             raise ToolError(
                 "Web fetch connection reached a non-public address (possible DNS rebinding); response rejected."
             )

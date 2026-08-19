@@ -151,6 +151,8 @@ export default function DecisionCard({ request, onSubmit }: Props) {
       />
       <Space className="decision-actions" wrap>
         <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("continue")}>继续</Button>
+        <Button autoInsertSpace={false} loading={submitting} disabled={submitting} onClick={() => void submit("allow_once")}>本次允许</Button>
+        <Button autoInsertSpace={false} loading={submitting} disabled={submitting} onClick={() => void submit("allow_session")}>本会话允许</Button>
         <Button
           autoInsertSpace={false}
           disabled={submitting || !supplement.trim()}
@@ -159,6 +161,7 @@ export default function DecisionCard({ request, onSubmit }: Props) {
           提交补充
         </Button>
         <Button autoInsertSpace={false} disabled={submitting} onClick={() => void submit("cancel")}>取消</Button>
+        <Button autoInsertSpace={false} danger disabled={submitting} onClick={() => void submit("deny")}>拒绝</Button>
       </Space>
     </Card>
   );

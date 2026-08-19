@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 from backend.configuration import ClientPaths, UserConfigStore, initialize_config, load_config, section
 from backend.domain import DEFAULT_TIME_ZONE
@@ -15,6 +16,16 @@ from backend.mcp.config import McpSettings, prepare_mcp_plan
 from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.providers import LLMClient, ModelConfig
 from backend.rag import EmbeddingProfile, KnowledgeBaseService, knowledge_base_search_tool
+from backend.sandbox import (
+    NetworkMode,
+    NetworkRule,
+    PermissionMode,
+    SandboxAdmission,
+    SandboxLauncher,
+    SandboxLimits,
+    SandboxPolicy,
+    WindowsBrokerClient,
+)
 from backend.skills import ProjectSkillGate, ProjectSkillTrustStore, SkillCatalog
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.sync import RequestsSyncTransport, SyncClient, SyncCoordinator
@@ -60,6 +71,7 @@ def build_application(
     job_registry: JobRegistry | None = None,
     job_user_id: str | None = None,
     job_parent_id: str | None = None,
+    sandbox_session_id: str | None = None,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     base_config = initialize_config(resolved_paths, workspace)
@@ -94,6 +106,7 @@ def build_application(
             **({"job_registry": job_registry} if job_registry is not None else {}),
             **({"job_user_id": job_user_id} if job_user_id is not None else {}),
             **({"job_parent_id": job_parent_id} if job_parent_id is not None else {}),
+            **({"sandbox_session_id": sandbox_session_id} if sandbox_session_id is not None else {}),
         )
     else:
         runner = _build_subagent_runner(
@@ -103,6 +116,7 @@ def build_application(
             **({"job_registry": job_registry} if job_registry is not None else {}),
             **({"job_user_id": job_user_id} if job_user_id is not None else {}),
             **({"job_parent_id": job_parent_id} if job_parent_id is not None else {}),
+            **({"sandbox_session_id": sandbox_session_id} if sandbox_session_id is not None else {}),
         )
     try:
         sync_coordinator = _build_sync_coordinator(
@@ -163,19 +177,28 @@ def _build_subagent_runner(
     job_user_id: str | None = None,
     job_parent_id: str | None = None,
     terminal_type: str | None = None,
+    sandbox_session_id: str | None = None,
 ) -> AgentRunner:
     terminal_type = terminal_type or _terminal_type_for_config(config)
     resolved_paths = paths or client_paths()
     skill_settings = SkillSettings.from_config(config)
     subagent_settings = SubagentSettings.from_config(config)
     rag_tool = _rag_tool_for_config(resolved_paths, config, job_user_id, project_id)
+    sandbox_launcher, sandbox_config = _sandbox_runtime(config)
 
     def child_factory() -> AgentRunner:
         return _build_runner(
             workspace,
             planner_name,
             settings,
-            build_tool_registry(workspace, upload_files=upload_files, terminal_type=terminal_type, rag_tool=rag_tool),
+            build_tool_registry(
+                workspace,
+                upload_files=upload_files,
+                terminal_type=terminal_type,
+                rag_tool=rag_tool,
+                sandbox_launcher=sandbox_launcher,
+                sandbox_config=sandbox_config,
+            ),
             hooks,
             checkpoints,
             resolved_paths,
@@ -198,6 +221,9 @@ def _build_subagent_runner(
         config,
         job_registry=job_registry,
         job_scope=mcp_scope,
+        session_id=sandbox_session_id,
+        sandbox_launcher=sandbox_launcher,
+        sandbox_config=sandbox_config,
     )
     try:
         tools = build_tool_registry(
@@ -206,6 +232,8 @@ def _build_subagent_runner(
             upload_files=upload_files,
             terminal_type=terminal_type,
             rag_tool=rag_tool,
+            sandbox_launcher=sandbox_launcher,
+            sandbox_config=sandbox_config,
             extra_tools=(
                 *delegation_tools(subagent_settings.max_tasks_per_batch),
                 *external,
@@ -306,15 +334,70 @@ def _external_resources(
     *,
     job_registry: JobRegistry | None = None,
     job_scope: JobScope | None = None,
+    session_id: str | None = None,
+    sandbox_launcher: SandboxLauncher | None = None,
+    sandbox_config: dict[str, object] | None = None,
 ) -> ExternalMcpResources:
-    del workspace
     plan = prepare_mcp_plan(paths)
     kwargs = {}
     if job_registry is not None:
         kwargs["job_registry"] = job_registry
     if job_scope is not None:
         kwargs["job_scope"] = job_scope
+    if sandbox_launcher is not None and sandbox_config is not None:
+        kwargs["sandbox_launcher"] = sandbox_launcher
+        kwargs["sandbox_policy_factory"] = _sandbox_policy_factory(
+            workspace,
+            session_id=session_id or "mcp",
+            config=sandbox_config,
+        )
     return start_external_tools(plan.effective_servers(), McpSettings.from_config(config), **kwargs)
+
+
+def _sandbox_runtime(config: dict[str, object]) -> tuple[SandboxLauncher | None, dict[str, object] | None]:
+    """Build the process launcher only when the local sandbox switch is on."""
+
+    raw = config.get("sandbox_config")
+    if not isinstance(raw, dict):
+        raw = config.get("sandbox") if isinstance(config.get("sandbox"), dict) else None
+    if not isinstance(raw, dict):
+        return None, None
+    normalized = dict(raw)
+    if not bool(normalized.get("enabled", False)):
+        return None, None
+    return SandboxLauncher(broker=WindowsBrokerClient.from_system(), admission=SandboxAdmission()), normalized
+
+
+def _sandbox_policy_factory(workspace: Path, *, session_id: str, config: dict[str, object]):
+    def make_policy(server) -> SandboxPolicy:
+        raw_rules = config.get("network_allowlist")
+        rules = (
+            tuple(
+                NetworkRule(str(item.get("host") or ""), int(item.get("port")))
+                for item in raw_rules
+                if isinstance(item, dict)
+            )
+            if isinstance(raw_rules, (list, tuple))
+            else ()
+        )
+        file_mode = PermissionMode(str(config.get("file_mode", PermissionMode.READ_ONLY.value)))
+        network_mode = NetworkMode(str(config.get("network_mode", NetworkMode.NO_NETWORK.value)))
+        if file_mode is PermissionMode.FULL_ACCESS:
+            network_mode = NetworkMode.FULL_NETWORK
+        limits = SandboxLimits.from_mapping(config.get("limits") if isinstance(config.get("limits"), dict) else None)
+        return SandboxPolicy(
+            workspace=workspace,
+            session_id=session_id,
+            job_id=f"mcp-{server.name}-{uuid4().hex}",
+            file_mode=file_mode,
+            network_mode=network_mode,
+            network_allowlist=rules,
+            limits=limits,
+            enforced=file_mode is not PermissionMode.FULL_ACCESS,
+            full_access_acknowledged=file_mode is PermissionMode.FULL_ACCESS,
+        )
+
+    return make_policy
 
 
 def _settings_for(

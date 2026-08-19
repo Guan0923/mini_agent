@@ -122,6 +122,14 @@ class ToolStepExecutor:
                     "tool": tool,
                     "call_id": tool_message.call_id,
                     "arguments": tool_message.arguments,
+                    "session_id": runtime.state.session_id,
+                    "command": (
+                        str(tool_message.arguments.get("command"))
+                        if isinstance(tool_message.arguments.get("command"), str)
+                        else tool
+                    ),
+                    "cwd": runtime.state.workspace_root or "",
+                    "permission_target": runtime.state.permission_mode,
                 },
             )
             run.add_event("approval_requested", "Tool approval requested", interrupt_kind="tool", **request.data)
@@ -175,11 +183,12 @@ class ToolStepExecutor:
                         tool,
                         tool_message.arguments,
                         ToolInvocationContext(
-                            runtime.state.session_id,
-                            runtime.state.timezone,
-                            runtime.services.clock,
-                            runtime.services.job_scope,
-                            runtime.services.cancel_requested,
+                            session_id=runtime.state.session_id,
+                            timezone=runtime.state.timezone,
+                            clock=runtime.services.clock,
+                            job_scope=runtime.services.job_scope,
+                            cancel_requested=runtime.services.cancel_requested,
+                            permission_mode=runtime.state.permission_mode,
                         ),
                         confirmed=True,
                     )

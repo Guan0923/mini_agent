@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { Button, FloatButton, Grid, Input } from "antd";
+import { Button, FloatButton, Grid, Input, Modal } from "antd";
 import { VerticalAlignBottomOutlined } from "@ant-design/icons";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
@@ -128,7 +128,7 @@ export default function ChatPage({
   const isMobile = screens.md === false && (typeof window === "undefined" || window.innerWidth < 768);
   const [input, setInput] = useState("");
   const [localBusy, setLocalBusy] = useState(false);
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>("approval_for_me");
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>("read_only");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
   const ragMode: RagMode = ragEnabled ? "tool" : "off";
   const [providerName, setProviderName] = useState("unknown");
@@ -180,7 +180,7 @@ export default function ChatPage({
     const model = normalizeRuntimeNodeModel(node.model);
     setProviderName(node.provider_name || "unknown");
     setRuntimeModel(model);
-    setPermissionMode(node.permission_mode || "approval_for_me");
+    setPermissionMode(node.permission_mode === "approval_for_me" ? "read_only" : (node.permission_mode || "read_only"));
     setReasoningEffort(model.reasoning_effort);
     if (node.running_mode && node.running_mode !== mode) onModeChange(node.running_mode);
   }, [activeRuntimeNode?.id, activeRuntimeNode?.provider_name, activeRuntimeNode?.model, activeRuntimeNode?.permission_mode, activeRuntimeNode?.running_mode]);
@@ -225,6 +225,7 @@ export default function ChatPage({
     provider_name?: string;
     model?: Partial<RuntimeNodeModel>;
     permission_mode?: PermissionMode;
+    full_access_acknowledged?: boolean;
     running_mode?: ChatMode;
   }) {
     if (!conversation?.sessionId || !activeRuntimeNode) return;
@@ -234,6 +235,7 @@ export default function ChatPage({
         provider_name: patch.provider_name,
         model: patch.model,
         permission_mode: patch.permission_mode,
+        full_access_acknowledged: patch.full_access_acknowledged,
         running_mode: patch.running_mode,
       });
     } catch (error) {
@@ -525,8 +527,21 @@ export default function ChatPage({
               requestModel,
               mode,
               ragMode,
+              permissionMode === "full_access",
             )
-          : await streamResume(sessionId, onMessage, controller.signal, permissionMode, reasoningEffort, undefined, requestProviderName, requestModel, mode, ragMode);
+          : await streamResume(
+              sessionId,
+              onMessage,
+              controller.signal,
+              permissionMode,
+              reasoningEffort,
+              undefined,
+              requestProviderName,
+              requestModel,
+              mode,
+              ragMode,
+              permissionMode === "full_access",
+            );
         if (result === "aborted") setLast({
           running: false,
           status: "已停止",
@@ -552,13 +567,13 @@ export default function ChatPage({
         const chatSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
         const options = chatSourceNodeId
           ? (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, references, ragMode }
-            : { sessionId, sourceNodeId: chatSourceNodeId, providerName: requestProviderName, model: requestModel, mode, permissionMode, reasoningEffort, references, ragMode })
+            ? { sessionId, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, references, ragMode }
+            : { sessionId, sourceNodeId: chatSourceNodeId, providerName: requestProviderName, model: requestModel, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, references, ragMode })
           // An empty tree has no dynamic runtime configuration to submit. Keep
           // the stable positional call for clients embedding ChatPage while
           // all established sessions use the explicit v0.3 config object.
           : (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, reasoningEffort, providerName: requestProviderName, model: requestModel, references, ragMode }
+            ? { sessionId, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, providerName: requestProviderName, model: requestModel, references, ragMode }
             : (ragMode !== "off" ? { sessionId, ragMode } : sessionId));
         const result = await streamChat(
           prompt ?? "",
@@ -922,7 +937,25 @@ export default function ChatPage({
         onComplete={completeCommand}
         onActiveCommandChange={setActiveCommandIndex}
         onModeChange={(value) => { onModeChange(value); void updateRuntimeConfig({ running_mode: value }); setOpenSettingsSelect(null); }}
-        onPermissionChange={(value) => { setPermissionMode(value); void updateRuntimeConfig({ permission_mode: value }); setOpenSettingsSelect(null); }}
+        onPermissionChange={async (value) => {
+          const next = value === "approval_for_me" ? "read_only" : value;
+          if (next === "full_access" && permissionMode !== "full_access") {
+            const confirmed = await new Promise<boolean>((resolve) => {
+              Modal.confirm({
+                title: "启用 Full access？",
+                content: "这会同时放开文件和网络访问，并标记为非沙箱运行。",
+                okText: "继续",
+                cancelText: "取消",
+                onOk: () => resolve(true),
+                onCancel: () => resolve(false),
+              });
+            });
+            if (!confirmed) return;
+          }
+          setPermissionMode(next);
+          void updateRuntimeConfig({ permission_mode: next, full_access_acknowledged: next === "full_access" });
+          setOpenSettingsSelect(null);
+        }}
         onReasoningChange={(value) => { setReasoningEffort(value); setRuntimeModel((current) => ({ ...current, reasoning_effort: value })); void updateRuntimeConfig({ model: { reasoning_effort: value } }); setOpenSettingsSelect(null); }}
         onSettingsSelectChange={setOpenSettingsSelect}
         onOpenSettings={() => setSettingsOpen(true)}

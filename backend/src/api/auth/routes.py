@@ -93,6 +93,30 @@ class RuntimeConfigPayload(BaseModel):
     terminal_type: Literal["cmd", "git_bash", "powershell", "pwsh", "wsl"] = "cmd"
 
 
+class SandboxLimitsPayload(BaseModel):
+    wall_seconds: StrictInt = Field(default=300, ge=1, le=300)
+    cpu_seconds: StrictInt = Field(default=300, ge=1, le=300)
+    memory_mib: StrictInt = Field(default=4096, ge=128, le=4096)
+    processes: StrictInt = Field(default=256, ge=1, le=256)
+    handles: StrictInt = Field(default=16384, ge=64, le=16384)
+    output_chars: StrictInt = Field(default=20000, ge=1000, le=20000)
+    disk_mib: StrictInt = Field(default=0, ge=0, le=20 * 1024)
+
+
+class SandboxNetworkRulePayload(BaseModel):
+    host: str = Field(min_length=1, max_length=253)
+    port: StrictInt = Field(ge=1, le=65535)
+
+
+class SandboxConfigPayload(BaseModel):
+    enabled: StrictBool = False
+    file_mode: Literal["read_only", "workspace_write", "full_access"] = "read_only"
+    network_mode: Literal["no_network", "restricted_network", "full_network"] = "no_network"
+    network_allowlist: list[SandboxNetworkRulePayload] = Field(default_factory=list, max_length=128)
+    limits: SandboxLimitsPayload = Field(default_factory=SandboxLimitsPayload)
+    full_access_acknowledged: StrictBool = False
+
+
 class RagConfigPayload(BaseModel):
     enabled: StrictBool = False
     algorithm: Literal["hybrid", "bm25", "vector"] = "hybrid"
@@ -347,6 +371,27 @@ def update_profile(
 @router.get("/settings")
 def settings(identity: Annotated[UserIdentity, Depends(require_user)], request: Request) -> dict[str, object]:
     return request.app.state.web.settings_for_user(identity.id)
+
+
+@router.put("/sandbox-config")
+def update_sandbox_config(
+    body: SandboxConfigPayload,
+    request: Request,
+    identity: Annotated[UserIdentity, Depends(require_user)],
+) -> dict[str, object]:
+    _origin_guard(request)
+    try:
+        return request.app.state.web.settings.update_sandbox_config(identity.id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _broker_payload(value: object) -> dict[str, object]:
+    if callable(getattr(value, "to_dict", None)):
+        return dict(value.to_dict())
+    if isinstance(value, dict):
+        return dict(value)
+    return {"installed": False, "healthy": False, "detail": "Broker returned an invalid status"}
 
 
 @router.get("/guest-import")

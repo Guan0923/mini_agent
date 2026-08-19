@@ -15,10 +15,12 @@ from backend.storage.settings_contract import (
     DEFAULT_PROFILE,
     DEFAULT_PROVIDER_CONFIG,
     DEFAULT_RUNTIME_CONFIG,
+    DEFAULT_SANDBOX_CONFIG,
     SUPPORTED_DISPLAY_MODES,
     normalize_agent_config,
     normalize_provider_config,
     normalize_runtime_config,
+    normalize_sandbox_config,
     timezone_options,
 )
 
@@ -582,9 +584,24 @@ class AuthSettingsMixin:
             "provider_configs": self.provider_configs_for_user(user_id),
             "capability_config": self.capability_config_for_user(user_id),
             "runtime_config": runtime_config,
+            "sandbox_config": self.sandbox_config_for_user(user_id),
             "timezone_options": timezone_options(),
             "rag_config": self.rag_config_for_user(user_id),
         }
+
+    def sandbox_config_for_user(self, user_id: str) -> dict[str, object]:
+        config = self._config(user_id)
+        raw = config.get("sandbox")
+        return normalize_sandbox_config(raw if isinstance(raw, Mapping) else DEFAULT_SANDBOX_CONFIG)
+
+    def update_sandbox_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, object]:
+        current = self.sandbox_config_for_user(user_id)
+        result = normalize_sandbox_config(current, values)
+        config_store = self._config_store(user_id)
+        if config_store is None:
+            raise ValueError("sandbox settings require a local config store")
+        config_store.update({"sandbox": result})
+        return result
 
     def rag_config_for_user(self, user_id: str) -> dict[str, object]:
         config = self._config(user_id)

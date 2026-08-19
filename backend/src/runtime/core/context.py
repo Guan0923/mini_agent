@@ -63,7 +63,7 @@ class RuntimeState:
     model: str = "unknown"
     provider_name: str = "unknown"
     model_snapshot: dict[str, Any] = field(default_factory=dict)
-    permission_mode: str = "approval_for_me"
+    permission_mode: str = "read_only"
     running_mode: str = "agent"
     request_parameters: dict[str, Any] = field(default_factory=dict)
     runner_settings: RunnerSettings = field(default_factory=RunnerSettings)
@@ -161,7 +161,11 @@ class RuntimeState:
                 else str(data.get("provider_name") or data.get("provider") or "unknown")
             ),
             model_snapshot=dict(data.get("model_snapshot") or {}),
-            permission_mode=str(data.get("permission_mode") or "approval_for_me"),
+            permission_mode=(
+                "read_only"
+                if data.get("permission_mode") in {None, "", "approval_for_me"}
+                else str(data["permission_mode"])
+            ),
             running_mode=str(data.get("running_mode") or "agent"),
             request_parameters=dict(data.get("request_parameters") or {}),
             runner_settings=RunnerSettings(**settings),

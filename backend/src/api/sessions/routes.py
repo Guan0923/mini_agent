@@ -7,7 +7,7 @@ from threading import RLock
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, model_validator
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS
 from backend.domain.runtime_state import RuntimeStateValidationError
@@ -68,15 +68,26 @@ class RuntimeConfigPatch(BaseModel):
     node_id: str = Field(min_length=1, max_length=200)
     provider_name: str | None = Field(default=None, min_length=1, max_length=80)
     model: dict[str, object] | None = None
-    permission_mode: Literal["approval_for_me", "full_access"] | None = None
+    permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None
+    full_access_acknowledged: StrictBool = False
     running_mode: Literal["agent", "plan"] | None = None
+
+    @model_validator(mode="after")
+    def require_full_access_acknowledgement(self) -> RuntimeConfigPatch:
+        if self.permission_mode == "full_access" and not self.full_access_acknowledged:
+            raise ValueError("full_access requires explicit joint file and network confirmation")
+        return self
 
     @property
     def has_update(self) -> bool:
-        return any(value is not None for value in (self.provider_name, self.model, self.permission_mode, self.running_mode))
+        return any(
+            value is not None for value in (self.provider_name, self.model, self.permission_mode, self.running_mode)
+        )
 
 
-def _provider_model_snapshot(config, public_record: dict[str, object], *, explicit: dict[str, object] | None = None) -> dict[str, object]:
+def _provider_model_snapshot(
+    config, public_record: dict[str, object], *, explicit: dict[str, object] | None = None
+) -> dict[str, object]:
     """Build the canonical node model for a provider switch.
 
     A provider name identifies a complete saved configuration.  The model
@@ -89,9 +100,7 @@ def _provider_model_snapshot(config, public_record: dict[str, object], *, explic
     defaults: dict[str, object] = {
         "reasoning_effort": "medium",
         "current_model": getattr(config, "model", None) or public_record.get("model") or "unknown",
-        "context_length": int(
-            getattr(config, "context_size", None) or public_record.get("context_size") or 128000
-        ),
+        "context_length": int(getattr(config, "context_size", None) or public_record.get("context_size") or 128000),
         "output_length": int(getattr(config, "max_tokens", None) or public_record.get("max_tokens") or 8192),
         "thinking": "enable",
         "temperature": 1.0,
@@ -109,7 +118,6 @@ def _runtime_config_bridge(state: WebAppState, identity: UserIdentity, session_i
     # user mutate a same-named session owned by another account in a shared
     # process.
     return bridges.get(owner_key)
-
 
 
 def _store(state: WebAppState, user_id: str):
@@ -312,7 +320,7 @@ def patch_runtime_config(
     with lock:
         previous_registry = dict(registry.get(owner_key, {}))
         current = dict(previous_registry)
-        patch_values = body.model_dump(exclude_none=True)
+        patch_values = body.model_dump(exclude_none=True, exclude={"full_access_acknowledged"})
         current.update(patch_values)
         bridge = _runtime_config_bridge(state, identity, session_id)
         if bridge is None:
@@ -363,9 +371,7 @@ def patch_runtime_config(
             except ModelConfigurationError as exc:
                 raise HTTPException(status_code=422, detail=f"提供商配置无效：{exc}") from exc
             current["provider_name"] = str(
-                getattr(resolved, "provider_name", None)
-                or match.get("provider_name")
-                or body.provider_name
+                getattr(resolved, "provider_name", None) or match.get("provider_name") or body.provider_name
             )
             old_provider = str(getattr(bridge, "provider_name", "") or "")
             provider_changed = old_provider.casefold() != body.provider_name.casefold()
@@ -661,8 +667,10 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
     # source's provenance unless the caller supplied a genuinely new title;
     # the Web client echoes the source title, so only a different value (or an
     # explicit None) keeps automatic naming alive on the branch.
-    title_is_custom = None if not rewind else (
-        source.title_is_custom if not body.title or normalize_session_title(body.title) == source.title else True
+    title_is_custom = (
+        None
+        if not rewind
+        else (source.title_is_custom if not body.title or normalize_session_title(body.title) == source.title else True)
     )
     target = None
     try:

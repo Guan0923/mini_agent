@@ -89,6 +89,21 @@ class UserSettingsStore(AuthSettingsMixin):
                     "location_enabled": False,
                 },
                 "runtime": {"log_full_messages": True, "max_tool_calls": 32, "terminal_type": "cmd"},
+                "sandbox": {
+                    "enabled": False,
+                    "file_mode": "read_only",
+                    "network_mode": "no_network",
+                    "network_allowlist": [],
+                    "limits": {
+                        "wall_seconds": 300,
+                        "cpu_seconds": 300,
+                        "memory_mib": 4096,
+                        "processes": 256,
+                        "handles": 16384,
+                        "output_chars": 20000,
+                        "disk_mib": 0,
+                    },
+                },
                 "capabilities": {"skills": True, "rag": False, "plugins": False, "mcp": False},
                 "providers": {"active_id": ""},
                 "sync": {
@@ -228,6 +243,8 @@ class PerUserSettingsRepository:
             "update_profile",
             "update_agent_config",
             "update_runtime_config",
+            # Sandbox configuration is deliberately local-only and must not
+            # mark a cloud snapshot dirty.
             "update_rag_config",
             "update_provider_config",
             "add_provider_config",

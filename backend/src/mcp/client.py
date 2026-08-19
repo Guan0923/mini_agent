@@ -50,6 +50,8 @@ class ExternalMcpManager:
         *,
         job_registry: JobRegistry | None = None,
         job_scope: JobScope | None = None,
+        sandbox_launcher=None,
+        sandbox_policy_factory=None,
     ) -> None:
         self._configs = configs
         self._settings = settings or McpSettings()
@@ -63,6 +65,8 @@ class ExternalMcpManager:
         self.service_jobs: dict[str, ServiceJob] = {}
         self._job_registry = job_registry
         self._job_scope = job_scope
+        self._sandbox_launcher = sandbox_launcher
+        self._sandbox_policy_factory = sandbox_policy_factory
         self._closed = False
         self._thread.start()
         try:
@@ -105,7 +109,14 @@ class ExternalMcpManager:
         stack = AsyncExitStack()
         await stack.__aenter__()
         try:
-            read, write = await stack.enter_async_context(controlled_stdio_client(_parameters(server)))
+            policy = self._sandbox_policy_factory(server) if self._sandbox_policy_factory is not None else None
+            read, write = await stack.enter_async_context(
+                controlled_stdio_client(
+                    _parameters(server),
+                    sandbox_launcher=self._sandbox_launcher,
+                    sandbox_policy=policy,
+                )
+            )
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
             definitions = list((await session.list_tools()).tools)
@@ -137,7 +148,10 @@ class ExternalMcpManager:
             self.server_health[server_name] = "healthy"
             return (server_name, id(self._sessions[server_name]))
         try:
-            definitions = self._submit(self._open_server(self._server_config(server_name)), timeout=self._settings.initialization_timeout_seconds)
+            definitions = self._submit(
+                self._open_server(self._server_config(server_name)),
+                timeout=self._settings.initialization_timeout_seconds,
+            )
             self.definitions[server_name] = definitions
             self.failed_servers.pop(server_name, None)
             return (server_name, id(self._sessions[server_name]))
@@ -225,6 +239,22 @@ class ExternalMcpManager:
                 max_failures=self._settings.health_failure_threshold,
                 max_restarts=self._settings.rebuild_failure_threshold,
             )
+            if self._sandbox_policy_factory is not None:
+                policy = self._sandbox_policy_factory(self._server_config(server_name))
+                job.sandbox_policy = policy
+                setter = getattr(job, "_set_sandbox_info", None)
+                if callable(setter):
+                    raw = policy.to_dict()
+                    setter(
+                        {
+                            "enforced": bool(raw.get("enforced", True)),
+                            "file_mode": raw.get("file_mode", "read_only"),
+                            "network_mode": raw.get("network_mode", "no_network"),
+                            "limits": raw.get("limits", {}),
+                            "failure_code": None,
+                            "cleanup_pending": False,
+                        }
+                    )
             self._job_registry.submit(
                 job,
                 scope=scope,
@@ -279,6 +309,8 @@ def load_external_tools(
     settings: McpSettings | None = None,
     job_registry: JobRegistry | None = None,
     job_scope: JobScope | None = None,
+    sandbox_launcher=None,
+    sandbox_policy_factory=None,
 ) -> ExternalMcpResources:
     del project_file
     return start_external_tools(
@@ -286,6 +318,8 @@ def load_external_tools(
         settings,
         job_registry=job_registry,
         job_scope=job_scope,
+        sandbox_launcher=sandbox_launcher,
+        sandbox_policy_factory=sandbox_policy_factory,
     )
 
 
@@ -295,22 +329,24 @@ def start_external_tools(
     *,
     job_registry: JobRegistry | None = None,
     job_scope: JobScope | None = None,
+    sandbox_launcher=None,
+    sandbox_policy_factory=None,
 ) -> ExternalMcpResources:
     if not configs:
         return ExternalMcpResources()
     try:
-        if settings is None:
-            manager = (
-                ExternalMcpManager(configs, job_registry=job_registry, job_scope=job_scope)
-                if job_registry is not None
-                else ExternalMcpManager(configs)
-            )
-        else:
-            manager = (
-                ExternalMcpManager(configs, settings, job_registry=job_registry, job_scope=job_scope)
-                if job_registry is not None
-                else ExternalMcpManager(configs, settings)
-            )
+        manager_kwargs = {
+            "job_registry": job_registry,
+            "job_scope": job_scope,
+            "sandbox_launcher": sandbox_launcher,
+            "sandbox_policy_factory": sandbox_policy_factory,
+        }
+        manager_kwargs = {name: value for name, value in manager_kwargs.items() if value is not None}
+        manager = (
+            ExternalMcpManager(configs, **manager_kwargs)
+            if settings is None
+            else ExternalMcpManager(configs, settings, **manager_kwargs)
+        )
     except FutureTimeoutError as exc:
         raise ToolError("Cannot initialize external MCP servers: initialization timed out.") from exc
     except Exception as exc:

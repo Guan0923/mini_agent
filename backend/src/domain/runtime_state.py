@@ -33,7 +33,7 @@ NodeDataType: TypeAlias = Literal["message", "compaction", "root"]
 MessageRole: TypeAlias = Literal["user", "assistant", "tool_result", "bash"]
 ReasoningEffort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max"]
 ThinkingMode: TypeAlias = Literal["enable", "disable"]
-PermissionMode: TypeAlias = Literal["approval_for_me", "full_access"]
+PermissionMode: TypeAlias = Literal["read_only", "workspace_write", "full_access"]
 RunningMode: TypeAlias = Literal["agent", "plan"]
 ContentBlockType: TypeAlias = Literal[
     "text",
@@ -52,7 +52,9 @@ NODE_STATUSES = frozenset({"failed", "success", "abort"})
 NODE_DATA_TYPES = frozenset({"message", "compaction", "root"})
 REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 THINKING_MODES = frozenset({"enable", "disable"})
-PERMISSION_MODES = frozenset({"approval_for_me", "full_access"})
+PERMISSION_MODES = frozenset({"read_only", "workspace_write", "full_access"})
+LEGACY_PERMISSION_MODES = frozenset({"approval_for_me"})
+ALL_PERMISSION_MODES = PERMISSION_MODES | LEGACY_PERMISSION_MODES
 RUNNING_MODES = frozenset({"agent", "plan"})
 DEFAULT_MODEL: dict[str, Any] = {
     "reasoning_effort": "medium",
@@ -284,7 +286,9 @@ def change_payload(kind: str, **values: Any) -> dict[str, Any]:
     protocol error instead of an import failure.
     """
 
-    raise RuntimeStateValidationError(f"{kind!r} is no longer a RuntimeState data type; use top-level configuration fields.")
+    raise RuntimeStateValidationError(
+        f"{kind!r} is no longer a RuntimeState data type; use top-level configuration fields."
+    )
 
 
 def validate_data(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -433,7 +437,7 @@ class RuntimeState:
     user: str = ""
     provider_name: str = ""
     model: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_MODEL))
-    permission_mode: PermissionMode = "approval_for_me"
+    permission_mode: PermissionMode = "read_only"
     running_mode: RunningMode = "agent"
     usage: dict[str, int | None] = field(default_factory=lambda: {name: None for name in USAGE_FIELDS})
     cwd: str = ""
@@ -465,8 +469,8 @@ class RuntimeState:
         if parsed_timestamp.utcoffset() != timedelta(0):
             raise RuntimeStateValidationError("timestamp must be expressed in UTC.")
         object.__setattr__(self, "cwd", _normalize_cwd(self.cwd))
-        if not isinstance(self.permission_mode, str) or self.permission_mode not in PERMISSION_MODES:
-            raise RuntimeStateValidationError("permission_mode must be approval_for_me or full_access.")
+        if not isinstance(self.permission_mode, str) or self.permission_mode not in ALL_PERMISSION_MODES:
+            raise RuntimeStateValidationError("permission_mode must be read_only, workspace_write, or full_access.")
         if not isinstance(self.running_mode, str) or self.running_mode not in RUNNING_MODES:
             raise RuntimeStateValidationError("running_mode must be agent or plan.")
         object.__setattr__(self, "model", _normalize_model(self.model))
@@ -489,7 +493,7 @@ class RuntimeState:
                 raise RuntimeStateValidationError("Root nodes must use the fixed neutral model snapshot.")
             if self.user or self.provider_name or self.cwd:
                 raise RuntimeStateValidationError("Root nodes must not carry user, provider, or cwd state.")
-            if self.permission_mode != "approval_for_me" or self.running_mode != "agent":
+            if self.permission_mode not in {"approval_for_me", "read_only"} or self.running_mode != "agent":
                 raise RuntimeStateValidationError("Root nodes must use the default permission and agent modes.")
             if any(value is not None for value in self.usage.values()):
                 raise RuntimeStateValidationError("Root nodes must have empty usage fields.")
@@ -645,7 +649,11 @@ class RuntimeState:
             user=_string_field(raw, "user"),
             provider_name=_string_field(raw, "provider_name"),
             model=_mapping(raw.get("model"), "model"),
-            permission_mode=raw.get("permission_mode", "approval_for_me"),  # type: ignore[arg-type]
+            permission_mode=(
+                "read_only"
+                if raw.get("permission_mode") in {None, "", "approval_for_me"}
+                else raw.get("permission_mode")
+            ),  # type: ignore[arg-type]
             running_mode=raw.get("running_mode", "agent"),  # type: ignore[arg-type]
             usage=_mapping(raw.get("usage"), "usage"),
             cwd=_string_field(raw, "cwd"),
@@ -702,7 +710,7 @@ class RuntimeState:
             # when that explicit value is the empty placeholder identity).
             provider_name=provider_name if provider_name is not None else (provider or ""),
             model=dict(model or DEFAULT_MODEL),
-            permission_mode=permission_mode or "approval_for_me",
+            permission_mode=("read_only" if permission_mode in {None, "", "approval_for_me"} else permission_mode),
             running_mode=running_mode or "agent",
             usage=dict(usage or {name: None for name in USAGE_FIELDS}),
             cwd=cwd,
@@ -797,10 +805,7 @@ def ensure_session_root(
     retained = [node for node in values if node.key not in legacy_root_keys]
     return [
         root,
-        *[
-            reparent_node(node, root) if node.key in local_root_keys else node
-            for node in retained
-        ],
+        *[reparent_node(node, root) if node.key in local_root_keys else node for node in retained],
     ]
 
 
@@ -993,7 +998,7 @@ class RuntimeStateTree:
             permission_mode=(
                 permission_mode
                 if permission_mode is not None
-                else (parent_node.permission_mode if parent_node else "approval_for_me")
+                else (parent_node.permission_mode if parent_node else "read_only")
             ),
             running_mode=(
                 running_mode if running_mode is not None else (parent_node.running_mode if parent_node else "agent")
@@ -1314,7 +1319,7 @@ class NodeWriter:
                 permission_mode=(
                     permission_mode
                     if permission_mode is not None
-                    else (parent_node.permission_mode if parent_node else "approval_for_me")
+                    else (parent_node.permission_mode if parent_node else "read_only")
                 ),
                 running_mode=(
                     running_mode if running_mode is not None else (parent_node.running_mode if parent_node else "agent")
@@ -1376,8 +1381,10 @@ class NodeWriter:
                 # user earlier in the run.
                 node.model = _normalize_model({**node.model, **dict(model)})
             if permission_mode is not None:
-                if permission_mode not in PERMISSION_MODES:
-                    raise RuntimeStateValidationError("permission_mode must be approval_for_me or full_access.")
+                if permission_mode not in ALL_PERMISSION_MODES:
+                    raise RuntimeStateValidationError(
+                        "permission_mode must be read_only, workspace_write, or full_access."
+                    )
                 node.permission_mode = permission_mode
             if running_mode is not None:
                 if running_mode not in RUNNING_MODES:
@@ -1572,6 +1579,8 @@ __all__ = [
     "RuntimeStateTree",
     "RuntimeStateValidationError",
     "ROOT_MODEL",
+    "ALL_PERMISSION_MODES",
+    "LEGACY_PERMISSION_MODES",
     "PERMISSION_MODES",
     "PermissionMode",
     "REASONING_EFFORTS",
