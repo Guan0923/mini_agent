@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from uuid import uuid4
 
 from backend.domain import DEFAULT_SESSION_TITLE
@@ -14,6 +15,12 @@ from backend.runtime.core.context import RuntimeState, text_messages
 
 from .codec import is_default_session_title, normalize_session_title
 from .sqlite_schema import SCHEMA_VERSION, message_text
+
+
+def _migrate_snapshot_permission(node: TreeRuntimeState) -> TreeRuntimeState:
+    if node.permission_mode in {"approval_for_me", "full_access"}:
+        return replace(node, permission_mode="read_only")
+    return node
 
 
 class SQLiteSyncMixin:
@@ -42,8 +49,7 @@ class SQLiteSyncMixin:
         "runtime_messages": ("run_id", "sequence", "kind", "message", "data_json", "created_at"),
     }
 
-    _SUPPORTED_NODE_SNAPSHOT_VERSIONS = frozenset({4, 5, 6})
-
+    _SUPPORTED_NODE_SNAPSHOT_VERSIONS = frozenset({4, 5, 6, 7})
 
     def export_runtime_node_snapshot(self, session_id: str) -> dict[str, object]:
         """Export only session metadata and canonical nodes (schema 6)."""
@@ -108,11 +114,11 @@ class SQLiteSyncMixin:
         return title, False
 
     def apply_runtime_node_snapshot(self, snapshot: dict[str, object], *, local_device_id: str) -> None:
-        """Import a v4/v5/v6 snapshot and persist the normalized v6 shape."""
+        """Import a supported snapshot and persist the normalized v7 shape."""
 
         snapshot_version = int(snapshot.get("schema_version", -1))
         if snapshot_version not in self._SUPPORTED_NODE_SNAPSHOT_VERSIONS:
-            raise ValueError("Only RuntimeState node snapshots (schema_version=4, 5, or 6) are supported.")
+            raise ValueError("Only RuntimeState node snapshots (schema_version=4, 5, 6, or 7) are supported.")
         meta = snapshot.get("session")
         raw_nodes = snapshot.get("nodes")
         if not isinstance(meta, dict) or not isinstance(raw_nodes, list):
@@ -129,6 +135,8 @@ class SQLiteSyncMixin:
             # project conversation, even if it reuses the same session id.
             return
         nodes = [TreeRuntimeState.from_dict(item) for item in raw_nodes]
+        if snapshot_version < 7:
+            nodes = [_migrate_snapshot_permission(node) for node in nodes]
         if any(node.session_id != session_id for node in nodes):
             raise ValueError("Node snapshot contains a node from another session.")
         nodes = ensure_session_root(
@@ -259,11 +267,15 @@ class SQLiteSyncMixin:
         if meta.get("session_id") not in {None, session_id}:
             raise ValueError("Remote snapshot session id does not match its envelope.")
         snapshot_version = int(snapshot.get("schema_version", -1))
-        if snapshot_version not in self._SUPPORTED_NODE_SNAPSHOT_VERSIONS or not isinstance(snapshot.get("nodes"), list):
-            raise ValueError("Remote snapshot must use schema_version=4, 5, or 6 and contain a nodes list.")
+        if snapshot_version not in self._SUPPORTED_NODE_SNAPSHOT_VERSIONS or not isinstance(
+            snapshot.get("nodes"), list
+        ):
+            raise ValueError("Remote snapshot must use schema_version=4, 5, 6, or 7 and contain a nodes list.")
         if not all(isinstance(item, dict) for item in snapshot["nodes"]):
             raise ValueError("Remote snapshot nodes must be objects.")
         nodes = [TreeRuntimeState.from_dict(item) for item in snapshot["nodes"]]
+        if snapshot_version < 7:
+            nodes = [_migrate_snapshot_permission(node) for node in nodes]
         if any(node.session_id != session_id for node in nodes):
             raise ValueError("Remote snapshot contains a node from another session.")
         nodes = ensure_session_root(

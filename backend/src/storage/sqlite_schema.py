@@ -9,14 +9,14 @@ from backend.domain.runtime_state import create_root_node, session_root_id
 
 from .codec import is_default_session_title, normalize_session_title
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 RUNTIME_NODE_SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_meta (
     session_id TEXT PRIMARY KEY, title TEXT NOT NULL, owner_device_id TEXT NOT NULL,
     remote_revision INTEGER NOT NULL DEFAULT 0, read_only INTEGER NOT NULL DEFAULT 0,
-    schema_version INTEGER NOT NULL DEFAULT 6, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 7, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     client_id TEXT, archived_at TEXT, deleted_at TEXT,
     local_only INTEGER NOT NULL DEFAULT 0, title_is_custom INTEGER NOT NULL DEFAULT 0
 );
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS runtime_nodes (
     user TEXT NOT NULL DEFAULT '',
     provider_name TEXT NOT NULL DEFAULT '',
     model_json TEXT NOT NULL,
-    permission_mode TEXT NOT NULL DEFAULT 'approval_for_me',
+    permission_mode TEXT NOT NULL DEFAULT 'read_only',
     running_mode TEXT NOT NULL DEFAULT 'agent',
     usage_json TEXT NOT NULL,
     cwd TEXT NOT NULL DEFAULT '',
@@ -82,6 +82,19 @@ CREATE TABLE IF NOT EXISTS workspace_files (
 );
 CREATE INDEX IF NOT EXISTS workspace_files_session_idx
     ON workspace_files (session_id, relative_path);
+CREATE TABLE IF NOT EXISTS sandbox_approvals (
+    request_hash TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    command_hash TEXT NOT NULL,
+    cwd_hash TEXT NOT NULL,
+    permission_target TEXT NOT NULL,
+    network_target_hash TEXT NOT NULL,
+    command_summary TEXT NOT NULL,
+    cwd_summary TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sandbox_approvals_session_idx
+    ON sandbox_approvals (session_id, permission_target, request_hash);
 """
 
 
@@ -126,7 +139,7 @@ class SQLiteSchemaMixin:
                     id TEXT NOT NULL, parent_id TEXT NOT NULL DEFAULT '', version TEXT NOT NULL,
                     first_kept_entry_id TEXT NOT NULL, compaction_idx TEXT NOT NULL,
                     user TEXT NOT NULL DEFAULT '', provider_name TEXT NOT NULL DEFAULT '',
-                    model_json TEXT NOT NULL, permission_mode TEXT NOT NULL DEFAULT 'approval_for_me',
+                    model_json TEXT NOT NULL, permission_mode TEXT NOT NULL DEFAULT 'read_only',
                     running_mode TEXT NOT NULL DEFAULT 'agent', usage_json TEXT NOT NULL,
                     cwd TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL,
                     status TEXT NOT NULL CHECK (status IN ('failed', 'success', 'abort')),
@@ -152,6 +165,8 @@ class SQLiteSchemaMixin:
         ):
             if name not in meta_columns:
                 connection.execute(f"ALTER TABLE session_meta ADD COLUMN {name} {definition}")
+        if prior_version < 7:
+            self._migrate_legacy_permissions(connection)
         connection.execute(
             "UPDATE session_meta SET schema_version=? WHERE schema_version < ?", (SCHEMA_VERSION, SCHEMA_VERSION)
         )
@@ -159,7 +174,9 @@ class SQLiteSchemaMixin:
             "UPDATE session_meta SET owner_device_id=? WHERE owner_device_id IS NULL OR owner_device_id=''",
             (self.device_id,),
         )
-        if prior_version < SCHEMA_VERSION or (runtime_columns and not required_runtime_columns.issubset(runtime_columns)):
+        if prior_version < SCHEMA_VERSION or (
+            runtime_columns and not required_runtime_columns.issubset(runtime_columns)
+        ):
             # Version 0.3 is a protocol break for the message tree itself:
             # the old ``runtime_nodes`` table is rebuilt and its rows are not
             # interpreted as v4 nodes.  The remaining tables are deliberately
@@ -195,6 +212,7 @@ class SQLiteSchemaMixin:
             meta = connection.execute("SELECT session_id,read_only FROM session_meta").fetchone()
             if meta is not None and not int(meta[1]):
                 self._queue(connection, str(meta[0]))
+
         # A database created by an older client may already have an outbox
         # entry before the local project binding is imported.  Once the
         # session is marked local-only, remove that stale payload immediately.
@@ -209,6 +227,27 @@ class SQLiteSchemaMixin:
             meta = connection.execute("SELECT session_id,local_only,read_only FROM session_meta LIMIT 1").fetchone()
             if meta is not None and not int(meta[1]) and not int(meta[2]):
                 self._queue(connection, str(meta[0]))
+
+    @staticmethod
+    def _migrate_legacy_permissions(connection: sqlite3.Connection) -> None:
+        """Downgrade modes that predate the joint file/network confirmation."""
+
+        connection.execute(
+            "UPDATE runtime_nodes SET permission_mode='read_only' "
+            "WHERE permission_mode IN ('approval_for_me','full_access')"
+        )
+        for table, key in (("session_runtime", "session_id"), ("runs", "run_id"), ("checkpoints", "id")):
+            rows = connection.execute(f"SELECT {key},state_json FROM {table}").fetchall()
+            for identity, raw in rows:
+                try:
+                    payload = json.loads(str(raw))
+                except (TypeError, ValueError):
+                    continue
+                if _replace_legacy_permissions(payload):
+                    connection.execute(
+                        f"UPDATE {table} SET state_json=? WHERE {key}=?",
+                        (json.dumps(payload, ensure_ascii=False, separators=(",", ":")), identity),
+                    )
 
     def _backfill_title_is_custom(self, connection: sqlite3.Connection) -> None:
         """Infer ``title_is_custom`` for a pre-v6 database and backfill titles.
@@ -281,9 +320,7 @@ class SQLiteSchemaMixin:
             self._node_values(root),
         )
         direct_children = [
-            row
-            for row in all_local_nodes
-            if str(row[1]) == session_id and str(row[2]) in legacy_root_ids
+            row for row in all_local_nodes if str(row[1]) == session_id and str(row[2]) in legacy_root_ids
         ]
         root_keys = [str(row[0]) for row in local_roots] + [str(row[0]) for row in direct_children]
         if root_keys:
@@ -342,6 +379,21 @@ def message_text(data: object) -> str:
     )
 
 
+def _replace_legacy_permissions(value: object) -> bool:
+    changed = False
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "permission_mode" and item in {"approval_for_me", "full_access"}:
+                value[key] = "read_only"
+                changed = True
+            else:
+                changed = _replace_legacy_permissions(item) or changed
+    elif isinstance(value, list):
+        for item in value:
+            changed = _replace_legacy_permissions(item) or changed
+    return changed
+
+
 def first_local_user_message(connection: sqlite3.Connection) -> str | None:
     """Return the text of the first local user message, if any.
 
@@ -364,7 +416,5 @@ def first_local_user_message(connection: sqlite3.Connection) -> str | None:
         text = message_text(data)
         if text:
             return text
-    row = connection.execute(
-        "SELECT content FROM session_messages WHERE role='user' ORDER BY id LIMIT 1"
-    ).fetchone()
+    row = connection.execute("SELECT content FROM session_messages WHERE role='user' ORDER BY id LIMIT 1").fetchone()
     return str(row[0]) if row is not None else None

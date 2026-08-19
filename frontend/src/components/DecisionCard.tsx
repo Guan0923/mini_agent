@@ -21,7 +21,6 @@ interface Props {
  */
 export default function DecisionCard({ request, onSubmit }: Props) {
   const [submitting, setSubmitting] = useState(false);
-  const [supplement, setSupplement] = useState("");
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
 
   async function submit(choice: string, options: { supplement?: string; answers?: Record<string, string[]> } = {}) {
@@ -143,24 +142,9 @@ export default function DecisionCard({ request, onSubmit }: Props) {
       <p>{request.message || `请求调用 ${request.tool || "工具"}`}</p>
       {request.tool ? <strong className="mono">{request.tool}</strong> : null}
       <pre>{shownArguments}</pre>
-      <Input
-        placeholder="补充说明（可选）"
-        value={supplement}
-        onChange={(event) => setSupplement(event.target.value)}
-        disabled={submitting}
-      />
       <Space className="decision-actions" wrap>
-        <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("continue")}>继续</Button>
-        <Button autoInsertSpace={false} loading={submitting} disabled={submitting} onClick={() => void submit("allow_once")}>本次允许</Button>
+        <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("allow_once")}>本次允许</Button>
         <Button autoInsertSpace={false} loading={submitting} disabled={submitting} onClick={() => void submit("allow_session")}>本会话允许</Button>
-        <Button
-          autoInsertSpace={false}
-          disabled={submitting || !supplement.trim()}
-          onClick={() => void submit("supplement", { supplement: supplement.trim() })}
-        >
-          提交补充
-        </Button>
-        <Button autoInsertSpace={false} disabled={submitting} onClick={() => void submit("cancel")}>取消</Button>
         <Button autoInsertSpace={false} danger disabled={submitting} onClick={() => void submit("deny")}>拒绝</Button>
       </Space>
     </Card>

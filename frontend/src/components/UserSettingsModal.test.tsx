@@ -9,6 +9,10 @@ const api = vi.hoisted(() => ({
   updateProfile: vi.fn(),
   updateAgentConfig: vi.fn(),
   updateRuntimeConfig: vi.fn(),
+  getSandboxStatus: vi.fn(),
+  installSandboxBroker: vi.fn(),
+  repairSandboxBroker: vi.fn(),
+  updateSandboxConfig: vi.fn(),
   updateProviderConfig: vi.fn(),
   addProviderConfig: vi.fn(),
   updateProviderConfigById: vi.fn(),
@@ -34,6 +38,21 @@ const settings = {
   profile: { email: "user@example.com", display_name: "旧名字", agent_preferences: "" },
   agent_config: { tone: "balanced", verbosity: "balanced", initiative: "balanced", custom_instructions: "" },
   runtime_config: { max_tool_calls: 32, terminal_type: "cmd" as const },
+  sandbox_config: {
+    enabled: false,
+    file_mode: "read_only" as const,
+    network_mode: "no_network" as const,
+    network_allowlist: [],
+    limits: {
+      wall_seconds: 300,
+      cpu_seconds: 300,
+      memory_mib: 4096,
+      processes: 256,
+      handles: 16384,
+      output_chars: 20000,
+      disk_mib: 0,
+    },
+  },
   terminal_options: [
     { value: "cmd" as const, label: "命令提示符（cmd）" },
     { value: "powershell" as const, label: "Windows PowerShell" },
@@ -111,6 +130,10 @@ describe("UserSettingsModal", () => {
     api.updateProfile.mockResolvedValue({ display_name: "新名字", agent_preferences: "" });
     api.updateAgentConfig.mockResolvedValue(settings.agent_config);
     api.updateRuntimeConfig.mockResolvedValue(settings.runtime_config);
+    api.getSandboxStatus.mockResolvedValue({ installed: false, healthy: false, detail: "尚未安装" });
+    api.installSandboxBroker.mockResolvedValue({ installed: true, healthy: true });
+    api.repairSandboxBroker.mockResolvedValue({ installed: true, healthy: true });
+    api.updateSandboxConfig.mockImplementation(async (value) => value);
     api.updateProviderConfig.mockResolvedValue(settings.provider_config);
     api.discoverProviderModels.mockResolvedValue({ models: [] });
     api.getSyncStatus.mockResolvedValue({
@@ -192,6 +215,42 @@ describe("UserSettingsModal", () => {
       max_tool_calls: 32,
       terminal_type: "powershell",
     }));
+  });
+
+  it("confirms joint full access and saves every sandbox resource limit", async () => {
+    const user = userEvent.setup();
+    renderModal();
+    await screen.findByDisplayValue("user@example.com");
+    await user.click(screen.getByRole("menuitem", { name: "沙箱" }));
+
+    const fileMode = screen.getByRole("combobox", { name: "文件权限" });
+    fireEvent.mouseDown(fileMode);
+    await user.click(screen.getByText("Full access（高风险）", { selector: ".ant-select-item-option-content" }));
+    expect(screen.getByRole("combobox", { name: "网络权限" })).toBeDisabled();
+    expect(screen.getByRole("spinbutton", { name: "CPU 秒数" })).toHaveValue("300");
+    expect(screen.getByRole("spinbutton", { name: "句柄数" })).toHaveValue("16384");
+    expect(screen.getByRole("spinbutton", { name: "输出字符数" })).toHaveValue("20000");
+    expect(screen.getByRole("spinbutton", { name: "磁盘写入 MiB" })).toHaveValue("0");
+
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findAllByText("启用 Full access？")).not.toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: /继\s*续/ }));
+    await waitFor(() => expect(api.updateSandboxConfig).toHaveBeenCalledWith(expect.objectContaining({
+      file_mode: "full_access",
+      network_mode: "full_network",
+      full_access_acknowledged: true,
+      limits: settings.sandbox_config.limits,
+    })));
+  });
+
+  it("renders Broker install failures in the sandbox status", async () => {
+    api.installSandboxBroker.mockRejectedValueOnce(new Error("需要管理员批准"));
+    const user = userEvent.setup();
+    renderModal();
+    await screen.findByDisplayValue("user@example.com");
+    await user.click(screen.getByRole("menuitem", { name: "沙箱" }));
+    await user.click(screen.getByRole("button", { name: "安装" }));
+    expect(await screen.findByText("需要管理员批准")).toBeInTheDocument();
   });
 
   it("saves cloud preferences and starts a background cloud snapshot", async () => {

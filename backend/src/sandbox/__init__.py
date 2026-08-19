@@ -2,7 +2,7 @@
 
 from .admission import AggregateLimits, ResourceRequest, SandboxAdmission, SandboxAdmissionTimeout
 from .approvals import ApprovalDecision, ApprovalGrant, ApprovalStore, authorization_hash
-from .broker import BrokerStatus, WindowsBrokerClient
+from .broker import BrokerManagedProcess, BrokerStatus, WindowsBrokerClient
 from .broker_service import (
     BROKER_VERSION,
     AccountLease,
@@ -25,10 +25,23 @@ from .errors import (
 )
 from .launcher import SandboxLauncher
 from .manifest import ResourceManifest, ResourceRecord
+from .native_broker_adapter import WfpController, WindowsNativeBrokerAdapter
+from .native_windows import (
+    WindowsAccountManager,
+    WindowsAclManager,
+    WindowsJobObject,
+    WindowsPowerShellWfpController,
+    WindowsRestrictedTokenFactory,
+    WindowsSandboxAccount,
+    windows_pipe_security_attributes,
+)
 from .policy import (
+    FileAccessMode,
     NetworkMode,
     NetworkRule,
     PermissionMode,
+    ResourceLimits,
+    SandboxJobContext,
     SandboxLimits,
     SandboxPolicy,
     TerminalKind,
@@ -37,6 +50,7 @@ from .policy import (
     normalize_permission_mode,
     resolve_network_rules,
 )
+from .reclaimer import SandboxResourceReclaimer
 from .resources import NullResourceProvider, ResourceMonitor, ResourceUsage
 
 __all__ = [
@@ -49,12 +63,15 @@ __all__ = [
     "BrokerStatus",
     "BROKER_VERSION",
     "BrokerConfiguration",
+    "BrokerManagedProcess",
     "DpapiKeyStore",
+    "FileAccessMode",
     "NetworkMode",
     "NetworkRule",
     "NullResourceProvider",
     "PermissionMode",
     "ResourceMonitor",
+    "ResourceLimits",
     "ResourceManifest",
     "ResourceRecord",
     "ResourceRequest",
@@ -66,16 +83,27 @@ __all__ = [
     "SandboxFailureCode",
     "SandboxInitializationError",
     "SandboxLauncher",
+    "SandboxJobContext",
     "SandboxLimits",
     "SandboxPolicy",
     "SandboxPolicyError",
     "SandboxResourceExceeded",
+    "SandboxResourceReclaimer",
     "TerminalKind",
     "WindowsBrokerClient",
     "WindowsBrokerService",
     "WindowsDpapiProvider",
     "WindowsNamedPipeServer",
     "WindowsServiceInstaller",
+    "WindowsAccountManager",
+    "WindowsAclManager",
+    "WindowsJobObject",
+    "WindowsNativeBrokerAdapter",
+    "WindowsPowerShellWfpController",
+    "WindowsRestrictedTokenFactory",
+    "WindowsSandboxAccount",
+    "windows_pipe_security_attributes",
+    "WfpController",
     "UserAccountPools",
     "authorization_hash",
     "normalize_permission_mode",

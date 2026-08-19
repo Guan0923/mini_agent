@@ -42,7 +42,7 @@ describe("DecisionCard", () => {
     expect(onSubmit).toHaveBeenCalledWith("answer", { answers: { permission: ["完全访问"] } });
   });
 
-  it("requires supplement text before sending a tool supplement", async () => {
+  it("offers only the three sandbox approval outcomes", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
     render(
@@ -52,11 +52,17 @@ describe("DecisionCard", () => {
       />,
     );
 
-    const supplement = screen.getByPlaceholderText("补充说明（可选）");
-    expect(screen.getByRole("button", { name: "提交补充" })).toBeDisabled();
-    await user.type(supplement, "仅查看当前目录");
-    await user.click(screen.getByRole("button", { name: "提交补充" }));
-    expect(onSubmit).toHaveBeenCalledWith("supplement", { supplement: "仅查看当前目录" });
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "本次允许",
+      "本会话允许",
+      "拒绝",
+    ]);
+    await user.click(screen.getByRole("button", { name: "本次允许" }));
+    expect(onSubmit).toHaveBeenCalledWith("allow_once", {});
+    await user.click(screen.getByRole("button", { name: "本会话允许" }));
+    expect(onSubmit).toHaveBeenCalledWith("allow_session", {});
+    await user.click(screen.getByRole("button", { name: "拒绝" }));
+    expect(onSubmit).toHaveBeenCalledWith("deny", {});
   });
 
   it("renders a single-Skill trust review with trust and skip choices", async () => {
@@ -104,7 +110,7 @@ describe("DecisionCard", () => {
       />,
     );
     // The description is rendered as React text; no img element is created.
-    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(document.querySelector("img")).not.toBeInTheDocument();
     expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
   });
 });

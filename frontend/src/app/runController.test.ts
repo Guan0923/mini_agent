@@ -192,6 +192,6 @@ describe("RuntimeState streaming projection", () => {
 
     expect(view.conversation.messages[1].content).toBe("最终答案");
     expect(view.conversation.lastNodeId).toBe("tool-node");
-    expect(view.conversation.runtimeNodes).toEqual([toolNode]);
+    expect(view.conversation.runtimeNodes).toEqual([{ ...toolNode, permission_mode: "read_only" }]);
   });
 });

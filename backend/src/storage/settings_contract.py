@@ -11,7 +11,14 @@ from collections.abc import Mapping
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS, validate_time_zone
 from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, normalize_terminal_type
-from backend.sandbox import NetworkMode, NetworkRule, PermissionMode, SandboxLimits, normalize_permission_mode
+from backend.sandbox import (
+    NetworkMode,
+    NetworkRule,
+    PermissionMode,
+    SandboxLimits,
+    migrate_legacy_permission_mode,
+    normalize_permission_mode,
+)
 
 DEFAULT_PROFILE: dict[str, str] = {"display_name": "", "agent_preferences": ""}
 DEFAULT_AGENT_CONFIG: dict[str, object] = {
@@ -40,6 +47,7 @@ DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
 DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {}
 DEFAULT_RUNTIME_CONFIG: dict[str, object] = {"max_tool_calls": 32, "terminal_type": DEFAULT_TERMINAL_TYPE}
 DEFAULT_SANDBOX_CONFIG: dict[str, object] = {
+    "policy_version": 2,
     "enabled": False,
     "file_mode": PermissionMode.READ_ONLY.value,
     "network_mode": NetworkMode.NO_NETWORK.value,
@@ -69,7 +77,12 @@ def normalize_sandbox_config(
 
     result = dict(DEFAULT_SANDBOX_CONFIG)
     if isinstance(current, Mapping):
-        result.update(current)
+        current_values = dict(current)
+        if current_values.get("policy_version") != 2:
+            legacy_mode = current_values.get("file_mode", current_values.get("permission_mode"))
+            current_values["file_mode"] = migrate_legacy_permission_mode(legacy_mode).value
+            current_values["network_mode"] = NetworkMode.NO_NETWORK.value
+        result.update(current_values)
     if isinstance(values, Mapping):
         result.update(values)
     enabled = result.get("enabled", False)
@@ -84,8 +97,8 @@ def normalize_sandbox_config(
     raw_allowlist = result.get("network_allowlist") or []
     if not isinstance(raw_allowlist, (list, tuple)):
         raise ValueError("network_allowlist must be an array")
-    if len(raw_allowlist) > 128:
-        raise ValueError("network_allowlist must contain at most 128 rules")
+    if len(raw_allowlist) > 64:
+        raise ValueError("network_allowlist must contain at most 64 rules")
     allowlist: list[dict[str, object]] = []
     for item in raw_allowlist:
         if not isinstance(item, Mapping):
@@ -112,6 +125,7 @@ def normalize_sandbox_config(
         raise ValueError("full_access requires explicit joint file and network confirmation")
     limits = SandboxLimits.from_mapping(result.get("limits") if isinstance(result.get("limits"), Mapping) else None)
     return {
+        "policy_version": 2,
         "enabled": enabled,
         "file_mode": file_mode.value,
         "network_mode": network.value,

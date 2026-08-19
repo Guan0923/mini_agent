@@ -3,6 +3,7 @@ from pathlib import Path
 
 from backend.domain import AgentAction, NodeWriter, RunState, message_payload
 from backend.runtime import AgentRunner
+from backend.sandbox import ApprovalStore
 from backend.tools import ToolRegistry
 from tests.local_store import session_store
 from tui.cli import TerminalApp
@@ -97,6 +98,49 @@ def test_sqlite_schema_initialization_is_idempotent(tmp_path: Path) -> None:
         ).fetchone()
     assert {"workflow_id", "attempt", "origin_kind", "source_session_id", "source_run_id"} <= columns
     assert lineage == ("run_schema", 1, "legacy")
+
+
+def test_session_sandbox_approval_is_local_and_persistent(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    store = session_store(root)
+    session = store.create_session("Approval")
+    ApprovalStore(store).decide(
+        session_id=session.session_id,
+        command="git status --short",
+        cwd="C:\\workspace",
+        permission_target="workspace_write",
+        decision="allow_session",
+    )
+
+    reopened = session_store(root)
+    assert ApprovalStore(reopened).allowed(
+        session_id=session.session_id,
+        command="git status --short",
+        cwd="C:\\workspace",
+        permission_target="workspace_write",
+    )
+    with sqlite3.connect(reopened.paths.session_db(session.session_id)) as connection:
+        row = connection.execute(
+            "SELECT command_hash,cwd_hash,command_summary,cwd_summary FROM sandbox_approvals"
+        ).fetchone()
+    assert row is not None
+    persisted = " ".join(str(value) for value in row)
+    assert "git status" not in persisted
+    assert "C:\\workspace" not in persisted
+
+
+def test_v6_permission_migration_downgrades_legacy_full_access(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    store = session_store(root)
+    session = store.create_session("Legacy permission")
+    with sqlite3.connect(store.paths.session_db(session.session_id)) as connection:
+        connection.execute("UPDATE session_meta SET schema_version=6")
+        connection.execute("UPDATE runtime_nodes SET permission_mode='full_access'")
+
+    reopened = session_store(root)
+    root_node = reopened.get_session_root(session.session_id)
+    assert root_node is not None
+    assert root_node.permission_mode == "read_only"
 
 
 class HistoryPlanner:

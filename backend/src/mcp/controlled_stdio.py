@@ -33,6 +33,7 @@ async def controlled_stdio_client(
     *,
     sandbox_launcher: Any | None = None,
     sandbox_policy: Any | None = None,
+    sandbox_user_id: str | None = None,
 ):
     """Yield MCP memory streams backed by one explicitly configured process."""
     read_writer, read_stream = anyio.create_memory_object_stream(0)
@@ -49,6 +50,7 @@ async def controlled_stdio_client(
             errlog,
             sandbox_launcher=sandbox_launcher,
             sandbox_policy=sandbox_policy,
+            sandbox_user_id=sandbox_user_id,
         )
 
         async def stdout_reader() -> None:
@@ -118,6 +120,7 @@ async def _open_process(
     *,
     sandbox_launcher: Any | None = None,
     sandbox_policy: Any | None = None,
+    sandbox_user_id: str | None = None,
 ):
     if sandbox_launcher is not None:
         if sandbox_policy is None:
@@ -131,6 +134,8 @@ async def _open_process(
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                user_id=sandbox_user_id or "local",
+                job_kind="mcp",
             )
         )
         return _PopenProcess(popen, sandbox_launcher=sandbox_launcher)
@@ -165,6 +170,11 @@ class _PopenProcess:
 
     def kill(self) -> None:
         self._process.kill()
+
+    def terminate(self) -> None:
+        """Stop through the owning process manager when one is present."""
+
+        self._process.terminate()
 
     async def cleanup(self) -> None:
         if self._sandbox_launcher is not None:
@@ -218,7 +228,11 @@ async def _close_process(process, server: StdioServerParameters) -> None:
                 return
         except (TimeoutError, ProcessLookupError):
             pass
-        await anyio.to_thread.run_sync(_terminate_tree, process.pid)
+        terminate = getattr(process, "terminate", None)
+        if callable(terminate):
+            await anyio.to_thread.run_sync(terminate)
+        else:
+            await anyio.to_thread.run_sync(_terminate_tree, process.pid)
         try:
             with anyio.fail_after(5.0):
                 await process.wait()

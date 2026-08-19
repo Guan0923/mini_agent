@@ -15,6 +15,7 @@ from threading import RLock
 class ResourceRecord:
     installation_id: str
     backend_instance_id: str
+    user_id: str
     job_id: str
     resources: dict[str, object]
 
@@ -22,6 +23,7 @@ class ResourceRecord:
         return {
             "installation_id": self.installation_id,
             "backend_instance_id": self.backend_instance_id,
+            "user_id": self.user_id,
             "job_id": self.job_id,
             "resources": dict(self.resources),
         }
@@ -52,48 +54,69 @@ class ResourceManifest:
                 ResourceRecord(
                     str(item.get("installation_id")),
                     str(item.get("backend_instance_id") or ""),
+                    str(item.get("user_id") or ""),
                     str(item.get("job_id")),
                     dict(resources) if isinstance(resources, Mapping) else {},
                 )
             )
         return tuple(parsed)
 
-    def register(self, job_id: str, resources: Mapping[str, object]) -> ResourceRecord:
-        record = ResourceRecord(self.installation_id, self.backend_instance_id, job_id, dict(resources))
-        values = [
-            item
-            for item in self.records()
-            if not (
-                item.installation_id == self.installation_id
-                and item.backend_instance_id == self.backend_instance_id
-                and item.job_id == job_id
-            )
-        ]
-        values.append(record)
-        self._write(values)
-        return record
-
-    def remove(self, job_id: str) -> None:
-        self._write(
-            [
+    def register(
+        self,
+        user_id: str,
+        job_id: str,
+        resources: Mapping[str, object],
+        *,
+        backend_instance_id: str | None = None,
+    ) -> ResourceRecord:
+        with self._lock:
+            backend_id = backend_instance_id or self.backend_instance_id
+            record = ResourceRecord(self.installation_id, backend_id, user_id, job_id, dict(resources))
+            values = [
                 item
                 for item in self.records()
                 if not (
                     item.installation_id == self.installation_id
-                    and item.backend_instance_id == self.backend_instance_id
+                    and item.backend_instance_id == backend_id
+                    and item.user_id == user_id
                     and item.job_id == job_id
                 )
             ]
-        )
+            values.append(record)
+            self._write(values)
+            return record
 
-    def owned_orphans(self, live_job_ids: set[str]) -> tuple[ResourceRecord, ...]:
+    def remove(self, user_id: str, job_id: str, *, backend_instance_id: str | None = None) -> None:
+        with self._lock:
+            backend_id = backend_instance_id or self.backend_instance_id
+            self._write(
+                [
+                    item
+                    for item in self.records()
+                    if not (
+                        item.installation_id == self.installation_id
+                        and item.backend_instance_id == backend_id
+                        and item.user_id == user_id
+                        and item.job_id == job_id
+                    )
+                ]
+            )
+
+    def owned_orphans(
+        self,
+        live_job_ids: set[str],
+        *,
+        backend_instance_id: str | None = None,
+        user_id: str | None = None,
+    ) -> tuple[ResourceRecord, ...]:
         """Return only records provably owned by this installation/backend."""
 
         return tuple(
             item
             for item in self.records()
             if item.installation_id == self.installation_id
-            and item.backend_instance_id == self.backend_instance_id
+            and item.backend_instance_id == (backend_instance_id or self.backend_instance_id)
+            and (user_id is None or item.user_id == user_id)
             and item.job_id not in live_job_ids
         )
 

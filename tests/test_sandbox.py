@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -12,15 +13,20 @@ from backend.sandbox import (
     ApprovalDecision,
     ApprovalStore,
     BrokerConfiguration,
+    BrokerManagedProcess,
     DpapiKeyStore,
+    FileAccessMode,
     NetworkMode,
+    NetworkRule,
     PermissionMode,
+    ResourceLimits,
     ResourceMonitor,
     ResourceRequest,
     ResourceUsage,
     SandboxAdmission,
     SandboxAdmissionTimeout,
     SandboxInitializationError,
+    SandboxJobContext,
     SandboxLauncher,
     SandboxLimits,
     SandboxPolicy,
@@ -29,14 +35,18 @@ from backend.sandbox import (
     WindowsBrokerService,
     migrate_legacy_permission_mode,
     normalize_permission_mode,
+    resolve_network_rules,
 )
 
 
-def test_legacy_permission_modes_migrate_to_read_only() -> None:
+def test_legacy_permission_modes_migrate_to_read_only(tmp_path: Path) -> None:
     assert normalize_permission_mode("approval_for_me") is PermissionMode.READ_ONLY
     assert normalize_permission_mode("full_access") is PermissionMode.FULL_ACCESS
     assert normalize_permission_mode(None) is PermissionMode.READ_ONLY
     assert migrate_legacy_permission_mode("full_access") is PermissionMode.READ_ONLY
+    assert PermissionMode is FileAccessMode
+    assert SandboxLimits is ResourceLimits
+    assert SandboxJobContext("user-1", SandboxPolicy(tmp_path, "session", "job")).job_kind == "command"
 
 
 def test_limits_validate_hard_bounds() -> None:
@@ -45,8 +55,8 @@ def test_limits_validate_hard_bounds() -> None:
     assert SandboxLimits.from_mapping({"memory_mb": 128}).memory_mib == 128
 
 
-def test_policy_requires_workspace_and_full_access_pair() -> None:
-    workspace = Path.cwd()
+def test_policy_requires_workspace_and_full_access_pair(tmp_path: Path) -> None:
+    workspace = tmp_path
     with pytest.raises(Exception):
         SandboxPolicy(
             workspace,
@@ -68,6 +78,15 @@ def test_policy_requires_workspace_and_full_access_pair() -> None:
     assert len(policy.policy_hash()) == hashlib.sha256().digest_size * 2
 
 
+def test_restricted_network_rejects_non_public_resolution() -> None:
+    def resolver(host: str, port: int, **kwargs: object) -> list[tuple[object, ...]]:
+        del host, kwargs
+        return [(2, 1, 6, "", ("127.0.0.1", port))]
+
+    with pytest.raises(Exception, match="non-public"):
+        resolve_network_rules((NetworkRule("localhost", 80),), resolver=resolver)
+
+
 def test_authorization_grant_stores_only_hash() -> None:
     store = ApprovalStore()
     grant = store.decide(
@@ -80,6 +99,36 @@ def test_authorization_grant_stores_only_hash() -> None:
     assert grant is not None
     assert "echo secret" not in json.dumps(grant.to_public())
     assert store.allowed(
+        session_id="session-1",
+        command="echo secret",
+        cwd="C:\\workspace",
+        permission_target="workspace_write",
+    )
+
+
+def test_authorization_grant_uses_local_repository_after_restart() -> None:
+    class Repository:
+        def __init__(self) -> None:
+            self.values: set[tuple[str, str, str]] = set()
+
+        def save_sandbox_approval(self, session_id, request_hash, command_hash, cwd_hash, permission_target, *rest):
+            assert command_hash != "echo secret"
+            assert cwd_hash != "C:\\workspace"
+            assert "echo secret" not in json.dumps(rest)
+            self.values.add((session_id, request_hash, permission_target))
+
+        def has_sandbox_approval(self, session_id, request_hash, permission_target):
+            return (session_id, request_hash, permission_target) in self.values
+
+    repository = Repository()
+    ApprovalStore(repository).decide(
+        session_id="session-1",
+        command="echo secret",
+        cwd="C:\\workspace",
+        permission_target="workspace_write",
+        decision="allow_session",
+    )
+    assert ApprovalStore(repository).allowed(
         session_id="session-1",
         command="echo secret",
         cwd="C:\\workspace",
@@ -104,6 +153,45 @@ def test_broker_request_authenticates_nonce() -> None:
     assert client.status().healthy
 
 
+def test_broker_managed_process_proxies_communicate() -> None:
+    key = b"proxy-installation-key"
+
+    def transport(payload: bytes) -> bytes:
+        request = json.loads(payload)
+        operation = request["operation"]
+        if operation == "launch":
+            values = {
+                "accepted": True,
+                "process_id": "process-1",
+                "pid": 4321,
+                "stdin": "null",
+                "stdout": "pipe",
+                "stderr": "pipe",
+            }
+        elif operation == "process_communicate":
+            values = {"returncode": 0, "stdout": "b2s=", "stderr": ""}
+        else:
+            raise AssertionError(operation)
+        response = {"nonce": request["nonce"], **values}
+        response["hmac"] = hmac.new(
+            key,
+            json.dumps(response, sort_keys=True, separators=(",", ":")).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return json.dumps(response, separators=(",", ":")).encode()
+
+    client = WindowsBrokerClient(installation_key=key, transport=transport, is_windows=True)
+    process = client.launch(
+        argv=["cmd.exe", "/c", "echo ok"],
+        cwd="C:\\workspace",
+        environment={},
+        policy={"job_id": "job-1"},
+        user_id="user-1",
+    )
+    assert isinstance(process, BrokerManagedProcess)
+    assert process.communicate(timeout=1) == (b"ok", b"")
+
+
 def test_broker_service_verifies_requests_and_recovers_owned_orphans(tmp_path: Path) -> None:
     class FakeDpapi:
         def protect(self, value: bytes) -> bytes:
@@ -123,22 +211,54 @@ def test_broker_service_verifies_requests_and_recovers_owned_orphans(tmp_path: P
         def launch(self, request: dict[str, object]) -> dict[str, object]:
             return {"accepted": True, "resources": {"pid": 321}}
 
-    configuration = BrokerConfiguration.create(program_data=tmp_path, installation_id="install-1", backend_instance_id="backend-1")
+    configuration = BrokerConfiguration.create(
+        program_data=tmp_path,
+        installation_id="install-1",
+        backend_instance_id="backend-1",
+    )
     store = DpapiKeyStore(configuration.installation_key_path, provider=FakeDpapi())
-    service = WindowsBrokerService(configuration, key_store=store, adapter=Adapter(), is_windows=True)
+    service = WindowsBrokerService(
+        configuration,
+        key_store=store,
+        adapter=Adapter(),
+        is_windows=True,
+        clock=lambda: 1_000,
+    )
     service.initialize()
-    client = WindowsBrokerClient(installation_key=store.load(), transport=service.handle, is_windows=True)
+    client = WindowsBrokerClient(
+        installation_key=store.load(),
+        transport=service.handle,
+        is_windows=True,
+        backend_instance_id="backend-1",
+        clock=lambda: 1_000,
+    )
     assert client.status().healthy
     response = service.handle(
         json.dumps(
             {
                 "operation": "launch",
                 "nonce": "nonce-launch",
-                "body": {"policy": {"job_id": "job-1"}},
+                "issued_at": 1_000,
+                "expires_at": 1_030,
+                "body": {
+                    "backend_instance_id": "backend-1",
+                    "user_id": "user-1",
+                    "policy": {"job_id": "job-1"},
+                },
                 "hmac": hmac.new(
                     store.load(),
                     json.dumps(
-                        {"operation": "launch", "nonce": "nonce-launch", "body": {"policy": {"job_id": "job-1"}}},
+                        {
+                            "operation": "launch",
+                            "nonce": "nonce-launch",
+                            "issued_at": 1_000,
+                            "expires_at": 1_030,
+                            "body": {
+                                "backend_instance_id": "backend-1",
+                                "user_id": "user-1",
+                                "policy": {"job_id": "job-1"},
+                            },
+                        },
                         sort_keys=True,
                         separators=(",", ":"),
                     ).encode(),
@@ -150,9 +270,40 @@ def test_broker_service_verifies_requests_and_recovers_owned_orphans(tmp_path: P
     )
     assert json.loads(response)["nonce"] == "nonce-launch"
     assert service.manifest.records()[0].job_id == "job-1"
+    assert service.manifest.records()[0].user_id == "user-1"
     assert service.recover_orphans(set(), lambda record: record.job_id == "job-1") == ("job-1",)
     with pytest.raises(SandboxInitializationError):
         service.handle(response)
+
+
+def test_broker_service_rejects_expired_signed_request(tmp_path: Path) -> None:
+    key = b"k" * 32
+
+    class KeyStore:
+        def ensure(self):
+            return key
+
+        def load(self):
+            return key
+
+    configuration = BrokerConfiguration.create(program_data=tmp_path)
+    service = WindowsBrokerService(configuration, key_store=KeyStore(), is_windows=True, clock=lambda: 100)
+    service.initialize()
+    unsigned = {
+        "operation": "status",
+        "nonce": "expired",
+        "issued_at": 1,
+        "expires_at": 2,
+        "body": {},
+    }
+    request = {
+        **unsigned,
+        "hmac": hmac.new(
+            key, json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256
+        ).hexdigest(),
+    }
+    with pytest.raises(SandboxInitializationError, match="expired"):
+        service.handle(json.dumps(request).encode())
 
 
 def test_resource_monitor_rejects_memory() -> None:
@@ -161,8 +312,23 @@ def test_resource_monitor_rejects_memory() -> None:
         monitor.check(ResourceUsage(memory_bytes=129 * 1024 * 1024))
 
 
-def test_policy_environment_does_not_inherit_profile_locations() -> None:
-    policy = SandboxPolicy(Path.cwd(), "session", "job")
+def test_resource_monitor_fails_closed_when_sampling_breaks() -> None:
+    exceeded = threading.Event()
+
+    class Provider:
+        def sample(self, _pid: int) -> ResourceUsage:
+            raise OSError("accounting unavailable")
+
+    monitor = ResourceMonitor(1, SandboxLimits(), provider=Provider(), on_exceeded=lambda _error: exceeded.set())
+    monitor.start()
+    try:
+        assert exceeded.wait(1.0)
+    finally:
+        monitor.stop()
+
+
+def test_policy_environment_does_not_inherit_profile_locations(tmp_path: Path) -> None:
+    policy = SandboxPolicy(tmp_path, "session", "job")
     environment = policy.environment(
         {
             "PATH": "C:\\Windows",
@@ -194,8 +360,54 @@ def test_sandbox_admission_times_out_and_releases() -> None:
     admission.acquire("session", request)
 
 
-def test_windows_launcher_fails_closed_without_broker() -> None:
-    policy = SandboxPolicy(Path.cwd(), "session", "job")
+def test_windows_launcher_fails_closed_without_broker(tmp_path: Path) -> None:
+    policy = SandboxPolicy(tmp_path, "session", "job")
     launcher = SandboxLauncher(is_windows=True)
     with pytest.raises(SandboxInitializationError):
         launcher.launch(["cmd.exe", "/c", "echo ok"], policy)
+
+
+def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> None:
+    class Broker:
+        def __init__(self) -> None:
+            self.temp_dir: Path | None = None
+
+        def release(self, _job_id: str, *, user_id: str) -> None:
+            del user_id
+            assert self.temp_dir is not None and self.temp_dir.exists()
+            self.temp_dir.rmdir()
+
+    broker = Broker()
+    policy = SandboxPolicy(tmp_path, "session", "job")
+    temp_dir = tmp_path / "scratch" / "job"
+    temp_dir.mkdir(parents=True)
+    broker.temp_dir = temp_dir
+    launcher = SandboxLauncher(broker=broker, is_windows=True, allow_local_backend=True)
+    launcher._temp_dirs[1234] = temp_dir
+    launcher._job_contexts[1234] = SandboxJobContext("user-1", policy)
+
+    assert launcher.cleanup(1234)
+    assert not temp_dir.exists()
+
+
+def test_launcher_terminates_full_access_job_object() -> None:
+    class JobObject:
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    class Process:
+        pid = 4321
+
+        def terminate(self) -> None:
+            raise AssertionError("root process termination bypassed the Job Object")
+
+    launcher = SandboxLauncher(is_windows=True, allow_local_backend=True)
+    job = JobObject()
+    launcher._local_job_objects[Process.pid] = job
+
+    launcher.terminate_tree(Process())
+
+    assert job.terminated

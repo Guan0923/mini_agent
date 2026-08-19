@@ -7,12 +7,23 @@ import hmac
 import json
 import os
 import secrets
+import subprocess
+import sys
+import time
 import uuid
+from base64 import b64decode, b64encode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .errors import SandboxInitializationError
+from .errors import (
+    SandboxCleanupPending,
+    SandboxError,
+    SandboxFailureCode,
+    SandboxInitializationError,
+    SandboxPolicyError,
+    SandboxResourceExceeded,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +57,8 @@ class WindowsBrokerClient:
         backend_instance_id: str | None = None,
         key_store: Any | None = None,
         installer: Any | None = None,
+        clock: Callable[[], float] | None = None,
+        request_ttl_seconds: int = 30,
     ) -> None:
         self.pipe_name = pipe_name
         self._key = installation_key
@@ -54,6 +67,10 @@ class WindowsBrokerClient:
         self.backend_instance_id = backend_instance_id or f"backend-{uuid.uuid4().hex}"
         self._key_store = key_store
         self._installer = installer
+        self._clock = clock or time.time
+        if not 1 <= request_ttl_seconds <= 60:
+            raise ValueError("request_ttl_seconds must be between 1 and 60")
+        self._request_ttl_seconds = request_ttl_seconds
         self._seen_nonces: set[str] = set()
 
     @classmethod
@@ -69,23 +86,27 @@ class WindowsBrokerClient:
         if not resolved_windows:
             return cls(is_windows=False)
         try:
-            from .broker_service import BrokerConfiguration, DpapiKeyStore
-
-            configuration = BrokerConfiguration.create()
-            key_store = DpapiKeyStore(configuration.installation_key_path)
-            key = key_store.load()
-            return cls(
-                pipe_name=configuration.pipe_name,
-                installation_key=key,
-                is_windows=True,
-                key_store=key_store,
-            )
+            from .broker_service import BrokerConfiguration, DpapiKeyStore, WindowsServiceInstaller
         except Exception:
-            try:
-                key_store = DpapiKeyStore(configuration.installation_key_path)
-            except Exception:
-                key_store = None
-            return cls(is_windows=True, key_store=key_store)
+            return cls(is_windows=True)
+        configuration = BrokerConfiguration.create()
+        key_store = DpapiKeyStore(configuration.installation_key_path)
+        installer = WindowsServiceInstaller(
+            (sys.executable, "-m", "backend.sandbox.service_main", "run"),
+            backend_sid_path=configuration.backend_sid_path,
+            program_data_path=configuration.program_data,
+        )
+        try:
+            key = key_store.load()
+        except Exception:
+            key = None
+        return cls(
+            pipe_name=configuration.pipe_name,
+            installation_key=key,
+            is_windows=True,
+            key_store=key_store,
+            installer=installer,
+        )
 
     @property
     def available(self) -> bool:
@@ -107,11 +128,13 @@ class WindowsBrokerClient:
             return BrokerStatus(False, False, detail=str(type(exc).__name__))
 
     def install(self) -> BrokerStatus:
-        self._ensure_installation_key()
+        if self._installer is None:
+            self._ensure_installation_key()
         return self._status_command("install")
 
     def repair(self) -> BrokerStatus:
-        self._ensure_installation_key()
+        if self._installer is None:
+            self._ensure_installation_key()
         return self._status_command("repair")
 
     def _ensure_installation_key(self) -> None:
@@ -124,28 +147,72 @@ class WindowsBrokerClient:
     def _status_command(self, operation: str) -> BrokerStatus:
         if self._installer is not None:
             getattr(self._installer, operation)()
-            payload = self.request("status", {})
+            deadline = time.monotonic() + 10.0
+            last_error: Exception | None = None
+            while True:
+                try:
+                    if self._key is None and self._key_store is not None:
+                        self._key = self._key_store.load()
+                    payload = self.request("status", {})
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if time.monotonic() >= deadline:
+                        raise SandboxInitializationError("Broker service did not become ready") from last_error
+                    time.sleep(0.1)
         else:
             payload = self.request(operation, {})
         return BrokerStatus(bool(payload.get("installed", True)), bool(payload.get("healthy", True)))
 
-    def launch(self, *, argv: list[str], cwd: str, environment: Mapping[str, str], policy: Mapping[str, Any]) -> Any:
+    def launch(
+        self,
+        *,
+        argv: list[str],
+        cwd: str,
+        environment: Mapping[str, str],
+        policy: Mapping[str, Any],
+        user_id: str,
+        job_kind: str = "command",
+    ) -> Any:
         response = self.request(
-            "launch", {"argv": list(argv), "cwd": cwd, "environment": dict(environment), "policy": dict(policy)}
+            "launch",
+            {
+                "argv": list(argv),
+                "cwd": cwd,
+                "environment": dict(environment),
+                "policy": dict(policy),
+                "backend_instance_id": self.backend_instance_id,
+                "user_id": user_id,
+                "job_kind": job_kind,
+            },
         )
         if not response.get("accepted", False):
             raise SandboxInitializationError("Windows Broker rejected sandbox launch")
         # The real Broker returns a process handle/identifier. A development
         # client may return a Popen-compatible object for tests.
         process = response.get("process")
-        if process is None:
+        if process is not None:
+            return process
+        process_id = response.get("process_id")
+        pid = response.get("pid")
+        if not isinstance(process_id, str) or not process_id or isinstance(pid, bool) or not isinstance(pid, int):
             raise SandboxInitializationError("Windows Broker did not return a process handle")
-        return process
+        return BrokerManagedProcess(
+            self,
+            process_id,
+            pid,
+            stdin_enabled=response.get("stdin") == "pipe",
+            stdout_enabled=response.get("stdout") == "pipe",
+            stderr_enabled=response.get("stderr") == "pipe",
+        )
 
-    def release(self, job_id: str) -> None:
+    def release(self, job_id: str, *, user_id: str) -> None:
         """Drop the Broker-side resource lease for one completed Job."""
 
-        response = self.request("release", {"job_id": job_id})
+        response = self.request(
+            "release",
+            {"backend_instance_id": self.backend_instance_id, "user_id": user_id, "job_id": job_id},
+        )
         if not response.get("released", False):
             raise SandboxInitializationError("Windows Broker did not release the Job")
 
@@ -156,7 +223,14 @@ class WindowsBrokerClient:
         if nonce in self._seen_nonces:
             raise SandboxInitializationError("Broker nonce collision")
         self._seen_nonces.add(nonce)
-        envelope = {"operation": operation, "nonce": nonce, "body": dict(body)}
+        issued_at = int(self._clock())
+        envelope = {
+            "operation": operation,
+            "nonce": nonce,
+            "issued_at": issued_at,
+            "expires_at": issued_at + self._request_ttl_seconds,
+            "body": dict(body),
+        }
         encoded = _canonical(envelope)
         envelope["hmac"] = self._sign(encoded)
         response_bytes = self._send(_canonical(envelope))
@@ -171,7 +245,31 @@ class WindowsBrokerClient:
             response_hmac, self._sign(_canonical(response))
         ):
             raise SandboxInitializationError("Windows Broker response authentication failed")
+        error = response.get("error")
+        if error is not None:
+            self._raise_remote_error(error)
         return response
+
+    @staticmethod
+    def _raise_remote_error(value: object) -> None:
+        if not isinstance(value, Mapping):
+            raise SandboxInitializationError("Windows Broker returned an invalid error")
+        raw_code = value.get("code")
+        try:
+            code = SandboxFailureCode(str(raw_code))
+        except ValueError as exc:
+            raise SandboxInitializationError("Windows Broker returned an unknown error") from exc
+        message = "Windows Broker operation failed"
+        errors: dict[SandboxFailureCode, type[SandboxError]] = {
+            SandboxFailureCode.INIT_FAILED: SandboxInitializationError,
+            SandboxFailureCode.POLICY_FAILED: SandboxPolicyError,
+            SandboxFailureCode.RESOURCE_EXCEEDED: SandboxResourceExceeded,
+            SandboxFailureCode.CLEANUP_PENDING: SandboxCleanupPending,
+        }
+        error_type = errors.get(code)
+        if error_type is not None:
+            raise error_type(message)
+        raise SandboxError(message, code)
 
     def _send(self, payload: bytes) -> bytes:
         if self._transport is not None:
@@ -191,8 +289,116 @@ class WindowsBrokerClient:
         return hmac.new(self._key, payload, hashlib.sha256).hexdigest()
 
 
+class _BrokerReadStream:
+    def __init__(self, process: BrokerManagedProcess, stream: str) -> None:
+        self._process = process
+        self._stream = stream
+
+    def read(self, size: int = -1) -> bytes:
+        response = self._process._control(
+            "process_read",
+            {"stream": self._stream, "size": 65536 if size is None or size < 0 else size},
+        )
+        payload = response.get("data")
+        if not isinstance(payload, str):
+            raise OSError("Broker process stream returned invalid data")
+        return b64decode(payload.encode("ascii"))
+
+    def close(self) -> None:
+        return None
+
+
+class _BrokerWriteStream:
+    def __init__(self, process: BrokerManagedProcess) -> None:
+        self._process = process
+
+    def write(self, value: bytes) -> int:
+        response = self._process._control(
+            "process_write",
+            {"data": b64encode(bytes(value)).decode("ascii")},
+        )
+        return int(response.get("written", len(value)))
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self._process._control("process_close_stdin", {})
+
+
+class BrokerManagedProcess:
+    """Popen-compatible proxy for a process owned by the Broker service."""
+
+    def __init__(
+        self,
+        client: WindowsBrokerClient,
+        process_id: str,
+        pid: int,
+        *,
+        stdin_enabled: bool,
+        stdout_enabled: bool,
+        stderr_enabled: bool,
+    ) -> None:
+        self._client = client
+        self._process_id = process_id
+        self.pid = pid
+        self.returncode: int | None = None
+        self.stdin = _BrokerWriteStream(self) if stdin_enabled else None
+        self.stdout = _BrokerReadStream(self, "stdout") if stdout_enabled else None
+        self.stderr = _BrokerReadStream(self, "stderr") if stderr_enabled else None
+
+    def _control(self, operation: str, values: Mapping[str, Any]) -> dict[str, Any]:
+        return self._client.request(operation, {"process_id": self._process_id, **dict(values)})
+
+    def poll(self) -> int | None:
+        response = self._control("process_poll", {})
+        return self._capture_returncode(response)
+
+    def wait(self, timeout: float | None = None) -> int:
+        response = self._control("process_wait", {"timeout": timeout})
+        code = self._capture_returncode(response)
+        if code is None:
+            raise subprocess.TimeoutExpired(["sandbox-process"], timeout)
+        return code
+
+    def communicate(
+        self, input: bytes | None = None, timeout: float | None = None
+    ) -> tuple[bytes | None, bytes | None]:
+        response = self._control(
+            "process_communicate",
+            {
+                "input": b64encode(input).decode("ascii") if input is not None else None,
+                "timeout": timeout,
+            },
+        )
+        code = self._capture_returncode(response)
+        if code is None:
+            raise subprocess.TimeoutExpired(["sandbox-process"], timeout)
+        stdout = response.get("stdout")
+        stderr = response.get("stderr")
+        return (
+            b64decode(stdout.encode("ascii")) if isinstance(stdout, str) else None,
+            b64decode(stderr.encode("ascii")) if isinstance(stderr, str) else None,
+        )
+
+    def terminate(self) -> None:
+        self._capture_returncode(self._control("process_terminate", {}))
+
+    def kill(self) -> None:
+        self._capture_returncode(self._control("process_kill", {}))
+
+    def _capture_returncode(self, response: Mapping[str, Any]) -> int | None:
+        value = response.get("returncode")
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise OSError("Broker process returned an invalid exit code")
+        self.returncode = value
+        return value
+
+
 def _canonical(value: Mapping[str, Any]) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
-__all__ = ["BrokerStatus", "WindowsBrokerClient"]
+__all__ = ["BrokerManagedProcess", "BrokerStatus", "WindowsBrokerClient"]

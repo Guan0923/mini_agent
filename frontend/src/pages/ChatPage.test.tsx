@@ -83,7 +83,10 @@ function Harness({
 import * as React from "react";
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.clearAllMocks();
+  mocks.fileReferenceAvailable.mockResolvedValue(true);
+  mocks.sessionFileContentUrl.mockImplementation((sessionId: string, source: string, path: string) => `/files?session=${sessionId}&source=${source}&path=${encodeURIComponent(path)}`);
   vi.unstubAllGlobals();
   if (initialClipboardDescriptor) {
     Object.defineProperty(window.navigator, "clipboard", initialClipboardDescriptor);

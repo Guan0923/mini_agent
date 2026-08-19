@@ -31,11 +31,17 @@ def auto_approve(request: InterruptRequest) -> InterruptDecision:
 
 
 class _PendingDecision:
-    def __init__(self, owner_id: str | None = None, approval_context: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        owner_id: str | None = None,
+        approval_context: dict[str, str] | None = None,
+        approval_store: ApprovalStore | None = None,
+    ) -> None:
         self.event = threading.Event()
         self.result: dict[str, Any] = {}
         self.owner_id = owner_id
         self.approval_context = approval_context
+        self.approval_store = approval_store
 
 
 class DecisionRegistry:
@@ -52,8 +58,9 @@ class DecisionRegistry:
         owner_id: str | None = None,
         *,
         approval_context: dict[str, str] | None = None,
+        approval_store: ApprovalStore | None = None,
     ) -> _PendingDecision:
-        pending = _PendingDecision(owner_id, approval_context)
+        pending = _PendingDecision(owner_id, approval_context, approval_store)
         with self._lock:
             self._pending[decision_id] = pending
         return pending
@@ -74,7 +81,7 @@ class DecisionRegistry:
         pending.result.update(decision)
         if pending.approval_context is not None and decision.get("choice") == ApprovalDecision.ALLOW_SESSION.value:
             context = pending.approval_context
-            self.approval_store.decide(
+            (pending.approval_store or self.approval_store).decide(
                 session_id=context["session_id"],
                 command=context["command"],
                 cwd=context["cwd"],
@@ -100,6 +107,7 @@ def make_interactive_interrupt(
     cancel_requested: Callable[[], bool] | None = None,
     auto_approve_tools: bool = False,
     owner_id: str | None = None,
+    approval_store: ApprovalStore | None = None,
 ):
     """Build an interrupt handler that pauses the run and asks the client."""
 
@@ -107,7 +115,8 @@ def make_interactive_interrupt(
         if request.kind == "tool" and auto_approve_tools:
             return InterruptDecision("continue")
         approval_context = _approval_context(request)
-        if approval_context is not None and registry.approval_store.allowed(**approval_context):
+        active_approval_store = approval_store or registry.approval_store
+        if approval_context is not None and active_approval_store.allowed(**approval_context):
             return InterruptDecision("continue")
         decision_id = f"dec_{uuid.uuid4().hex}"
         questions = [
@@ -143,7 +152,12 @@ def make_interactive_interrupt(
                 },
             }
         )
-        pending = registry.register(decision_id, owner_id, approval_context=approval_context)
+        pending = registry.register(
+            decision_id,
+            owner_id,
+            approval_context=approval_context,
+            approval_store=active_approval_store,
+        )
         deadline = monotonic() + timeout
         while True:
             if pending.event.wait(timeout=min(0.1, max(0.0, deadline - monotonic()))):

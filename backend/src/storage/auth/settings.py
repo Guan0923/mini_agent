@@ -592,7 +592,12 @@ class AuthSettingsMixin:
     def sandbox_config_for_user(self, user_id: str) -> dict[str, object]:
         config = self._config(user_id)
         raw = config.get("sandbox")
-        return normalize_sandbox_config(raw if isinstance(raw, Mapping) else DEFAULT_SANDBOX_CONFIG)
+        result = normalize_sandbox_config(raw if isinstance(raw, Mapping) else DEFAULT_SANDBOX_CONFIG)
+        if isinstance(raw, Mapping) and raw.get("policy_version") != 2:
+            config_store = self._config_store(user_id)
+            if config_store is not None:
+                config_store.update({"sandbox": result})
+        return result
 
     def update_sandbox_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, object]:
         current = self.sandbox_config_for_user(user_id)

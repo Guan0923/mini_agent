@@ -76,6 +76,7 @@ class WorkspaceCommand:
         environment: Mapping[str, str] | None = None,
         sandbox_launcher: SandboxLauncher | None = None,
         sandbox_config: Mapping[str, object] | None = None,
+        sandbox_user_id: str | None = None,
     ) -> None:
         self._workspace = workspace.resolve()
         self._is_windows = os.name == "nt" if is_windows is None else is_windows
@@ -84,6 +85,7 @@ class WorkspaceCommand:
         self._tree_terminator = tree_terminator
         self._sandbox_launcher = sandbox_launcher
         self._sandbox_config = dict(sandbox_config or {})
+        self._sandbox_user_id = sandbox_user_id
         self._environment = self._filtered_environment(os.environ if environment is None else environment)
 
     def run(self, command: str, timeout_seconds: int = 30) -> str:
@@ -165,7 +167,13 @@ class WorkspaceCommand:
                 )
                 job_options["max_output_chars"] = limits.output_chars
                 effective_timeout = min(timeout_seconds, limits.wall_seconds)
-                job_options["popen_factory"] = self._sandbox_launcher.popen_factory(policy)
+                sandbox_user_id = task_scope.owner.user_id or self._sandbox_user_id or "local"
+                job_options["popen_factory"] = self._sandbox_launcher.popen_factory(
+                    policy,
+                    user_id=sandbox_user_id,
+                    job_kind="command",
+                )
+                job_options["tree_terminator"] = self._sandbox_launcher.terminate_tree
                 job_options["sandbox_policy"] = policy
                 job_options["sandbox_launcher"] = self._sandbox_launcher
             job = SubprocessJob(

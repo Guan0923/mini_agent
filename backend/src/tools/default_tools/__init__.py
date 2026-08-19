@@ -31,6 +31,7 @@ def build_default_tools(
     rag_tool: Tool | None = None,
     sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: Mapping[str, object] | None = None,
+    sandbox_user_id: str | None = None,
     network_mode: str | None = None,
 ) -> tuple[Tool, ...]:
     """Build tools in the stable order exposed to planners."""
@@ -73,6 +74,7 @@ def build_default_tools(
                 terminal_type=terminal_type,
                 sandbox_launcher=sandbox_launcher,
                 sandbox_config=sandbox_config,
+                sandbox_user_id=sandbox_user_id,
             )
         ),
     ]

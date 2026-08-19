@@ -145,7 +145,7 @@ def test_v4_database_migration_adds_root_without_losing_message_tree(tmp_path: P
     assert (migrated_user.parent_session_id, migrated_user.parent_id) == migrated_root.key
     assert reopened.get_session_summary(session.session_id).message_count == 1  # type: ignore[union-attr]
     with sqlite3.connect(reopened.paths.session_db(session.session_id)) as connection:
-        assert connection.execute("SELECT schema_version FROM session_meta").fetchone() == (6,)
+        assert connection.execute("SELECT schema_version FROM session_meta").fetchone() == (7,)
 
 
 def test_v4_snapshot_import_adds_root_and_writes_v6(tmp_path: Path) -> None:
@@ -175,7 +175,7 @@ def test_v4_snapshot_import_adds_root_and_writes_v6(tmp_path: Path) -> None:
     assert restored_root is not None
     assert restored_user is not None
     assert (restored_user.parent_session_id, restored_user.parent_id) == restored_root.key
-    assert replica.export_runtime_node_snapshot(session.session_id)["schema_version"] == 6
+    assert replica.export_runtime_node_snapshot(session.session_id)["schema_version"] == 7
 
 
 def _snapshot_with_title(snapshot: dict[str, object], title: str, custom: object) -> dict[str, object]:
@@ -197,7 +197,7 @@ def test_v5_snapshot_title_inference_and_v6_round_trip(tmp_path: Path) -> None:
     user = writer.create(session_id=session.session_id, parent=root, data=message_payload("user", "  快照  消息 "))
     writer.delete(user.session_id, user.id)
     snapshot = source.export_runtime_node_snapshot(session.session_id)
-    assert snapshot["schema_version"] == 6
+    assert snapshot["schema_version"] == 7
     assert snapshot["session"]["title_is_custom"] is False
 
     # v5 snapshot without the field: placeholder title is backfilled from the
@@ -211,7 +211,7 @@ def test_v5_snapshot_title_inference_and_v6_round_trip(tmp_path: Path) -> None:
     assert restored is not None
     assert restored.title == "快照 消息"
     assert restored.title_is_custom is False
-    assert replica.export_runtime_node_snapshot(session.session_id)["schema_version"] == 6
+    assert replica.export_runtime_node_snapshot(session.session_id)["schema_version"] == 7
 
     # v5 snapshot with a non-placeholder title: conservatively custom.
     conservative = SQLiteSessionStore(ClientPaths(tmp_path / "conservative"), "device_b")
@@ -428,7 +428,9 @@ def test_transcript_projects_timeline_metadata_for_user_and_steering_messages() 
         parent=root,
         id="user-1",
         timestamp="2026-01-01T00:00:01+00:00",
-        data=message_payload("user", [{"type": "text", "text": " first "}, {"type": "reasoning", "text": "hidden"}], source="user"),
+        data=message_payload(
+            "user", [{"type": "text", "text": " first "}, {"type": "reasoning", "text": "hidden"}], source="user"
+        ),
         status="success",
     )
     steering = RuntimeState.create(
@@ -779,7 +781,7 @@ def test_sqlite_node_atomic_finalization_and_snapshot(tmp_path: Path) -> None:
     writer.update(node.session_id, node.id, data=message_payload("user", "hello"))
     writer.delete(node.session_id, node.id)
     snapshot = store.export_runtime_node_snapshot(session.session_id)
-    assert snapshot["schema_version"] == 6
+    assert snapshot["schema_version"] == 7
     assert len(snapshot["nodes"]) == 2
     assert sum(node["data"].get("type") == "message" for node in snapshot["nodes"]) == 1
     assert "runtime" not in snapshot
@@ -789,7 +791,7 @@ def test_sqlite_node_atomic_finalization_and_snapshot(tmp_path: Path) -> None:
 
 def test_old_runtime_snapshot_is_rejected(tmp_path: Path) -> None:
     store = SQLiteSessionStore(ClientPaths(tmp_path / "mini-agent"), "device")
-    with pytest.raises(ValueError, match="schema_version=4, 5, or 6"):
+    with pytest.raises(ValueError, match="schema_version=4, 5, 6, or 7"):
         store.apply_runtime_node_snapshot({"schema_version": 3}, local_device_id="device")
 
 

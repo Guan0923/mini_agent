@@ -26,6 +26,7 @@ def _build_tools(
     rag_tool: Tool | None = None,
     sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: Mapping[str, object] | None = None,
+    sandbox_user_id: str | None = None,
     network_mode: str | None = None,
 ) -> tuple[Tool, ...]:
     """Create the standard tool set for one workspace."""
@@ -40,6 +41,7 @@ def _build_tools(
         rag_tool=rag_tool,
         sandbox_launcher=sandbox_launcher,
         sandbox_config=sandbox_config,
+        sandbox_user_id=sandbox_user_id,
         network_mode=network_mode,
     )
 
@@ -56,6 +58,7 @@ def build_tool_registry(
     rag_tool: Tool | None = None,
     sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: Mapping[str, object] | None = None,
+    sandbox_user_id: str | None = None,
     network_mode: str | None = None,
 ) -> ToolRegistry:
     """Build the standard workspace tool registry."""
@@ -72,6 +75,7 @@ def build_tool_registry(
                 rag_tool=rag_tool,
                 sandbox_launcher=sandbox_launcher,
                 sandbox_config=sandbox_config,
+                sandbox_user_id=sandbox_user_id,
                 network_mode=network_mode,
             ),
             *extra_tools,

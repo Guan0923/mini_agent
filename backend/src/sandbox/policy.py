@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import shutil
@@ -16,7 +17,7 @@ from pathlib import Path
 from .errors import SandboxPolicyError
 
 
-class PermissionMode(StrEnum):
+class FileAccessMode(StrEnum):
     READ_ONLY = "read_only"
     WORKSPACE_WRITE = "workspace_write"
     FULL_ACCESS = "full_access"
@@ -39,19 +40,23 @@ LEGACY_PERMISSION_MODES = frozenset({"approval_for_me", "full_access"})
 SUPPORTED_TERMINALS = frozenset(item.value for item in TerminalKind)
 
 
-def normalize_permission_mode(value: object, *, default: PermissionMode = PermissionMode.READ_ONLY) -> PermissionMode:
+PermissionMode = FileAccessMode
+"""Compatibility alias for the pre-stage-two public name."""
+
+
+def normalize_permission_mode(value: object, *, default: FileAccessMode = FileAccessMode.READ_ONLY) -> FileAccessMode:
     """Map pre-sandbox permission values to the new three-level contract."""
 
     if value in {"approval_for_me", "read_only", None, ""}:
-        return default if value in {None, ""} else PermissionMode.READ_ONLY
+        return default if value in {None, ""} else FileAccessMode.READ_ONLY
     if value == "workspace_write":
-        return PermissionMode.WORKSPACE_WRITE
+        return FileAccessMode.WORKSPACE_WRITE
     if value == "full_access":
-        return PermissionMode.FULL_ACCESS
+        return FileAccessMode.FULL_ACCESS
     raise SandboxPolicyError("permission_mode is invalid")
 
 
-def migrate_legacy_permission_mode(value: object) -> PermissionMode:
+def migrate_legacy_permission_mode(value: object) -> FileAccessMode:
     """Migrate persisted pre-sandbox values before interpreting new input.
 
     The old ``full_access`` switch did not carry the mandatory joint file and
@@ -60,7 +65,7 @@ def migrate_legacy_permission_mode(value: object) -> PermissionMode:
     """
 
     if value in {"approval_for_me", "full_access", None, ""}:
-        return PermissionMode.READ_ONLY
+        return FileAccessMode.READ_ONLY
     return normalize_permission_mode(value)
 
 
@@ -85,7 +90,7 @@ class ResolvedNetworkRule:
 
 
 @dataclass(frozen=True, slots=True)
-class SandboxLimits:
+class ResourceLimits:
     """Per-job limits. Values are intentionally bounded before admission."""
 
     wall_seconds: int = 300
@@ -113,7 +118,7 @@ class SandboxLimits:
             raise SandboxPolicyError("disk_mib must be 0 or between 1 and 20480")
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, object] | None) -> SandboxLimits:
+    def from_mapping(cls, raw: Mapping[str, object] | None) -> ResourceLimits:
         values = dict(raw or {})
         aliases = {"wall_clock_seconds": "wall_seconds", "memory_mb": "memory_mib", "max_processes": "processes"}
         for source, target in aliases.items():
@@ -127,6 +132,10 @@ class SandboxLimits:
         return {name: int(getattr(self, name)) for name in self.__dataclass_fields__}
 
 
+SandboxLimits = ResourceLimits
+"""Compatibility alias for the pre-stage-two public name."""
+
+
 _DEFAULT_ENVIRONMENT = frozenset(
     {
         "PATH",
@@ -137,13 +146,10 @@ _DEFAULT_ENVIRONMENT = frozenset(
         "COMSPEC",
         "PROGRAMFILES",
         "PROGRAMFILES(X86)",
-        "PROGRAMDATA",
         "LOCALAPPDATA",
         "APPDATA",
         "HOMEDRIVE",
         "HOMEPATH",
-        "USERNAME",
-        "USERDOMAIN",
         "NUMBER_OF_PROCESSORS",
         "PROCESSOR_ARCHITECTURE",
         "PROCESSOR_IDENTIFIER",
@@ -162,17 +168,17 @@ class SandboxPolicy:
     workspace: Path
     session_id: str
     job_id: str
-    file_mode: PermissionMode = PermissionMode.READ_ONLY
+    file_mode: FileAccessMode = FileAccessMode.READ_ONLY
     network_mode: NetworkMode = NetworkMode.NO_NETWORK
     network_allowlist: tuple[NetworkRule, ...] = ()
-    limits: SandboxLimits = field(default_factory=SandboxLimits)
+    limits: ResourceLimits = field(default_factory=ResourceLimits)
     terminal: TerminalKind = TerminalKind.CMD
     enforced: bool = True
     full_access_acknowledged: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "workspace", Path(self.workspace))
-        if not isinstance(self.file_mode, PermissionMode):
+        if not isinstance(self.file_mode, FileAccessMode):
             object.__setattr__(self, "file_mode", normalize_permission_mode(self.file_mode))
         if not isinstance(self.network_mode, NetworkMode):
             try:
@@ -197,13 +203,15 @@ class SandboxPolicy:
             raise SandboxPolicyError("session_id and job_id are required")
         if self.terminal.value not in SUPPORTED_TERMINALS:
             raise SandboxPolicyError("unsupported terminal")
-        if self.file_mode is PermissionMode.FULL_ACCESS:
+        if self.file_mode is FileAccessMode.FULL_ACCESS:
             if self.network_mode is not NetworkMode.FULL_NETWORK or not self.full_access_acknowledged:
                 raise SandboxPolicyError("full_access requires full_network acknowledgement")
             if self.enforced:
                 raise SandboxPolicyError("full_access must be explicitly marked non-sandbox")
         if self.network_mode is NetworkMode.RESTRICTED_NETWORK and not self.network_allowlist:
             raise SandboxPolicyError("restricted_network requires an allowlist")
+        if len(self.network_allowlist) > 64:
+            raise SandboxPolicyError("network allowlist may contain at most 64 rules")
         self.limits.validate()
         workspace = _safe_directory(self.workspace)
         if workspace != self.workspace.resolve():
@@ -278,6 +286,28 @@ class SandboxPolicy:
         return result
 
 
+@dataclass(frozen=True, slots=True)
+class SandboxJobContext:
+    """Immutable ownership and policy snapshot captured before Job launch."""
+
+    user_id: str
+    policy: SandboxPolicy
+    job_kind: str = "command"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.user_id, str) or not self.user_id:
+            raise SandboxPolicyError("sandbox user_id is required")
+        if self.job_kind not in {"command", "mcp"}:
+            raise SandboxPolicyError("sandbox job_kind must be command or mcp")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "user_id": self.user_id,
+            "job_kind": self.job_kind,
+            "policy": self.policy.to_dict(),
+        }
+
+
 def ensure_disk_reserve(path: Path, *, required_bytes: int = 0) -> None:
     """Keep the machine-wide free-space reserve before admitting a Job."""
 
@@ -304,6 +334,7 @@ def _safe_directory(path: Path) -> Path:
                 break
             current = current.parent
         resolved = path.resolve(strict=True)
+        _reject_reparse_descendants(resolved)
     except OSError as exc:
         raise SandboxPolicyError("workspace cannot be inspected") from exc
     return resolved
@@ -318,7 +349,11 @@ def _is_reparse_point(path: Path) -> bool:
         import ctypes
 
         attributes = ctypes.windll.kernel32.GetFileAttributesW(str(path))
-        return attributes != 0xFFFFFFFF and bool(attributes & 0x400)
+        # ctypes may expose INVALID_FILE_ATTRIBUTES as signed -1 rather than
+        # the unsigned Win32 value 0xFFFFFFFF.
+        if attributes in {-1, 0xFFFFFFFF}:
+            return False
+        return bool(attributes & 0x400)
     except (AttributeError, OSError):
         return False
 
@@ -334,6 +369,21 @@ def _has_reparse_ancestor(path: Path) -> bool:
         if parent == current:
             return False
         current = parent
+
+
+def _reject_reparse_descendants(root: Path) -> None:
+    """Fail closed if an existing workspace entry redirects path traversal."""
+
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                child = Path(entry.path)
+                if _is_reparse_point(child):
+                    raise SandboxPolicyError("workspace cannot contain a reparse point")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(child)
 
 
 def remove_temp_dir(path: Path) -> bool:
@@ -369,7 +419,15 @@ def resolve_network_rules(
             sockaddr = answer[4] if len(answer) > 4 else None
             address = sockaddr[0] if isinstance(sockaddr, tuple) and sockaddr else None
             if isinstance(address, str) and address:
-                result.add((address, rule.port))
+                try:
+                    parsed = ipaddress.ip_address(address.split("%", 1)[0])
+                except ValueError as exc:
+                    raise SandboxPolicyError("network hostname resolved to an invalid address") from exc
+                if not parsed.is_global:
+                    raise SandboxPolicyError("restricted network cannot target localhost or non-public addresses")
+                result.add((str(parsed), rule.port))
+                if len(result) > 256:
+                    raise SandboxPolicyError("network allowlist resolved to too many addresses")
     if not result:
         raise SandboxPolicyError("network allowlist resolved to no addresses")
     return tuple(ResolvedNetworkRule(address, port) for address, port in sorted(result))
@@ -377,11 +435,14 @@ def resolve_network_rules(
 
 __all__ = [
     "LEGACY_PERMISSION_MODES",
+    "FileAccessMode",
     "NetworkMode",
     "NetworkRule",
     "ResolvedNetworkRule",
     "PermissionMode",
+    "ResourceLimits",
     "SandboxLimits",
+    "SandboxJobContext",
     "SandboxPolicy",
     "TerminalKind",
     "normalize_permission_mode",

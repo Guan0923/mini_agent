@@ -198,6 +198,7 @@ def _build_subagent_runner(
                 rag_tool=rag_tool,
                 sandbox_launcher=sandbox_launcher,
                 sandbox_config=sandbox_config,
+                sandbox_user_id=job_user_id,
             ),
             hooks,
             checkpoints,
@@ -224,6 +225,7 @@ def _build_subagent_runner(
         session_id=sandbox_session_id,
         sandbox_launcher=sandbox_launcher,
         sandbox_config=sandbox_config,
+        sandbox_user_id=job_user_id,
     )
     try:
         tools = build_tool_registry(
@@ -234,6 +236,7 @@ def _build_subagent_runner(
             rag_tool=rag_tool,
             sandbox_launcher=sandbox_launcher,
             sandbox_config=sandbox_config,
+            sandbox_user_id=job_user_id,
             extra_tools=(
                 *delegation_tools(subagent_settings.max_tasks_per_batch),
                 *external,
@@ -337,6 +340,7 @@ def _external_resources(
     session_id: str | None = None,
     sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: dict[str, object] | None = None,
+    sandbox_user_id: str | None = None,
 ) -> ExternalMcpResources:
     plan = prepare_mcp_plan(paths)
     kwargs = {}
@@ -351,6 +355,7 @@ def _external_resources(
             session_id=session_id or "mcp",
             config=sandbox_config,
         )
+        kwargs["sandbox_user_id"] = sandbox_user_id
     return start_external_tools(plan.effective_servers(), McpSettings.from_config(config), **kwargs)
 
 

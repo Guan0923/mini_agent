@@ -26,6 +26,7 @@ from backend.runtime import RunnerSettings, build_application
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.job_events import RuntimeJobEventBridge
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
+from backend.sandbox import ApprovalStore
 from backend.storage.auth.crypto import SecretDecryptionError
 
 from ..auth.dependencies import require_user
@@ -458,16 +459,19 @@ def _stream(
             q.put(item)
 
     owner_id = identity.id if identity is not None else None
+    approval_store = ApprovalStore(_store(state, identity.id)) if identity is not None and session_id else None
     interactive_interrupt = make_interactive_interrupt(
         sink,
         cancel_requested=cancellation_requested,
         owner_id=owner_id,
+        approval_store=approval_store,
     )
     full_access_interrupt = make_interactive_interrupt(
         sink,
         cancel_requested=cancellation_requested,
         auto_approve_tools=True,
         owner_id=owner_id,
+        approval_store=approval_store,
     )
 
     effective_reasoning = request_model.reasoning_effort if request_model is not None else reasoning_effort

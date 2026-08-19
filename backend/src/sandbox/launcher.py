@@ -14,6 +14,7 @@ from .errors import SandboxError, SandboxInitializationError, SandboxPolicyError
 from .policy import (
     NetworkMode,
     PermissionMode,
+    SandboxJobContext,
     SandboxPolicy,
     ensure_disk_reserve,
     remove_temp_dir,
@@ -45,7 +46,8 @@ class SandboxLauncher:
         self.admission = admission
         self._temp_dirs: dict[int, Path] = {}
         self._admitted: dict[int, tuple[str, ResourceRequest]] = {}
-        self._job_ids: dict[int, str] = {}
+        self._job_contexts: dict[int, SandboxJobContext] = {}
+        self._local_job_objects: dict[int, Any] = {}
 
     def launch(
         self,
@@ -57,10 +59,13 @@ class SandboxLauncher:
         stdin: int | None = subprocess.DEVNULL,
         stdout: int | None = subprocess.PIPE,
         stderr: int | None = subprocess.PIPE,
+        user_id: str = "local",
+        job_kind: str = "command",
     ) -> subprocess.Popen:
         if not argv or any(not isinstance(value, str) or not value for value in argv):
             raise SandboxPolicyError("argv must contain non-empty strings")
         policy.validate(is_windows=self.is_windows or self.allow_local_backend)
+        job_context = SandboxJobContext(user_id=user_id, policy=policy, job_kind=job_kind)
         ensure_disk_reserve(policy.workspace, required_bytes=policy.limits.disk_mib * 1024 * 1024)
         if self.is_windows and self.broker is None and not self.allow_local_backend:
             raise SandboxInitializationError("Windows Sandbox Broker is not initialized")
@@ -89,13 +94,33 @@ class SandboxLauncher:
         admitted = False
         if self.admission is not None:
             try:
-                self.admission.acquire(policy.session_id, request)
+                self.admission.acquire(job_context.user_id, request)
             except Exception:
                 remove_temp_dir(temp_dir)
                 raise
             admitted = True
         try:
-            if self.is_windows and (not self.allow_local_backend or self.broker is not None):
+            if self.is_windows and policy.file_mode is PermissionMode.FULL_ACCESS:
+                process = subprocess.Popen(
+                    list(argv),
+                    cwd=launch_cwd,
+                    env=env,
+                    stdin=stdin,
+                    stdout=stdout,
+                    stderr=stderr,
+                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                )
+                try:
+                    from .native_windows import WindowsJobObject
+
+                    local_job = WindowsJobObject(f"mini-agent-full-{policy.job_id}", policy.limits)
+                    local_job.assign(getattr(process, "_handle"))
+                    self._local_job_objects[process.pid] = local_job
+                except Exception:
+                    process.kill()
+                    process.wait(timeout=5.0)
+                    raise
+            elif self.is_windows and (not self.allow_local_backend or self.broker is not None):
                 if self.broker is None:
                     raise SandboxInitializationError("Windows Broker is not initialized")
                 process = self.broker.launch(
@@ -112,6 +137,8 @@ class SandboxLauncher:
                         "stdout": "pipe" if stdout == subprocess.PIPE else "null",
                         "stderr": "pipe" if stderr == subprocess.PIPE else "null",
                     },
+                    user_id=job_context.user_id,
+                    job_kind=job_context.job_kind,
                 )
             else:
                 process = subprocess.Popen(
@@ -127,7 +154,7 @@ class SandboxLauncher:
         except Exception as exc:
             remove_temp_dir(temp_dir)
             if admitted:
-                self.admission.release(policy.session_id, request)
+                self.admission.release(job_context.user_id, request)
             if isinstance(exc, SandboxInitializationError):
                 raise
             if isinstance(exc, SandboxError):
@@ -137,12 +164,13 @@ class SandboxLauncher:
         if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
             remove_temp_dir(temp_dir)
             if admitted:
-                self.admission.release(policy.session_id, request)
+                self.admission.release(job_context.user_id, request)
             raise SandboxInitializationError("sandbox process did not return a valid process id")
         self._temp_dirs[pid] = temp_dir
-        self._job_ids[pid] = policy.job_id
+        if policy.file_mode is not PermissionMode.FULL_ACCESS:
+            self._job_contexts[pid] = job_context
         if admitted:
-            self._admitted[pid] = (policy.session_id, request)
+            self._admitted[pid] = (job_context.user_id, request)
         return process
 
     def cleanup(self, process_or_pid: Any) -> bool:
@@ -150,19 +178,31 @@ class SandboxLauncher:
         if not isinstance(pid, int):
             return True
         path = self._temp_dirs.pop(pid, None)
-        cleaned = True if path is None else remove_temp_dir(path)
-        job_id = self._job_ids.pop(pid, None)
-        if job_id is not None and self.broker is not None:
+        local_job = self._local_job_objects.pop(pid, None)
+        if local_job is not None:
+            local_job.close()
+        job_context = self._job_contexts.pop(pid, None)
+        cleaned = True
+        if job_context is not None and self.broker is not None:
             try:
-                self.broker.release(job_id)
+                self.broker.release(job_context.policy.job_id, user_id=job_context.user_id)
             except Exception:
                 cleaned = False
+            else:
+                # The Broker restores the temporary-directory ACL before it
+                # removes the directory. Keep it intact until that release has
+                # completed, then make a best-effort client-side cleanup
+                # idempotent for development/test adapters.
+                if path is not None:
+                    cleaned = remove_temp_dir(path)
+        elif path is not None:
+            cleaned = remove_temp_dir(path)
         lease = self._admitted.pop(pid, None)
         if lease is not None and self.admission is not None:
             self.admission.release(*lease)
         return cleaned
 
-    def popen_factory(self, policy: SandboxPolicy):
+    def popen_factory(self, policy: SandboxPolicy, *, user_id: str = "local", job_kind: str = "command"):
         """Adapt this launcher to the existing ``SubprocessJob`` port."""
 
         def factory(argv, **kwargs):
@@ -174,9 +214,21 @@ class SandboxLauncher:
                 stdin=kwargs.get("stdin", subprocess.DEVNULL),
                 stdout=kwargs.get("stdout"),
                 stderr=kwargs.get("stderr"),
+                user_id=user_id,
+                job_kind=job_kind,
             )
 
         return factory
+
+    def terminate_tree(self, process: Any) -> None:
+        """Terminate through the owning Job Object or Broker when available."""
+
+        pid = getattr(process, "pid", None)
+        local_job = self._local_job_objects.get(pid) if isinstance(pid, int) else None
+        if local_job is not None:
+            local_job.terminate()
+            return
+        process.terminate()
 
 
 def _inside_workspace(candidate: Path, workspace: Path) -> bool:

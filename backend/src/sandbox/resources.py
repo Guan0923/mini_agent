@@ -82,7 +82,14 @@ class ResourceMonitor:
                 if callable(self.on_exceeded):
                     self.on_exceeded(exc)
                 return
-            except (OSError, ProcessLookupError):
+            except ProcessLookupError:
+                return
+            except OSError:
+                # Losing the accounting channel while the process may still
+                # be alive is a safety failure. The caller terminates the
+                # process tree instead of running without enforcement.
+                if callable(self.on_exceeded):
+                    self.on_exceeded(SandboxResourceExceeded("sandbox resource accounting failed"))
                 return
 
 

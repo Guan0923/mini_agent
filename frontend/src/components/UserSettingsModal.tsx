@@ -201,6 +201,7 @@ export default function UserSettingsModal({
   const [cloudLoading, setCloudLoading] = useState(false);
   const [ragCapabilities, setRagCapabilities] = useState<RagCapabilities | null>(null);
   const [brokerStatus, setBrokerStatus] = useState<SandboxBrokerStatus | null>(null);
+  const [brokerAction, setBrokerAction] = useState<"install" | "repair" | null>(null);
   const [sandboxHostDraft, setSandboxHostDraft] = useState("");
   const [sandboxPortDraft, setSandboxPortDraft] = useState<number | null>(443);
   const settingsOpenRef = useRef(open);
@@ -518,6 +519,22 @@ export default function UserSettingsModal({
       setError(cause instanceof Error ? cause.message : "保存失败，请稍后重试。");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function runBrokerAction(action: "install" | "repair") {
+    setBrokerAction(action);
+    try {
+      const status = await (action === "install" ? installSandboxBroker() : repairSandboxBroker());
+      setBrokerStatus(status);
+    } catch (cause) {
+      setBrokerStatus({
+        installed: false,
+        healthy: false,
+        detail: cause instanceof Error ? cause.message : "Broker 操作失败。",
+      });
+    } finally {
+      setBrokerAction(null);
     }
   }
 
@@ -873,23 +890,32 @@ export default function UserSettingsModal({
             </Form.Item>
             <Form.Item label="文件权限">
               <Select
+                aria-label="文件权限"
                 value={settings.sandbox_config.file_mode}
                 options={[
                   { value: "read_only", label: "只读工作区" },
                   { value: "workspace_write", label: "读写工作区" },
                   { value: "full_access", label: "Full access（高风险）" },
                 ]}
-                onChange={(file_mode) => updateSettings({ sandbox_config: { ...settings.sandbox_config, file_mode } })}
+                onChange={(file_mode) => updateSettings({
+                  sandbox_config: {
+                    ...settings.sandbox_config,
+                    file_mode,
+                    ...(file_mode === "full_access" ? { network_mode: "full_network" as const } : {}),
+                  },
+                })}
               />
             </Form.Item>
             <Form.Item label="网络权限">
               <Select
+                aria-label="网络权限"
                 value={settings.sandbox_config.network_mode}
                 options={[
                   { value: "no_network", label: "禁止网络" },
                   { value: "restricted_network", label: "受限网络" },
                   { value: "full_network", label: "完整网络" },
                 ]}
+                disabled={settings.sandbox_config.file_mode === "full_access"}
                 onChange={(network_mode) => updateSettings({ sandbox_config: { ...settings.sandbox_config, network_mode } })}
               />
             </Form.Item>
@@ -953,16 +979,20 @@ export default function UserSettingsModal({
               />
             </Form.Item>
             <Space wrap>
-              <Form.Item label="墙钟秒数"><InputNumber min={1} max={300} value={settings.sandbox_config.limits.wall_seconds} onChange={(wall_seconds) => wall_seconds != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, wall_seconds } } })} /></Form.Item>
-              <Form.Item label="内存 MiB"><InputNumber min={128} max={4096} value={settings.sandbox_config.limits.memory_mib} onChange={(memory_mib) => memory_mib != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, memory_mib } } })} /></Form.Item>
-              <Form.Item label="进程数"><InputNumber min={1} max={256} value={settings.sandbox_config.limits.processes} onChange={(processes) => processes != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, processes } } })} /></Form.Item>
+              <Form.Item label="墙钟秒数"><InputNumber aria-label="墙钟秒数" min={1} max={300} value={settings.sandbox_config.limits.wall_seconds} onChange={(wall_seconds) => wall_seconds != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, wall_seconds } } })} /></Form.Item>
+              <Form.Item label="CPU 秒数"><InputNumber aria-label="CPU 秒数" min={1} max={300} value={settings.sandbox_config.limits.cpu_seconds} onChange={(cpu_seconds) => cpu_seconds != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, cpu_seconds } } })} /></Form.Item>
+              <Form.Item label="内存 MiB"><InputNumber aria-label="内存 MiB" min={128} max={4096} value={settings.sandbox_config.limits.memory_mib} onChange={(memory_mib) => memory_mib != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, memory_mib } } })} /></Form.Item>
+              <Form.Item label="进程数"><InputNumber aria-label="进程数" min={1} max={256} value={settings.sandbox_config.limits.processes} onChange={(processes) => processes != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, processes } } })} /></Form.Item>
+              <Form.Item label="句柄数"><InputNumber aria-label="句柄数" min={64} max={16384} value={settings.sandbox_config.limits.handles} onChange={(handles) => handles != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, handles } } })} /></Form.Item>
+              <Form.Item label="输出字符数"><InputNumber aria-label="输出字符数" min={1000} max={20000} value={settings.sandbox_config.limits.output_chars} onChange={(output_chars) => output_chars != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, output_chars } } })} /></Form.Item>
+              <Form.Item label="磁盘写入 MiB"><InputNumber aria-label="磁盘写入 MiB" min={0} max={20480} value={settings.sandbox_config.limits.disk_mib} onChange={(disk_mib) => disk_mib != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, disk_mib } } })} /></Form.Item>
             </Space>
             <Alert
               type={brokerStatus?.healthy ? "success" : "warning"}
               showIcon
               title={brokerStatus?.healthy ? "Broker 已就绪" : "Broker 未就绪"}
               description={brokerStatus?.detail ?? "严格沙箱初始化失败时不会降级到普通进程。"}
-              action={<Space><Button size="small" onClick={() => void installSandboxBroker().then(setBrokerStatus)}>安装</Button><Button size="small" onClick={() => void repairSandboxBroker().then(setBrokerStatus)}>修复</Button></Space>}
+              action={<Space><Button autoInsertSpace={false} size="small" loading={brokerAction === "install"} onClick={() => void runBrokerAction("install")}>安装</Button><Button autoInsertSpace={false} size="small" loading={brokerAction === "repair"} onClick={() => void runBrokerAction("repair")}>修复</Button></Space>}
             />
           </Form>
         )}

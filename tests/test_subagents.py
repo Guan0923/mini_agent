@@ -84,6 +84,24 @@ def test_subagent_coordinator_runs_tasks_and_pages_results() -> None:
     assert page["next_cursor"] == 1
 
 
+def test_subagent_inherits_parent_permission_snapshot() -> None:
+    observed: list[str] = []
+
+    class PermissionChild(_ChildRunner):
+        def run(self, runtime: AgentRuntime) -> object:
+            observed.append(runtime.state.permission_mode)
+            return super().run(runtime)
+
+    runtime = _parent_runtime()
+    runtime.state.permission_mode = "workspace_write"
+    SubagentCoordinator(PermissionChild).invoke(
+        runtime,
+        "delegate_tasks",
+        {"tasks": [{"id": "one", "task": "inherit"}]},
+    )
+    assert observed == ["workspace_write"]
+
+
 def test_subagent_coordinator_rejects_duplicate_task_ids() -> None:
     coordinator = SubagentCoordinator(_ChildRunner)
     with pytest.raises(ToolError, match="unique"):

@@ -119,6 +119,7 @@ class SubagentCoordinator:
         self._event(runtime, "subagent_queued", "Subagent batch queued", batch_id=batch_id, count=len(tasks))
 
         parent_interrupt = runtime.services.interrupt
+        parent_permission_mode = runtime.state.permission_mode
         bridge = ParentRuntimeBridge(
             lambda kind, message, **data: self._event(runtime, kind, message, **data),
             parent_interrupt or (lambda _request: (_ for _ in ()).throw(RuntimeError("No parent interrupt handler."))),
@@ -155,6 +156,7 @@ class SubagentCoordinator:
                         controls[task.id],
                         batch_control,
                         job_id,
+                        parent_permission_mode,
                     )
                 except BaseException as exc:
                     task_exceptions[task.id] = exc
@@ -256,6 +258,7 @@ class SubagentCoordinator:
         control: _TaskControl,
         batch_control: _TaskControl,
         parent_job_id: str,
+        parent_permission_mode: str,
     ) -> dict[str, Any]:
         control.start()
         bridge.event("subagent_started", "Subagent started", batch_id=batch_id, task_id=task.id)
@@ -295,6 +298,7 @@ class SubagentCoordinator:
             interrupt=interrupt,
             parent_job_id=parent_job_id,
         )
+        child_runtime.state.permission_mode = parent_permission_mode
         child_runtime.services.cancel_requested = control.cancel.is_set
         try:
             child_run = runner.run(child_runtime)

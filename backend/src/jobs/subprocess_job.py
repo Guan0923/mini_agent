@@ -212,6 +212,12 @@ class SubprocessJob(Job):
         except JobStateError:
             # A concurrent cancel/close already sealed the terminal state.
             pass
+        except Exception as exc:
+            try:
+                self._mark_sandbox_failure(getattr(exc, "code", "init_failed"))
+                self._mark_failed(exc)
+            except JobStateError:
+                pass
         finally:
             if self.resource_monitor is not None:
                 self.resource_monitor.stop()

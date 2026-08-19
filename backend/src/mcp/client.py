@@ -52,6 +52,7 @@ class ExternalMcpManager:
         job_scope: JobScope | None = None,
         sandbox_launcher=None,
         sandbox_policy_factory=None,
+        sandbox_user_id: str | None = None,
     ) -> None:
         self._configs = configs
         self._settings = settings or McpSettings()
@@ -67,6 +68,7 @@ class ExternalMcpManager:
         self._job_scope = job_scope
         self._sandbox_launcher = sandbox_launcher
         self._sandbox_policy_factory = sandbox_policy_factory
+        self._sandbox_user_id = sandbox_user_id
         self._closed = False
         self._thread.start()
         try:
@@ -115,6 +117,7 @@ class ExternalMcpManager:
                     _parameters(server),
                     sandbox_launcher=self._sandbox_launcher,
                     sandbox_policy=policy,
+                    sandbox_user_id=self._sandbox_user_id,
                 )
             )
             session = await stack.enter_async_context(ClientSession(read, write))
@@ -311,6 +314,7 @@ def load_external_tools(
     job_scope: JobScope | None = None,
     sandbox_launcher=None,
     sandbox_policy_factory=None,
+    sandbox_user_id: str | None = None,
 ) -> ExternalMcpResources:
     del project_file
     return start_external_tools(
@@ -320,6 +324,7 @@ def load_external_tools(
         job_scope=job_scope,
         sandbox_launcher=sandbox_launcher,
         sandbox_policy_factory=sandbox_policy_factory,
+        sandbox_user_id=sandbox_user_id,
     )
 
 
@@ -331,6 +336,7 @@ def start_external_tools(
     job_scope: JobScope | None = None,
     sandbox_launcher=None,
     sandbox_policy_factory=None,
+    sandbox_user_id: str | None = None,
 ) -> ExternalMcpResources:
     if not configs:
         return ExternalMcpResources()
@@ -340,6 +346,7 @@ def start_external_tools(
             "job_scope": job_scope,
             "sandbox_launcher": sandbox_launcher,
             "sandbox_policy_factory": sandbox_policy_factory,
+            "sandbox_user_id": sandbox_user_id,
         }
         manager_kwargs = {name: value for name, value in manager_kwargs.items() if value is not None}
         manager = (

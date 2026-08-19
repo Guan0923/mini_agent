@@ -238,7 +238,7 @@ class SafeWebFetcher:
         if self._network_mode == "restricted_network":
             return self._resolve_all_addresses(host, port)
         if self._allow_private_network:
-            return self._resolve_all_addresses(host, port)
+            return self._resolve_all_addresses(host, port, allow_non_public=True)
         try:
             literal = ipaddress.ip_address(host)
         except ValueError:
@@ -274,7 +274,7 @@ class SafeWebFetcher:
             return resolved
         raise ToolError("Web fetch refuses loopback, private, link-local, or reserved network addresses.")
 
-    def _resolve_all_addresses(self, host: str, port: int) -> list[str]:
+    def _resolve_all_addresses(self, host: str, port: int, *, allow_non_public: bool = False) -> list[str]:
         try:
             addresses_info = self._resolver(host, port, type=socket.SOCK_STREAM)
         except (socket.gaierror, OSError) as exc:
@@ -286,6 +286,8 @@ class SafeWebFetcher:
                 parsed_address = ipaddress.ip_address(address)
             except (IndexError, ValueError) as exc:
                 raise ToolError(f"Web host resolved to an invalid address: {host}.") from exc
+            if not parsed_address.is_global and not allow_non_public:
+                raise ToolError("Restricted web access refuses loopback, private, link-local, or reserved addresses.")
             value = str(parsed_address)
             if value not in addresses:
                 addresses.append(value)

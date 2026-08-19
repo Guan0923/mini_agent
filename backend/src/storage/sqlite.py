@@ -6,6 +6,7 @@ connection, session, and runtime responsibilities live in focused mixins.
 
 from __future__ import annotations
 
+from .sqlite_approvals import SQLiteApprovalMixin
 from .sqlite_base import SQLiteBaseMixin
 from .sqlite_fork import SQLiteForkMixin
 from .sqlite_runtime import SQLiteRuntimeMixin
@@ -16,6 +17,7 @@ from .sqlite_sync import SQLiteSyncMixin
 
 class SQLiteSessionStore(
     SQLiteBaseMixin,
+    SQLiteApprovalMixin,
     SQLiteSessionMixin,
     SQLiteRuntimeMixin,
     SQLiteForkMixin,
