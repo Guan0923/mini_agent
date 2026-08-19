@@ -19,7 +19,7 @@ from .models import (
     RagSectionType,
 )
 from .ocr import OcrEngine, OcrImage, OcrLine, OcrResult, RapidOcrEngine
-from .service import KnowledgeBaseService, RagDependencyError
+from .service import KnowledgeBaseService, RagBusyError, RagDependencyError, RagNotFoundError
 from .tool import knowledge_base_search_tool
 
 __all__ = [
@@ -48,5 +48,7 @@ __all__ = [
     "RagSectionType",
     "KnowledgeBaseService",
     "RagDependencyError",
+    "RagBusyError",
+    "RagNotFoundError",
     "knowledge_base_search_tool",
 ]

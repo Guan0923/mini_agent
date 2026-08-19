@@ -134,6 +134,101 @@
   align-items: center;
 }
 
+.rag-content {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.rag-content-header,
+.rag-document-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.rag-content-header .ant-typography,
+.rag-document-actions .ant-typography {
+  margin: 0;
+}
+
+.rag-content-loading {
+  display: grid;
+  min-height: 280px;
+  place-items: center;
+}
+
+.rag-content-browser {
+  display: grid;
+  grid-template-columns: minmax(230px, 0.85fr) minmax(0, 1.35fr);
+  min-height: 360px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.rag-tree-pane {
+  min-width: 0;
+  overflow: auto;
+  padding: 12px 8px;
+  border-right: 1px solid #e5e7eb;
+  background: #fafafa;
+}
+
+.rag-tree {
+  background: transparent;
+}
+
+.rag-tree-section-title,
+.rag-tree-document-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rag-tree-document-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rag-tree .ant-tree-node-content-wrapper {
+  min-width: 0;
+}
+
+.rag-tree .ant-tree-title {
+  display: block;
+  min-width: 0;
+}
+
+.rag-document-details {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  overflow: auto;
+}
+
+.rag-document-details .ant-descriptions-item-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rag-upload-form {
+  display: grid;
+  gap: 12px;
+  padding-top: 8px;
+}
+
+.rag-upload-form .ant-select {
+  width: 100%;
+}
+
 @media (max-width: 640px) {
   .user-settings-modal {
     height: min(680px, calc(100vh - 16px));
@@ -187,5 +282,21 @@
 
   .provider-management .ant-space {
     flex-wrap: wrap;
+  }
+
+  .rag-content-header,
+  .rag-document-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rag-content-browser {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rag-tree-pane {
+    max-height: 240px;
+    border-right: 0;
+    border-bottom: 1px solid #e5e7eb;
   }
 }

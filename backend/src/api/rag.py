@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
-from backend.rag import EmbeddingProfile, KnowledgeBaseService, PdfExtractor
+from backend.rag import (
+    EmbeddingProfile,
+    KnowledgeBaseService,
+    PdfExtractor,
+    RagBusyError,
+    RagNotFoundError,
+)
 
 from .auth.dependencies import require_user
 from .auth.types import UserIdentity
-from .session_files.store import SessionFileError, SessionFileStore
+from .session_files.store import MAX_FILE_BYTES, SessionFileError, SessionFileStore
 from .sessions.routes import _require_active, _store
 from .user_data import user_paths
 
@@ -38,13 +46,46 @@ def _service(request: Request, identity: UserIdentity) -> KnowledgeBaseService:
     return KnowledgeBaseService(paths.root)
 
 
+def _profile(request: Request, identity: UserIdentity) -> EmbeddingProfile:
+    settings = request.app.state.web.settings.rag_config_for_user(identity.id)
+    return EmbeddingProfile.create(
+        base_url=str(settings["embedding_base_url"]),
+        model=str(settings["embedding_model"]),
+    )
+
+
+def _submit_index_job(
+    request: Request,
+    identity: UserIdentity,
+    service: KnowledgeBaseService,
+    document_id: str,
+    profile: EmbeddingProfile,
+    *,
+    session_id: str | None = None,
+) -> str | None:
+    state = request.app.state.web
+    registry = getattr(state, "job_registry", None)
+    if registry is None:
+        return None
+    paths = state.user_paths(identity.id)
+    parent_scope = getattr(state, "system_job_scope", registry.root_scope())
+    job_scope = parent_scope.child(JobScopeKind.USER, user_id=identity.id, session_id=session_id)
+    job = ThreadJob(
+        registry.new_job_id(),
+        service.index_document,
+        kwargs={
+            "document_id": document_id,
+            "profile": profile,
+            "extractor": PdfExtractor(paths.root),
+        },
+    )
+    registry.submit(job, scope=job_scope, lane=JobLane.BACKGROUND, admission=AdmissionPolicy())
+    return job.info().id
+
+
 @router.get("/capabilities")
 def capabilities(request: Request, identity: UserIdentity = Depends(require_user)) -> dict[str, object]:
-    settings = request.app.state.web.settings.rag_config_for_user(identity.id)
-    profile = EmbeddingProfile.create(
-        base_url=str(settings["embedding_base_url"]), model=str(settings["embedding_model"])
-    )
-    return _service(request, identity).capabilities(profile)
+    return _service(request, identity).capabilities(_profile(request, identity))
 
 
 @router.post("/documents/import")
@@ -64,31 +105,20 @@ def import_document(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if source_path.suffix.lower() != ".pdf":
         raise HTTPException(status_code=422, detail="知识库只支持 PDF 文件")
-    settings = state.settings.rag_config_for_user(identity.id)
-    profile = EmbeddingProfile.create(
-        base_url=str(settings["embedding_base_url"]), model=str(settings["embedding_model"])
-    )
+    profile = _profile(request, identity)
     service = _service(request, identity)
     section = _section_for_session(request, identity, body.session_id)
     document, ingestion, duplicate = service.import_document(
         source_path, user_id=identity.id, section_id=section.section_id, profile=profile, source=body.source
     )
-    job_id: str | None = None
-    job_registry = getattr(state, "job_registry", None)
-    if job_registry is not None:
-        parent_scope = getattr(state, "system_job_scope", job_registry.root_scope())
-        job_scope = parent_scope.child(JobScopeKind.USER, user_id=identity.id, session_id=body.session_id)
-        job = ThreadJob(
-            job_registry.new_job_id(),
-            service.index_document,
-            kwargs={
-                "document_id": document.document_id,
-                "profile": profile,
-                "extractor": PdfExtractor(paths.root),
-            },
-        )
-        job_registry.submit(job, scope=job_scope, lane=JobLane.BACKGROUND, admission=AdmissionPolicy())
-        job_id = job.info().id
+    job_id = _submit_index_job(
+        request,
+        identity,
+        service,
+        document.document_id,
+        profile,
+        session_id=body.session_id,
+    )
     return {
         "document": document.__dict__,
         "ingestion": ingestion.__dict__,
@@ -98,13 +128,143 @@ def import_document(
     }
 
 
+@router.post("/documents/upload", status_code=202)
+async def upload_document(
+    request: Request,
+    section_id: str = Form(min_length=1, max_length=128),
+    file: UploadFile = File(...),
+    identity: UserIdentity = Depends(require_user),
+) -> dict[str, object]:
+    """Upload one bounded PDF directly into an existing RAG section."""
+
+    service = _service(request, identity)
+    try:
+        section = service.get_section(section_id, user_id=identity.id)
+    except RagNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="知识库分区不存在。") from exc
+    filename = SessionFileStore.sanitize_name(file.filename or "document.pdf")
+    if Path(filename).suffix.lower() != ".pdf":
+        raise HTTPException(status_code=422, detail="知识库只支持 PDF 文件")
+    paths = request.app.state.web.user_paths(identity.id)
+    paths.rag_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix=".rag-upload-", dir=paths.rag_dir) as temporary:
+            source_path = Path(temporary) / filename
+            total = 0
+            with source_path.open("wb") as handle:
+                while chunk := await file.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > MAX_FILE_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"单文件超过 {MAX_FILE_BYTES // (1024 * 1024)} MiB 限制。",
+                        )
+                    handle.write(chunk)
+            if total == 0:
+                raise HTTPException(status_code=422, detail="PDF 文件不能为空。")
+            profile = _profile(request, identity)
+            document, ingestion, duplicate = service.import_document(
+                source_path,
+                user_id=identity.id,
+                section_id=section.section_id,
+                profile=profile,
+                source="knowledge_base",
+            )
+    finally:
+        await file.close()
+    job_id = _submit_index_job(
+        request,
+        identity,
+        service,
+        document.document_id,
+        profile,
+        session_id=section.session_id,
+    )
+    return {
+        "document": document.__dict__,
+        "ingestion": ingestion.__dict__,
+        "duplicate": duplicate,
+        "section": section.__dict__,
+        "job_id": job_id,
+    }
+
+
+@router.post("/documents/{document_id}/reindex", status_code=202)
+def reindex_document(
+    document_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict[str, object]:
+    service = _service(request, identity)
+    profile = _profile(request, identity)
+    try:
+        document, ingestion = service.queue_document(
+            document_id,
+            user_id=identity.id,
+            profile=profile,
+        )
+        section = service.get_section(document.section_id, user_id=identity.id)
+    except RagNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="知识库文件不存在。") from exc
+    except RagBusyError as exc:
+        raise HTTPException(status_code=409, detail="文件正在索引，不能重复提交。") from exc
+    job_id = _submit_index_job(
+        request,
+        identity,
+        service,
+        document.document_id,
+        profile,
+        session_id=section.session_id,
+    )
+    return {
+        "document": document.__dict__,
+        "ingestion": ingestion.__dict__,
+        "job_id": job_id,
+    }
+
+
+@router.delete("/documents/{document_id}")
+def delete_document(
+    document_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict[str, object]:
+    service = _service(request, identity)
+    try:
+        document, warning = service.delete_document(document_id, user_id=identity.id)
+    except RagNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="知识库文件不存在。") from exc
+    except RagBusyError as exc:
+        raise HTTPException(status_code=409, detail="文件正在索引，不能删除。") from exc
+    return {"deleted": document.document_id, "warning": warning}
+
+
+@router.get("/tree")
+def knowledge_base_tree(
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> list[dict[str, object]]:
+    """Return the authenticated user's knowledge-base sections and files."""
+
+    service = _service(request, identity)
+    profile = _profile(request, identity)
+    return [
+        {
+            "section": section.__dict__,
+            "documents": service.list_documents(
+                user_id=identity.id,
+                section_id=section.section_id,
+                profile=profile,
+            ),
+        }
+        for section in service.list_sections(user_id=identity.id)
+    ]
+
+
 @router.get("/sections/{section_id}/documents")
 def list_documents(
     section_id: str, request: Request, identity: UserIdentity = Depends(require_user)
 ) -> list[dict[str, object]]:
     service = _service(request, identity)
-    settings = request.app.state.web.settings.rag_config_for_user(identity.id)
-    profile = EmbeddingProfile.create(
-        base_url=str(settings["embedding_base_url"]), model=str(settings["embedding_model"])
-    )
+    profile = _profile(request, identity)
     return service.list_documents(user_id=identity.id, section_id=section_id, profile=profile)

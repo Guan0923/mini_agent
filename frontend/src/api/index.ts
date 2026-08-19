@@ -7,3 +7,4 @@ export * from "./files";
 export * from "./sync";
 export * from "./projects";
 export * from "./jobs";
+export * from "./rag";

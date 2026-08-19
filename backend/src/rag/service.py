@@ -36,6 +36,14 @@ class RagDependencyError(RuntimeError):
     """An external embedding or vector dependency is unavailable."""
 
 
+class RagNotFoundError(ValueError):
+    """A user-scoped RAG section or document does not exist."""
+
+
+class RagBusyError(RuntimeError):
+    """A document cannot be mutated while indexing is active."""
+
+
 class KnowledgeBaseService:
     """SQLite source of truth with optional Ollama and Qdrant derived indexes."""
 
@@ -150,6 +158,38 @@ class KnowledgeBaseService:
                 (profile.profile_id, profile.provider, profile.base_url, profile.model, profile.dimension, time.time()),
             )
         return profile
+
+    def list_sections(self, *, user_id: str) -> list[KnowledgeBaseSection]:
+        """List the user's project/session partitions without creating any."""
+
+        with self._connection() as db:
+            rows = db.execute(
+                """SELECT * FROM sections
+                   WHERE user_id=?
+                   ORDER BY section_type, display_name COLLATE NOCASE, created_at""",
+                (user_id,),
+            ).fetchall()
+        return [self._row_section(row) for row in rows]
+
+    def get_section(self, section_id: str, *, user_id: str) -> KnowledgeBaseSection:
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT * FROM sections WHERE section_id=? AND user_id=?",
+                (section_id, user_id),
+            ).fetchone()
+        if row is None:
+            raise RagNotFoundError("knowledge-base section not found")
+        return self._row_section(row)
+
+    def get_document(self, document_id: str, *, user_id: str) -> KnowledgeDocument:
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT * FROM documents WHERE document_id=? AND user_id=?",
+                (document_id, user_id),
+            ).fetchone()
+        if row is None:
+            raise RagNotFoundError("knowledge-base document not found")
+        return self._row_document(row)
 
     def import_document(
         self,
@@ -350,6 +390,121 @@ class KnowledgeBaseService:
             item["ingestion_error"] = ingestion_error
             documents.append(item)
         return documents
+
+    def queue_document(
+        self,
+        document_id: str,
+        *,
+        user_id: str,
+        profile: EmbeddingProfile,
+    ) -> tuple[KnowledgeDocument, DocumentIngestion]:
+        """Queue an existing managed document for the selected profile."""
+
+        profile = self.register_profile(profile)
+        now = time.time()
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT * FROM documents WHERE document_id=? AND user_id=?",
+                (document_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise RagNotFoundError("knowledge-base document not found")
+            active = db.execute(
+                "SELECT 1 FROM ingestions WHERE document_id=? AND status IN ('queued', 'indexing') LIMIT 1",
+                (document_id,),
+            ).fetchone()
+            if active is not None:
+                raise RagBusyError("document indexing is already active")
+            db.execute(
+                """INSERT INTO ingestions VALUES (?, ?, 'queued', ?, ?, NULL)
+                   ON CONFLICT(document_id, embedding_profile_id)
+                   DO UPDATE SET status='queued', updated_at=excluded.updated_at, error=NULL""",
+                (document_id, profile.profile_id, now, now),
+            )
+            db.execute(
+                "UPDATE documents SET status='queued', error=NULL WHERE document_id=?",
+                (document_id,),
+            )
+            document = self._row_document(
+                db.execute("SELECT * FROM documents WHERE document_id=?", (document_id,)).fetchone()
+            )
+        return document, DocumentIngestion(document_id, profile.profile_id, "queued", now, now)
+
+    def delete_document(self, document_id: str, *, user_id: str) -> tuple[KnowledgeDocument, str | None]:
+        """Delete a managed copy and authoritative indexes for one user."""
+
+        managed_path: Path | None = None
+        staged_path: Path | None = None
+        profile_ids: list[str] = []
+        document: KnowledgeDocument | None = None
+        try:
+            with self._connection() as db:
+                row = db.execute(
+                    "SELECT * FROM documents WHERE document_id=? AND user_id=?",
+                    (document_id, user_id),
+                ).fetchone()
+                if row is None:
+                    raise RagNotFoundError("knowledge-base document not found")
+                document = self._row_document(row)
+                active = db.execute(
+                    "SELECT 1 FROM ingestions WHERE document_id=? AND status IN ('queued', 'indexing') LIMIT 1",
+                    (document_id,),
+                ).fetchone()
+                if active is not None:
+                    raise RagBusyError("document indexing is active")
+                profile_ids = [
+                    str(item[0])
+                    for item in db.execute(
+                        "SELECT embedding_profile_id FROM ingestions WHERE document_id=?",
+                        (document_id,),
+                    ).fetchall()
+                ]
+                managed_path = (self.rag_dir / document.relative_path).resolve()
+                if not managed_path.is_relative_to(self.sections_dir.resolve()):
+                    raise ValueError("managed document path escaped the RAG sections directory")
+                if managed_path.exists():
+                    if managed_path.is_symlink() or not managed_path.is_file():
+                        raise ValueError("managed document is not a regular file")
+                    staged_path = managed_path.with_name(f".delete-{uuid4().hex}")
+                    os.replace(managed_path, staged_path)
+                db.execute(
+                    "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM knowledge_chunks WHERE document_id=?)",
+                    (document_id,),
+                )
+                db.execute("DELETE FROM documents WHERE document_id=?", (document_id,))
+        except Exception:
+            if staged_path is not None and staged_path.exists() and managed_path is not None:
+                os.replace(staged_path, managed_path)
+            raise
+        if staged_path is not None:
+            staged_path.unlink(missing_ok=True)
+        assert document is not None
+        warnings: list[str] = []
+        for profile_id in profile_ids:
+            try:
+                self._delete_document_vectors(document, profile_id)
+            except Exception as exc:
+                warnings.append(f"{profile_id}: {exc}")
+        warning = "Qdrant cleanup failed: " + "; ".join(warnings) if warnings else None
+        return document, warning
+
+    def _delete_document_vectors(self, document: KnowledgeDocument, profile_id: str) -> None:
+        response = self.http.post(
+            f"{self.qdrant_url}/collections/rag_{profile_id}/points/delete",
+            params={"wait": "true"},
+            json={
+                "filter": {
+                    "must": [
+                        {"key": "user_id", "match": {"value": document.user_id}},
+                        {"key": "document_id", "match": {"value": document.document_id}},
+                    ]
+                }
+            },
+            timeout=15,
+        )
+        if getattr(response, "status_code", 200) == 404:
+            return
+        response.raise_for_status()
 
     def requeue_ingestions(self) -> int:
         """Mark derived vector work for regeneration after a snapshot restore."""

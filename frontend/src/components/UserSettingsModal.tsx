@@ -48,8 +48,9 @@ import {
   type SyncJob,
 } from "../api";
 import type { AuthUser } from "../types";
+import KnowledgeBaseContent from "./KnowledgeBaseContent";
 
-type SettingsSection = "profile" | "agent" | "runtime" | "rag" | "provider_add" | "provider_manage" | "cloud";
+type SettingsSection = "profile" | "agent" | "runtime" | "rag" | "rag_content" | "provider_add" | "provider_manage" | "cloud";
 
 type ProviderDraft = {
   provider_name: string;
@@ -561,6 +562,7 @@ export default function UserSettingsModal({
     { key: "agent", label: "Agent 配置" },
     { key: "runtime", label: "运行配置" },
     { key: "rag", label: "知识库配置" },
+    { key: "rag_content", label: "知识库内容" },
     { key: "provider_add", label: "添加提供商" },
     { key: "provider_manage", label: "Provider 与模型" },
     { key: "cloud", label: "云同步" },
@@ -786,6 +788,7 @@ export default function UserSettingsModal({
             </Card>
           </div>
         )}
+        {section === "rag_content" && <KnowledgeBaseContent activeSessionId={activeSessionId} />}
         {section === "provider_add" && (
           <Form layout="vertical">
             <Typography.Title level={4}>添加提供商</Typography.Title>
@@ -1028,7 +1031,7 @@ export default function UserSettingsModal({
       mask={{ closable: true }}
       keyboard={false}
       onCancel={requestClose}
-      footer={section === "provider_manage" ? null : (
+      footer={["provider_manage", "rag_content"].includes(section) ? null : (
         <Space>
           <Button
             type="primary"
