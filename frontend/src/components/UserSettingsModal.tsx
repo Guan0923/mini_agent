@@ -19,7 +19,7 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getSettings,
   addProviderConfig,
@@ -61,6 +61,11 @@ type ProviderDraft = {
   context_size: number;
   tokenizer_model: string;
   api_key: string;
+};
+
+type ProviderModelFeedback = {
+  status: "success" | "warning" | "error";
+  message: string;
 };
 
 interface UserSettingsModalProps {
@@ -166,10 +171,23 @@ export default function UserSettingsModal({
   const [savedProviderDrafts, setSavedProviderDrafts] = useState<Record<string, { provider_name: string; model: string; api_key: string }>>({});
   const [modelOptions, setModelOptions] = useState<Record<string, string[]>>({});
   const [modelsLoading, setModelsLoading] = useState<Record<string, boolean>>({});
+  const [managedModelQueries, setManagedModelQueries] = useState<Record<string, string>>({});
+  const [managedModelOpen, setManagedModelOpen] = useState<Record<string, boolean>>({});
+  const [managedModelFeedback, setManagedModelFeedback] = useState<Record<string, ProviderModelFeedback>>({});
   const [syncJob, setSyncJob] = useState<SyncJob | null>(null);
   const [cloudSnapshots, setCloudSnapshots] = useState<CloudSnapshot[]>([]);
   const [cloudLoading, setCloudLoading] = useState(false);
   const [ragCapabilities, setRagCapabilities] = useState<RagCapabilities | null>(null);
+  const settingsOpenRef = useRef(open);
+
+  useEffect(() => {
+    settingsOpenRef.current = open;
+    if (open) return;
+    setManagedModelQueries({});
+    setManagedModelOpen({});
+    setManagedModelFeedback({});
+    setModelsLoading({});
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -215,6 +233,9 @@ export default function UserSettingsModal({
         setSavedProviderDrafts(drafts);
         setModelOptions({});
         setModelsLoading({});
+        setManagedModelQueries({});
+        setManagedModelOpen({});
+        setManagedModelFeedback({});
         setRagCapabilities(null);
         if ((next.cloud_sync_available ?? user?.kind !== "guest") && user?.kind !== "guest") void refreshCloud();
       })
@@ -244,6 +265,9 @@ export default function UserSettingsModal({
         setSavedProviderAddDraft(defaultProviderDraft);
         setProviderDrafts({});
         setSavedProviderDrafts({});
+        setManagedModelQueries({});
+        setManagedModelOpen({});
+        setManagedModelFeedback({});
         setError(cause instanceof Error ? cause.message : "设置加载失败。");
       })
       .finally(() => {
@@ -478,16 +502,56 @@ export default function UserSettingsModal({
   }
 
   async function discoverModels(id: string, values: { provider_name: string; protocol: ProviderConfig["protocol"]; base_url: string; api_key?: string }) {
+    const managed = id !== "new";
     setModelsLoading((current) => ({ ...current, [id]: true }));
-    setError("");
+    if (managed) {
+      setManagedModelQueries((current) => ({ ...current, [id]: "" }));
+      setManagedModelOpen((current) => ({ ...current, [id]: false }));
+      setManagedModelFeedback((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+    } else {
+      setError("");
+    }
     try {
       const result = await discoverProviderModels({ ...values, ...(id !== "new" ? { config_id: id } : {}) });
+      if (managed && !settingsOpenRef.current) return;
       setModelOptions((current) => ({ ...current, [id]: result.models }));
-      if (result.models.length === 0) setError("模型服务没有返回可用模型，请继续手动输入。");
+      if (managed) {
+        if (result.models.length === 0) {
+          setManagedModelFeedback((current) => ({
+            ...current,
+            [id]: { status: "warning", message: "模型服务没有返回可用模型，请继续手动输入。" },
+          }));
+        } else {
+          setManagedModelOpen((current) => ({ ...current, [id]: true }));
+          setManagedModelFeedback((current) => ({
+            ...current,
+            [id]: { status: "success", message: `已获取 ${result.models.length} 个模型` },
+          }));
+        }
+      } else if (result.models.length === 0) {
+        setError("模型服务没有返回可用模型，请继续手动输入。");
+      }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "获取模型列表失败。");
+      if (managed) {
+        if (!settingsOpenRef.current) return;
+        setManagedModelFeedback((current) => ({
+          ...current,
+          [id]: {
+            status: "error",
+            message: cause instanceof Error ? cause.message : "获取模型列表失败。",
+          },
+        }));
+      } else {
+        setError(cause instanceof Error ? cause.message : "获取模型列表失败。");
+      }
     } finally {
-      setModelsLoading((current) => ({ ...current, [id]: false }));
+      if (!managed || settingsOpenRef.current) {
+        setModelsLoading((current) => ({ ...current, [id]: false }));
+      }
     }
   }
 
@@ -869,6 +933,7 @@ export default function UserSettingsModal({
               <Collapse
                 items={(settings.provider_configs ?? []).map((provider) => {
                   const draft = providerDrafts[provider.id] ?? { provider_name: provider.provider_name, model: provider.model, api_key: "" };
+                  const modelFeedback = managedModelFeedback[provider.id];
                   return {
                     key: provider.id,
                     label: <span>{provider.provider_name} · {provider.model || "未选择模型"} {provider.is_active ? <Tag color="green">当前使用</Tag> : null}</span>,
@@ -878,9 +943,20 @@ export default function UserSettingsModal({
                         <Form.Item label="Base URL"><Input value={provider.base_url} disabled /></Form.Item>
                         <Form.Item label="模型">
                           <AutoComplete
-                            options={matchingModels(provider.id, draft.model)}
+                            options={matchingModels(provider.id, managedModelQueries[provider.id] ?? "")}
                             value={draft.model}
                             onChange={(model) => updateProviderDraft(provider.id, { model })}
+                            onSelect={(model) => {
+                              updateProviderDraft(provider.id, { model });
+                              setManagedModelQueries((current) => ({ ...current, [provider.id]: "" }));
+                              setManagedModelOpen((current) => ({ ...current, [provider.id]: false }));
+                            }}
+                            open={managedModelOpen[provider.id] ?? false}
+                            onOpenChange={(nextOpen) => setManagedModelOpen((current) => ({ ...current, [provider.id]: nextOpen }))}
+                            showSearch={{
+                              filterOption: false,
+                              onSearch: (query) => setManagedModelQueries((current) => ({ ...current, [provider.id]: query })),
+                            }}
                             placeholder="手动输入或先获取模型列表"
                           />
                           <Button
@@ -893,6 +969,15 @@ export default function UserSettingsModal({
                               api_key: draft.api_key,
                             })}
                           >获取 /v1/models</Button>
+                          {modelFeedback ? (
+                            <Typography.Text
+                              aria-live="polite"
+                              type={modelFeedback.status === "error" ? "danger" : modelFeedback.status}
+                              style={{ display: "block", marginTop: 4 }}
+                            >
+                              {modelFeedback.message}
+                            </Typography.Text>
+                          ) : null}
                         </Form.Item>
                         <Form.Item label="API Key">
                           <Input.Password
