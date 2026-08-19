@@ -72,18 +72,29 @@ const settings = {
   },
 };
 
-function renderModal(onClose = vi.fn(), onUserUpdate = vi.fn(), onProviderConfigUpdate = vi.fn()) {
-  return render(
+const authUser = { id: "u1", email: "user@example.com", kind: "account" as const, display_name: "user@example.com" };
+
+function modalElement(
+  open: boolean,
+  onClose = vi.fn(),
+  onUserUpdate = vi.fn(),
+  onProviderConfigUpdate = vi.fn(),
+) {
+  return (
     <AntApp>
       <UserSettingsModal
-        open
-        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "user@example.com" }}
+        open={open}
+        user={authUser}
         onClose={onClose}
         onUserUpdate={onUserUpdate}
         onProviderConfigUpdate={onProviderConfigUpdate}
       />
-    </AntApp>,
+    </AntApp>
   );
+}
+
+function renderModal(onClose = vi.fn(), onUserUpdate = vi.fn(), onProviderConfigUpdate = vi.fn()) {
+  return render(modalElement(true, onClose, onUserUpdate, onProviderConfigUpdate));
 }
 
 describe("UserSettingsModal", () => {
@@ -96,6 +107,7 @@ describe("UserSettingsModal", () => {
     api.updateAgentConfig.mockResolvedValue(settings.agent_config);
     api.updateRuntimeConfig.mockResolvedValue(settings.runtime_config);
     api.updateProviderConfig.mockResolvedValue(settings.provider_config);
+    api.discoverProviderModels.mockResolvedValue({ models: [] });
     api.getSyncStatus.mockResolvedValue({
       preferences: settings.sync_preferences,
       state: settings.sync_state,
@@ -278,5 +290,83 @@ describe("UserSettingsModal", () => {
       model: "claude-settings",
       is_active: true,
     }));
+  });
+
+  it("opens every discovered model before filtering and keeps selection editable", async () => {
+    api.discoverProviderModels.mockResolvedValueOnce({
+      models: ["alpha-model", "beta-model"],
+    });
+    renderModal();
+
+    await screen.findByDisplayValue("user@example.com");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
+    await userEvent.click(screen.getByText(/openai · demo/));
+    await userEvent.click(screen.getByRole("button", { name: "获取 /v1\/models" }));
+
+    await waitFor(() => expect(api.discoverProviderModels).toHaveBeenCalledWith({
+      config_id: "provider-1",
+      provider_name: "openai",
+      protocol: "chat_completions",
+      base_url: "https://example.test/v1",
+      api_key: "",
+    }));
+    expect(await screen.findByText("已获取 2 个模型")).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "alpha-model" })).toBeInTheDocument();
+
+    const modelInput = screen.getByDisplayValue("demo");
+    await userEvent.clear(modelInput);
+    await userEvent.type(modelInput, "beta");
+    expect(screen.queryByRole("option", { name: "alpha-model" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("beta-model", { selector: ".ant-select-item-option-content" }));
+    await waitFor(() => expect(modelInput).toHaveValue("beta-model"));
+    await waitFor(() => expect(screen.queryByRole("option", { name: "beta-model" })).not.toBeInTheDocument());
+  });
+
+  it("shows empty and failed discovery results on their own Providers", async () => {
+    const nextProvider = {
+      ...settings.provider_config,
+      id: "provider-2",
+      is_active: false,
+      provider: "anthropic",
+      provider_name: "anthropic",
+      protocol: "messages" as const,
+      model: "claude-settings",
+    };
+    api.getSettings.mockResolvedValue({
+      ...structuredClone(settings),
+      provider_configs: [structuredClone(settings.provider_config), nextProvider],
+    });
+    api.discoverProviderModels
+      .mockResolvedValueOnce({ models: [] })
+      .mockRejectedValueOnce(new Error("密钥无效"));
+    renderModal();
+
+    await screen.findByDisplayValue("user@example.com");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
+    await userEvent.click(screen.getByText(/openai · demo/));
+    await userEvent.click(screen.getByText(/anthropic · claude-settings/));
+    const discoverButtons = screen.getAllByRole("button", { name: "获取 /v1\/models" });
+    await userEvent.click(discoverButtons[0]);
+    expect(await screen.findByText("模型服务没有返回可用模型，请继续手动输入。")).toBeInTheDocument();
+    await userEvent.click(discoverButtons[1]);
+
+    expect(await screen.findByText("密钥无效")).toBeInTheDocument();
+    expect(screen.getByText("模型服务没有返回可用模型，请继续手动输入。")).toBeInTheDocument();
+  });
+
+  it("clears managed model feedback when settings close", async () => {
+    api.discoverProviderModels.mockResolvedValueOnce({ models: ["alpha-model"] });
+    const view = renderModal();
+
+    await screen.findByDisplayValue("user@example.com");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
+    await userEvent.click(screen.getByText(/openai · demo/));
+    await userEvent.click(screen.getByRole("button", { name: "获取 /v1\/models" }));
+    expect(await screen.findByText("已获取 1 个模型")).toBeInTheDocument();
+
+    view.rerender(modalElement(false));
+    view.rerender(modalElement(true));
+    await screen.findByRole("heading", { name: "Provider 与模型" });
+    await waitFor(() => expect(screen.queryByText("已获取 1 个模型")).not.toBeInTheDocument());
   });
 });
