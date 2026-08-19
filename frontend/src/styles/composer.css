@@ -19,7 +19,8 @@
   border-color: var(--accent);
 }
 
-.composer textarea {
+.composer textarea,
+.composer .file-mention-editor {
   width: 100%;
   border: none;
   padding: 14px 16px;
@@ -33,6 +34,63 @@
   line-height: 1.5;
   overflow-y: auto;
   display: block;
+}
+
+.composer .file-mention-editor {
+  min-height: 48px;
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.composer .file-mention-editor p {
+  margin: 0;
+}
+
+.file-mention-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin: 0 2px;
+  padding: 1px 5px 1px 7px;
+  border: 1px solid #c7d2fe;
+  border-radius: 7px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 0.94em;
+  line-height: 1.35;
+  vertical-align: baseline;
+}
+
+.file-mention-bubble.upload {
+  border-color: #bae6fd;
+  background: #ecfeff;
+  color: #155e75;
+}
+
+.file-mention-label {
+  max-width: min(32ch, 55vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-mention-remove {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: currentColor;
+  cursor: pointer;
+  font: inherit;
+  line-height: 14px;
+}
+
+.file-mention-remove:hover {
+  background: rgba(15, 23, 42, 0.12);
 }
 
 .composer-box .send-btn {
@@ -78,7 +136,8 @@
     bottom: 10px;
   }
 
-  .composer textarea {
+  .composer textarea,
+  .composer .file-mention-editor {
     padding-bottom: 76px;
   }
 }

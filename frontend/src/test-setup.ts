@@ -29,6 +29,10 @@ if (!HTMLElement.prototype.scrollIntoView) {
   HTMLElement.prototype.scrollIntoView = () => undefined;
 }
 
+if (!Range.prototype.getBoundingClientRect) {
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
+}
+
 if (!window.scrollTo) {
   Object.defineProperty(window, "scrollTo", { writable: true, value: () => undefined });
 }
