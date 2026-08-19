@@ -551,8 +551,7 @@ describe("ChatPage file references", () => {
     await user.click(item);
 
     expect(textarea).toHaveValue("请查看 @notes.md");
-    expect(screen.getByLabelText("待发送引用")).toBeInTheDocument();
-    expect(screen.getByText("notes.md", { selector: ".composer-reference-path" })).toBeInTheDocument();
+    expect(screen.getByText("notes.md", { selector: ".file-mention-label" })).toBeInTheDocument();
   });
 
   it("inserts quoted tokens for paths with spaces", async () => {
@@ -600,7 +599,7 @@ describe("ChatPage file references", () => {
 
     expect(mocks.uploadSessionFiles).toHaveBeenCalledWith("session-files", [file], expect.any(Function));
     expect(await screen.findByText("shot.png", { selector: ".composer-upload-name" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByLabelText("待发送引用")).toBeInTheDocument());
+    expect(container.querySelector(".file-mention-bubble")).toBeNull();
 
     await user.type(textarea, "分析图片");
     await user.click(screen.getByRole("button", { name: "发送" }));

@@ -18,10 +18,11 @@ import type { RagMode } from "../../api/chat";
 import type { ProviderConfig } from "../../api";
 import { HELP_TEXT, parseCommand } from "../../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../../commands/completion";
-import { fileKeyAction, fileTrigger, insertToken, completionToken, toCandidates, type FileCandidate, type FileTrigger } from "../../commands/fileCompletion";
+import { fileKeyAction, toCandidates, type FileCandidate, type FileTrigger } from "../../commands/fileCompletion";
 import MarkdownContent from "../../components/MarkdownContent";
 import { AssistantMessage, MessageActions, MessageReferenceChip } from "./messageParts";
 import Composer, { type SettingsSelectKey } from "./Composer";
+import type { FileMentionChange, FileMentionEditorHandle } from "./FileMentionEditor";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import { latestTodoList } from "./todoPanel";
 import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "../../app/runtimeDetailProjection";
@@ -145,11 +146,12 @@ export default function ChatPage({
   const [fileMenuDismissedFor, setFileMenuDismissedFor] = useState<string | null>(null);
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const fileSearchTimerRef = useRef<number | null>(null);
+  const latestFileTriggerRef = useRef<FileTrigger | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const taRef = useRef<TextAreaRef>(null);
+  const editorRef = useRef<FileMentionEditorHandle>(null);
   const editRef = useRef<TextAreaRef>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
-  const pendingCaretRef = useRef<number | null>(null);
+  const discardedUploadUidsRef = useRef(new Set<string>());
 
   const messages = conversation?.messages ?? [];
   const busy = runningProp ?? localBusy;
@@ -264,16 +266,22 @@ export default function ChatPage({
     requestModel?.output_length,
   ]);
 
-  useEffect(() => {
-    if (pendingCaretRef.current !== null) {
-      const caret = pendingCaretRef.current;
-      const textarea = nativeTextArea(taRef.current);
-      textarea?.setSelectionRange(caret, caret);
-      pendingCaretRef.current = null;
-    }
-  }, [input]);
-
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  useEffect(() => {
+    for (const upload of pendingUploads) {
+      if (upload.status === "uploading") discardedUploadUidsRef.current.add(upload.uid);
+    }
+    editorRef.current?.clear();
+    setInput("");
+    setReferences([]);
+    setFileTriggerState(null);
+    setFileCandidates([]);
+    setPendingUploads([]);
+    // Upload callbacks use the uid set above to delete files that finish after
+    // the composer has moved to another conversation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation?.id]);
 
   useEffect(() => {
     if (editingMessageId) {
@@ -282,15 +290,14 @@ export default function ChatPage({
     }
   }, [editingMessageId]);
 
-  function changeInput(value: string, caret?: number) {
+  function handleEditorChange(change: FileMentionChange) {
+    const { prompt: value, references: inlineReferences, trigger } = change;
     setInput(value);
+    setReferences(inlineReferences);
     setCommandMenuDismissedFor(null);
     setActiveCommandIndex(0);
-    // File completion follows the caret.  The textarea reports its selection
-    // on change; when unavailable (programmatic edits) fall back to the end.
-    const position = caret ?? nativeTextArea(taRef.current)?.selectionStart ?? value.length;
-    const trigger = fileTrigger(value, position);
     setFileTriggerState(trigger);
+    latestFileTriggerRef.current = trigger;
     if (!trigger) {
       if (fileSearchTimerRef.current !== null) {
         window.clearTimeout(fileSearchTimerRef.current);
@@ -307,6 +314,7 @@ export default function ChatPage({
     }
     fileSearchTimerRef.current = window.setTimeout(() => {
       fileSearchTimerRef.current = null;
+      if (latestFileTriggerRef.current?.query !== trigger.query || latestFileTriggerRef.current?.start !== trigger.start) return;
       void searchFiles(trigger);
     }, 250);
   }
@@ -324,24 +332,7 @@ export default function ChatPage({
   function completeFile(index = activeFileIndex) {
     const candidate = fileCandidates[index];
     if (!candidate || !fileTriggerState) return;
-    const token = completionToken(candidate.reference.path);
-    const { value, caret } = insertToken(input, fileTriggerState, token);
-    setInput(value);
-    setFileTriggerState(null);
-    setFileCandidates([]);
-    setFileMenuDismissedFor(value);
-    pendingCaretRef.current = caret;
-    // Uploaded files are already on disk; project files only become a
-    // reference for this message.
-    setReferences((current) =>
-      current.some(
-        (item) => item.source === candidate.reference.source && item.path === candidate.reference.path,
-      ) ? current : [...current, candidate.reference],
-    );
-  }
-
-  function removeReference(index: number) {
-    setReferences((current) => current.filter((_item, itemIndex) => itemIndex !== index));
+    editorRef.current?.replaceCurrentMention(candidate.reference, candidate.label);
   }
 
   function handlePickFiles(files: FileList | File[]) {
@@ -359,15 +350,20 @@ export default function ChatPage({
     }));
     setPendingUploads((current) => [...current, ...uploads]);
     void uploadSessionFiles(sessionId, selected, (percent) => {
-      setPendingUploads((current) => current.map((item) => (item.status === "uploading" ? { ...item, percent } : item)));
+      setPendingUploads((current) => current.map((item) => uploads.some((upload) => upload.uid === item.uid) && item.status === "uploading" ? { ...item, percent } : item));
     }).then((results) => {
+      const discardedPaths: string[] = [];
       setPendingUploads((current) => {
         const next = [...current];
         results.forEach((result, index) => {
           const upload = uploads[index];
           if (!upload) return;
           const position = next.findIndex((item) => item.uid === upload.uid);
-          if (position === -1) return;
+          if (position === -1 || discardedUploadUidsRef.current.has(upload.uid)) {
+            discardedUploadUidsRef.current.delete(upload.uid);
+            discardedPaths.push(result.path);
+            return;
+          }
           next[position] = {
             ...next[position],
             status: "done",
@@ -377,42 +373,23 @@ export default function ChatPage({
         });
         return next;
       });
-      // Auto-insert the reference at the caret for every completed file, so
-      // sending only file references is possible without typing anything.
-      results.forEach((result) => {
-        setReferences((current) =>
-          current.some((item) => item.source === "upload" && item.path === result.path)
-            ? current
-            : [...current, { source: "upload", path: result.path }],
-        );
-        insertUploadReference(result.path, result.name);
-      });
+      for (const path of discardedPaths) void deleteSessionFile(sessionId, "upload", path).catch(() => undefined);
     }).catch((error) => {
-      setPendingUploads((current) =>
-        current.map((item) => (item.uid === uploads[0].uid ? { ...item, status: "error", error: String((error as Error).message ?? error) } : item)),
-      );
-    });
-  }
-
-  function insertUploadReference(path: string, name: string) {
-    setInput((current) => {
-      const token = completionToken(path);
-      const caret = nativeTextArea(taRef.current)?.selectionStart ?? current.length;
-      const value = `${current.slice(0, caret)}${token}${current.slice(caret)}`;
-      pendingCaretRef.current = caret + token.length;
-      void name;
-      return value;
+      const message = String((error as Error).message ?? error);
+      setPendingUploads((current) => current.map((item) => uploads.some((upload) => upload.uid === item.uid) ? { ...item, status: "error", error: message } : item));
     });
   }
 
   function removePendingUpload(index: number) {
     const upload = pendingUploads[index];
     if (!upload) return;
+    if (upload.status === "uploading") {
+      discardedUploadUidsRef.current.add(upload.uid);
+    }
     if (upload.status === "done" && upload.path && conversation?.sessionId) {
-      // A completed new upload is deleted from the server when removed
-      // before sending; existing project files only drop their reference.
+      // Removing an upload deletes the server file. Inline mentions remain
+      // independent and may intentionally become unavailable.
       void deleteSessionFile(conversation.sessionId, "upload", upload.path).catch(() => undefined);
-      setReferences((current) => current.filter((item) => item.source !== "upload" || item.path !== upload.path));
     }
     setPendingUploads((current) => current.filter((_item, itemIndex) => itemIndex !== index));
   }
@@ -428,10 +405,10 @@ export default function ChatPage({
     const command = filteredCommands[index];
     if (!command) return;
     const value = completionText(command);
-    setInput(value);
+    editorRef.current?.clear();
+    editorRef.current?.insertText(value);
     setCommandMenuDismissedFor(value);
     setActiveCommandIndex(0);
-    pendingCaretRef.current = value.length;
   }
 
   function updateLast(updater: (message: ChatMessage) => ChatMessage, conversationId = conversation?.id) {
@@ -674,7 +651,8 @@ export default function ChatPage({
 
 
   async function executeCommand(name: string, argument: string) {
-    setInput("");
+    editorRef.current?.clear();
+    setReferences([]);
     setCommandMenuDismissedFor(null);
     setActiveCommandIndex(0);
     setSettingsOpen(false);
@@ -710,15 +688,22 @@ export default function ChatPage({
 
   async function send() {
     const prompt = input.trim();
-    if (!prompt || busy) return;
+    if (busy || pendingUploads.some((upload) => upload.status === "uploading")) return;
+    const uploadedReferences = pendingUploads
+      .filter((upload) => upload.status === "done" && upload.path)
+      .map((upload) => ({ source: "upload" as const, path: upload.path! }));
+    const mergedReferences = [...references, ...uploadedReferences].filter((reference, index, all) =>
+      all.findIndex((candidate) => candidate.source === reference.source && candidate.path === reference.path) === index,
+    );
+    if (!prompt && mergedReferences.length === 0) return;
     const command = parseCommand(prompt);
-    if (command) {
+    if (command && prompt) {
       await executeCommand(command.name, command.argument);
       return;
     }
-    setInput("");
-    await runPrompt(prompt, undefined, references.length > 0 ? references : undefined);
+    editorRef.current?.clear();
     setReferences([]);
+    await runPrompt(prompt, undefined, mergedReferences.length > 0 ? mergedReferences : undefined);
   }
 
   async function chooseDecision(request: DecisionRequest, choice: string, options?: { supplement?: string; answers?: Record<string, string[]> }) {
@@ -750,18 +735,15 @@ export default function ChatPage({
     const message = conversation.messages.find((item) => item.id === messageId);
     const result = await onRewind(conversation.id, messageId);
     if (result === undefined) return;
-    setInput(typeof result === "string" ? result : result.content);
-    // Carry the rewound message's references into the composer so the
-    // replacement run keeps the same structured file references.
-    setReferences(message?.references ?? []);
-    window.setTimeout(() => taRef.current?.focus(), 0);
+    const content = typeof result === "string" ? result : result.content;
+    editorRef.current?.restore(content, message?.references ?? []);
+    window.setTimeout(() => editorRef.current?.focus(), 0);
   }
 
   function beginEdit(message: ChatMessage) {
     if (busy || !onRewind || !message.content) return;
     setEditingMessageId(message.id);
     setEditingDraft(message.content);
-    setReferences(message.references ?? []);
   }
 
   function cancelEdit() {
@@ -821,7 +803,7 @@ export default function ChatPage({
   }
 
 
-  function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+  function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     const isComposing = event.nativeEvent.isComposing;
     const fileAction = fileKeyAction({ key: event.key, shiftKey: event.shiftKey, isComposing, menuVisible: fileMenuVisible });
     if (fileAction.type === "move") { event.preventDefault(); setActiveFileIndex((current) => nextCommandIndex(current, fileAction.direction, fileCandidates.length)); return; }
@@ -934,8 +916,8 @@ export default function ChatPage({
         usageContextLength={activeUsage?.context}
         openSettingsSelect={openSettingsSelect}
         settingsOpen={settingsOpen}
-        taRef={taRef}
-        onInputChange={changeInput}
+        editorRef={editorRef}
+        onEditorChange={handleEditorChange}
         onKeyDown={handleComposerKeyDown}
         onComplete={completeCommand}
         onActiveCommandChange={setActiveCommandIndex}
@@ -953,13 +935,12 @@ export default function ChatPage({
         fileMenuVisible={fileMenuVisible}
         activeFileIndex={activeFileIndex}
         fileMenuQuery={fileTriggerState?.query ?? ""}
-        references={references}
         onFileComplete={completeFile}
         onActiveFileChange={setActiveFileIndex}
-        onRemoveReference={removeReference}
         onPickFiles={handlePickFiles}
         sessionId={conversation?.sessionId}
         pendingUploads={pendingUploads}
+        uploadsUploading={pendingUploads.some((upload) => upload.status === "uploading")}
         onRemoveUpload={removePendingUpload}
         onRetryUpload={retryUpload}
         onUploadPreview={(index) => {

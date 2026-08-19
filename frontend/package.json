@@ -13,8 +13,10 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
+    "@lexical/react": "0.49.0",
     "@rc-component/listy": "^1.2.3",
     "antd": "^6.5.3",
+    "lexical": "0.49.0",
     "markdown-it": "^15.0.0",
     "markdown-it-texmath": "^1.0.0",
     "mathjax": "^4.1.3",
