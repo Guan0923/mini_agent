@@ -781,37 +781,36 @@ def rewind_session(
     request: Request,
     identity: UserIdentity = Depends(require_user),
 ) -> dict:
+    """Resolve a same-session rewind parent without mutating the session."""
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     source = _require_branchable(store, session_id)
     _require_session_workspace(state, identity.id, source.session_id)
-    target_id: str | None = None
-    copied = False
-    try:
-        summary = _branch_session(store, source, body, rewind=True)
-        target_id = summary.session_id
-        _copy_or_bind_project(state, identity.id, source.session_id, summary.session_id)
-        copied = True
-        store.delete_session(source.session_id)
-    except Exception as exc:
-        if target_id is not None:
-            try:
-                if copied:
-                    # Rewind is a compound operation.  If deleting the
-                    # source fails after the new session was copied, keep the
-                    # source authoritative and move the speculative target to
-                    # the soft-deleted state instead of leaving two active
-                    # conversations.
-                    store.delete_session(target_id)
-                else:
-                    # A failed file copy must not leave a discoverable,
-                    # half-initialized session behind.
-                    shutil.rmtree(store.paths.session_root(target_id), ignore_errors=True)
-                state.projects(identity.id).discard_session(target_id)
-            except Exception:
-                pass
-        raise _mutation_error(exc) from exc
-    return _summary_for_user(state, identity.id, summary)
+    if not body.source_node_id:
+        raise HTTPException(status_code=422, detail="rewind 必须提供 source_node_id")
+    target = store.get_node(source.session_id, body.source_node_id)
+    if target is None:
+        raise HTTPException(status_code=409, detail="source_node_id 不属于当前会话")
+    # The protocol names the selected message as the rewind target. Resolve its
+    # parent with the complete cross-session key before returning the branch
+    # anchor. Older clients sent the parent directly; accepting a root here is
+    # harmless and keeps those clients on the same-session branch path.
+    if target.data_type == "root":
+        # A legacy client may already have sent the desired root parent.
+        parent = target
+    elif target.parent_id or target.parent_session_id:
+        if not target.parent_id or not target.parent_session_id:
+            raise HTTPException(status_code=409, detail="目标节点的父引用不完整")
+        parent = store.get_node(target.parent_session_id, target.parent_id)
+        if parent is None:
+            raise HTTPException(status_code=409, detail="目标节点的父节点不存在")
+    else:
+        parent = target
+    payload = _summary_for_user(state, identity.id, store.get_session_summary(source.session_id))
+    payload["rewind_source_node_id"] = parent.id
+    payload["rewind_source_session_id"] = parent.session_id
+    payload["branch"] = True
+    return payload
 
 
 @router.get("/sessions/{session_id}/timezone")

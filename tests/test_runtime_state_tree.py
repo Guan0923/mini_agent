@@ -21,6 +21,7 @@ from backend.domain.runtime_state import (
     RuntimeState,
     RuntimeStateTree,
     RuntimeStateValidationError,
+    compaction_payload,
     create_root_node,
     message_payload,
     recoverable,
@@ -96,6 +97,65 @@ def test_session_root_is_deterministic_and_uses_neutral_runtime_defaults() -> No
     assert first.firstKeptEntryId == first.id
     assert first.compactionIdx == first.id
     assert RuntimeState.from_dict(first.to_dict()).to_dict() == first.to_dict()
+
+
+def test_children_and_rewind_branches_inherit_both_ancestor_indexes() -> None:
+    root = create_root_node("index-session")
+    tree = RuntimeStateTree([root])
+
+    first = tree.create_child(
+        session_id=root.session_id,
+        parent=root,
+        data=message_payload("user", "first"),
+    )
+    original_assistant = tree.create_child(
+        session_id=root.session_id,
+        parent=first,
+        data=message_payload("assistant", "old"),
+    )
+    # A rewind branch is allowed to use a parent that already has children.
+    branch_user = tree.create_child(
+        session_id=root.session_id,
+        parent=first,
+        data=message_payload("user", "edited"),
+    )
+
+    for node in (first, original_assistant, branch_user):
+        assert node.firstKeptEntryId == root.id
+        assert node.compactionIdx == root.id
+    assert root.firstKeptEntryId == root.id
+    assert root.compactionIdx == root.id
+
+    summary = tree.compact(branch_user, "summary", retention=1)
+    descendant = tree.create_child(
+        session_id=root.session_id,
+        parent=summary,
+        data=message_payload("user", "after compaction"),
+    )
+    assert summary.firstKeptEntryId == branch_user.id
+    assert summary.compactionIdx == summary.id
+    assert descendant.firstKeptEntryId == summary.firstKeptEntryId
+    assert descendant.compactionIdx == summary.compactionIdx
+
+
+def test_model_input_ignores_invalid_compaction_index_outside_path() -> None:
+    root = create_root_node("path-session")
+    tree = RuntimeStateTree([root])
+    user = tree.create_child(
+        session_id=root.session_id,
+        parent=root,
+        data=message_payload("user", "hello"),
+    )
+    summary = tree.create_child(
+        session_id=root.session_id,
+        parent=user,
+        data=compaction_payload("summary"),
+        first_kept_entry_id="other-session:kept",
+        compaction_idx="other-session:summary",
+    )
+
+    context = tree.model_input(summary)
+    assert [node.id for node in context] == [summary.id, user.id]
 
 
 def test_root_payload_rejects_extra_fields() -> None:

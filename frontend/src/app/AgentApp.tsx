@@ -554,7 +554,7 @@ function AgentApp() {
     }
   }
 
-  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string; sourceNodeId?: string } | undefined> {
+  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string; sourceNodeId?: string; branch?: boolean } | undefined> {
     setActionError(null);
     const source = conversations.find((conversation) => conversation.id === id);
     if (!source) return undefined;
@@ -562,34 +562,32 @@ function AgentApp() {
     if (index < 0 || source.messages[index].role !== "user") return undefined;
     try {
       const sessionId = await ensureSession(id);
-      const previousAssistant = [...source.messages.slice(0, index)].reverse().find((message) => message.role === "assistant");
       const summary = await rewindSession(
         sessionId,
-        previousAssistant?.runId,
+        undefined,
         source.title,
         source.clientId ?? source.id,
-        importableMessages(source.messages.slice(0, index)),
-        source.messages[index].sourceNodeId,
+        [],
+        source.messages[index].nodeId ?? source.messages[index].sourceNodeId,
       );
       updateConversation(id, (conversation) => ({
         ...summaryToConversation(summary, conversation),
         messages: conversation.messages.slice(0, index),
         messagesLoaded: true,
-        runtimeNodes: undefined,
       }));
       setCurrentId(id);
       setPage("chat");
       return {
         content: source.messages[index].content,
         sessionId: summary.session_id,
-        sourceNodeId: summary.last_node_id ?? undefined,
+        sourceNodeId: summary.rewind_source_node_id,
+        branch: Boolean(summary.branch),
       };
     } catch (error) {
       setActionError(String((error as Error).message ?? error));
       return undefined;
     }
   }
-
   async function reloadConversation(id: string): Promise<void> {
     const conversation = conversations.find((item) => item.id === id);
     if (!conversation) throw new Error("会话不存在");

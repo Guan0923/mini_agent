@@ -136,6 +136,9 @@ export function transcriptToMessages(transcript: SessionMessage[]): ChatMessage[
     error: message.error,
     running: message.running ? false : undefined,
     runId: message.run_id ?? undefined,
+    nodeId: message.id?.includes(":")
+      ? message.id.slice(message.id.indexOf(":") + 1)
+      : undefined,
     sourceNodeId: message.source_node_id ?? undefined,
     references: message.references,
     timelineSeq: message.timeline_seq,

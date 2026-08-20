@@ -89,6 +89,7 @@ class ChatRequest(BaseModel):
     provider_name: str | None = Field(default=None, min_length=1, max_length=80)
     model: RuntimeModelRequest | None = None
     source_node_id: str | None = None
+    branch: bool = False
     references: list[FileReference] = Field(default_factory=list, max_length=50)
     rag_mode: Literal["off", "tool", "forced"] = "off"
 
@@ -273,7 +274,9 @@ def _model_config_snapshot(state: WebAppState, user_id: str) -> ModelConfig:
         raise HTTPException(status_code=422, detail=f"模型未配置：{exc}") from exc
 
 
-def _validate_source_node(store, session_id: str, source_node_id: str | None, *, resume: bool = False) -> None:
+def _validate_source_node(
+    store, session_id: str, source_node_id: str | None, *, resume: bool = False, allow_branch: bool = False
+) -> None:
     """Validate the optimistic-concurrency source before opening an SSE stream."""
 
     if not source_node_id or not callable(getattr(store, "get_node", None)):
@@ -282,7 +285,7 @@ def _validate_source_node(store, session_id: str, source_node_id: str | None, *,
     if source is None:
         raise HTTPException(status_code=400, detail="source_node_id 不属于当前会话")
     children = getattr(store, "list_children", lambda *_: [])(source.session_id, source.id)
-    if children:
+    if children and not allow_branch:
         raise HTTPException(status_code=409, detail="source_node_id 必须是当前会话的叶子节点")
     if resume and source.status not in {"failed", "abort"}:
         raise HTTPException(status_code=409, detail="只能从 failed 或 abort 节点恢复")
@@ -340,6 +343,7 @@ def _stream(
     identity: UserIdentity | None = None,
     session_id: str | None = None,
     source_node_id: str | None = None,
+    branch: bool = False,
     mode: Literal["agent", "plan"] = "agent",
     permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None,
     reasoning_effort: ReasoningEffort = "medium",
@@ -556,7 +560,7 @@ def _stream(
             # so validation is delegated to the node store when available.
             node_store = getattr(app, "session_store", None) or getattr(app, "store", None)
             if source_node_id and node_store is not None and session_id:
-                _validate_source_node(node_store, session_id, source_node_id)
+                _validate_source_node(node_store, session_id, source_node_id, allow_branch=branch)
             if callable(getattr(node_store, "create_node", None)):
                 if getattr(conversation, "active_session", None) is None:
                     conversation.ensure_session(prompt or None)
@@ -567,6 +571,7 @@ def _stream(
                         session_id=active_session.session_id,
                         prompt=prompt,
                         source_node_id=source_node_id,
+                        allow_branch=branch,
                         user=identity.id if identity is not None else "",
                         provider=getattr(selected_model_config, "provider", "unknown")
                         if selected_model_config
@@ -888,7 +893,7 @@ async def chat(
             )
         if has_history and not body.source_node_id:
             raise HTTPException(status_code=409, detail="续聊请求必须提交当前最后节点 ID。")
-        _validate_source_node(store, resolved_session_id, body.source_node_id)
+        _validate_source_node(store, resolved_session_id, body.source_node_id, allow_branch=body.branch)
     else:
         # A project conversation must always be created through the scoped
         # project endpoint.  The chat endpoint's implicit session is only for
@@ -903,6 +908,7 @@ async def chat(
             identity=identity,
             session_id=resolved_session_id,
             source_node_id=body.source_node_id,
+            branch=body.branch,
             mode=body.mode,
             interactive=body.interactive,
             permission_mode=body.permission_mode,

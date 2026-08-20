@@ -11,6 +11,7 @@ export interface ChatRunRequest {
   providerName?: string;
   model?: RuntimeConfigModel;
   sourceNodeId?: string;
+  branch?: boolean;
   references?: FileReference[];
 }
 

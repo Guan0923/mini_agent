@@ -18,6 +18,9 @@ export interface SessionInfo {
   title_is_custom?: boolean;
   project_id?: string | null;
   project_available?: boolean | null;
+  rewind_source_node_id?: string;
+  rewind_source_session_id?: string;
+  branch?: boolean;
 }
 
 export interface SessionMessage {

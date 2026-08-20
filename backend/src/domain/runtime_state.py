@@ -1032,6 +1032,46 @@ class RuntimeStateTree:
             **kwargs,
         )
 
+    @staticmethod
+    def _path_index(
+        path: Sequence[RuntimeState],
+        node_id: str | None,
+        *,
+        before: int | None = None,
+    ) -> int | None:
+        """Resolve an ancestry pointer only against the complete path.
+
+        Runtime ancestry pointers intentionally remain compact node-id strings,
+        while parent links carry the full ``(session_id, node_id)`` key.  Never
+        search the store by id alone here: a fork can contain nodes from more
+        than one session and those sessions may legally reuse an id.
+        """
+
+        if not node_id:
+            return None
+        candidates = enumerate(path[:before] if before is not None else path)
+        matches = [index for index, item in candidates if item.id == node_id]
+        return matches[0] if matches else None
+
+    @classmethod
+    def _compaction_start(cls, path: Sequence[RuntimeState], summary_index: int) -> int:
+        """Return a valid retained-window start for a compaction summary."""
+
+        summary = path[summary_index]
+        resolved = cls._path_index(path, summary.firstKeptEntryId, before=summary_index)
+        if resolved is not None:
+            return resolved
+        # A malformed or cross-session pointer must not select an unrelated
+        # node. Prefer the nearest earlier summary whose own pointer is valid;
+        # otherwise retain from the current path root.
+        for index in range(summary_index - 1, -1, -1):
+            if path[index].data_type != "compaction":
+                continue
+            resolved = cls._path_index(path, path[index].firstKeptEntryId, before=index)
+            if resolved is not None:
+                return resolved
+        return 0
+
     def resume(
         self,
         source: RuntimeState | tuple[str, str],
@@ -1088,10 +1128,9 @@ class RuntimeStateTree:
             if isinstance(source, RuntimeState) and path and path[-1].key == source.key:
                 path[-1] = source.clone()
         kept = path[max(0, len(path) - retention)]
-        old_compaction_index = next(
-            (index for index, item in enumerate(path) if item.id == current.compactionIdx),
-            0,
-        )
+        old_compaction_index = self._path_index(path, current.compactionIdx)
+        if old_compaction_index is None:
+            old_compaction_index = 0
         payload = compaction_payload(
             summary,
             source_ids=source_ids or [item.id for item in path[old_compaction_index:]],
@@ -1178,8 +1217,7 @@ class RuntimeStateTree:
             return path
         summary_index = compaction_positions[-1]
         summary = path[summary_index]
-        first_id = summary.firstKeptEntryId
-        first_index = next((i for i, item in enumerate(path) if item.id == first_id), 0)
+        first_index = self._compaction_start(path, summary_index)
         # The raw window is intentionally limited to the entries before the
         # summary node; a descendant path continues after it.  A later
         # compaction supersedes older summary nodes, so do not feed duplicate

@@ -64,6 +64,7 @@ class RuntimeEventNodeBridge:
         session_id: str,
         prompt: str,
         source_node_id: str | None = None,
+        allow_branch: bool = False,
         user: str = "",
         provider: str = "unknown",
         provider_name: str | None = None,
@@ -80,6 +81,7 @@ class RuntimeEventNodeBridge:
         self.session_id = session_id
         self.prompt = prompt
         self.source_node_id = source_node_id
+        self.allow_branch = allow_branch
         self.user = user
         # ``provider_name`` is the user-owned configuration identity.  Keep
         # the internal adapter kind in ``provider`` so a named configuration
@@ -316,7 +318,7 @@ class RuntimeEventNodeBridge:
             self.parent = self.store.get_node(self.session_id, self.source_node_id)
             if self.parent is None:
                 raise ValueError("source_node_id does not belong to the active session.")
-            if self.store.list_children(self.parent.session_id, self.parent.id):
+            if self.store.list_children(self.parent.session_id, self.parent.id) and not self.allow_branch:
                 raise ValueError("source_node_id must identify a leaf node.")
             if not self.prompt and self.parent.status not in {"failed", "abort"}:
                 raise ValueError("A resume source must be failed or abort.")
@@ -334,7 +336,11 @@ class RuntimeEventNodeBridge:
         # placeholder is intentionally used as the parent reference; its
         # contents are replaced by the writer's dynamic copy at the next
         # provider boundary and are never sent as an empty message.
-        if self.parent is not None and self.store.list_children(self.parent.session_id, self.parent.id):
+        if (
+            self.parent is not None
+            and self.store.list_children(self.parent.session_id, self.parent.id)
+            and not self.allow_branch
+        ):
             raise ValueError("The continuation parent must be a leaf node.")
         if self.parent is None and self.source_node_id is None:
             # Configuration is part of the user node now; no synthetic change
@@ -894,7 +900,7 @@ class RuntimeEventNodeBridge:
             path = self._ancestor_path(self.last_node)
             if not source_ids:
                 old_compaction = self.last_node.compactionIdx if self.last_node is not None else ""
-                start = next((index for index, item in enumerate(path) if item.id == old_compaction), 0)
+                start = RuntimeStateTree._path_index(path, old_compaction) or 0
                 source_ids = [item.id for item in path[start:]]
             first_kept = path[max(0, len(path) - DEFAULT_COMPACTION_RETENTION)].id if path else None
             node = self.writer.create(

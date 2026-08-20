@@ -112,6 +112,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
         : await streamChat(request.prompt ?? "", onMessage, controller.signal, {
             sessionId: request.sessionId,
             sourceNodeId: request.sourceNodeId,
+            branch: request.branch,
             mode: request.mode,
             permissionMode: request.permissionMode,
             reasoningEffort: request.reasoningEffort,

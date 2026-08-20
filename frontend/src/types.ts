@@ -136,6 +136,8 @@ export interface ChatMessage {
   error?: string;
   running?: boolean;
   runId?: string;
+  /** Durable runtime node id for rewind targets. */
+  nodeId?: string;
   sourceNodeId?: string;
   runtimeNodeIds?: string[];
   decision?: DecisionRequest;

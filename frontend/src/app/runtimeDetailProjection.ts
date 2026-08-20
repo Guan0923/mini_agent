@@ -194,6 +194,7 @@ export function integrateRuntimeNodeFrame(conversation: Conversation, frame: Run
       if (messages[index].role !== "user") continue;
       messages[index] = {
         ...messages[index],
+        nodeId: frame.node.id,
         sourceNodeId: frame.node.parent_id || undefined,
         references: projection.references,
       };

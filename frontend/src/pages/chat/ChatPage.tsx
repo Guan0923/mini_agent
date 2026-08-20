@@ -68,6 +68,7 @@ interface RewindResult {
   content: string;
   sessionId: string;
   sourceNodeId?: string;
+  branch?: boolean;
 }
 
 /** One file being uploaded or already stored in the session uploads. */
@@ -95,6 +96,7 @@ interface ChatRunRequest {
   providerName?: string;
   model?: RuntimeNodeModel;
   sourceNodeId?: string;
+  branch?: boolean;
   references?: FileReference[];
 }
 
@@ -455,6 +457,7 @@ export default function ChatPage({
     resume = false,
     sourceNodeId?: string | null,
     references?: FileReference[],
+    branch = false,
   ) {
     const controller = new AbortController();
     abortRef.current = controller;
@@ -567,8 +570,8 @@ export default function ChatPage({
         const chatSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
         const options = chatSourceNodeId
           ? (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, references, ragMode }
-            : { sessionId, sourceNodeId: chatSourceNodeId, providerName: requestProviderName, model: requestModel, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, references, ragMode })
+            ? { sessionId, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, branch, references, ragMode }
+            : { sessionId, sourceNodeId: chatSourceNodeId, branch, providerName: requestProviderName, model: requestModel, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, references, ragMode })
           // An empty tree has no dynamic runtime configuration to submit. Keep
           // the stable positional call for clients embedding ChatPage while
           // all established sessions use the explicit v0.3 config object.
@@ -617,6 +620,7 @@ export default function ChatPage({
     resume = false,
     sourceNodeId: string | null = conversation?.lastNodeId ?? null,
     references?: FileReference[],
+    branch = false,
   ) {
     if (onRun) {
       await onRun({
@@ -630,16 +634,17 @@ export default function ChatPage({
         providerName: requestProviderName,
         model: requestModel,
         sourceNodeId: sourceNodeId ?? undefined,
+        branch,
         references,
       });
       return;
     }
-    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId, references);
+    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId, references, branch);
   }
 
   async function runPrompt(
     prompt: string,
-    target?: { conversationId: string; sessionId: string; sourceNodeId?: string },
+    target?: { conversationId: string; sessionId: string; sourceNodeId?: string; branch?: boolean },
     references?: FileReference[],
   ) {
     const { conversationId, sessionId } = target ?? await ensureSession();
@@ -661,6 +666,7 @@ export default function ChatPage({
       false,
       target ? target.sourceNodeId ?? null : conversation?.lastNodeId ?? null,
       references,
+      target?.branch ?? false,
     );
   }
 
@@ -783,6 +789,7 @@ export default function ChatPage({
         conversationId: conversation.id,
         sessionId,
         sourceNodeId: typeof result === "string" ? undefined : result.sourceNodeId,
+          branch: typeof result === "string" ? false : Boolean(result.branch),
       },
       message.references,
     );

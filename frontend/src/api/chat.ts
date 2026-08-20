@@ -7,6 +7,7 @@ export type RagMode = "off" | "tool" | "forced";
 export interface StreamOptions {
   sessionId?: string;
   sourceNodeId?: string;
+  branch?: boolean;
   mode?: ChatMode;
   permissionMode?: PermissionMode;
   fullAccessAcknowledged?: boolean;
@@ -104,6 +105,7 @@ export async function streamChat(
       prompt,
       session_id: normalized.sessionId,
       source_node_id: normalized.sourceNodeId,
+      ...(normalized.branch ? { branch: true } : {}),
       mode: normalized.mode ?? "agent",
       ...(normalized.mode ? { running_mode: normalized.mode } : {}),
       permission_mode: normalized.permissionMode,
