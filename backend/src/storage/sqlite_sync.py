@@ -527,7 +527,6 @@ class SQLiteSyncMixin:
             "session_messages",
             "session_runtime",
             "runs",
-            "checkpoints",
             "runtime_messages",
             "runtime_nodes",
             "json_objects",

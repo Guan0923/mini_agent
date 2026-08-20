@@ -39,10 +39,6 @@ CREATE TABLE IF NOT EXISTS session_runtime (
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY, status TEXT NOT NULL, state_json TEXT NOT NULL, updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS checkpoints (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, reason TEXT NOT NULL,
-    state_json TEXT NOT NULL, created_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS runtime_messages (
     run_id TEXT NOT NULL, sequence INTEGER NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL,
     data_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (run_id, sequence)
@@ -159,7 +155,7 @@ class SQLiteSchemaMixin:
                 # A metadata table without a v8 row is an old database, not a
                 # partially initialized new one, when any runtime table exists.
                 if "session_meta" in legacy_tables and legacy_tables.intersection(
-                    {"sync_outbox", "runtime_nodes", "session_runtime", "checkpoints"}
+                    {"sync_outbox", "runtime_nodes", "session_runtime"}
                 ):
                     raise RuntimeError(
                         "Unsupported legacy state.db schema; remove the old state.db before using JSON event storage."
@@ -247,7 +243,7 @@ class SQLiteSchemaMixin:
             "UPDATE runtime_nodes SET permission_mode='read_only' "
             "WHERE permission_mode IN ('approval_for_me','full_access')"
         )
-        for table, key in (("session_runtime", "session_id"), ("runs", "run_id"), ("checkpoints", "id")):
+        for table, key in (("session_runtime", "session_id"), ("runs", "run_id")):
             rows = connection.execute(f"SELECT {key},state_json FROM {table}").fetchall()
             for identity, raw in rows:
                 try:

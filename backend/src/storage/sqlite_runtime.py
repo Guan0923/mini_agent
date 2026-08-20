@@ -534,10 +534,6 @@ class SQLiteRuntimeMixin:
                     (run.run_id, run.status, payload, timestamp),
                 )
                 connection.execute(
-                    "INSERT INTO checkpoints(run_id, reason, state_json, created_at) VALUES (?, ?, ?, ?)",
-                    (run.run_id, reason, payload, timestamp),
-                )
-                connection.execute(
                     "UPDATE session_runs SET status=?, updated_at=? WHERE run_id=?",
                     (run.status, timestamp, run.run_id),
                 )
