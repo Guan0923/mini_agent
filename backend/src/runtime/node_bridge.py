@@ -64,6 +64,7 @@ class RuntimeEventNodeBridge:
         session_id: str,
         prompt: str,
         source_node_id: str | None = None,
+        source_node_session_id: str | None = None,
         allow_branch: bool = False,
         user: str = "",
         provider: str = "unknown",
@@ -81,6 +82,7 @@ class RuntimeEventNodeBridge:
         self.session_id = session_id
         self.prompt = prompt
         self.source_node_id = source_node_id
+        self.source_node_session_id = source_node_session_id or session_id
         self.allow_branch = allow_branch
         self.user = user
         # ``provider_name`` is the user-owned configuration identity.  Keep
@@ -120,7 +122,7 @@ class RuntimeEventNodeBridge:
         self.abort_code = ""
         self.terminal_error: dict[str, str] | None = None
         # ``True`` means the dynamic copy could not be atomically sealed.  The
-        # durable failed placeholder is intentionally left untouched so a
+        # durable running placeholder is intentionally left untouched so a
         # subsequent resume can recover the turn without pretending that the
         # streamed contents were durably committed.
         self.persistence_failed = False
@@ -160,7 +162,7 @@ class RuntimeEventNodeBridge:
                     break
             else:
                 path.append(dynamic.clone())
-        # The same identity can occur as a persisted failed placeholder and a
+        # The same identity can occur as a persisted running placeholder and a
         # dynamic sidecar.  Keep one entry and let the sidecar win.
         unique: dict[tuple[str, str], RuntimeState] = {}
         for item in path:
@@ -315,13 +317,13 @@ class RuntimeEventNodeBridge:
                 raise RuntimeError("Node bridge has no starting node.")
             return self.last_node
         if self.source_node_id:
-            self.parent = self.store.get_node(self.session_id, self.source_node_id)
+            self.parent = self.store.get_node(self.source_node_session_id, self.source_node_id)
             if self.parent is None:
                 raise ValueError("source_node_id does not belong to the active session.")
             if self.store.list_children(self.parent.session_id, self.parent.id) and not self.allow_branch:
                 raise ValueError("source_node_id must identify a leaf node.")
-            if not self.prompt and self.parent.status not in {"failed", "abort"}:
-                raise ValueError("A resume source must be failed or abort.")
+            if not self.prompt and self.parent.status not in {"running", "abort"}:
+                raise ValueError("A resume source must be running or abort.")
         elif self.parent is None:
             load_nodes = getattr(self.store, "load_nodes", None)
             if callable(load_nodes):
@@ -346,7 +348,21 @@ class RuntimeEventNodeBridge:
             # Configuration is part of the user node now; no synthetic change
             # nodes are written into the history.
             self.parent = None
+        if self.parent is not None and not self.prompt and self.parent.status == "running":
+            # A process restart may leave the authoritative assistant leaf in
+            # ``running``. Re-open that exact identity instead of creating a
+            # second leaf; only its parent path is used for model context.
+            self.assistant = self.writer.resume(self.parent)
+            self.last_node = self.parent
+            self.started = True
+            self.assistant_blocks = [dict(block) for block in self.assistant.content]
+            self.response_text = "".join(str(block.get("text", "")) for block in self.assistant_blocks)
+            return self.last_node
         if self.parent is not None and not self.prompt:
+            if self.parent.status == "abort" and self.parent.parent_id:
+                parent = self.store.get_node(self.parent.parent_session_id, self.parent.parent_id)
+                if parent is not None:
+                    self.parent = parent
             # ``/resume`` has no new user text.  Continue directly from the
             # paused/failed leaf instead of persisting an empty user message.
             # Resume configuration is represented by the next assistant node;
@@ -435,9 +451,7 @@ class RuntimeEventNodeBridge:
     def _exception_category(cls, error: BaseException) -> TerminalErrorCategory | None:
         """Map a known runtime exception to an abort category.
 
-        Unknown exceptions intentionally remain ``failed`` so that the
-        generic failed message does not claim a cause the runtime cannot
-        prove.  Provider transport errors and tool/preparation failures are
+        Provider transport errors and tool/preparation failures are
         safe to classify because their exception types are part of the local
         runtime contract.
         """
@@ -613,7 +627,7 @@ class RuntimeEventNodeBridge:
             self.last_node = self.writer.delete(
                 result.session_id,
                 result.id,
-                status="success" if status == "succeeded" else "failed",
+                status="success",
             )
         finally:
             self.writer.emit = previous_emit
@@ -845,7 +859,7 @@ class RuntimeEventNodeBridge:
             if data.get("unexpected"):
                 category = self.abort_category or self._data_category(data)
                 if category is None:
-                    self.finish("failed")
+                    self.finish("abort", message, category="agent", code="runtime_error")
                 else:
                     self.finish(
                         "abort",
@@ -943,6 +957,8 @@ class RuntimeEventNodeBridge:
     ) -> RuntimeState | None:
         if self.closed:
             return self.last_node
+        if status not in {"success", "abort"}:
+            raise ValueError("A runtime bridge can only finish as success or abort.")
         if status != "success":
             self.terminal_error = terminal_error_payload(
                 status,
@@ -977,41 +993,36 @@ class RuntimeEventNodeBridge:
             except Exception:
                 # ``NodeWriter.delete`` performs the durable replacement in a
                 # transaction.  If that transaction or its final persistence
-                # hook fails, retain the original empty failed placeholder;
+                # hook fails, retain the original running placeholder;
                 # the stream still receives a deterministic terminal error.
                 self.persistence_failed = True
-                self.terminal_error = terminal_error_payload("failed", code="runtime_node_persistence_failed")
+                self.terminal_error = terminal_error_payload("abort", code="runtime_node_persistence_failed")
                 self.closed = True
                 return None
         self.closed = True
         return self.last_node
 
     def preserve_placeholder(self, *, code: str = "runtime_exception") -> RuntimeState | None:
-        """Close a stream without replacing its failed persistence marker.
+        """Close a stream by sealing its running marker as abort.
 
-        This is used for an uncaught/unknown worker exception.  The dynamic
-        sidecar is process-local and must not be promoted to history merely
-        because the error handler ran after the exception.
+        This is used for an uncaught/unknown worker exception. The running
+        leaf is sealed as ``abort`` so the tree never retains a second failed
+        state or an unowned dynamic identity.
         """
 
-        self.terminal_error = terminal_error_payload("failed", code=code)
-        self.closed = True
         if self.assistant is None:
-            # ``last_node`` may be an already sealed user/tool node.  Returning
-            # it would make the SSE layer report a successful terminal state
-            # for an exception that has no active assistant placeholder.
-            return None
+            self.closed = True
+            return self.last_node
         try:
-            return self.store.get_node(self.assistant.session_id, self.assistant.id)
+            return self.finish("abort", "", category="agent", code=code)
         except Exception:
+            self.closed = True
             return None
 
     def finish_exception(self, error: BaseException) -> RuntimeState | None:
         """Finish an uncaught worker exception without losing its category."""
 
-        category = self.abort_category or self._exception_category(error)
-        if category is None:
-            return self.preserve_placeholder(code=error.__class__.__name__ or "runtime_exception")
+        category = self.abort_category or self._exception_category(error) or "agent"
         return self.finish(
             "abort",
             str(error),

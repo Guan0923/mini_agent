@@ -89,6 +89,7 @@ class ChatRequest(BaseModel):
     provider_name: str | None = Field(default=None, min_length=1, max_length=80)
     model: RuntimeModelRequest | None = None
     source_node_id: str | None = None
+    source_node_session_id: str | None = None
     branch: bool = False
     references: list[FileReference] = Field(default_factory=list, max_length=50)
     rag_mode: Literal["off", "tool", "forced"] = "off"
@@ -121,6 +122,7 @@ class ResumeRequest(BaseModel):
     full_access_acknowledged: StrictBool = False
     reasoning_effort: ReasoningEffort = "medium"
     source_node_id: str | None = None
+    source_node_session_id: str | None = None
     mode: Literal["agent", "plan"] = "agent"
     running_mode: Literal["agent", "plan"] | None = None
     provider_name: str | None = Field(default=None, min_length=1, max_length=80)
@@ -275,20 +277,52 @@ def _model_config_snapshot(state: WebAppState, user_id: str) -> ModelConfig:
 
 
 def _validate_source_node(
-    store, session_id: str, source_node_id: str | None, *, resume: bool = False, allow_branch: bool = False
+    store,
+    session_id: str,
+    source_node_id: str | None,
+    *,
+    source_node_session_id: str | None = None,
+    resume: bool = False,
+    allow_branch: bool = False,
 ) -> None:
     """Validate the optimistic-concurrency source before opening an SSE stream."""
 
     if not source_node_id or not callable(getattr(store, "get_node", None)):
         return
-    source = store.get_node(session_id, source_node_id)
+    source_session_id = source_node_session_id or session_id
+    source = store.get_node(source_session_id, source_node_id)
     if source is None:
-        raise HTTPException(status_code=400, detail="source_node_id 不属于当前会话")
+        raise HTTPException(status_code=400, detail="source_node_id 不属于当前会话祖先树")
+    if source_session_id != session_id:
+        loaded = getattr(store, "load_nodes", lambda _sid: [])(session_id)
+        if source.key not in {getattr(item, "key", None) for item in loaded}:
+            raise HTTPException(status_code=409, detail="source_node_id 不属于当前会话祖先树")
     children = getattr(store, "list_children", lambda *_: [])(source.session_id, source.id)
     if children and not allow_branch:
         raise HTTPException(status_code=409, detail="source_node_id 必须是当前会话的叶子节点")
-    if resume and source.status not in {"failed", "abort"}:
-        raise HTTPException(status_code=409, detail="只能从 failed 或 abort 节点恢复")
+    if resume and source.status not in {"running", "abort"}:
+        raise HTTPException(status_code=409, detail="只能从 running 或 abort 节点恢复")
+
+
+def _session_has_active_execution(state: WebAppState, user_id: str, session_id: str) -> bool:
+    """Check both the node bridge and job registry for a live session run."""
+
+    key = (user_id, session_id)
+    bridge = getattr(state, "active_runtime_bridges", {}).get(key)
+    if bridge is not None and not bool(getattr(bridge, "closed", False)):
+        return True
+    registry = getattr(state, "job_registry", None)
+    if registry is not None:
+        try:
+            from backend.jobs import JobState
+
+            return any(
+                info.info.state in {JobState.PENDING, JobState.RUNNING}
+                for info in registry.list_for_user(user_id, session_id=session_id)
+            )
+        except (AttributeError, TypeError):
+            return False
+    return False
 
 
 def _has_conversation_nodes(nodes: list[object]) -> bool:
@@ -343,6 +377,7 @@ def _stream(
     identity: UserIdentity | None = None,
     session_id: str | None = None,
     source_node_id: str | None = None,
+    source_node_session_id: str | None = None,
     branch: bool = False,
     mode: Literal["agent", "plan"] = "agent",
     permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None,
@@ -370,6 +405,26 @@ def _stream(
     if not isinstance(active_runtime_bridges, dict):
         active_runtime_bridges = {}
         setattr(state, "active_runtime_bridges", active_runtime_bridges)
+
+    # Reserve the session before creating the Job object.  Endpoint-level
+    # summary checks are advisory; this lock closes the two-window race where
+    # both requests otherwise pass validation and create two running leaves.
+    stream_locks = getattr(state, "active_runtime_stream_locks", None)
+    if (
+        not isinstance(stream_locks, dict)
+        or not isinstance(stream_locks.get("keys"), set)
+        or not hasattr(stream_locks.get("__lock__"), "__enter__")
+    ):
+        stream_locks = {"__lock__": threading.RLock(), "keys": set()}
+        setattr(state, "active_runtime_stream_locks", stream_locks)
+    stream_key = (identity.id if identity is not None else "", session_id or "")
+    reserved_stream_keys: set[tuple[str, str]] = {stream_key}
+    stream_lock = stream_locks["__lock__"]
+    with stream_lock:
+        if session_id and stream_key in stream_locks["keys"]:
+            raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
+        if session_id:
+            stream_locks["keys"].add(stream_key)
 
     owner_id = identity.id if identity is not None else ""
 
@@ -450,6 +505,11 @@ def _stream(
                     active_runtime_bridges.pop(old_key, None)
                     active_runtime_configs.pop(old_key, None)
             active_runtime_bridges[registry_key(bridge.session_id)] = bridge
+            new_stream_key = registry_key(bridge.session_id)
+            if new_stream_key not in reserved_stream_keys:
+                with stream_lock:
+                    stream_locks["keys"].add(new_stream_key)
+                reserved_stream_keys.add(new_stream_key)
             return
         if getattr(item, "kind", "") in _HIDDEN_RECOVERABLE_EVENTS:
             return
@@ -560,7 +620,13 @@ def _stream(
             # so validation is delegated to the node store when available.
             node_store = getattr(app, "session_store", None) or getattr(app, "store", None)
             if source_node_id and node_store is not None and session_id:
-                _validate_source_node(node_store, session_id, source_node_id, allow_branch=branch)
+                _validate_source_node(
+                    node_store,
+                    session_id,
+                    source_node_id,
+                    source_node_session_id=source_node_session_id,
+                    allow_branch=branch,
+                )
             if callable(getattr(node_store, "create_node", None)):
                 if getattr(conversation, "active_session", None) is None:
                     conversation.ensure_session(prompt or None)
@@ -571,6 +637,7 @@ def _stream(
                         session_id=active_session.session_id,
                         prompt=prompt,
                         source_node_id=source_node_id,
+                        source_node_session_id=source_node_session_id,
                         allow_branch=branch,
                         user=identity.id if identity is not None else "",
                         provider=getattr(selected_model_config, "provider", "unknown")
@@ -662,7 +729,7 @@ def _stream(
             current_run = runtime.state.current_run if runtime is not None else None
             bridge = bridge_ref["bridge"]
             if bridge is not None:
-                old_status = str(run_state.status if run_state is not None else "failed")
+                old_status = str(run_state.status if run_state is not None else "abort")
                 stop_reason = str(getattr(run_state, "stop_reason", "") or "")
                 if old_status in {"completed", "success"}:
                     requested_status = "success"
@@ -674,8 +741,8 @@ def _stream(
                     requested_status = "abort"
                     category = bridge.abort_category
                 else:
-                    requested_status = "failed"
-                    category = None
+                    requested_status = "abort"
+                    category = bridge.abort_category or "agent"
                 final_answer = (run_state.final_answer if run_state is not None else "") or ""
                 final_node = bridge.finish(
                     requested_status,
@@ -686,7 +753,7 @@ def _stream(
                 terminal_status = (
                     final_node.status
                     if final_node is not None
-                    else "failed"
+                    else "abort"
                     if getattr(bridge, "persistence_failed", False)
                     else requested_status
                 )
@@ -780,10 +847,10 @@ def _stream(
             bridge = bridge_ref["bridge"]
             if bridge is not None:
                 final_node = bridge.finish_exception(exc)
-                terminal_status = final_node.status if final_node is not None else "failed"
+                terminal_status = final_node.status if final_node is not None else "abort"
                 rendered_error = terminal_error_text(bridge.terminal_error or {}) if bridge.terminal_error else ""
-                if terminal_status == "failed":
-                    rendered_error = rendered_error or FAILED_TERMINAL_MESSAGE
+                if terminal_status == "abort":
+                    rendered_error = rendered_error or "The run was aborted because an internal error interrupted execution."
                 enqueue_terminal(
                     {
                         "type": "error",
@@ -796,9 +863,9 @@ def _stream(
                 enqueue_terminal(
                     {
                         "type": "error",
-                        "status": "failed",
-                        "error": FAILED_TERMINAL_MESSAGE,
-                        "message": FAILED_TERMINAL_MESSAGE,
+                        "status": "abort",
+                        "error": "The run was aborted because an internal error interrupted execution.",
+                        "message": "The run was aborted because an internal error interrupted execution.",
                     }
                 )
         finally:
@@ -817,6 +884,9 @@ def _stream(
                     app.close()
                 except Exception:
                     pass
+            if reserved_stream_keys:
+                with stream_lock:
+                    stream_locks["keys"].difference_update(reserved_stream_keys)
             done.set()
 
     if job_registry is not None:
@@ -859,6 +929,9 @@ def _stream(
                     job.cancel("stream disconnected")
                 except Exception:
                     pass
+            if reserved_stream_keys:
+                with stream_lock:
+                    stream_locks["keys"].difference_update(reserved_stream_keys)
 
     return generator()
 
@@ -873,13 +946,15 @@ async def chat(
     store = _store(state, identity.id)
     resolved_session_id = body.session_id
     if resolved_session_id:
-        summary = _require_active(store, resolved_session_id)
+        _require_active(store, resolved_session_id)
         try:
             state.session_workspace(identity.id, resolved_session_id)
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if summary.last_run_status == "running":
+        if _session_has_active_execution(state, identity.id, resolved_session_id):
             raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
+        # A persisted ``running`` leaf can be an orphan after a process crash;
+        # only a real in-process SSE/Job blocks a new request.
         nodes = getattr(store, "load_nodes", lambda _session_id: [])(resolved_session_id)
         has_history = _has_conversation_nodes(nodes)
         if has_history:
@@ -893,7 +968,13 @@ async def chat(
             )
         if has_history and not body.source_node_id:
             raise HTTPException(status_code=409, detail="续聊请求必须提交当前最后节点 ID。")
-        _validate_source_node(store, resolved_session_id, body.source_node_id, allow_branch=body.branch)
+        _validate_source_node(
+            store,
+            resolved_session_id,
+            body.source_node_id,
+            source_node_session_id=body.source_node_session_id,
+            allow_branch=body.branch,
+        )
     else:
         # A project conversation must always be created through the scoped
         # project endpoint.  The chat endpoint's implicit session is only for
@@ -908,6 +989,7 @@ async def chat(
             identity=identity,
             session_id=resolved_session_id,
             source_node_id=body.source_node_id,
+            source_node_session_id=body.source_node_session_id,
             branch=body.branch,
             mode=body.mode,
             interactive=body.interactive,
@@ -939,12 +1021,12 @@ async def resume(
     state: WebAppState = request.app.state.web
 
     store = _store(state, identity.id)
-    summary = _require_active(store, session_id)
+    _require_active(store, session_id)
     try:
         state.session_workspace(identity.id, session_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if summary.last_run_status == "running":
+    if _session_has_active_execution(state, identity.id, session_id):
         raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
     nodes = getattr(store, "load_nodes", lambda _session_id: [])(session_id)
     if not _has_conversation_nodes(nodes):
@@ -960,7 +1042,13 @@ async def resume(
     )
     if not body.source_node_id:
         raise HTTPException(status_code=409, detail="恢复请求必须提交当前节点 ID。")
-    _validate_source_node(store, session_id, body.source_node_id, resume=True)
+    _validate_source_node(
+        store,
+        session_id,
+        body.source_node_id,
+        source_node_session_id=body.source_node_session_id,
+        resume=True,
+    )
 
     def operation(conversation, interrupt, sink, cancel_requested, request_parameters):
         if body.rag_mode == "forced" and bool(state.settings.rag_config_for_user(identity.id).get("enabled")):
@@ -980,6 +1068,7 @@ async def resume(
             identity=identity,
             session_id=session_id,
             source_node_id=body.source_node_id,
+            source_node_session_id=body.source_node_session_id,
             mode=body.mode,
             interactive=True,
             permission_mode=body.permission_mode,

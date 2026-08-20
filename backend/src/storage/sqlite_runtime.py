@@ -26,7 +26,7 @@ class SQLiteRuntimeMixin:
     """Legacy turn persistence plus the canonical ``runtime_nodes`` store."""
 
     def create_node(self, node: TreeRuntimeState) -> None:
-        """Insert a failed placeholder node.
+        """Insert a durable running leaf placeholder.
 
         Dynamic updates are intentionally not represented here; callers use
         :class:`backend.domain.runtime_state.NodeWriter` and invoke
@@ -35,14 +35,32 @@ class SQLiteRuntimeMixin:
 
         if node.data_type == "root":
             raise ValueError("Root nodes are created only with session metadata.")
-        if node.status != "failed":
-            raise ValueError("A runtime node must be created with status='failed'.")
+        if node.status != "running":
+            raise ValueError("A runtime node must be created with status='running'.")
         if node.parent_id and self.get_node(node.parent_session_id, node.parent_id) is None:
             raise ValueError("A runtime node parent must be present in the store.")
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
             if connection.execute("SELECT 1 FROM session_meta").fetchone() is None:
                 raise ValueError(f"Unknown session: {node.session_id}")
+            if node.parent_id:
+                parent = connection.execute(
+                    "SELECT status FROM runtime_nodes WHERE session_id=? AND id=?",
+                    (node.parent_session_id, node.parent_id),
+                ).fetchone()
+                if parent is not None and str(parent[0]) == "running":
+                    raise ValueError("A running node cannot have a running child.")
+            active = connection.execute(
+                """SELECT n.id FROM runtime_nodes n
+                   WHERE n.session_id=? AND n.status='running'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM runtime_nodes c
+                       WHERE c.parent_session_id=n.session_id AND c.parent_id=n.id
+                     ) LIMIT 1""",
+                (node.session_id,),
+            ).fetchone()
+            if active is not None:
+                raise ValueError("A session may have only one running leaf.")
             connection.execute(
                 """INSERT INTO runtime_nodes (
                     session_id, parent_session_id, id, parent_id, version,
@@ -124,7 +142,7 @@ class SQLiteRuntimeMixin:
         return sorted(result.values(), key=lambda item: (item.timestamp, item.id))
 
     def finalize_node(self, node: TreeRuntimeState) -> None:
-        """Atomically replace a failed leaf with its final node."""
+        """Atomically replace a running leaf with its terminal node."""
 
         if node.data_type == "root":
             raise ValueError("Root nodes are immutable.")
@@ -137,8 +155,10 @@ class SQLiteRuntimeMixin:
             ).fetchone()
             if existing is None:
                 raise ValueError(f"Unknown runtime node: {node.session_id}/{node.id}")
-            if str(existing[0]) != "failed":
+            if str(existing[0]) != "running":
                 raise ValueError("Sealed runtime nodes are read-only.")
+            if node.status not in {"success", "abort"}:
+                raise ValueError("A runtime node can only be finalized as success or abort.")
             child = connection.execute(
                 "SELECT 1 FROM runtime_nodes WHERE parent_session_id=? AND parent_id=? LIMIT 1",
                 (node.session_id, node.id),

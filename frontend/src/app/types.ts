@@ -11,6 +11,7 @@ export interface ChatRunRequest {
   providerName?: string;
   model?: RuntimeConfigModel;
   sourceNodeId?: string;
+  sourceNodeSessionId?: string;
   branch?: boolean;
   references?: FileReference[];
 }
@@ -19,4 +20,6 @@ export interface ActiveRun {
   controller: AbortController;
   sessionId: string;
   jobId?: string;
+  stopRequested?: boolean;
+  cancelTimer?: ReturnType<typeof setTimeout>;
 }

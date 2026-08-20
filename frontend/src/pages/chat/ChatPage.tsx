@@ -4,6 +4,7 @@ import { VerticalAlignBottomOutlined } from "@ant-design/icons";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
   compactSession,
+  cancelJob,
   deleteSessionFile,
   listSkills,
   patchRuntimeConfig,
@@ -26,6 +27,7 @@ import type { FileMentionChange, FileMentionEditorHandle } from "./FileMentionEd
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import { latestTodoList } from "./todoPanel";
 import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "../../app/runtimeDetailProjection";
+import { leafNodes } from "../../app/runtimeNodeReducer";
 import { applyRunSegment } from "../../app/runSegmentReducer";
 import { DEFAULT_RUNTIME_NODE_MODEL, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
 import type {
@@ -68,6 +70,7 @@ interface RewindResult {
   content: string;
   sessionId: string;
   sourceNodeId?: string;
+  sourceNodeSessionId?: string;
   branch?: boolean;
 }
 
@@ -96,6 +99,7 @@ interface ChatRunRequest {
   providerName?: string;
   model?: RuntimeNodeModel;
   sourceNodeId?: string;
+  sourceNodeSessionId?: string;
   branch?: boolean;
   references?: FileReference[];
 }
@@ -141,6 +145,7 @@ export default function ChatPage({
   const [commandMenuDismissedFor, setCommandMenuDismissedFor] = useState<string | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingDraft, setEditingDraft] = useState("");
+  const [rewindPending, setRewindPending] = useState(false);
   const [references, setReferences] = useState<FileReference[]>([]);
   const [fileTriggerState, setFileTriggerState] = useState<FileTrigger | null>(null);
   const [fileCandidates, setFileCandidates] = useState<FileCandidate[]>([]);
@@ -154,6 +159,10 @@ export default function ChatPage({
   const editRef = useRef<TextAreaRef>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const discardedUploadUidsRef = useRef(new Set<string>());
+  const pendingRewindRef = useRef<{ conversationId: string; sessionId: string; sourceNodeId?: string; sourceNodeSessionId?: string; branch?: boolean } | null>(null);
+  const activeJobIdRef = useRef<string | null>(null);
+  const stopRequestedRef = useRef(false);
+  const stopFallbackTimerRef = useRef<number | null>(null);
 
   const messages = conversation?.messages ?? [];
   const busy = runningProp ?? localBusy;
@@ -166,15 +175,19 @@ export default function ChatPage({
   const display = configuredDisplayMode ?? "medium";
 
   const activeRuntimeNode = (() => {
-    const nodes = (conversation?.runtimeNodes ?? []).filter((node) => node.data.type !== "root");
-    if (!nodes.length) return undefined;
+    const nodes = conversation?.runtimeNodes ?? [];
+    const sessionLeaves = leafNodes(nodes, conversation?.sessionId);
+    if (!sessionLeaves.length) return undefined;
     if (conversation?.lastNodeId) {
-      const selected = nodes.find((node) => node.id === conversation.lastNodeId && node.session_id === conversation.sessionId);
+      const selected = sessionLeaves.find(
+        (node) => node.id === conversation.lastNodeId && node.session_id === conversation.sessionId,
+      );
       if (selected) return selected;
     }
-    const sorted = [...nodes].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
+    const sorted = [...sessionLeaves].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
     return sorted[sorted.length - 1];
   })();
+  const recoveryMode = !busy && (activeRuntimeNode?.status === "running" || activeRuntimeNode?.status === "abort");
 
   useEffect(() => {
     const node = activeRuntimeNode;
@@ -282,6 +295,7 @@ export default function ChatPage({
     setFileTriggerState(null);
     setFileCandidates([]);
     setPendingUploads([]);
+    pendingRewindRef.current = null;
     // Upload callbacks use the uid set above to delete files that finish after
     // the composer has moved to another conversation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -297,6 +311,7 @@ export default function ChatPage({
   function handleEditorChange(change: FileMentionChange) {
     const { prompt: value, references: inlineReferences, trigger } = change;
     setInput(value);
+    if (value !== input) pendingRewindRef.current = null;
     setReferences(inlineReferences);
     setCommandMenuDismissedFor(null);
     setActiveCommandIndex(0);
@@ -456,17 +471,26 @@ export default function ChatPage({
     prompt: string | null,
     resume = false,
     sourceNodeId?: string | null,
+    sourceNodeSessionId?: string | null,
     references?: FileReference[],
     branch = false,
   ) {
     const controller = new AbortController();
     abortRef.current = controller;
+    activeJobIdRef.current = null;
+    stopRequestedRef.current = false;
     setLocalBusy(true);
     try {
       let nodeProtocol = false;
       let sawDone = false;
       let finalNode: import("../../types").RuntimeStateNode | undefined;
       const onMessage = (message: StreamMessage) => {
+        if (message.type === "job" && message.job_id) {
+          activeJobIdRef.current = message.job_id;
+          if (stopRequestedRef.current) void cancelJob(message.job_id).catch(() => undefined);
+          return;
+        }
+        if (stopRequestedRef.current && message.type !== "done" && message.type !== "error") return;
         if (message.type === "run_segment") {
           if (message.segment) updateLast((item) => applyRunSegment(item, message.segment!), conversationId);
           const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
@@ -531,6 +555,7 @@ export default function ChatPage({
               mode,
               ragMode,
               permissionMode === "full_access",
+              sourceNodeSessionId ?? undefined,
             )
           : await streamResume(
               sessionId,
@@ -544,6 +569,7 @@ export default function ChatPage({
               mode,
               ragMode,
               permissionMode === "full_access",
+              sourceNodeSessionId ?? undefined,
             );
         if (result === "aborted") setLast({
           running: false,
@@ -570,8 +596,8 @@ export default function ChatPage({
         const chatSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
         const options = chatSourceNodeId
           ? (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, branch, references, ragMode }
-            : { sessionId, sourceNodeId: chatSourceNodeId, branch, providerName: requestProviderName, model: requestModel, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, references, ragMode })
+            ? { sessionId, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, sourceNodeSessionId: sourceNodeSessionId ?? undefined, branch, references, ragMode }
+            : { sessionId, sourceNodeId: chatSourceNodeId, sourceNodeSessionId: sourceNodeSessionId ?? undefined, branch, providerName: requestProviderName, model: requestModel, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, references, ragMode })
           // An empty tree has no dynamic runtime configuration to submit. Keep
           // the stable positional call for clients embedding ChatPage while
           // all established sessions use the explicit v0.3 config object.
@@ -608,6 +634,10 @@ export default function ChatPage({
         setLast({ error: String((error as Error).message ?? error), running: false, decision: undefined }, conversationId);
       }
     } finally {
+      if (stopFallbackTimerRef.current !== null) window.clearTimeout(stopFallbackTimerRef.current);
+      stopFallbackTimerRef.current = null;
+      activeJobIdRef.current = null;
+      stopRequestedRef.current = false;
       setLocalBusy(false);
       abortRef.current = null;
     }
@@ -619,6 +649,7 @@ export default function ChatPage({
     prompt: string | null,
     resume = false,
     sourceNodeId: string | null = conversation?.lastNodeId ?? null,
+    sourceNodeSessionId: string | null = null,
     references?: FileReference[],
     branch = false,
   ) {
@@ -634,17 +665,18 @@ export default function ChatPage({
         providerName: requestProviderName,
         model: requestModel,
         sourceNodeId: sourceNodeId ?? undefined,
+        sourceNodeSessionId: sourceNodeSessionId ?? undefined,
         branch,
         references,
       });
       return;
     }
-    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId, references, branch);
+    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId, sourceNodeSessionId, references, branch);
   }
 
   async function runPrompt(
     prompt: string,
-    target?: { conversationId: string; sessionId: string; sourceNodeId?: string; branch?: boolean },
+    target?: { conversationId: string; sessionId: string; sourceNodeId?: string; sourceNodeSessionId?: string; branch?: boolean },
     references?: FileReference[],
   ) {
     const { conversationId, sessionId } = target ?? await ensureSession();
@@ -665,6 +697,7 @@ export default function ChatPage({
       prompt,
       false,
       target ? target.sourceNodeId ?? null : conversation?.lastNodeId ?? null,
+      target ? target.sourceNodeSessionId ?? null : undefined,
       references,
       target?.branch ?? false,
     );
@@ -710,6 +743,19 @@ export default function ChatPage({
   async function send() {
     const prompt = input.trim();
     if (busy || pendingUploads.some((upload) => upload.status === "uploading")) return;
+    if (recoveryMode && conversation?.sessionId && activeRuntimeNode) {
+      await dispatchRun(
+        conversation.id,
+        conversation.sessionId,
+        null,
+        true,
+        activeRuntimeNode.id,
+        activeRuntimeNode.session_id,
+        undefined,
+        false,
+      );
+      return;
+    }
     const uploadedReferences = pendingUploads
       .filter((upload) => upload.status === "done" && upload.path)
       .map((upload) => ({ source: "upload" as const, path: upload.path! }));
@@ -722,9 +768,15 @@ export default function ChatPage({
       await executeCommand(command.name, command.argument);
       return;
     }
+    const rewindTarget = pendingRewindRef.current;
+    pendingRewindRef.current = null;
     editorRef.current?.clear();
     setReferences([]);
-    await runPrompt(prompt, undefined, mergedReferences.length > 0 ? mergedReferences : undefined);
+    await runPrompt(
+      prompt,
+      rewindTarget ? { ...rewindTarget } : undefined,
+      mergedReferences.length > 0 ? mergedReferences : undefined,
+    );
   }
 
   async function chooseDecision(request: DecisionRequest, choice: string, options?: { supplement?: string; answers?: Record<string, string[]> }) {
@@ -741,24 +793,46 @@ export default function ChatPage({
       onStopRun(conversation.id);
       return;
     }
-    abortRef.current?.abort();
+    stopRequestedRef.current = true;
+    if (activeJobIdRef.current) {
+      void cancelJob(activeJobIdRef.current).catch(() => undefined);
+    }
+    if (stopFallbackTimerRef.current === null) {
+      stopFallbackTimerRef.current = window.setTimeout(() => abortRef.current?.abort(), 2000);
+    }
     setLast({
-      running: false,
+      running: true,
       status: "已停止",
       error: "The run was aborted at the user's request.",
       decision: undefined,
     });
-    setLocalBusy(false);
+    setLocalBusy(true);
   }
 
   async function rewindMessage(messageId: string) {
-    if (!conversation || !onRewind || busy) return;
+    if (!conversation || !onRewind || busy || rewindPending) return;
     const message = conversation.messages.find((item) => item.id === messageId);
-    const result = await onRewind(conversation.id, messageId);
-    if (result === undefined) return;
-    const content = typeof result === "string" ? result : result.content;
-    editorRef.current?.restore(content, message?.references ?? []);
-    window.setTimeout(() => editorRef.current?.focus(), 0);
+    setRewindPending(true);
+    try {
+      const result = await onRewind(conversation.id, messageId);
+      if (result === undefined) return;
+      const content = typeof result === "string" ? result : result.content;
+      editorRef.current?.restore(content, message?.references ?? []);
+      pendingRewindRef.current = typeof result === "string"
+        ? { conversationId: conversation.id, sessionId: conversation.sessionId ?? conversation.id }
+        : {
+          conversationId: conversation.id,
+          sessionId: result.sessionId,
+          sourceNodeId: result.sourceNodeId,
+          sourceNodeSessionId: result.sourceNodeSessionId,
+          branch: result.branch,
+        };
+      setInput(content);
+      setReferences(message?.references ?? []);
+      window.setTimeout(() => editorRef.current?.focus(), 0);
+    } finally {
+      setRewindPending(false);
+    }
   }
 
   function beginEdit(message: ChatMessage) {
@@ -773,26 +847,32 @@ export default function ChatPage({
   }
 
   async function saveEdit(message: ChatMessage) {
-    if (!conversation || !onRewind || busy || !editingDraft.trim() || editingDraft.trim() === message.content.trim()) {
-      cancelEdit();
+    if (!conversation || !onRewind || busy || !editingDraft.trim() || rewindPending) {
+      if (!rewindPending) cancelEdit();
       return;
     }
-    const result = await onRewind(conversation.id, message.id);
-    if (result === undefined) return;
-    const nextPrompt = editingDraft.trim();
-    const sessionId = typeof result === "string" ? conversation.sessionId : result.sessionId;
-    if (!sessionId) return;
-    cancelEdit();
-    await runPrompt(
-      nextPrompt,
-      {
-        conversationId: conversation.id,
-        sessionId,
-        sourceNodeId: typeof result === "string" ? undefined : result.sourceNodeId,
+    setRewindPending(true);
+    try {
+      const result = await onRewind(conversation.id, message.id);
+      if (result === undefined) return;
+      const nextPrompt = editingDraft.trim();
+      const sessionId = typeof result === "string" ? conversation.sessionId : result.sessionId;
+      if (!sessionId) return;
+      cancelEdit();
+      await runPrompt(
+        nextPrompt,
+        {
+          conversationId: conversation.id,
+          sessionId,
+          sourceNodeId: typeof result === "string" ? undefined : result.sourceNodeId,
+          sourceNodeSessionId: typeof result === "string" ? undefined : result.sourceNodeSessionId,
           branch: typeof result === "string" ? false : Boolean(result.branch),
-      },
-      message.references,
-    );
+        },
+        message.references,
+      );
+    } finally {
+      setRewindPending(false);
+    }
   }
 
   function handleUserBubbleClick(event: ReactMouseEvent<HTMLDivElement>, message: ChatMessage) {
@@ -864,6 +944,7 @@ export default function ChatPage({
                           ref={editRef}
                           aria-label="编辑用户消息"
                           value={editingDraft}
+                          disabled={busy}
                           onChange={(event) => setEditingDraft(event.target.value)}
                           onKeyDown={(event) => {
                             if (event.key === "Escape") {
@@ -877,8 +958,8 @@ export default function ChatPage({
                           autoSize={{ minRows: 2, maxRows: 8 }}
                         />
                         <div className="message-edit-actions">
-                          <Button type="text" onClick={cancelEdit}>取消</Button>
-                          <Button type="primary" onClick={() => void saveEdit(message)} disabled={!editingDraft.trim()}>保存并重新生成</Button>
+                          <Button type="text" onClick={cancelEdit} disabled={busy}>取消</Button>
+                          <Button type="primary" loading={rewindPending} onClick={() => void saveEdit(message)} disabled={busy || !editingDraft.trim()}>保存并重新生成</Button>
                         </div>
                       </div>
                     ) : (
@@ -969,8 +1050,9 @@ export default function ChatPage({
         onCloseSettings={() => setSettingsOpen(false)}
         onStop={stop}
         onSend={() => void send()}
-        disabled={conversation?.projectId !== undefined && conversation.projectAvailable === false}
-        disabledReason={conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
+        disabled={busy || (conversation?.projectId !== undefined && conversation.projectAvailable === false)}
+        disabledReason={busy ? "当前会话正在运行，请先中止" : conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
+        startMode={recoveryMode}
         fileCandidates={fileCandidates}
         fileMenuVisible={fileMenuVisible}
         activeFileIndex={activeFileIndex}

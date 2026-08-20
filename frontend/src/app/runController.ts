@@ -37,19 +37,23 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       if (active?.controller !== controller || controller.signal.aborted) return;
       if (message.type === "job" && message.job_id) {
         if (active?.controller === controller) active.jobId = message.job_id;
+        if (active?.stopRequested) void cancelJob(message.job_id).catch(() => undefined);
         return;
       } else if ((message.type === "node.create" || message.type === "node.update" || message.type === "node.delete") && message.node) {
+        if (active?.stopRequested) return;
         nodeProtocol = true;
         const frame: RuntimeNodeFrame = { type: message.type, node: message.node };
         callbacks.applyRuntimeNodeFrame?.(frame);
         callbacks.updateConversation?.(request.conversationId, (conversation) => integrateRuntimeNodeFrame(conversation, frame));
         if (message.type === "node.delete") finalNode = message.node;
       } else if (message.type === "run_segment") {
+        if (active?.stopRequested) return;
         const segment = message.segment;
         if (segment) callbacks.updateLastMessage(request.conversationId, (item) => applyRunSegment(item, segment));
         const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
         if (runId) callbacks.updateLastMessage(request.conversationId, (item) => ({ ...item, runId }));
       } else if (message.type === "event") {
+        if (active?.stopRequested) return;
         const kind = message.kind ?? "";
         if (kind === "response_delta" && !nodeProtocol) {
           const content = (message.data?.content as string | undefined) ?? message.message ?? "";
@@ -108,10 +112,14 @@ export function createRunController(callbacks: RunControllerCallbacks) {
             request.providerName,
             request.model,
             request.mode,
+            "off",
+            false,
+            request.sourceNodeSessionId,
           )
         : await streamChat(request.prompt ?? "", onMessage, controller.signal, {
             sessionId: request.sessionId,
             sourceNodeId: request.sourceNodeId,
+            sourceNodeSessionId: request.sourceNodeSessionId,
             branch: request.branch,
             mode: request.mode,
             permissionMode: request.permissionMode,
@@ -153,18 +161,28 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       }
     } finally {
       const active = callbacks.activeRuns.get(request.conversationId);
-      if (active?.controller === controller) callbacks.activeRuns.delete(request.conversationId);
+      if (active?.controller === controller) {
+        if (active.cancelTimer) clearTimeout(active.cancelTimer);
+        callbacks.activeRuns.delete(request.conversationId);
+      }
     }
   }
 
   function stopConversation(id: string): void {
     const active = callbacks.activeRuns.get(id);
     if (!active) return;
-    if (active.jobId) void cancelJob(active.jobId).catch(() => undefined);
-    active.controller.abort();
+    active.stopRequested = true;
+    if (active.jobId) {
+      void cancelJob(active.jobId).catch(() => undefined);
+      // Keep the SSE open until the backend emits its terminal frame. This
+      // prevents a second request from racing the still-running job.
+      active.cancelTimer = setTimeout(() => active.controller.abort(), 2000);
+    } else {
+      active.cancelTimer = setTimeout(() => active.controller.abort(), 2000);
+    }
     callbacks.updateLastMessage(id, (item) => ({
       ...item,
-      running: false,
+      running: true,
       status: "已停止",
       error: "The run was aborted at the user's request.",
       decision: undefined,

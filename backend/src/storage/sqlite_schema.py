@@ -10,6 +10,10 @@ from backend.domain.runtime_state import create_root_node, session_root_id
 from .codec import is_default_session_title, normalize_session_title
 
 SCHEMA_VERSION = 7
+# Keep the structural version stable: v4 databases only need the session-root
+# migration and should not have their message tree dropped. New databases use
+# the three-state CHECK constraint below; stale failed rows are intentionally
+# outside the supported protocol and are left for user cleanup.
 RUNTIME_NODE_SCHEMA_VERSION = 4
 
 SCHEMA = """
@@ -59,7 +63,7 @@ CREATE TABLE IF NOT EXISTS runtime_nodes (
     usage_json TEXT NOT NULL,
     cwd TEXT NOT NULL DEFAULT '',
     timestamp TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('failed', 'success', 'abort')),
+    status TEXT NOT NULL CHECK (status IN ('running', 'success', 'abort')),
     data_json TEXT NOT NULL,
     PRIMARY KEY (session_id, id)
 );
@@ -142,7 +146,7 @@ class SQLiteSchemaMixin:
                     model_json TEXT NOT NULL, permission_mode TEXT NOT NULL DEFAULT 'read_only',
                     running_mode TEXT NOT NULL DEFAULT 'agent', usage_json TEXT NOT NULL,
                     cwd TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK (status IN ('failed', 'success', 'abort')),
+                    status TEXT NOT NULL CHECK (status IN ('running', 'success', 'abort')),
                     data_json TEXT NOT NULL, PRIMARY KEY (session_id, id)
                 );
                 CREATE INDEX IF NOT EXISTS runtime_nodes_session_timestamp_idx

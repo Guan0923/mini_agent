@@ -554,7 +554,7 @@ function AgentApp() {
     }
   }
 
-  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string; sourceNodeId?: string; branch?: boolean } | undefined> {
+  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string; sourceNodeId?: string; sourceNodeSessionId?: string; branch?: boolean } | undefined> {
     setActionError(null);
     const source = conversations.find((conversation) => conversation.id === id);
     if (!source) return undefined;
@@ -569,6 +569,7 @@ function AgentApp() {
         source.clientId ?? source.id,
         [],
         source.messages[index].nodeId ?? source.messages[index].sourceNodeId,
+        source.messages[index].nodeSessionId,
       );
       updateConversation(id, (conversation) => ({
         ...summaryToConversation(summary, conversation),
@@ -581,6 +582,7 @@ function AgentApp() {
         content: source.messages[index].content,
         sessionId: summary.session_id,
         sourceNodeId: summary.rewind_source_node_id,
+        sourceNodeSessionId: summary.rewind_source_session_id,
         branch: Boolean(summary.branch),
       };
     } catch (error) {

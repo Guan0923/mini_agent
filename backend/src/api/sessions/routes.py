@@ -58,6 +58,7 @@ class BranchRequest(BaseModel):
     client_id: str | None = Field(default=None, max_length=200)
     fallback_messages: list[SessionMessageInput] = Field(default_factory=list, max_length=500)
     source_node_id: str | None = Field(default=None, max_length=200)
+    source_node_session_id: str | None = Field(default=None, max_length=200)
 
 
 class TimezoneBody(BaseModel):
@@ -187,9 +188,25 @@ def _require_active(store, session_id: str):
 
 def _require_branchable(store, session_id: str):
     summary = _require_active(store, session_id)
-    if summary.last_run_status == "running":
-        raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
     return summary
+
+
+def _has_active_execution(state: WebAppState, user_id: str, session_id: str) -> bool:
+    bridge = getattr(state, "active_runtime_bridges", {}).get((user_id, session_id))
+    if bridge is not None and not bool(getattr(bridge, "closed", False)):
+        return True
+    registry = getattr(state, "job_registry", None)
+    if registry is None:
+        return False
+    try:
+        from backend.jobs import JobState
+
+        return any(
+            item.info.state in {JobState.PENDING, JobState.RUNNING}
+            for item in registry.list_for_user(user_id, session_id=session_id)
+        )
+    except (AttributeError, TypeError):
+        return False
 
 
 def _mutation_error(exc: Exception) -> HTTPException:
@@ -295,8 +312,9 @@ def patch_runtime_config(
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     summary = _require_active(store, session_id)
-    if summary.last_run_status != "running":
-        raise HTTPException(status_code=409, detail="当前会话没有正在运行的任务")
+    if not _has_active_execution(state, identity.id, session_id):
+        if summary.last_run_status != "running":
+            raise HTTPException(status_code=409, detail="当前会话没有正在运行的任务")
     if not body.has_update:
         raise HTTPException(status_code=422, detail="至少需要一个运行配置字段")
     node = store.get_node(session_id, body.node_id)
@@ -687,11 +705,16 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
                     node for node in loader(source.session_id) if str(getattr(node, "id", "")) == body.source_node_id
                 ]
                 source_node = next(
-                    (node for node in candidates if str(getattr(node, "session_id", "")) == source.session_id),
-                    candidates[0] if candidates else None,
+                    (
+                        node
+                        for node in candidates
+                        if str(getattr(node, "session_id", ""))
+                        == (body.source_node_session_id or source.session_id)
+                    ),
+                    None if body.source_node_session_id else (candidates[0] if candidates else None),
                 )
             if source_node is None:
-                source_node = store.get_node(source.session_id, body.source_node_id)
+                source_node = store.get_node(body.source_node_session_id or source.session_id, body.source_node_id)
             if source_node is None:
                 raise ValueError("指定的 source_node_id 不属于当前会话。")
             target = store.create_session(
@@ -757,6 +780,8 @@ def fork_session(
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     source = _require_branchable(store, session_id)
+    if _has_active_execution(state, identity.id, session_id):
+        raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
     _require_session_workspace(state, identity.id, source.session_id)
     target_id: str | None = None
     try:
@@ -785,12 +810,18 @@ def rewind_session(
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     source = _require_branchable(store, session_id)
+    if _has_active_execution(state, identity.id, session_id):
+        raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
     _require_session_workspace(state, identity.id, source.session_id)
     if not body.source_node_id:
         raise HTTPException(status_code=422, detail="rewind 必须提供 source_node_id")
-    target = store.get_node(source.session_id, body.source_node_id)
+    target_session_id = body.source_node_session_id or source.session_id
+    target = store.get_node(target_session_id, body.source_node_id)
     if target is None:
-        raise HTTPException(status_code=409, detail="source_node_id 不属于当前会话")
+        raise HTTPException(status_code=409, detail="source_node_id 不属于当前会话祖先树")
+    loaded = getattr(store, "load_nodes", lambda _sid: [])(source.session_id)
+    if target.key not in {getattr(item, "key", None) for item in loaded}:
+        raise HTTPException(status_code=409, detail="source_node_id 不属于当前会话祖先树")
     # The protocol names the selected message as the rewind target. Resolve its
     # parent with the complete cross-session key before returning the branch
     # anchor. Older clients sent the parent directly; accepting a root here is

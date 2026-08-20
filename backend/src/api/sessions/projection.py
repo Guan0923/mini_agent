@@ -65,7 +65,7 @@ def _terminal_error(node: Any, message: Mapping[str, Any] | None = None) -> str 
     """
 
     status = getattr(node, "status", "")
-    if status not in {"failed", "abort"}:
+    if status != "abort":
         return None
     if message is not None:
         error = message.get("error")
@@ -73,8 +73,7 @@ def _terminal_error(node: Any, message: Mapping[str, Any] | None = None) -> str 
             return terminal_error_text(error)
         if isinstance(error, str) and error:
             return error
-    fallback_status = "failed" if status == "failed" else "abort"
-    return terminal_error_text(terminal_error_payload(fallback_status))
+    return terminal_error_text(terminal_error_payload("abort"))
 
 
 def _terminal_entry(node: Any, error: str) -> dict[str, Any]:
@@ -87,6 +86,7 @@ def _terminal_entry(node: Any, error: str) -> dict[str, Any]:
         "error": error,
         "status": node.status,
         "source_node_id": node.id,
+        "node_session_id": node.session_id,
     }
 
 
@@ -179,6 +179,7 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
                 "content": content,
                 "events": [],
                 "source_node_id": node.parent_id or None,
+                "node_session_id": node.session_id,
                 "timeline_seq": timeline_seq,
                 "timeline_time": _timeline_time(node),
                 "timeline_text": _timeline_text(blocks),
@@ -214,6 +215,7 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
                 "content": "",
                 "events": [],
                 "source_node_id": node.id,
+                "node_session_id": node.session_id,
             }
             result.append(current_assistant)
         current_assistant["source_node_id"] = node.id
@@ -247,7 +249,7 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
                     }
                 )
             elif kind == "tool_result":
-                failed = block.get("status") == "failed" or node.status == "failed"
+                failed = block.get("status") == "failed"
                 if failed:
                     continue
                 current_assistant["events"].append(

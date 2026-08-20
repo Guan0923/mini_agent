@@ -14,6 +14,7 @@ export type SettingsSelectKey = "mode" | "permission" | "reasoning";
 export interface ComposerProps {
   input: string;
   busy: boolean;
+  startMode?: boolean;
   isMobile: boolean;
   filteredCommands: Array<{ name: string; label: string; description: string }>;
   commandMenuVisible: boolean;
@@ -101,13 +102,13 @@ export default function Composer(props: ComposerProps) {
 
   const settingsControls = (
     <Space className="composer-settings-controls" size={[6, 6]} wrap>
-      <Select className="mode-picker" placement="topLeft" open={props.openSettingsSelect === "mode"} aria-label="运行模式" disabled={false} value={props.mode} options={[{ value: "agent", label: "⚙ Agent" }, { value: "plan", label: "📋 Plan" }]} onChange={props.onModeChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "mode" : null)} />
-      <Select virtual={false} className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "permission"} aria-label="权限模式" disabled={false} value={props.permissionMode === "approval_for_me" ? "read_only" : props.permissionMode} options={[{ value: "read_only", label: "只读" }, { value: "workspace_write", label: "工作区读写" }, { value: "full_access", label: "完全访问" }]} onChange={props.onPermissionChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "permission" : null)} />
+      <Select className="mode-picker" placement="topLeft" open={props.openSettingsSelect === "mode"} aria-label="运行模式" disabled={props.disabled} value={props.mode} options={[{ value: "agent", label: "⚙ Agent" }, { value: "plan", label: "📋 Plan" }]} onChange={props.onModeChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "mode" : null)} />
+      <Select virtual={false} className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "permission"} aria-label="权限模式" disabled={props.disabled} value={props.permissionMode === "approval_for_me" ? "read_only" : props.permissionMode} options={[{ value: "read_only", label: "只读" }, { value: "workspace_write", label: "工作区读写" }, { value: "full_access", label: "完全访问" }]} onChange={props.onPermissionChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "permission" : null)} />
       <Space size={4} align="center">
         <Tooltip title={props.usageTotalTokens == null ? "暂无 token usage" : `${props.usageTotalTokens.toLocaleString()} / ${(props.usageContextLength ?? 0).toLocaleString()} tokens`}>
           <Progress type="circle" size={32} percent={Math.max(0, Math.min(100, props.usagePercent ?? 0))} format={() => props.usageTotalTokens == null ? "–" : props.usageTotalTokens >= 1000 ? `${(props.usageTotalTokens / 1000).toFixed(1)}k` : String(props.usageTotalTokens)} />
         </Tooltip>
-        <Select className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "reasoning"} aria-label="思考等级" disabled={false} value={props.reasoningEffort} options={(Object.keys(REASONING_LABELS) as ReasoningEffort[]).map((level) => ({ value: level, label: `${level}` }))} onChange={props.onReasoningChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "reasoning" : null)} />
+        <Select className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "reasoning"} aria-label="思考等级" disabled={props.disabled} value={props.reasoningEffort} options={(Object.keys(REASONING_LABELS) as ReasoningEffort[]).map((level) => ({ value: level, label: `${level}` }))} onChange={props.onReasoningChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "reasoning" : null)} />
       </Space>
     </Space>
   );
@@ -171,9 +172,9 @@ export default function Composer(props: ComposerProps) {
           />
           <div className="composer-toolbar composer-reveal-item" data-reveal-index="4">
             <IconAction className="file-upload-trigger" label="上传文件" icon={<PaperClipOutlined />} disabled={props.disabled || props.uploadsDisabled} onClick={openFilePicker} />
-            {props.isMobile ? <IconAction className="run-settings-trigger" label="运行设置" icon={<SettingOutlined />} disabled={false} onClick={props.onOpenSettings} /> : settingsControls}
+            {props.isMobile ? <IconAction className="run-settings-trigger" label="运行设置" icon={<SettingOutlined />} disabled={props.disabled} onClick={props.onOpenSettings} /> : settingsControls}
           </div>
-          {props.busy ? <Tooltip title="停止"><Button className="send-btn stop composer-reveal-item" data-reveal-index="5" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /> </Tooltip> : <Tooltip title={props.disabledReason || "发送"}><Button className="send-btn composer-reveal-item" data-reveal-index="5" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label="发送" onClick={props.onSend} disabled={props.disabled || props.uploadsUploading || !props.input.trim() && props.pendingUploads.every((upload) => upload.status !== "done")} /></Tooltip>}
+          {props.busy ? <Tooltip title="停止"><Button className="send-btn stop composer-reveal-item" data-reveal-index="5" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /> </Tooltip> : <Tooltip title={props.disabledReason || (props.startMode ? "开始" : "发送")}><Button className="send-btn composer-reveal-item" data-reveal-index="5" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label={props.startMode ? "开始" : "发送"} onClick={props.onSend} disabled={props.disabled || props.uploadsUploading || (!props.startMode && !props.input.trim() && props.pendingUploads.every((upload) => upload.status !== "done"))} /></Tooltip>}
         </div>
       </div>
       <Drawer className="run-settings-drawer" title="运行设置" placement="bottom" open={props.settingsOpen} onClose={props.onCloseSettings}>{settingsControls}</Drawer>
