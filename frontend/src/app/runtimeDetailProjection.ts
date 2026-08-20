@@ -96,6 +96,7 @@ export function projectRuntimeNode(node: RuntimeStateNode, terminal = true): Pro
   const events: ToolEvent[] = [];
   const answers: string[] = [];
   const reasoning: string[] = [];
+  let containsRecoverableToolFailure = false;
 
   for (const block of contentBlocks(message)) {
     const kind = String(block.type ?? "");
@@ -118,7 +119,9 @@ export function projectRuntimeNode(node: RuntimeStateNode, terminal = true): Pro
       });
     } else if (kind === "tool_result") {
       const failed = block.status === "failed";
-      if (failed) continue;
+      const denied = failed && block.failure_code === "user_denied";
+      containsRecoverableToolFailure ||= failed;
+      if (failed && !denied) continue;
       events.push({
         kind: failed ? "tool_failed" : "tool_result",
         message: textValue(block.content),
@@ -144,7 +147,7 @@ export function projectRuntimeNode(node: RuntimeStateNode, terminal = true): Pro
     content: answers.join(""),
     events,
     runId: typeof message.run_id === "string" ? message.run_id : undefined,
-    error: terminalNodeError(node, message, terminal),
+    error: terminalNodeError(node, message, terminal && !containsRecoverableToolFailure),
     references: role === "user" ? projectedReferences(message) : undefined,
   };
 }

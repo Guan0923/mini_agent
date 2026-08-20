@@ -78,6 +78,28 @@ def test_runtime_state_round_trips_complete_session_state() -> None:
     assert restored.tool_specs[0].provider_options == {"chat_completions": {"strict": True}}
 
 
+def test_runtime_state_round_trips_tool_failure_code() -> None:
+    denied = ToolMessage(
+        name="write_file",
+        call_id="call_denied",
+        arguments={"path": "a.txt", "content": ""},
+        content="The user denied this write_file tool call.",
+        status="failed",
+        retryable=False,
+        failure_code="user_denied",
+    )
+    state = RuntimeState(
+        session_id="session_denied",
+        messages=[AssistantMessage(tool_messages=[denied])],
+    )
+
+    restored = RuntimeState.from_dict(state.to_dict())
+
+    restored_assistant = restored.messages[0]
+    assert isinstance(restored_assistant, AssistantMessage)
+    assert restored_assistant.tool_messages[0] == denied
+
+
 def test_postgres_persists_and_reloads_runtime_snapshot(tmp_path: Path) -> None:
     store = session_store(tmp_path / "store")
     session = store.create_session("Runtime")

@@ -256,7 +256,7 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
 
     result: list[ChatMessage] = []
     tool_calls: dict[str, tuple[AssistantMessage, int]] = {}
-    completed_results: dict[str, tuple[str, str, str]] = {}
+    completed_results: dict[str, tuple[str, str, str, bool | None, str | None]] = {}
 
     def block_text(block: Mapping[str, Any]) -> str:
         value = block.get("text")
@@ -296,15 +296,25 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                 content = block.get("content")
                 text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
                 status = "failed" if block.get("status") == "failed" else "succeeded"
+                retryable = block.get("retryable") if isinstance(block.get("retryable"), bool) else None
+                failure_code = block.get("failure_code") if isinstance(block.get("failure_code"), str) else None
                 if target is not None:
                     assistant, index = target
                     assistant.tool_messages[index].content = text
                     assistant.tool_messages[index].status = status  # type: ignore[assignment]
+                    assistant.tool_messages[index].retryable = retryable
+                    assistant.tool_messages[index].failure_code = failure_code
                 elif call_id:
                     # A result can precede the assistant that declared the
                     # call after recovery or a split tool batch.  Hold it
                     # until the call is encountered on this path.
-                    completed_results[call_id] = (str(block.get("tool") or "unknown"), text, status)
+                    completed_results[call_id] = (
+                        str(block.get("tool") or "unknown"),
+                        text,
+                        status,
+                        retryable,
+                        failure_code,
+                    )
             continue
         if role != "assistant":
             continue
@@ -328,6 +338,8 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                 arguments=dict(block.get("arguments") or {}) if isinstance(block.get("arguments"), Mapping) else {},
                 content=completed[1] if completed is not None else None,
                 status=completed[2] if completed is not None else "pending",  # type: ignore[arg-type]
+                retryable=completed[3] if completed is not None else None,
+                failure_code=completed[4] if completed is not None else None,
             )
             tools.append(tool)
         assistant = AssistantMessage(
@@ -343,9 +355,11 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                 if completed is not None:
                     tool.content = completed[1]
                     tool.status = completed[2]  # type: ignore[assignment]
+                    tool.retryable = completed[3]
+                    tool.failure_code = completed[4]
     # Preserve genuinely orphaned results as evidence, but do not duplicate a
     # result matched to an assistant call above.
-    for call_id, (tool_name, text, status) in completed_results.items():
+    for call_id, (tool_name, text, status, retryable, failure_code) in completed_results.items():
         result.append(
             AssistantMessage(
                 content=None,
@@ -356,6 +370,8 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                         arguments={},
                         content=text,
                         status=status,  # type: ignore[arg-type]
+                        retryable=retryable,
+                        failure_code=failure_code,
                     )
                 ],
             )

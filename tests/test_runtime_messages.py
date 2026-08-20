@@ -371,6 +371,7 @@ def test_assistant_message_bounds_non_stream_content_before_tool_execution_and_i
                 "arguments": {"value": "ok"},
                 "status": "pending",
                 "retryable": None,
+                "failure_code": None,
                 "provider_options": {},
             }
         ],

@@ -18,6 +18,9 @@ from ..core.hooks import (
     ToolHookResult,
 )
 
+USER_DENIED_FAILURE_CODE = "user_denied"
+USER_DENIED_BATCH_FAILURE_CODE = "user_denied_batch"
+
 
 @dataclass(frozen=True)
 class ToolStepResult:
@@ -145,6 +148,8 @@ class ToolStepExecutor:
                     retryable=failure.retryable,
                 )
             decision = runtime.services.interrupt(request)
+            if decision.choice == "deny":
+                return self._denied(runtime, tool, decision)
             if decision.choice != "continue":
                 failure = self._failure(runtime, tool, "Tool approval was not granted.")
                 return ToolStepResult(
@@ -237,7 +242,7 @@ class ToolStepExecutor:
 
     @staticmethod
     def _hook_outcome(result: ToolStepResult) -> HookOutcome[ToolHookResult]:
-        if result.interrupt is not None:
+        if result.interrupt is not None and result.interrupt.choice != "deny":
             status = "cancelled"
         else:
             status = "succeeded" if result.success else "failed"
@@ -249,6 +254,34 @@ class ToolStepExecutor:
                 result.error,
                 result.retryable,
             ),
+        )
+
+    @staticmethod
+    def _denied(runtime: AgentRuntime, tool: str, decision: InterruptDecision) -> ToolStepResult:
+        message = runtime.state.active_message
+        index = runtime.state.active_tool_index
+        assert message is not None and index is not None
+        current = message.tool_messages[index]
+        error = f"The user denied this {tool} tool call."
+        current.status = "failed"
+        current.content = error
+        current.retryable = False
+        current.failure_code = USER_DENIED_FAILURE_CODE
+        data = {
+            "tool": tool,
+            "call_id": current.call_id,
+            "error": error,
+            "failure_code": USER_DENIED_FAILURE_CODE,
+        }
+        runtime.run.add_event("tool_failed", f"{tool} denied", **data)
+        publish = runtime.services.publish or (lambda _event: None)
+        publish(RuntimeEvent("tool_failed", error, data))
+        runtime.save()
+        return ToolStepResult(
+            success=False,
+            error=error,
+            interrupt=decision,
+            retryable=False,
         )
 
     @staticmethod

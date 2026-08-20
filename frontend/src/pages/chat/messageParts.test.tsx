@@ -138,4 +138,73 @@ describe("assistant runtime Collapse presentation", () => {
     expect(answerCode).not.toHaveClass("tool-result");
     expect(answerCode).toHaveTextContent("最终答案代码");
   });
+
+  it("shows a denied tool without exposing model feedback or skipped batch tools", async () => {
+    const message: ChatMessage = {
+      id: "assistant-denied",
+      role: "assistant",
+      content: "继续回复",
+      events: [],
+      segments: [
+        {
+          sequence: 1,
+          segment_id: "tools-denied",
+          segment_type: "tool_batch",
+          status: "failed",
+          tools: [
+            {
+              call_id: "call-denied",
+              name: "write_file",
+              arguments: { path: "a.txt", content: "" },
+              status: "failed",
+              error: "The user denied this write_file tool call.",
+              failure_code: "user_denied",
+            },
+            {
+              call_id: "call-skipped",
+              name: "run_command",
+              arguments: { command: "echo skipped" },
+              status: "failed",
+              error: "Not executed because tool execution was interrupted.",
+              failure_code: "user_denied_batch",
+            },
+          ],
+        },
+      ],
+    };
+
+    const { container } = render(
+      <AntApp>
+        <AssistantMessage
+          msg={message}
+          display="developer"
+          busy={false}
+          onDecision={vi.fn().mockResolvedValue(undefined)}
+        />
+      </AntApp>,
+    );
+
+    const header = screen.getByText("write_file · 已拒绝");
+    fireEvent.click(header);
+    await waitFor(() => expect(screen.getByText("已拒绝")).toBeInTheDocument());
+    expect(container).not.toHaveTextContent("The user denied this write_file tool call.");
+    expect(container).not.toHaveTextContent("run_command");
+  });
+
+  it("keeps a denial visible in minimal legacy details", () => {
+    const { container } = render(
+      <ToolLine
+        ev={{
+          kind: "tool_failed",
+          message: "The user denied this write_file tool call.",
+          data: { tool: "write_file", call_id: "call-denied", failure_code: "user_denied" },
+        }}
+        display="minimal"
+      />,
+    );
+
+    expect(container).toHaveTextContent("write_file");
+    expect(container).toHaveTextContent("已拒绝");
+    expect(container).not.toHaveTextContent("The user denied this write_file tool call.");
+  });
 });

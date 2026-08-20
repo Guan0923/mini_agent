@@ -51,6 +51,7 @@ export interface RunPresentationTool {
   status: RunPresentationToolStatus;
   result?: string;
   error?: string;
+  failure_code?: string;
 }
 
 export interface RunPresentationSegment {

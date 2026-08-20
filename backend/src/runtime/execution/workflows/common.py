@@ -184,7 +184,13 @@ def _publish_tool_recovery(runtime: AgentRuntime, tool: ToolMessage, error: str)
     )
 
 
-def _fail_pending_tools(runtime: AgentRuntime, message: AssistantMessage, error: str) -> None:
+def _fail_pending_tools(
+    runtime: AgentRuntime,
+    message: AssistantMessage,
+    error: str,
+    *,
+    failure_code: str | None = None,
+) -> None:
     """Close unexecuted tool calls after cancellation or steering."""
 
     for tool in message.tool_messages:
@@ -192,7 +198,31 @@ def _fail_pending_tools(runtime: AgentRuntime, message: AssistantMessage, error:
             tool.status = "failed"
             tool.content = error
             tool.retryable = False
-            _publish_tool_failure(runtime, tool, error)
+            tool.failure_code = failure_code
+            if failure_code is None:
+                _publish_tool_failure(runtime, tool, error)
+                continue
+            runtime.run.add_event(
+                "tool_failed",
+                f"{tool.name} failed",
+                tool=tool.name,
+                call_id=tool.call_id,
+                error=error,
+                failure_code=failure_code,
+            )
+            _publish(
+                runtime,
+                RuntimeEvent(
+                    "tool_failed",
+                    error,
+                    {
+                        "tool": tool.name,
+                        "call_id": tool.call_id,
+                        "error": error,
+                        "failure_code": failure_code,
+                    },
+                ),
+            )
 
 
 def _truncate(value: str) -> str:

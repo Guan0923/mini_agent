@@ -133,8 +133,28 @@ function callId(ev: ToolEvent): string {
   return typeof ev.data?.call_id === "string" ? ev.data.call_id : "";
 }
 
+function isUserDenied(value: { failure_code?: unknown }): boolean {
+  return value.failure_code === "user_denied";
+}
+
+function isHiddenRecoverableToolFailure(value: { failure_code?: unknown }): boolean {
+  return value.failure_code === "user_denied_batch";
+}
+
 export function ToolLine({ ev, display, active = false }: { ev: ToolEvent; display: DisplayMode; active?: boolean }) {
-  if (display === "minimal") return null;
+  const denied = ev.kind === "tool_failed" && isUserDenied(ev.data ?? {});
+  if (display === "minimal" && !denied) return null;
+  if (denied) {
+    const tool = String(ev.data?.tool ?? "工具");
+    return (
+      <div className="tool-line">
+        <ToolOutlined aria-hidden="true" />
+        <b>{tool}</b>
+        <span className="tool-status failed">已拒绝</span>
+        {display === "developer" && callId(ev) ? <span className="tool-call-id">call ID: {callId(ev)}</span> : null}
+      </div>
+    );
+  }
   if (ev.kind === "tool_call") {
     const tool = String(ev.data?.tool ?? ev.message ?? "工具") || "工具";
     return (
@@ -166,7 +186,7 @@ function RuntimeDetails({ msg, configuredDisplay }: { msg: ChatMessage; configur
   const [activeKey, setActiveKey] = useState<string[]>(msg.running ? ["details"] : []);
   const previousRunning = useRef(Boolean(msg.running));
   const thinking = msg.events.filter((event) => event.kind === "thinking").map((event) => event.message).filter(Boolean).join("\n\n");
-  const toolEvents = msg.events.filter((event) => ["tool_call", "tool_result"].includes(event.kind));
+  const toolEvents = msg.events.filter((event) => ["tool_call", "tool_result", "tool_failed"].includes(event.kind));
   const finishedCallIds = new Set(toolEvents.filter((event) => event.kind !== "tool_call").map(callId).filter(Boolean));
   const activeCalls = toolEvents.filter((event) => event.kind === "tool_call" && (!callId(event) || !finishedCallIds.has(callId(event))));
   const showAllTools = display === "verbose" || display === "developer";
@@ -176,7 +196,7 @@ function RuntimeDetails({ msg, configuredDisplay }: { msg: ChatMessage; configur
       ? activeCalls
       : showAllTools
         ? toolEvents
-        : [];
+        : toolEvents.filter((event) => event.kind === "tool_failed" && isUserDenied(event.data ?? {}));
   const hasDetails = Boolean(thinking || shownTools.length > 0 || msg.running);
 
   useEffect(() => {
@@ -226,7 +246,9 @@ function RuntimeDetails({ msg, configuredDisplay }: { msg: ChatMessage; configur
 }
 
 function presentationToolBody(tool: RunPresentationTool, display: DisplayMode) {
-  const status = tool.status === "pending" ? "等待执行" : tool.status === "succeeded" ? "已完成" : "失败";
+  const denied = isUserDenied(tool);
+  const status = denied ? "已拒绝" : tool.status === "pending" ? "等待执行" : tool.status === "succeeded" ? "已完成" : "失败";
+  const developerDetails = denied ? { ...tool, result: undefined, error: undefined } : tool;
   return (
     <div className="runtime-tool-body">
       <div className="tool-line">
@@ -235,8 +257,8 @@ function presentationToolBody(tool: RunPresentationTool, display: DisplayMode) {
       </div>
       {display === "verbose" || display === "developer" ? <pre className="tool-payload">{jsonText(tool.arguments)}</pre> : null}
       {tool.result && display !== "minimal" ? <pre className="tool-result">{jsonText(tool.result)}</pre> : null}
-      {tool.error ? <pre className="tool-result error-text">{tool.error}</pre> : null}
-      {display === "developer" ? <pre className="tool-payload">{jsonText(tool)}</pre> : null}
+      {tool.error && !denied ? <pre className="tool-result error-text">{tool.error}</pre> : null}
+      {display === "developer" ? <pre className="tool-payload">{jsonText(developerDetails)}</pre> : null}
     </div>
   );
 }
@@ -262,10 +284,11 @@ function RunSegments({ msg, configuredDisplay }: { msg: ChatMessage; configuredD
   }
 
   function renderToolBatch(segment: RunPresentationSegment) {
-    const tools = segment.tools ?? [];
+    const tools = (segment.tools ?? []).filter((tool) => !isHiddenRecoverableToolFailure(tool));
     if (!tools.length) return null;
     if (tools.length === 1) {
       const tool = tools[0];
+      const label = isUserDenied(tool) ? `${tool.name} · 已拒绝` : `调用 ${tool.name}`;
       return (
         <Collapse
           key={segment.segment_id}
@@ -274,7 +297,7 @@ function RunSegments({ msg, configuredDisplay }: { msg: ChatMessage; configuredD
           size="small"
           activeKey={activeKeys.includes(segment.segment_id) ? [segment.segment_id] : []}
           onChange={(keys) => toggle(segment.segment_id, keys)}
-          items={[{ key: segment.segment_id, label: `调用 ${tool.name}`, children: presentationToolBody(tool, display) }]}
+          items={[{ key: segment.segment_id, label, children: presentationToolBody(tool, display) }]}
         />
       );
     }
@@ -289,7 +312,7 @@ function RunSegments({ msg, configuredDisplay }: { msg: ChatMessage; configuredD
         items={[{
           key: segment.segment_id,
           label: "并行工具调用",
-          children: <Collapse className="runtime-collapse" ghost size="small" items={tools.map((tool) => ({ key: tool.call_id, label: `${tool.name} · ${tool.status}`, children: presentationToolBody(tool, display) }))} />,
+          children: <Collapse className="runtime-collapse" ghost size="small" items={tools.map((tool) => ({ key: tool.call_id, label: `${tool.name} · ${isUserDenied(tool) ? "已拒绝" : tool.status}`, children: presentationToolBody(tool, display) }))} />,
         }]}
       />
     );

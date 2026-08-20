@@ -11,7 +11,7 @@ from ...core.context import AgentRuntime
 from ...planning.review import REQUEST_PLAN_REVIEW_NAME
 from ..lifecycle.cancellation import cancel_if_requested
 from ..lifecycle.outcomes import cancel_run, fail_run, planning_failure_data, record_plan_feedback
-from ..steps import ToolStepExecutor
+from ..steps import USER_DENIED_BATCH_FAILURE_CODE, ToolStepExecutor
 from .budgets import _claim_model_turn, _ensure_tool_budget, _reject_over_budget_tools, _tool_batch_fits
 from .common import (
     PlanProposalResult,
@@ -90,6 +90,7 @@ class PlanProposalWorkflow(PlanControlMixin):
                 continue
             _start_assistant(runtime, response)
             steered = False
+            denied = False
             for index, tool in enumerate(response.tool_messages):
                 if cancel_if_requested(runtime):
                     return None
@@ -107,6 +108,16 @@ class PlanProposalWorkflow(PlanControlMixin):
                 if cancel_if_requested(runtime):
                     return None
                 if outcome.interrupt is not None:
+                    if outcome.interrupt.choice == "deny":
+                        _fail_pending_tools(
+                            runtime,
+                            response,
+                            "Not executed because tool execution was interrupted.",
+                            failure_code=USER_DENIED_BATCH_FAILURE_CODE,
+                        )
+                        _finish_assistant(runtime)
+                        denied = True
+                        break
                     _fail_pending_tools(runtime, response, "Not executed because tool execution was interrupted.")
                     runtime.state.active_message = None
                     runtime.state.active_tool_index = None
@@ -129,6 +140,6 @@ class PlanProposalWorkflow(PlanControlMixin):
                     error = outcome.error or "Tool failed."
                     tool.content = f"{tool.name} failed: {_truncate(error)}"
                     _publish_tool_recovery(runtime, tool, error)
-            if steered:
+            if steered or denied:
                 continue
             _finish_assistant(runtime)

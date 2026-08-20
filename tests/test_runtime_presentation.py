@@ -47,10 +47,21 @@ def test_assistant_boundary_does_not_duplicate_streamed_response():
         RuntimeEvent("response_start"),
         RuntimeEvent("response_delta", "准备调用工具"),
         RuntimeEvent("response_end"),
-        RuntimeEvent("assistant_message", data={"message": {"content": "准备调用工具", "tool_messages": [{"call_id": "a", "name": "glob", "arguments": {}}]}}),
+        RuntimeEvent(
+            "assistant_message",
+            data={
+                "message": {
+                    "content": "准备调用工具",
+                    "tool_messages": [{"call_id": "a", "name": "glob", "arguments": {}}],
+                }
+            },
+        ),
     )
     latest_by_id = {event.data["segment_id"]: event.data for event in events}
-    assert [item["segment_type"] for item in sorted(latest_by_id.values(), key=lambda item: item["sequence"])] == ["response", "tool_batch"]
+    assert [item["segment_type"] for item in sorted(latest_by_id.values(), key=lambda item: item["sequence"])] == [
+        "response",
+        "tool_batch",
+    ]
 
 
 def test_run_finished_reuses_final_response_segment():
@@ -61,3 +72,22 @@ def test_run_finished_reuses_final_response_segment():
     latest_by_id = {event.data["segment_id"]: event.data for event in events}
     assert len(latest_by_id) == 1
     assert next(iter(latest_by_id.values()))["final"] is True
+
+
+def test_user_denial_is_a_visible_failed_tool_segment():
+    events = _events(
+        RuntimeEvent(
+            "tool_failed",
+            "The user denied this write_file tool call.",
+            {
+                "call_id": "call_denied",
+                "tool": "write_file",
+                "error": "The user denied this write_file tool call.",
+                "failure_code": "user_denied",
+            },
+        )
+    )
+
+    tool = events[-1].data["tools"][0]
+    assert tool["status"] == "failed"
+    assert tool["failure_code"] == "user_denied"

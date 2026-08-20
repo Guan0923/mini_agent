@@ -51,6 +51,7 @@ class ToolMessage(Message):
     arguments: dict[str, Any] = field(default_factory=dict)
     status: ToolStatus = "pending"
     retryable: bool | None = None
+    failure_code: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -109,6 +110,7 @@ def tool_message_to_dict(message: ToolMessage) -> dict[str, Any]:
         "arguments": message.arguments,
         "status": message.status,
         "retryable": message.retryable,
+        "failure_code": message.failure_code,
         "provider_options": message.provider_options,
     }
 
@@ -129,6 +131,7 @@ def tool_message_from_dict(data: dict[str, Any], *, fallback_call_id: str | None
         arguments=dict(data.get("arguments") or {}),
         status=status,
         retryable=data.get("retryable") if isinstance(data.get("retryable"), bool) else None,
+        failure_code=data.get("failure_code") if isinstance(data.get("failure_code"), str) else None,
     )
 
 

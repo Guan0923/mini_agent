@@ -187,15 +187,19 @@ class RunPresentationTracker:
             "arguments": dict(raw.get("arguments") or {}),
             "status": status,
         }
-        item.update({
-            "name": str(raw.get("name") or raw.get("tool") or item.get("name") or "工具"),
-            "arguments": dict(raw.get("arguments") or item.get("arguments") or {}),
-            "status": status,
-        })
+        item.update(
+            {
+                "name": str(raw.get("name") or raw.get("tool") or item.get("name") or "工具"),
+                "arguments": dict(raw.get("arguments") or item.get("arguments") or {}),
+                "status": status,
+            }
+        )
         if raw.get("content") is not None or raw.get("result") is not None:
             item["result"] = str(raw.get("content") if raw.get("content") is not None else raw.get("result"))
         if raw.get("error") is not None:
             item["error"] = str(raw["error"])
+        if raw.get("failure_code") is not None:
+            item["failure_code"] = str(raw["failure_code"])
         if existing is None:
             tools.append(item)
         return batch
@@ -204,7 +208,11 @@ class RunPresentationTracker:
         batch = self._ensure_tool_batch()
         self._merge_tool(
             batch,
-            {"call_id": event.data.get("call_id"), "name": event.data.get("tool") or event.message, "arguments": event.data.get("arguments")},
+            {
+                "call_id": event.data.get("call_id"),
+                "name": event.data.get("tool") or event.message,
+                "arguments": event.data.get("arguments"),
+            },
             default_status="pending",
         )
         return batch
@@ -222,6 +230,7 @@ class RunPresentationTracker:
             "status": "failed" if failed else "succeeded",
             "result": event.data.get("result") or (event.message if not failed else None),
             "error": event.data.get("error") or (event.message if failed else None),
+            "failure_code": event.data.get("failure_code"),
         }
         self._merge_tool(batch, raw, default_status="failed" if failed else "succeeded")
         tools = batch.get("tools", [])
@@ -239,7 +248,9 @@ class RunPresentationTracker:
                     if tool.get("status") == "pending":
                         tool["status"] = "failed"
                         tool["error"] = error
-                segment["status"] = "failed" if any(t.get("status") == "failed" for t in segment.get("tools", [])) else "completed"
+                segment["status"] = (
+                    "failed" if any(t.get("status") == "failed" for t in segment.get("tools", [])) else "completed"
+                )
             else:
                 segment["status"] = "failed" if error else "completed"
             updates.append(segment)

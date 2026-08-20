@@ -584,6 +584,12 @@ class RuntimeEventNodeBridge:
             result_block["tool"] = tool_name
         if data.get("side_effect") is not None:
             result_block["side_effect"] = bool(data["side_effect"])
+        if isinstance(data.get("retryable"), bool):
+            result_block["retryable"] = data["retryable"]
+        elif data.get("failure_code") in {"user_denied", "user_denied_batch"}:
+            result_block["retryable"] = False
+        if isinstance(data.get("failure_code"), str):
+            result_block["failure_code"] = data["failure_code"]
         previous_emit = self.writer.emit
         if not emit:
             self.writer.emit = lambda _frame: None
@@ -730,7 +736,8 @@ class RuntimeEventNodeBridge:
             # terminal error arriving immediately afterwards still needs the
             # most specific category for its visible terminal explanation.
             if kind == "tool_failed":
-                self._remember_abort("tool", code="tool_failed")
+                if data.get("failure_code") not in {"user_denied", "user_denied_batch"}:
+                    self._remember_abort("tool", code="tool_failed")
                 self._persist_tool_result(message, data, status="failed", emit=False)
             return
         event_session_id = data.get("session_id")

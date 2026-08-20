@@ -87,17 +87,16 @@ class ResponsesAdapter:
                 if message.content:
                     items.append({"role": "assistant", "content": message.content})
                 for tool in message.tool_messages:
-                    if tool.status == "pending":
-                        items.append(
-                            {
-                                "type": "function_call",
-                                "id": tool.call_id,
-                                "call_id": tool.call_id,
-                                "name": tool.name,
-                                "arguments": json.dumps(tool.arguments, ensure_ascii=False, separators=(",", ":")),
-                            }
-                        )
-                    elif tool.content is not None:
+                    items.append(
+                        {
+                            "type": "function_call",
+                            "id": tool.call_id,
+                            "call_id": tool.call_id,
+                            "name": tool.name,
+                            "arguments": json.dumps(tool.arguments, ensure_ascii=False, separators=(",", ":")),
+                        }
+                    )
+                    if tool.status != "pending" and tool.content is not None:
                         items.append(
                             {
                                 "type": "function_call_output",
@@ -298,24 +297,17 @@ class MessagesAdapter:
                 messages.append({"role": "user", "content": [{"type": "text", "text": message.content or ""}]})
             elif isinstance(message, AssistantMessage):
                 blocks: list[dict[str, Any]] = []
+                results: list[dict[str, Any]] = []
                 if message.content:
                     blocks.append({"type": "text", "text": message.content})
                 for tool in message.tool_messages:
-                    if tool.status == "pending":
-                        blocks.append(
-                            {"type": "tool_use", "id": tool.call_id, "name": tool.name, "input": tool.arguments}
-                        )
-                    elif tool.content is not None:
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "tool_result", "tool_use_id": tool.call_id, "content": tool.content}
-                                ],
-                            }
-                        )
+                    blocks.append({"type": "tool_use", "id": tool.call_id, "name": tool.name, "input": tool.arguments})
+                    if tool.status != "pending" and tool.content is not None:
+                        results.append({"type": "tool_result", "tool_use_id": tool.call_id, "content": tool.content})
                 if blocks:
                     messages.append({"role": "assistant", "content": blocks})
+                if results:
+                    messages.append({"role": "user", "content": results})
         model_snapshot = config.get("model_snapshot") if isinstance(config.get("model_snapshot"), Mapping) else {}
         payload: dict[str, Any] = {
             "model": str(config.get("model") or model_snapshot.get("current_model") or self.config.model),

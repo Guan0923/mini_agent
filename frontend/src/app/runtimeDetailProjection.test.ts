@@ -106,6 +106,40 @@ describe("runtime detail projection", () => {
     expect(projectRuntimeNode(tool)?.events[0]?.kind).toBe("tool_result");
   });
 
+  it("projects user denial without a terminal error and hides other recoverable failures", () => {
+    const denied = node("denied", "assistant", {
+      role: "tool_result",
+      content: [{
+        type: "tool_result",
+        tool: "write_file",
+        call_id: "call-denied",
+        content: "The user denied this write_file tool call.",
+        status: "failed",
+        failure_code: "user_denied",
+      }],
+    }, "failed");
+    const skipped = node("skipped", "denied", {
+      role: "tool_result",
+      content: [{
+        type: "tool_result",
+        tool: "run_command",
+        call_id: "call-skipped",
+        content: "Not executed because tool execution was interrupted.",
+        status: "failed",
+        failure_code: "user_denied_batch",
+      }],
+    }, "failed");
+
+    expect(projectRuntimeNode(denied)).toMatchObject({
+      error: undefined,
+      events: [{
+        kind: "tool_failed",
+        data: { tool: "write_file", call_id: "call-denied", failure_code: "user_denied" },
+      }],
+    });
+    expect(projectRuntimeNode(skipped)).toMatchObject({ error: undefined, events: [] });
+  });
+
   it("clears a stale error when a terminal success replaces it", () => {
     const current = conversation();
     current.messages[1].error = "An unknown error caused the system to encounter an exception.";

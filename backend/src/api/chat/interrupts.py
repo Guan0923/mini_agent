@@ -179,6 +179,8 @@ def make_interactive_interrupt(
                     "supplement",
                     supplement=supplement if isinstance(supplement, str) and supplement else None,
                 )
+            if choice == "deny":
+                return InterruptDecision("deny")
             return InterruptDecision(
                 "continue" if choice in {"continue", "allow_once", "allow_session"} else "cancel",
                 supplement=supplement if isinstance(supplement, str) and supplement else None,

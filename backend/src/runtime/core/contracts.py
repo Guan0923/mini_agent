@@ -14,11 +14,12 @@ SteeringHandler = Callable[[], list[str]]
 CancellationHandler = Callable[[], bool]
 SuspensionHandler = Callable[[], bool]
 PlanReviewChoice = Literal["implement", "implement_clear_session", "cancel"]
-ToolReviewChoice = Literal["continue", "cancel", "supplement"]
+ToolReviewChoice = Literal["continue", "deny", "cancel", "supplement"]
 HumanChoice = Literal[
     "implement",
     "implement_clear_session",
     "continue",
+    "deny",
     "cancel",
     "supplement",
     "answer",

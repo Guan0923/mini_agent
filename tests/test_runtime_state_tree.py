@@ -869,6 +869,53 @@ def test_hidden_tool_failure_closes_canonical_tool_call() -> None:
     assert assistants[0].tool_messages[0].content == "command failed"
 
 
+def test_user_denial_persists_as_recoverable_canonical_tool_result() -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(store, session_id="s", prompt="hello", emit=lambda _frame: None)
+    bridge.start()
+    bridge.handle(
+        RuntimeEvent(
+            "assistant_message",
+            data={
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_messages": [{"name": "write_file", "call_id": "call_denied", "arguments": {"path": "a.txt"}}],
+                }
+            },
+        )
+    )
+    bridge.handle(
+        RuntimeEvent(
+            "tool_failed",
+            "The user denied this write_file tool call.",
+            {
+                "tool": "write_file",
+                "call_id": "call_denied",
+                "error": "The user denied this write_file tool call.",
+                "failure_code": "user_denied",
+            },
+        )
+    )
+
+    messages = _chat_messages_from_nodes(bridge.model_context())
+    assistant = next(message for message in messages if isinstance(message, AssistantMessage) and message.tool_messages)
+    denied = assistant.tool_messages[0]
+    assert denied.status == "failed"
+    assert denied.retryable is False
+    assert denied.failure_code == "user_denied"
+    assert denied.content == "The user denied this write_file tool call."
+    result_blocks = [
+        block
+        for node in store.load_nodes("s")
+        for block in node.data.get("message", {}).get("content", [])
+        if block.get("type") == "tool_result"
+    ]
+    assert result_blocks[-1]["retryable"] is False
+    assert result_blocks[-1]["failure_code"] == "user_denied"
+    assert bridge.abort_category is None
+
+
 def test_bridge_switches_to_handoff_session_without_mixing_nodes() -> None:
     store = InMemoryNodeStore()
     frames: list[NodeFrame] = []

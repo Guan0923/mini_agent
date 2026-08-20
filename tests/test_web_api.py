@@ -99,6 +99,24 @@ def test_interactive_decision_maps_plan_clear_resume_and_supplement() -> None:
     assert tool.supplement == "use read-only"
 
 
+def test_interactive_tool_denial_does_not_map_to_run_cancellation() -> None:
+    _, denied = resolve_once(InterruptRequest("tool", "review", {"tool": "write_file"}), "deny")
+    _, allowed_once = resolve_once(InterruptRequest("tool", "review", {"tool": "write_file"}), "allow_once")
+    _, allowed_session = resolve_once(InterruptRequest("tool", "review", {"tool": "write_file"}), "allow_session")
+    stopped = make_interactive_interrupt(lambda _event: None, cancel_requested=lambda: True)(
+        InterruptRequest("tool", "review", {"tool": "write_file"})
+    )
+    timed_out = make_interactive_interrupt(lambda _event: None, timeout=0.01)(
+        InterruptRequest("tool", "review", {"tool": "write_file"})
+    )
+
+    assert denied.choice == "deny"
+    assert allowed_once.choice == "continue"
+    assert allowed_session.choice == "continue"
+    assert stopped.choice == "cancel"
+    assert timed_out.choice == "cancel"
+
+
 def test_full_access_interrupt_auto_approves_tools_but_still_requests_plan() -> None:
     events: list[dict] = []
     handler = make_interactive_interrupt(events.append, timeout=1, auto_approve_tools=True)
