@@ -78,7 +78,7 @@ class ClientPaths:
 
     @property
     def projects_db(self) -> Path:
-        """Local-only project index; never included in cloud snapshots."""
+        """Local-only project index; never included in cloud event sync."""
 
         return self.root / "projects.db"
 
@@ -208,7 +208,7 @@ class ClientPaths:
 
         Older sessions stored uploads next to the workspace at
         ``runtime/<session>/uploads``.  The canonical location is now
-        ``workspace/uploads`` so workspace copies, sync snapshots, branch
+        ``workspace/uploads`` so workspace copies, event sync, branch
         creation and guest imports carry uploads automatically.  The migration
         refuses symbolic links and special files and leaves an already
         canonical session untouched.

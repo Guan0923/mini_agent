@@ -21,8 +21,11 @@ class SQLiteApprovalMixin:
     ) -> None:
         with self._connection(session_id) as connection:
             self._assert_writable(connection)
-            meta = connection.execute("SELECT session_id FROM session_meta LIMIT 1").fetchone()
-            if meta is None or str(meta[0]) != session_id:
+            meta = connection.execute(
+                "SELECT 1 FROM json_objects WHERE session_id=? AND namespace='session' AND object_id=?",
+                (session_id, session_id),
+            ).fetchone()
+            if meta is None:
                 raise ValueError(f"Unknown session: {session_id}")
             connection.execute(
                 """INSERT OR IGNORE INTO sandbox_approvals(

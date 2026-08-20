@@ -58,5 +58,8 @@ class HttpCloudEventRepository:
     def pull_events(self, user_id: str, *, session_id: str, after_revision: int) -> dict[str, object]:
         return self._client(user_id).pull_events(session_id=session_id, after_revision=after_revision)
 
+    def list_heads(self, user_id: str) -> list[dict[str, object]]:
+        return self._client(user_id).list_sync_heads()
+
 
 __all__ = ["HttpCloudEventRepository"]

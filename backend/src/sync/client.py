@@ -22,6 +22,8 @@ class SyncTransport(Protocol):
 
     def get(self, path: str) -> dict[str, object]: ...
 
+    def list_heads(self) -> list[dict[str, object]]: ...
+
 
 class RequestsSyncTransport:
     def __init__(self, base_url: str, token: str, device_id: str, *, timeout: float = 10.0) -> None:
@@ -56,6 +58,11 @@ class RequestsSyncTransport:
             raise ValueError("Sync service returned a non-object response.")
         return value
 
+    def list_heads(self) -> list[dict[str, object]]:
+        payload = self.get("/v1/sync/heads")
+        heads = payload.get("heads", [])
+        return [dict(item) for item in heads if isinstance(item, dict)] if isinstance(heads, list) else []
+
 
 class SyncClient:
     def __init__(self, device_id: str, transport: SyncTransport, key_provider=None) -> None:
@@ -66,37 +73,8 @@ class SyncClient:
     def synchronize(self, store) -> None:
         operations = store.pending_sync_operations()
         if operations:
-            acknowledgements: list[dict[str, object]] = []
             for operation in operations:
-                session_id = str(operation["session_id"])
-                events = operation.get("events", [])
-                if not isinstance(events, list):
-                    raise ValueError("Local sync operation has invalid events.")
-                if self.key_provider is None:
-                    raise ValueError("An authenticated user DEK provider is required for event synchronization.")
-                key = self.key_provider(session_id)
-                event_ids = [str(item["event_id"]) for item in events if isinstance(item, dict) and item.get("event_id")]
-                envelope = encrypt_event_batch([item for item in events if isinstance(item, dict)], key, aad=session_id)
-                result = self.transport.post(
-                    "/v1/sync/push",
-                    {
-                        "session_id": session_id,
-                        "parent_revision": int(operation.get("base_revision", 0)),
-                        "device_id": self.device_id,
-                        "event_id": str(operation["operation_id"]),
-                        "event_ids": event_ids,
-                        "envelope": envelope,
-                        "checksum": str(envelope["checksum"]),
-                    },
-                )
-                acknowledgements.append(
-                    {
-                        "session_id": session_id,
-                        "event_ids": event_ids,
-                        "revision": int(result.get("revision", result.get("head_revision", 0))),
-                    }
-                )
-            store.acknowledge_sync_operations(acknowledgements)
+                self._push_operation(store, operation)
         # Local project conversations never participate in cloud sync.  Keep
         # them out of the pull cursor as well as the push outbox so their
         # session identifiers are not disclosed to the sync service.
@@ -108,28 +86,73 @@ class SyncClient:
         pull = getattr(self.transport, "get", None)
         if not callable(pull):
             return
-        for session_id, revision in known.items():
-            result = pull(f"/v1/sync/pull?session_id={session_id}&after_revision={revision}")
-            raw_events = result.get("events", [])
-            if not isinstance(raw_events, list):
+        if hasattr(self.transport, "list_heads") or callable(getattr(self.transport, "heads", None)):
+            heads = self.transport.list_heads() if hasattr(self.transport, "list_heads") else self.transport.heads()
+            if isinstance(heads, list):
+                for head in heads:
+                    if isinstance(head, dict) and head.get("session_id"):
+                        session_id = str(head["session_id"])
+                        known.setdefault(session_id, store.remote_revision(session_id) if session_id in known else 0)
+        for session_id, revision in list(known.items()):
+            self._pull_session(store, session_id, revision)
+
+    def _push_operation(self, store, operation: dict[str, object]) -> None:
+        session_id = str(operation["session_id"])
+        events = operation.get("events", [])
+        if not isinstance(events, list) or not all(isinstance(item, dict) for item in events):
+            raise ValueError("Local sync operation has invalid events.")
+        if self.key_provider is None:
+            raise ValueError("An authenticated user DEK provider is required for event synchronization.")
+        event_ids = [str(item["event_id"]) for item in events if item.get("event_id")]
+        key = self.key_provider(session_id)
+        envelope = encrypt_event_batch(events, key, aad=session_id)
+        payload = {
+            "session_id": session_id,
+            "parent_revision": int(operation.get("base_revision", 0)),
+            "device_id": self.device_id,
+            "event_id": str(operation["operation_id"]),
+            "event_ids": event_ids,
+            "envelope": envelope,
+            "checksum": str(envelope["checksum"]),
+        }
+        try:
+            result = self.transport.post("/v1/sync/push", payload)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 409:
+                raise
+            self._pull_session(store, session_id, int(operation.get("base_revision", 0)))
+            refreshed = next(
+                (item for item in store.pending_sync_operations() if item.get("session_id") == session_id), None
+            )
+            if refreshed is None:
+                return
+            payload["parent_revision"] = int(refreshed.get("base_revision", 0))
+            result = self.transport.post("/v1/sync/push", payload)
+        revision = int(result.get("revision", result.get("head_revision", 0)))
+        store.acknowledge_sync_operations([{"session_id": session_id, "event_ids": event_ids, "revision": revision}])
+
+    def _pull_session(self, store, session_id: str, revision: int) -> None:
+        result = self.transport.get(f"/v1/sync/pull?session_id={session_id}&after_revision={revision}")
+        raw_events = result.get("events", [])
+        if not isinstance(raw_events, list):
+            return
+        if self.key_provider is None:
+            raise ValueError("An authenticated user DEK provider is required for event synchronization.")
+        key = self.key_provider(session_id)
+        for item in raw_events:
+            if not isinstance(item, dict):
                 continue
-            for item in raw_events:
-                if not isinstance(item, dict):
-                    continue
-                if self.key_provider is None:
-                    raise ValueError("An authenticated user DEK provider is required for event synchronization.")
-                key = self.key_provider(session_id)
-                events = decrypt_event_batch(item.get("envelope", {}), key, aad=session_id)
-                store.apply_sync_events(
-                    {
-                        "session_id": session_id,
-                        "revision": int(item.get("revision", 0)),
-                        "owner_device_id": self.device_id,
-                        "parent_revision": int(item.get("parent_revision", revision - 1)),
-                        "events": events,
-                    },
-                    local_device_id=self.device_id,
-                )
+            events = decrypt_event_batch(item.get("envelope", {}), key, aad=session_id)
+            store.apply_sync_events(
+                {
+                    "session_id": session_id,
+                    "revision": int(item.get("revision", 0)),
+                    "owner_device_id": str(item.get("device_id") or self.device_id),
+                    "parent_revision": int(item.get("parent_revision", revision)),
+                    "events": events,
+                },
+                local_device_id=self.device_id,
+            )
 
 
 class SyncCoordinator:

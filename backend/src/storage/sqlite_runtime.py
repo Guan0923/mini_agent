@@ -1,38 +1,23 @@
-"""Runtime turns, checkpoints, and message persistence for SQLite."""
+"""Runtime state, message and node persistence using JSON objects."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
 
-from backend.domain import RunProvenance, RunStatus, RuntimeMessage, Session
+from backend.domain import RunProvenance, RunStatus, RuntimeMessage
 from backend.domain.runtime_state import RuntimeState as TreeRuntimeState
 from backend.domain.runtime_state import session_root_id
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState
 
-from .codec import (
-    assistant_content,
-    decode_message_data,
-    decode_runtime_state,
-    encode_message_data,
-    encode_runtime_state,
-    normalize_session_title,
-)
-from .sqlite_schema import SCHEMA_VERSION
+from .codec import assistant_content, decode_runtime_state, normalize_session_title
 
 
 class SQLiteRuntimeMixin:
-    """Legacy turn persistence plus the canonical ``runtime_nodes`` store."""
+    """Persist all runtime business values as JSON objects and events."""
 
     def create_node(self, node: TreeRuntimeState) -> None:
-        """Insert a durable running leaf placeholder.
-
-        Dynamic updates are intentionally not represented here; callers use
-        :class:`backend.domain.runtime_state.NodeWriter` and invoke
-        :meth:`finalize_node` only for the terminal delete frame.
-        """
-
         if node.data_type == "root":
             raise ValueError("Root nodes are created only with session metadata.")
         if node.status != "running":
@@ -41,107 +26,51 @@ class SQLiteRuntimeMixin:
             raise ValueError("A runtime node parent must be present in the store.")
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
-            if connection.execute("SELECT 1 FROM session_meta").fetchone() is None:
-                raise ValueError(f"Unknown session: {node.session_id}")
+            self._session_document(connection, node.session_id)
+            nodes = self._objects(connection, node.session_id, "runtime_node")
             if node.parent_id:
-                parent = connection.execute(
-                    "SELECT status FROM runtime_nodes WHERE session_id=? AND id=?",
-                    (node.parent_session_id, node.parent_id),
-                ).fetchone()
-                if parent is not None and str(parent[0]) == "running":
+                parent = next(
+                    (item for item in nodes if item.id == node.parent_id and item.session_id == node.parent_session_id),
+                    None,
+                )
+                if parent is not None and parent.status == "running":
                     raise ValueError("A running node cannot have a running child.")
-            active = connection.execute(
-                """SELECT n.id FROM runtime_nodes n
-                   WHERE n.session_id=? AND n.status='running'
-                     AND NOT EXISTS (
-                       SELECT 1 FROM runtime_nodes c
-                       WHERE c.parent_session_id=n.session_id AND c.parent_id=n.id
-                     ) LIMIT 1""",
-                (node.session_id,),
-            ).fetchone()
-            if active is not None:
+            if any(
+                item.status == "running"
+                and not any(
+                    child.parent_session_id == item.session_id and child.parent_id == item.id for child in nodes
+                )
+                for item in nodes
+            ):
                 raise ValueError("A session may have only one running leaf.")
-            connection.execute(
-                """INSERT INTO runtime_nodes (
-                    session_id, parent_session_id, id, parent_id, version,
-                    first_kept_entry_id, compaction_idx, user, provider_name, model_json,
-                    permission_mode, running_mode, usage_json, cwd, timestamp, status, data_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                self._node_values(node),
-            )
-            connection.execute("UPDATE session_meta SET updated_at=?", (node.timestamp,))
-            self._queue(
-                connection,
-                node.session_id,
-                kind="node_upserted",
-                payload={"node": node.to_dict()},
-                object_namespace="runtime_node",
-                object_id=node.id,
-            )
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+            self._touch_session(connection, node.session_id, node.timestamp)
+            self._append_event(connection, node.session_id, kind="node_upserted", payload={"node": node.to_dict()})
 
     def get_node(self, session_id: str, node_id: str) -> TreeRuntimeState | None:
+        if not self.paths.session_db(session_id).exists():
+            return None
         with self._connection(session_id) as connection:
-            row = connection.execute(
-                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json "
-                "FROM runtime_nodes WHERE session_id=? AND id=?",
-                (session_id, node_id),
-            ).fetchone()
-        return self._node_from_row(row) if row is not None else None
+            value = self._json_object(connection, session_id, "runtime_node", node_id)
+        return TreeRuntimeState.from_dict(value) if value is not None else None
 
     def get_session_root(self, session_id: str) -> TreeRuntimeState | None:
-        """Return the deterministic root owned by a session."""
-
         return self.get_node(session_id, session_root_id(session_id))
 
     def list_children(self, parent_session_id: str, parent_id: str) -> list[TreeRuntimeState]:
-        """Query children using the cross-session parent reference."""
-
-        path = self.paths.session_db(parent_session_id)
-        if not path.exists():
-            return []
-        with self._connection(parent_session_id) as connection:
-            rows = connection.execute(
-                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json "
-                "FROM runtime_nodes WHERE parent_session_id=? AND parent_id=? ORDER BY timestamp,id",
-                (parent_session_id, parent_id),
-            ).fetchall()
-        # The query above finds same-session children.  Fork roots live in a
-        # different database, so scan the local session directories as well;
-        # this remains bounded by the user's local session set.
-        result = [self._node_from_row(row) for row in rows]
-        for directory in self.paths.root.iterdir():
-            if (
-                not directory.is_dir()
-                or not directory.name.startswith("session_")
-                or directory.name == parent_session_id
-            ):
-                continue
-            if not (directory / "state.db").exists():
-                continue
-            with self._connection(directory.name) as connection:
-                rows = connection.execute(
-                    "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json "
-                    "FROM runtime_nodes WHERE parent_session_id=? AND parent_id=? ORDER BY timestamp,id",
-                    (parent_session_id, parent_id),
-                ).fetchall()
-            result.extend(self._node_from_row(row) for row in rows)
-        return result
+        result: list[TreeRuntimeState] = []
+        for summary in self.list_sessions(state="all"):
+            with self._connection(summary.session_id) as connection:
+                for value in self._objects(connection, summary.session_id, "runtime_node"):
+                    if value.parent_session_id == parent_session_id and value.parent_id == parent_id:
+                        result.append(value)
+        return sorted(result, key=lambda item: (item.timestamp, item.id))
 
     def load_nodes(self, session_id: str) -> list[TreeRuntimeState]:
+        if not self.paths.session_db(session_id).exists():
+            return []
         with self._connection(session_id) as connection:
-            objects = connection.execute(
-                "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace='runtime_node' ORDER BY updated_at,object_id",
-                (session_id,),
-            ).fetchall()
-            if objects:
-                nodes = [TreeRuntimeState.from_dict(json.loads(str(row[0]))) for row in objects]
-            else:
-                rows = connection.execute(
-                    "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json "
-                    "FROM runtime_nodes ORDER BY timestamp,id"
-                ).fetchall()
-                nodes = [self._node_from_row(row) for row in rows]
+            nodes = self._objects(connection, session_id, "runtime_node")
         result = {node.key: node for node in nodes}
         pending = list(result.values())
         while pending:
@@ -149,7 +78,7 @@ class SQLiteRuntimeMixin:
             if not node.parent_id:
                 continue
             key = (node.parent_session_id, node.parent_id)
-            if key in result:
+            if key in result or not self.paths.session_db(node.parent_session_id).exists():
                 continue
             parent = self.get_node(*key)
             if parent is not None:
@@ -158,132 +87,30 @@ class SQLiteRuntimeMixin:
         return sorted(result.values(), key=lambda item: (item.timestamp, item.id))
 
     def finalize_node(self, node: TreeRuntimeState) -> None:
-        """Atomically replace a running leaf with its terminal node."""
-
         if node.data_type == "root":
             raise ValueError("Root nodes are immutable.")
         if self.list_children(node.session_id, node.id):
             raise ValueError("Only a leaf runtime node can be finalized.")
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
-            existing = connection.execute(
-                "SELECT status FROM runtime_nodes WHERE session_id=? AND id=?", (node.session_id, node.id)
-            ).fetchone()
+            existing = self._json_object(connection, node.session_id, "runtime_node", node.id)
             if existing is None:
                 raise ValueError(f"Unknown runtime node: {node.session_id}/{node.id}")
-            if str(existing[0]) != "running":
+            if str(existing.get("status")) != "running":
                 raise ValueError("Sealed runtime nodes are read-only.")
             if node.status not in {"success", "abort"}:
                 raise ValueError("A runtime node can only be finalized as success or abort.")
-            child = connection.execute(
-                "SELECT 1 FROM runtime_nodes WHERE parent_session_id=? AND parent_id=? LIMIT 1",
-                (node.session_id, node.id),
-            ).fetchone()
-            if child is not None:
-                raise ValueError("Only a leaf runtime node can be finalized.")
-            connection.execute(
-                """UPDATE runtime_nodes SET parent_session_id=?, parent_id=?, version=?,
-                    first_kept_entry_id=?, compaction_idx=?, user=?, provider_name=?, model_json=?,
-                    permission_mode=?, running_mode=?, usage_json=?, cwd=?, timestamp=?, status=?, data_json=?
-                    WHERE session_id=? AND id=?""",
-                (
-                    node.parent_session_id,
-                    node.parent_id,
-                    node.version,
-                    node.firstKeptEntryId,
-                    node.compactionIdx,
-                    node.user,
-                    node.provider_name,
-                    json.dumps(node.model, ensure_ascii=False, separators=(",", ":")),
-                    node.permission_mode,
-                    node.running_mode,
-                    json.dumps(node.usage, ensure_ascii=False, separators=(",", ":")),
-                    node.cwd,
-                    node.timestamp,
-                    node.status,
-                    json.dumps(node.data, ensure_ascii=False, separators=(",", ":")),
-                    node.session_id,
-                    node.id,
-                ),
-            )
-            connection.execute("UPDATE session_meta SET updated_at=?", (node.timestamp,))
-            self._queue(
-                connection,
-                node.session_id,
-                kind="node_finalized",
-                payload={"node": node.to_dict()},
-                object_namespace="runtime_node",
-                object_id=node.id,
-            )
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+            self._touch_session(connection, node.session_id, node.timestamp)
+            self._append_event(connection, node.session_id, kind="node_finalized", payload={"node": node.to_dict()})
 
     def runtime_state_document(self, session_id: str) -> dict[str, object]:
-        """Return the new sync shape; no legacy runtime tables are included."""
-
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Unknown session: {session_id}")
         if session.local_only:
             raise ValueError("Local-only sessions are excluded from cloud sync.")
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "session": {
-                "session_id": session.session_id,
-                "title": session.title,
-                "title_is_custom": session.title_is_custom,
-                "created_at": session.created_at,
-                "updated_at": session.updated_at,
-                "client_id": session.client_id,
-                "owner_device_id": self.device_id,
-            },
-            "nodes": [node.to_dict() for node in self.load_nodes(session_id) if node.session_id == session_id],
-        }
-
-    @staticmethod
-    def _node_values(node: TreeRuntimeState) -> tuple[object, ...]:
-        return (
-            node.session_id,
-            node.parent_session_id,
-            node.id,
-            node.parent_id,
-            node.version,
-            node.firstKeptEntryId,
-            node.compactionIdx,
-            node.user,
-            node.provider_name,
-            json.dumps(node.model, ensure_ascii=False, separators=(",", ":")),
-            node.permission_mode,
-            node.running_mode,
-            json.dumps(node.usage, ensure_ascii=False, separators=(",", ":")),
-            node.cwd,
-            node.timestamp,
-            node.status,
-            json.dumps(node.data, ensure_ascii=False, separators=(",", ":")),
-        )
-
-    @staticmethod
-    def _node_from_row(row: sqlite3.Row | tuple[object, ...]) -> TreeRuntimeState:
-        return TreeRuntimeState.from_dict(
-            {
-                "session_id": row[0],
-                "parent_session_id": row[1],
-                "id": row[2],
-                "parent_id": row[3],
-                "version": row[4],
-                "firstKeptEntryId": row[5],
-                "compactionIdx": row[6],
-                "user": row[7],
-                "provider_name": row[8],
-                "model": json.loads(str(row[9])),
-                "permission_mode": row[10],
-                "running_mode": row[11],
-                "usage": json.loads(str(row[12])),
-                "cwd": row[13],
-                "timestamp": row[14],
-                "status": row[15],
-                "data": json.loads(str(row[16])),
-            }
-        )
+        return self._build_baseline_for_runtime(session_id)
 
     def start_turn(
         self,
@@ -298,57 +125,27 @@ class SQLiteRuntimeMixin:
         origin = provenance or RunProvenance(workflow_id=run_id, trigger="legacy")
         with self._connection(session_id) as connection:
             self._assert_writable(connection)
-            meta = connection.execute("SELECT title, title_is_custom FROM session_meta").fetchone()
-            if meta is None:
-                raise ValueError(f"Unknown session: {session_id}")
-            title = str(meta[0])
-            # Automatic naming applies only while the full parent chain has no
-            # user message, so the first prompt of a fresh conversation (and of
-            # a rewind that undid its first user message) becomes the title.
-            # The legacy session_messages projection is checked for the current
-            # session only; cross-session ancestors always carry canonical
-            # runtime_nodes and are walked through the deterministic roots.
-            if not bool(meta[1]) and not self._chain_has_user_message(connection, session_id):
-                title = normalize_session_title(task)
-            connection.execute(
-                """INSERT INTO session_runs VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(run_id) DO UPDATE SET task=excluded.task,status='running',updated_at=excluded.updated_at""",
-                (
-                    run_id,
-                    task,
-                    origin.workflow_id,
-                    origin.attempt,
-                    origin.trigger,
-                    origin.source_session_id,
-                    origin.source_run_id,
-                    timestamp,
-                    timestamp,
-                ),
-            )
+            document = self._session_document(connection, session_id)
+            if not bool(document.get("title_is_custom")) and not self._chain_has_user_message(connection, session_id):
+                document["title"] = normalize_session_title(task)
+            run = {
+                "run_id": run_id,
+                "task": task,
+                "status": "running",
+                "workflow_id": origin.workflow_id,
+                "attempt": origin.attempt,
+                "origin_kind": origin.trigger,
+                "source_session_id": origin.source_session_id,
+                "source_run_id": origin.source_run_id,
+                "started_at": timestamp,
+                "updated_at": timestamp,
+            }
+            self._put_json_object(connection, session_id, "run", run_id, run, timestamp)
+            self._append_event(connection, session_id, kind="run_upserted", payload={"run": run})
             if append_user_message:
-                connection.execute(
-                    "INSERT INTO session_messages(run_id,role,content,created_at) "
-                    "SELECT ?, 'user', ?, ? WHERE NOT EXISTS "
-                    "(SELECT 1 FROM session_messages WHERE run_id=? AND role='user')",
-                    (run_id, task, timestamp, run_id),
-                )
-                self._queue(
-                    connection,
-                    session_id,
-                    kind="runtime_message_appended",
-                    payload={
-                        "run_id": run_id,
-                        "sequence": 1,
-                        "kind": "user",
-                        "message": task,
-                        "data": {},
-                        "created_at": timestamp,
-                    },
-                    object_namespace="runtime_message",
-                    object_id=f"{run_id}:1",
-                )
-            connection.execute("UPDATE session_meta SET title=?, updated_at=?", (title, timestamp))
-            self._queue(
+                self._append_turn_message(connection, session_id, run_id, "user", task, timestamp)
+            self._write_session_document(connection, session_id, document)
+            self._append_event(
                 connection,
                 session_id,
                 kind="turn_started",
@@ -367,69 +164,47 @@ class SQLiteRuntimeMixin:
             )
 
     def _chain_has_user_message(self, connection: sqlite3.Connection, session_id: str) -> bool:
-        """Return whether the full parent chain contains a user message.
-
-        Walks the deterministic session roots upward so fork/rewind ancestors
-        that live in a different session database are included.  The caller's
-        connection is reused for the current session (opening a second
-        connection to the same database would hit the migration write lock);
-        ancestor databases are opened individually.  The chain is bounded by
-        the user's local session set, so a cycle is impossible.
-        """
-
         visited: set[str] = set()
         current = session_id
         while current and current not in visited:
             visited.add(current)
             if current == session_id:
-                found, parent_session = self._chain_query(connection, current)
-            else:
-                if not self.paths.session_db(current).exists():
-                    return False
+                found, parent = self._chain_query(connection, current)
+            elif self.paths.session_db(current).exists():
                 with self._connection(current) as ancestor:
-                    found, parent_session = self._chain_query(ancestor, current)
+                    found, parent = self._chain_query(ancestor, current)
+            else:
+                return False
             if found:
                 return True
-            if parent_session is None:
-                return False
-            current = parent_session
+            current = parent or ""
         return False
 
     @staticmethod
     def _chain_query(connection: sqlite3.Connection, session_id: str) -> tuple[bool, str | None]:
-        """Query one chain session for a user message and its root parent."""
-
-        if (
-            connection.execute(
-                "SELECT 1 FROM runtime_nodes "
-                "WHERE json_extract(data_json, '$.type')='message' "
-                "AND json_extract(data_json, '$.message.role')='user' LIMIT 1"
-            ).fetchone()
-            is not None
-            or connection.execute("SELECT 1 FROM session_messages WHERE role='user' LIMIT 1").fetchone()
-            is not None
-        ):
+        found = connection.execute(
+            "SELECT 1 FROM json_objects WHERE namespace='runtime_node' AND json_extract(payload_json,'$.data.type')='message' AND json_extract(payload_json,'$.data.message.role')='user' LIMIT 1"
+        ).fetchone()
+        if found is not None:
             return True, None
-        parent_row = connection.execute(
-            "SELECT parent_session_id FROM runtime_nodes WHERE id=?",
+        root = connection.execute(
+            "SELECT payload_json FROM json_objects WHERE namespace='runtime_node' AND object_id=?",
             (session_root_id(session_id),),
         ).fetchone()
-        if parent_row is None or not str(parent_row[0]):
+        if root is None:
             return False, None
-        return False, str(parent_row[0])
+        payload = json.loads(str(root[0]))
+        return False, str(payload.get("parent_session_id") or "") or None
 
     def append_turn_input(self, session_id: str, run_id: str, content: str) -> None:
         with self._connection(session_id) as connection:
             self._assert_writable(connection)
-            if connection.execute("SELECT 1 FROM session_runs WHERE run_id=?", (run_id,)).fetchone() is None:
+            if self._json_object(connection, session_id, "run", run_id) is None:
                 raise ValueError(f"Unknown session run: {run_id}")
             timestamp = utc_now()
-            connection.execute(
-                "INSERT INTO session_messages(run_id,role,content,created_at) VALUES (?, 'user', ?, ?)",
-                (run_id, content, timestamp),
-            )
-            connection.execute("UPDATE session_meta SET updated_at=?", (timestamp,))
-            self._queue(
+            self._append_turn_message(connection, session_id, run_id, "user", content, timestamp)
+            self._touch_session(connection, session_id, timestamp)
+            self._append_event(
                 connection,
                 session_id,
                 kind="turn_input_appended",
@@ -440,42 +215,18 @@ class SQLiteRuntimeMixin:
         timestamp = utc_now()
         with self._connection(session_id) as connection:
             self._assert_writable(connection)
-            if (
-                connection.execute(
-                    "UPDATE session_runs SET status=?, updated_at=? WHERE run_id=?", (status, timestamp, run_id)
-                ).rowcount
-                == 0
-            ):
+            run = self._json_object(connection, session_id, "run", run_id)
+            if run is None:
                 raise ValueError(f"Unknown session run: {run_id}")
             content = assistant_content(status, answer)
-            if (
-                connection.execute(
-                    "UPDATE session_messages SET content=?,created_at=? WHERE run_id=? AND role='assistant'",
-                    (content, timestamp, run_id),
-                ).rowcount
-                == 0
-            ):
-                connection.execute(
-                    "INSERT INTO session_messages(run_id,role,content,created_at) VALUES (?, 'assistant', ?, ?)",
-                    (run_id, content, timestamp),
-                )
-            self._queue(
-                connection,
-                session_id,
-                kind="runtime_message_appended",
-                payload={
-                    "run_id": run_id,
-                    "sequence": 2,
-                    "kind": "assistant",
-                    "message": content,
-                    "data": {"status": str(status)},
-                    "created_at": timestamp,
-                },
-                object_namespace="runtime_message",
-                object_id=f"{run_id}:2",
+            run.update({"status": str(status), "updated_at": timestamp})
+            self._put_json_object(connection, session_id, "run", run_id, run, timestamp)
+            self._append_event(connection, session_id, kind="run_upserted", payload={"run": run})
+            self._append_turn_message(
+                connection, session_id, run_id, "assistant", content, timestamp, data={"status": str(status)}
             )
-            connection.execute("UPDATE session_meta SET updated_at=?", (timestamp,))
-            self._queue(
+            self._touch_session(connection, session_id, timestamp)
+            self._append_event(
                 connection,
                 session_id,
                 kind="turn_finished",
@@ -492,96 +243,105 @@ class SQLiteRuntimeMixin:
 
     def _save_state(self, state: RuntimeState, reason: str) -> None:
         timestamp = utc_now()
-        payload = encode_runtime_state(state)
+        full_payload = state.to_dict(include_runtime_messages=True)
+        previous_payload: dict[str, object] = {}
+        reduced_payload = state.to_dict(include_runtime_messages=False)
+        # Messages and runtime messages have independent append-only objects;
+        # the state event is deliberately not an ever-growing transcript.
+        reduced_payload.pop("messages", None)
+        reduced_payload.pop("run_history", None)
+        if reduced_payload.get("current_run"):
+            for key in ("history", "actions", "events", "runtime_messages", "subagent_batches"):
+                reduced_payload["current_run"].pop(key, None)
         with self._connection(state.session_id) as connection:
             self._assert_writable(connection)
-            if connection.execute("SELECT 1 FROM session_meta").fetchone() is None:
-                raise ValueError(f"Unknown session: {state.session_id}")
-            connection.execute(
-                "INSERT INTO session_runtime VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at",
-                (state.session_id, payload, timestamp),
+            self._session_document(connection, state.session_id)
+            previous_payload = self._json_object(connection, state.session_id, "runtime_state", state.session_id) or {}
+            self._put_json_object(
+                connection, state.session_id, "runtime_state", state.session_id, full_payload, timestamp
             )
             run = state.current_run
             if run is not None:
-                # Resume reconstruction creates a new RunState before the
-                # execution loop emits its first checkpoint.  Register that
-                # attempt in the per-session run index before updating its
-                # status; otherwise the first durable event (and the final
-                # answer) is rejected as an unknown run.
-                existing_run = connection.execute("SELECT 1 FROM session_runs WHERE run_id=?", (run.run_id,)).fetchone()
-                if existing_run is None:
-                    provenance = run.provenance
-                    connection.execute(
-                        """INSERT INTO session_runs
-                        (run_id, task, status, workflow_id, attempt, origin_kind,
-                         source_session_id, source_run_id, started_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            run.run_id,
-                            run.task,
-                            run.status,
-                            provenance.workflow_id,
-                            provenance.attempt,
-                            provenance.trigger,
-                            provenance.source_session_id,
-                            provenance.source_run_id,
-                            timestamp,
-                            timestamp,
-                        ),
-                    )
-                connection.execute(
-                    "INSERT INTO runs VALUES (?, ?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,state_json=excluded.state_json,updated_at=excluded.updated_at",
-                    (run.run_id, run.status, payload, timestamp),
+                run_payload = run.to_dict(include_runtime_messages=False)
+                run_payload.update(
+                    {"run_id": run.run_id, "task": run.task, "status": run.status, "updated_at": timestamp}
                 )
-                connection.execute(
-                    "UPDATE session_runs SET status=?, updated_at=? WHERE run_id=?",
-                    (run.status, timestamp, run.run_id),
+                self._put_json_object(connection, state.session_id, "run", run.run_id, run_payload, timestamp)
+                previous_run = previous_payload.get("current_run")
+                previous_messages = (
+                    previous_run.get("runtime_messages", [])
+                    if isinstance(previous_run, dict) and isinstance(previous_run.get("runtime_messages"), list)
+                    else []
                 )
-                self._save_runtime_messages(connection, run.runtime_messages, run.run_id)
-            connection.execute("UPDATE session_meta SET updated_at=?", (timestamp,))
-            state_payload = state.to_dict(include_runtime_messages=False)
-            # Chat history and audit messages have their own immutable append
-            # events; keeping them out of this state delta prevents a growing
-            # conversation from being copied into every checkpoint event.
-            state_payload["messages"] = []
-            self._queue(
+                previous_sequences = {
+                    int(item.get("sequence", 0)) for item in previous_messages if isinstance(item, dict)
+                }
+                for message in run.runtime_messages:
+                    if message.sequence in previous_sequences:
+                        continue
+                    self._put_runtime_message(connection, state.session_id, run.run_id, message)
+            self._touch_session(connection, state.session_id, timestamp)
+            self._append_event(
                 connection,
                 state.session_id,
                 kind="runtime_state_saved",
-                payload={
-                    "reason": reason,
-                    "state": state_payload,
-                    "run_id": run.run_id if run is not None else None,
-                },
+                payload={"reason": reason, "state": reduced_payload, "run_id": run.run_id if run else None},
             )
-            self._put_json_object(connection, state.session_id, "runtime_state", state.session_id, json.loads(payload), timestamp)
+            delta = self._runtime_state_delta(previous_payload, full_payload, run.run_id if run else None)
+            if delta:
+                self._append_event(connection, state.session_id, kind="runtime_state_delta", payload=delta)
             if run is not None:
-                checkpoint_payload = {
-                    "run_id": run.run_id,
-                    "reason": reason,
-                    "state": state_payload,
-                    "created_at": timestamp,
-                }
-                self._queue(
+                checkpoint = {"run_id": run.run_id, "reason": reason, "state": reduced_payload, "created_at": timestamp}
+                self._put_json_object(
+                    connection,
+                    state.session_id,
+                    "checkpoint",
+                    f"{run.run_id}:{timestamp}:{reason}",
+                    checkpoint,
+                    timestamp,
+                )
+                self._append_event(
                     connection,
                     state.session_id,
                     kind="checkpoint_recorded",
-                    payload=checkpoint_payload,
-                    object_namespace="checkpoint",
-                    object_id=f"{run.run_id}:{timestamp}:{reason}",
+                    payload=checkpoint,
                 )
+
+    @staticmethod
+    def _runtime_state_delta(
+        previous: dict[str, object], current: dict[str, object], run_id: str | None
+    ) -> dict[str, object] | None:
+        """Return only newly appended runtime history for cloud replay."""
+
+        delta: dict[str, object] = {"run_id": run_id}
+        old_history = previous.get("run_history") if isinstance(previous.get("run_history"), list) else []
+        new_history = current.get("run_history") if isinstance(current.get("run_history"), list) else []
+        if len(new_history) > len(old_history):
+            delta["run_history_append"] = new_history[len(old_history) :]
+        old_run = previous.get("current_run") if isinstance(previous.get("current_run"), dict) else {}
+        new_run = current.get("current_run") if isinstance(current.get("current_run"), dict) else {}
+        for field in ("history", "actions", "events"):
+            old_values = old_run.get(field) if isinstance(old_run.get(field), list) else []
+            new_values = new_run.get(field) if isinstance(new_run.get(field), list) else []
+            common = 0
+            while common < len(old_values) and common < len(new_values) and old_values[common] == new_values[common]:
+                common += 1
+            if common < len(new_values):
+                delta[f"{field}_from"] = common
+                delta[f"{field}_values"] = new_values[common:]
+        old_batches = old_run.get("subagent_batches") if isinstance(old_run.get("subagent_batches"), dict) else {}
+        new_batches = new_run.get("subagent_batches") if isinstance(new_run.get("subagent_batches"), dict) else {}
+        changed_batches = {str(key): value for key, value in new_batches.items() if old_batches.get(key) != value}
+        if changed_batches:
+            delta["subagent_batches_upsert"] = changed_batches
+        return delta if len(delta) > 1 else None
 
     def load_runtime(self, session_id: str) -> RuntimeState | None:
         with self._connection(session_id) as connection:
-            row = connection.execute(
-                "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace='runtime_state' LIMIT 1",
-                (session_id,),
-            ).fetchone()
-            if row is None:
-                row = connection.execute("SELECT state_json FROM session_runtime").fetchone()
-        if row is None:
+            payload = self._json_object(connection, session_id, "runtime_state", session_id)
+        if payload is None:
             return None
-        state = decode_runtime_state(str(row[0]))
+        state = decode_runtime_state(json.dumps(payload, ensure_ascii=False))
         if state.current_run is not None:
             state.current_run.runtime_messages = self.load_runtime_messages(session_id, state.current_run.run_id)
         return state
@@ -589,70 +349,114 @@ class SQLiteRuntimeMixin:
     def append_runtime_message(self, session_id: str, run_id: str, message: RuntimeMessage) -> None:
         with self._connection(session_id) as connection:
             self._assert_writable(connection)
-            if connection.execute("SELECT 1 FROM session_runs WHERE run_id=?", (run_id,)).fetchone() is None:
+            if self._json_object(connection, session_id, "run", run_id) is None:
                 raise ValueError(f"Unknown session run: {run_id}")
-            self._insert_runtime_message(connection, message, run_id)
-            connection.execute("UPDATE session_meta SET updated_at=?", (message.timestamp,))
-            self._queue(
-                connection,
-                session_id,
-                kind="runtime_message_appended",
-                payload={
-                    "run_id": run_id,
-                    "sequence": message.sequence,
-                    "kind": message.kind,
-                    "message": message.message,
-                    "data": message.data,
-                    "created_at": message.timestamp,
-                },
-                object_namespace="runtime_message",
-                object_id=f"{run_id}:{message.sequence}",
-            )
-            self._put_json_object(
-                connection,
-                session_id,
-                "runtime_message",
-                f"{run_id}:{message.sequence}",
-                {
-                    "run_id": run_id,
-                    "sequence": message.sequence,
-                    "kind": message.kind,
-                    "message": message.message,
-                    "data": message.data,
-                    "created_at": message.timestamp,
-                },
-                message.timestamp,
-            )
+            self._put_runtime_message(connection, session_id, run_id, message)
+            self._touch_session(connection, session_id, message.timestamp)
 
     def load_runtime_messages(self, session_id: str, run_id: str | None = None) -> list[RuntimeMessage]:
         with self._connection(session_id) as connection:
-            objects = connection.execute(
-                "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace='runtime_message' ORDER BY object_id",
-                (session_id,),
-            ).fetchall()
-            if objects:
-                values = [json.loads(str(row[0])) for row in objects]
-                if run_id is not None:
-                    values = [item for item in values if str(item.get("run_id") or "") == run_id]
-                return [
-                    RuntimeMessage(
-                        int(item.get("sequence", 0)),
-                        str(item.get("kind") or ""),
-                        str(item.get("message") or ""),
-                        str(item.get("created_at") or utc_now()),
-                        dict(item.get("data") or {}),
-                    )
-                    for item in values
-                ]
-            query = "SELECT sequence, kind, message, data_json, created_at FROM runtime_messages"
-            values: tuple[object, ...] = () if run_id is None else (run_id,)
-            if run_id is not None:
-                query += " WHERE run_id=?"
-            rows = connection.execute(query + " ORDER BY run_id, sequence", values).fetchall()
+            values = [
+                value
+                for value in self._json_values(connection, session_id, "runtime_message")
+                if run_id is None or str(value.get("run_id") or "") == run_id
+            ]
+        values.sort(
+            key=lambda item: (
+                str(item.get("run_id") or ""),
+                int(item.get("sequence", 0)),
+                str(item.get("created_at") or ""),
+            )
+        )
         return [
-            RuntimeMessage(int(row[0]), str(row[1]), str(row[2]), str(row[4]), decode_message_data(str(row[3])))
-            for row in rows
+            RuntimeMessage(
+                int(item.get("sequence", 0)),
+                str(item.get("kind") or ""),
+                str(item.get("message") or ""),
+                str(item.get("created_at") or utc_now()),
+                dict(item.get("data") or {}),
+            )
+            for item in values
         ]
+
+    def resume_runtime(self, source: RuntimeState, resumed: RuntimeState) -> None:
+        self._save_state(source, f"run_{source.current_run.status}" if source.current_run else "resume")
+        self._save_state(resumed, "run_resumed")
+
+    def _append_turn_message(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        run_id: str,
+        role: str,
+        content: str,
+        timestamp: str,
+        *,
+        data: dict[str, object] | None = None,
+    ) -> None:
+        existing = self._json_values(connection, session_id, "turn_message")
+        sequence = 1 + max(
+            (int(item.get("sequence", 0)) for item in existing if str(item.get("run_id") or "") == run_id), default=0
+        )
+        payload = {
+            "run_id": run_id,
+            "sequence": sequence,
+            "role": role,
+            "content": content,
+            "data": data or {},
+            "created_at": timestamp,
+        }
+        self._put_json_object(connection, session_id, "turn_message", f"{run_id}:{sequence}", payload, timestamp)
+        self._append_event(
+            connection,
+            session_id,
+            kind="runtime_message_appended",
+            payload={
+                "run_id": run_id,
+                "sequence": sequence,
+                "kind": role,
+                "message": content,
+                "data": data or {},
+                "created_at": timestamp,
+            },
+        )
+
+    def _put_runtime_message(
+        self, connection: sqlite3.Connection, session_id: str, run_id: str, message: RuntimeMessage
+    ) -> None:
+        payload = {
+            "run_id": run_id,
+            "sequence": message.sequence,
+            "kind": message.kind,
+            "message": message.message,
+            "data": message.data,
+            "created_at": message.timestamp,
+        }
+        object_id = f"{run_id}:{message.sequence}"
+        existing = self._json_object(connection, session_id, "runtime_message", object_id)
+        if existing is not None:
+            if existing == payload:
+                return
+            raise ValueError("Runtime messages are immutable and cannot be replaced.")
+        self._put_json_object(connection, session_id, "runtime_message", object_id, payload, message.timestamp)
+        self._append_event(connection, session_id, kind="runtime_message_appended", payload=payload)
+
+    def _touch_session(self, connection: sqlite3.Connection, session_id: str, timestamp: str) -> None:
+        document = self._session_document(connection, session_id)
+        document["updated_at"] = timestamp
+        self._write_session_document(connection, session_id, document)
+
+    @staticmethod
+    def _objects(connection: sqlite3.Connection, session_id: str, namespace: str) -> list[TreeRuntimeState]:
+        values = SQLiteRuntimeMixin._json_values(connection, session_id, namespace)
+        return [TreeRuntimeState.from_dict(value) for value in values]
+
+    @staticmethod
+    def _json_values(connection: sqlite3.Connection, session_id: str, namespace: str) -> list[dict[str, object]]:
+        rows = connection.execute(
+            "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace=?", (session_id, namespace)
+        ).fetchall()
+        return [dict(value) for row in rows if isinstance(value := json.loads(str(row[0])), dict)]
 
     @staticmethod
     def _put_json_object(
@@ -664,8 +468,7 @@ class SQLiteRuntimeMixin:
         updated_at: str,
     ) -> None:
         connection.execute(
-            "INSERT INTO json_objects(session_id,namespace,object_id,payload_json,updated_at) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(session_id,namespace,object_id) DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at",
+            "INSERT INTO json_objects(session_id,namespace,object_id,payload_json,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(session_id,namespace,object_id) DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at",
             (
                 session_id,
                 namespace,
@@ -675,46 +478,24 @@ class SQLiteRuntimeMixin:
             ),
         )
 
-    def resume_runtime(self, source: RuntimeState, resumed: RuntimeState) -> None:
-        self._save_state(source, f"run_{source.current_run.status}" if source.current_run else "resume")
-        self._save_state(resumed, "run_resumed")
-
     @staticmethod
-    def _session(row: sqlite3.Row) -> Session:
-        return Session(
-            str(row[0]),
-            str(row[1]),
-            str(row[2]),
-            str(row[3]),
-            str(row[4]) if row[4] is not None else None,
-            str(row[5]) if row[5] is not None else None,
-            str(row[6]) if row[6] is not None else None,
-            bool(row[7]) if len(row) > 7 else False,
-            bool(row[8]) if len(row) > 8 else False,
-        )
-
-    @staticmethod
-    def _insert_runtime_message(connection: sqlite3.Connection, message: RuntimeMessage, run_id: str) -> None:
-        connection.execute(
-            "INSERT INTO runtime_messages VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, sequence) DO UPDATE SET kind=excluded.kind,message=excluded.message,data_json=excluded.data_json,created_at=excluded.created_at",
-            (
-                run_id,
-                message.sequence,
-                message.kind,
-                message.message,
-                encode_message_data(message.data),
-                message.timestamp,
-            ),
-        )
-
-    def _save_runtime_messages(
-        self, connection: sqlite3.Connection, messages: list[RuntimeMessage], run_id: str
-    ) -> None:
-        for message in messages:
-            self._insert_runtime_message(connection, message, run_id)
+    def _json_object(
+        connection: sqlite3.Connection, session_id: str, namespace: str, object_id: str
+    ) -> dict[str, object] | None:
+        row = connection.execute(
+            "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace=? AND object_id=?",
+            (session_id, namespace, object_id),
+        ).fetchone()
+        if row is None:
+            return None
+        value = json.loads(str(row[0]))
+        return dict(value) if isinstance(value, dict) else None
 
     @staticmethod
     def _assert_writable(connection: sqlite3.Connection) -> None:
-        row = connection.execute("SELECT read_only FROM session_meta").fetchone()
-        if row is not None and int(row[0]):
+        row = connection.execute("SELECT payload_json FROM json_objects WHERE namespace='session' LIMIT 1").fetchone()
+        if row is not None and bool(json.loads(str(row[0])).get("read_only", False)):
             raise PermissionError("Remote sessions are read-only; fork the session before writing.")
+
+
+__all__ = ["SQLiteRuntimeMixin"]

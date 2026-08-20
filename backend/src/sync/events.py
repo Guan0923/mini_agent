@@ -47,6 +47,8 @@ def decrypt_event_batch(envelope: Mapping[str, object], key: bytes, *, aad: str)
         ciphertext = base64.urlsafe_b64decode(str(envelope["ciphertext"]).encode("ascii"))
     except (KeyError, ValueError, TypeError) as exc:
         raise ValueError("Invalid encrypted sync event envelope.") from exc
+    if len(nonce) != 12:
+        raise ValueError("Invalid encrypted sync event nonce.")
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     try:

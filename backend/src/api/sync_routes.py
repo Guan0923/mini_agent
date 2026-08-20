@@ -24,9 +24,9 @@ class SyncNowBody(BaseModel):
 
 
 def _manager(state: WebAppState):
-    if state.snapshot_manager is None:
+    if state.event_sync_manager is None:
         raise HTTPException(status_code=503, detail="云同步服务尚未配置。")
-    return state.snapshot_manager
+    return state.event_sync_manager
 
 
 def _require_cloud_identity(identity: UserIdentity) -> None:
@@ -44,7 +44,7 @@ def status(request: Request, identity: UserIdentity = Depends(require_user)) -> 
             "state": {"status": "local_only", "local_revision": 0, "cloud_revision": 0, "pending_event_count": 0},
             "job": None,
         }
-    if state.snapshot_manager is None:
+    if state.event_sync_manager is None:
         return {
             "available": False,
             "preferences": state.settings.sync_preferences_for_user(identity.id),
@@ -104,7 +104,8 @@ def cancel_job(
     identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
     _require_cloud_identity(identity)
-    manager = _manager(request)
+    state: WebAppState = request.app.state.web
+    manager = _manager(state)
     if not manager.cancel(identity.id, job_id):
         current = manager.job(identity.id, job_id)
         if current is None:

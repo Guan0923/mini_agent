@@ -98,14 +98,6 @@ class EventSyncManager:
             job.updated_at = time.time()
             return True
 
-    def snapshots(self, user_id: str) -> list[dict[str, object]]:
-        del user_id
-        return []
-
-    def start_restore(self, user_id: str, snapshot_id: str) -> dict[str, object]:
-        del user_id, snapshot_id
-        raise ValueError("全量云端快照已移除，请使用事件同步恢复。")
-
     def recover_key_if_available(self, user_id: str) -> bytes | None:
         key = self.key_store.get(user_id)
         if key is not None:
@@ -132,75 +124,101 @@ class EventSyncManager:
     def _sync_user(self, user_id: str, job: EventSyncJob) -> None:
         key = self.key_store.get_or_create(user_id)
         self.repository.ensure_user_key(user_id, key)
-        paths = user_paths(self.data_root, user_id)
-        store = SQLiteSessionStore(paths, self._device_id_for(user_id))
+        store = SQLiteSessionStore(user_paths(self.data_root, user_id), self._device_id_for(user_id))
         summaries = store.list_sessions(state="all")
-        total = max(len(summaries), 1)
+        known_ids = {summary.session_id for summary in summaries if not summary.local_only}
+        list_heads = getattr(self.repository, "list_heads", None)
+        if callable(list_heads):
+            known_ids.update(
+                str(head["session_id"])
+                for head in list_heads(user_id)
+                if isinstance(head, dict) and head.get("session_id")
+            )
+        by_id = {summary.session_id: summary for summary in summaries}
+        total = max(len(known_ids), 1)
         metric = getattr(self.settings, "set_sync_metrics", None)
-        for index, summary in enumerate(summaries, start=1):
-            if summary.local_only:
+        for index, session_id in enumerate(sorted(known_ids), start=1):
+            summary = by_id.get(session_id)
+            if summary is not None and summary.local_only:
                 continue
-            pending = store.pending_sync_operations()
-            if callable(metric):
-                session_pending = [item for item in pending if item.get("session_id") == summary.session_id]
-                pending_count = sum(len(item.get("events", [])) for item in session_pending)
-                metric(
-                    user_id,
-                    local_revision=store.event_head(summary.session_id),
-                    cloud_revision=store.remote_revision(summary.session_id),
-                    pending_event_count=pending_count,
-                )
-            for operation in pending:
-                if operation.get("session_id") != summary.session_id:
-                    continue
-                events = [item for item in operation.get("events", []) if isinstance(item, dict)]
-                if not events:
-                    continue
-                envelope = encrypt_event_batch(events, key, aad=summary.session_id)
-                result = self.repository.push_events(
-                    user_id,
-                    session_id=summary.session_id,
-                    parent_revision=int(operation.get("base_revision", 0)),
-                    device_id=self._device_id_for(user_id),
-                    event_id=str(operation["operation_id"]),
-                    envelope=envelope,
-                    checksum=str(envelope["checksum"]),
-                    event_ids=[str(item["event_id"]) for item in events if item.get("event_id")],
-                )
+            pending = next(
+                (item for item in store.pending_sync_operations() if item.get("session_id") == session_id), None
+            )
+            if pending is not None:
+                events = [item for item in pending.get("events", []) if isinstance(item, dict)]
+                envelope = encrypt_event_batch(events, key, aad=session_id)
+                try:
+                    result = self.repository.push_events(
+                        user_id,
+                        session_id=session_id,
+                        parent_revision=int(pending.get("base_revision", 0)),
+                        device_id=self._device_id_for(user_id),
+                        event_id=str(pending["operation_id"]),
+                        envelope=envelope,
+                        checksum=str(envelope["checksum"]),
+                        event_ids=[str(item["event_id"]) for item in events if item.get("event_id")],
+                    )
+                except Exception as exc:
+                    if getattr(exc, "status_code", None) != 409 and exc.__class__.__name__ != "CloudSyncConflict":
+                        raise
+                    self._pull_session(store, user_id, session_id, store.remote_revision(session_id), key)
+                    pending = next(
+                        (item for item in store.pending_sync_operations() if item.get("session_id") == session_id), None
+                    )
+                    if pending is None:
+                        continue
+                    events = [item for item in pending.get("events", []) if isinstance(item, dict)]
+                    envelope = encrypt_event_batch(events, key, aad=session_id)
+                    result = self.repository.push_events(
+                        user_id,
+                        session_id=session_id,
+                        parent_revision=store.remote_revision(session_id),
+                        device_id=self._device_id_for(user_id),
+                        event_id=str(pending["operation_id"]),
+                        envelope=envelope,
+                        checksum=str(envelope["checksum"]),
+                        event_ids=[str(item["event_id"]) for item in events if item.get("event_id")],
+                    )
                 revision = int(result.get("revision", result.get("head_revision", 0)))
                 store.acknowledge_sync_operations(
-                    [{"session_id": summary.session_id, "event_ids": [str(item["event_id"]) for item in events], "revision": revision}]
+                    [
+                        {
+                            "session_id": session_id,
+                            "event_ids": [str(item["event_id"]) for item in events],
+                            "revision": revision,
+                        }
+                    ]
                 )
                 marker = getattr(self.settings, "mark_uploaded", None)
                 if callable(marker):
-                    marker(user_id, str(operation["operation_id"]), revision)
-            pulled = self.repository.pull_events(
-                user_id,
-                session_id=summary.session_id,
-                after_revision=store.remote_revision(summary.session_id),
-            )
-            for item in pulled.get("events", []) if isinstance(pulled.get("events"), list) else []:
-                if not isinstance(item, dict):
-                    continue
-                events = decrypt_event_batch(item.get("envelope", {}), key, aad=summary.session_id)
-                store.apply_sync_events(
-                    {
-                        "session_id": summary.session_id,
-                        "revision": int(item.get("revision", 0)),
-                        "owner_device_id": str(item.get("device_id") or self._device_id_for(user_id)),
-                        "events": events,
-                    },
-                    local_device_id=self._device_id_for(user_id),
-                )
-            if callable(metric):
-                remaining = [item for item in store.pending_sync_operations() if item.get("session_id") == summary.session_id]
+                    marker(user_id, str(pending["operation_id"]), revision)
+            self._pull_session(store, user_id, session_id, store.remote_revision(session_id), key)
+            if callable(metric) and summary is not None:
+                remaining = [item for item in store.pending_sync_operations() if item.get("session_id") == session_id]
                 metric(
                     user_id,
-                    local_revision=store.event_head(summary.session_id),
-                    cloud_revision=store.remote_revision(summary.session_id),
+                    local_revision=store.event_head(session_id),
+                    cloud_revision=store.remote_revision(session_id),
                     pending_event_count=sum(len(op.get("events", [])) for op in remaining),
                 )
             self._set(job, progress=min(95, 5 + int(index / total * 90)))
+
+    def _pull_session(self, store, user_id: str, session_id: str, revision: int, key: bytes) -> None:
+        pulled = self.repository.pull_events(user_id, session_id=session_id, after_revision=revision)
+        for item in pulled.get("events", []) if isinstance(pulled.get("events"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            events = decrypt_event_batch(item.get("envelope", {}), key, aad=session_id)
+            store.apply_sync_events(
+                {
+                    "session_id": session_id,
+                    "revision": int(item.get("revision", 0)),
+                    "parent_revision": int(item.get("parent_revision", revision)),
+                    "owner_device_id": str(item.get("device_id") or self._device_id_for(user_id)),
+                    "events": events,
+                },
+                local_device_id=self._device_id_for(user_id),
+            )
 
     def _set(self, job: EventSyncJob, **values: object) -> None:
         with self._lock:

@@ -106,11 +106,23 @@ def build_router() -> APIRouter:
         request: Request,
         identity: Annotated[UserIdentity, Depends(current_identity)],
     ) -> dict[str, object]:
-        if str(body.envelope.get("checksum") or "") != body.checksum:
+        envelope = body.envelope
+        if envelope.get("algorithm") != "AES-256-GCM":
+            raise HTTPException(status_code=422, detail="加密事件批次算法不受支持。")
+        if not envelope.get("nonce") or not envelope.get("ciphertext"):
+            raise HTTPException(status_code=422, detail="加密事件批次缺少认证字段。")
+        if len(body.checksum) != 64 or any(char not in "0123456789abcdef" for char in body.checksum.lower()):
+            raise HTTPException(status_code=422, detail="加密事件批次校验和格式无效。")
+        if str(envelope.get("checksum") or "") != body.checksum:
             raise HTTPException(status_code=422, detail="加密事件批次校验和无效。")
         declared_count = body.envelope.get("event_count")
-        if declared_count is not None and int(declared_count) != len(body.event_ids):
-            raise HTTPException(status_code=422, detail="事件数量与加密批次不匹配。")
+        if declared_count is not None:
+            try:
+                count = int(declared_count)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail="事件数量格式无效。") from exc
+            if count != len(body.event_ids):
+                raise HTTPException(status_code=422, detail="事件数量与加密批次不匹配。")
         if len(set(body.event_ids)) != len(body.event_ids):
             raise HTTPException(status_code=422, detail="事件 ID 不得重复。")
         try:
@@ -139,6 +151,14 @@ def build_router() -> APIRouter:
         if after_revision < 0:
             raise HTTPException(status_code=422, detail="after_revision must be non-negative")
         return _state(request).events.pull_events(identity.id, session_id=session_id, after_revision=after_revision)
+
+    @router.get("/sync/heads")
+    def sync_heads(
+        request: Request,
+        identity: Annotated[UserIdentity, Depends(current_identity)],
+    ) -> dict[str, object]:
+        reader = getattr(_state(request).events, "list_heads", None)
+        return {"heads": reader(identity.id) if callable(reader) else []}
 
     @router.post("/auth/register/code", status_code=202)
     def register_code(body: EmailRequest, request: Request) -> dict[str, str]:

@@ -96,7 +96,7 @@ def build_user_application(
             if name in signature.parameters and signature.parameters[name].kind is not inspect.Parameter.POSITIONAL_ONLY
         }
     application = application_builder(workspace or state.session_workspace(user_id, session_id), **builder_options)
-    if state.snapshot_manager is not None:
+    if state.event_sync_manager is not None:
         store = getattr(application, "session_store", None) or getattr(application, "store", None)
         if callable(getattr(store, "set_sync_listener", None)):
             store.set_sync_listener(lambda: state.mark_sync_dirty(user_id))

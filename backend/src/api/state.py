@@ -70,7 +70,6 @@ class WebAppState:
         # different threads.  Serialize those transitions per active session
         # so a partial update can never be interleaved with another update.
         self.active_runtime_config_locks: dict[tuple[str, str], RLock] = {}
-        self.snapshot_manager = None
         self.event_sync_manager = None
         if auth_repository is not None:
             self.auth = auth_repository
@@ -119,7 +118,7 @@ class WebAppState:
         if event_repository is not None:
             from backend.sync.events_manager import EventSyncManager
 
-            self.snapshot_manager = EventSyncManager(
+            self.event_sync_manager = EventSyncManager(
                 data_root,
                 self.settings,
                 event_repository,
@@ -130,7 +129,6 @@ class WebAppState:
                     and self.cloud_client is not None
                 ),
             )
-            self.event_sync_manager = self.snapshot_manager
         if mailer is not None:
             self.mailer = mailer
         else:
@@ -200,9 +198,9 @@ class WebAppState:
         """Mark account data dirty while keeping guest activity local-only."""
 
         identity = self.auth.user_by_id(user_id)
-        if identity is None or identity.is_guest or self.snapshot_manager is None:
+        if identity is None or identity.is_guest or self.event_sync_manager is None:
             return
-        self.snapshot_manager.mark_dirty(user_id)
+        self.event_sync_manager.mark_dirty(user_id)
 
     def _cloud_token_for_user(self, user_id: str) -> str:
         from backend.cloud.client import CloudAuthExpired
@@ -310,7 +308,7 @@ class WebAppState:
         self.job_registry.close_all(reason="web application closed", timeout=5.0)
         closed: set[int] = set()
         for resource in (
-            self.snapshot_manager,
+            self.event_sync_manager,
             self.cloud_client,
             self.mailer,
             self.settings,

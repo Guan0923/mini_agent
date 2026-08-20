@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
     user_id TEXT PRIMARY KEY,
     local_revision INTEGER NOT NULL DEFAULT 0,
     uploaded_revision INTEGER NOT NULL DEFAULT 0,
-    cloud_snapshot_id TEXT,
+    last_event_batch_id TEXT,
     pending_event_count INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'local_only',
     last_error TEXT NOT NULL DEFAULT '',
@@ -116,6 +116,11 @@ class UserSettingsStore(AuthSettingsMixin):
         )
         with self._connection() as connection:
             connection.executescript(USER_SETTINGS_SCHEMA)
+            sync_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(sync_state)")}
+            if "cloud_snapshot_id" in sync_columns and "last_event_batch_id" not in sync_columns:
+                raise RuntimeError(
+                    "Unsupported legacy user.db sync schema; remove user.db before event synchronization."
+                )
         self._migrate_legacy_profile()
 
     @contextmanager
@@ -191,7 +196,7 @@ class UserSettingsStore(AuthSettingsMixin):
             if "pending_event_count" not in columns:
                 connection.execute("ALTER TABLE sync_state ADD COLUMN pending_event_count INTEGER NOT NULL DEFAULT 0")
             row = connection.execute(
-                """SELECT local_revision,uploaded_revision,cloud_snapshot_id,pending_event_count,status,last_error,updated_at
+                """SELECT local_revision,uploaded_revision,last_event_batch_id,pending_event_count,status,last_error,updated_at
                 FROM sync_state WHERE user_id=?""",
                 (user_id,),
             ).fetchone()
@@ -226,7 +231,9 @@ class UserSettingsStore(AuthSettingsMixin):
                 (user_id, status, error[:1000], now),
             )
 
-    def set_sync_metrics(self, user_id: str, *, local_revision: int, cloud_revision: int, pending_event_count: int) -> None:
+    def set_sync_metrics(
+        self, user_id: str, *, local_revision: int, cloud_revision: int, pending_event_count: int
+    ) -> None:
         now = time.time()
         with self._connection(immediate=True) as connection:
             connection.execute(
@@ -243,10 +250,10 @@ class UserSettingsStore(AuthSettingsMixin):
         with self._connection(immediate=True) as connection:
             connection.execute(
                 """INSERT INTO sync_state
-                (user_id,local_revision,uploaded_revision,cloud_snapshot_id,pending_event_count,status,last_error,updated_at)
+                (user_id,local_revision,uploaded_revision,last_event_batch_id,pending_event_count,status,last_error,updated_at)
                 VALUES (?,?,?,?,0, 'synced','',?) ON CONFLICT(user_id) DO UPDATE SET
                 uploaded_revision=excluded.uploaded_revision,
-                cloud_snapshot_id=excluded.cloud_snapshot_id,
+                last_event_batch_id=excluded.last_event_batch_id,
                 status=CASE WHEN sync_state.local_revision=excluded.uploaded_revision THEN 'synced' ELSE 'dirty' END,
                 last_error='',updated_at=excluded.updated_at""",
                 (user_id, revision, revision, event_batch_id, now),
@@ -262,7 +269,7 @@ class PerUserSettingsRepository:
             "update_agent_config",
             "update_runtime_config",
             # Sandbox configuration is deliberately local-only and must not
-            # mark a cloud snapshot dirty.
+            # mark the cloud event stream dirty.
             "update_rag_config",
             "update_provider_config",
             "add_provider_config",
@@ -317,7 +324,7 @@ class PerUserSettingsRepository:
         self.data_root.mkdir(parents=True, exist_ok=True)
 
     def invalidate(self, user_id: str) -> None:
-        """Drop a cached facade after an atomic snapshot restore.
+        """Drop a cached facade after a settings restore.
 
         ``UserSettingsStore`` opens SQLite connections per operation, but its
         config/database facade is still cached by identity.  Removing it here

@@ -55,9 +55,6 @@ export function syncNow(force = false): Promise<SyncJob> {
   });
 }
 
-/** @deprecated Use syncNow; retained only for embedded clients during rollout. */
-export const saveToCloud = syncNow;
-
 export function getSyncJob(id: string): Promise<SyncJob> {
   return requestJson<SyncJob>(`/api/sync/jobs/${encodeURIComponent(id)}`);
 }

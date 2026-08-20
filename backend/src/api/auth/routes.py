@@ -211,7 +211,7 @@ def _prepare_user(request: Request, identity: UserIdentity, *, first_cloud_login
     local_user_db = user_root(state.data_root, identity.id) / "user.db"
     had_local_user_db = local_user_db.is_file()
     state.user_paths(identity.id)
-    manager = state.snapshot_manager
+    manager = state.event_sync_manager
     if manager is None or identity.is_guest:
         return
     try:
@@ -431,14 +431,6 @@ def guest_import(
     source_identity = request.app.state.web.auth.user_by_id(str(pending["guest_id"]))
     if source_identity is None or not source_identity.is_guest:
         raise HTTPException(status_code=409, detail="待导入的游客身份已不可用。")
-    manager = request.app.state.web.snapshot_manager
-    if manager is not None:
-        active_reader = getattr(manager, "active_job", None)
-        active_job = active_reader(identity.id) if callable(active_reader) else None
-        job_kind = active_job.get("kind") if isinstance(active_job, dict) else getattr(active_job, "kind", None)
-        job_status = active_job.get("status") if isinstance(active_job, dict) else getattr(active_job, "status", None)
-        if active_job is not None and job_kind == "restore" and job_status in {"queued", "running"}:
-            raise HTTPException(status_code=409, detail="账户云端恢复尚未完成，请稍后再试。")
     try:
         result = user_data.import_guest_sessions(
             request.app.state.web.data_root,

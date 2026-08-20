@@ -126,7 +126,7 @@ def _store(state: WebAppState, user_id: str):
 
     paths = state.user_paths(user_id)
     store = SQLiteSessionStore(paths, f"web_{user_id}")
-    if state.snapshot_manager is not None:
+    if state.event_sync_manager is not None:
         store.set_sync_listener(lambda: state.mark_sync_dirty(user_id))
     return store
 

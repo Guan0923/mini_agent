@@ -26,6 +26,8 @@ class SQLiteBaseMixin:
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
+            # Inspect before DDL: unsupported databases remain untouched.
+            self._assert_supported_schema(connection)
             connection.executescript(SCHEMA)
             self._migrate_schema(connection)
             yield connection
@@ -40,6 +42,5 @@ class SQLiteBaseMixin:
         self._sync_listener = listener
 
     def _is_local_only(self, session_id: str) -> bool:
-        with self._connection(session_id) as connection:
-            row = connection.execute("SELECT local_only FROM session_meta LIMIT 1").fetchone()
-        return bool(row and int(row[0]))
+        session = self.get_session(session_id)
+        return bool(session and session.local_only)

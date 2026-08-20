@@ -816,11 +816,10 @@ def _stream(
                         },
                     }
                 )
-            if identity is not None and state.snapshot_manager is not None:
+            if identity is not None and state.event_sync_manager is not None:
                 # Project conversations are local-only.  Their runtime writes
                 # are already excluded from the outbox; do not let the
-                # generic end-of-run hook mark the account cloud snapshot
-                # dirty either.
+                # Generic end-of-run hook marks the account event stream dirty.
                 local_only = bool(getattr(active_session, "local_only", False))
                 if not local_only and session_id:
                     session_store = getattr(app, "session_store", None)
@@ -832,7 +831,7 @@ def _stream(
                         except Exception:
                             pass
                 if not local_only:
-                    state.snapshot_manager.notify_run_finished(identity.id)
+                    state.event_sync_manager.notify_run_finished(identity.id)
         except ModelConfigurationError as exc:
             if bridge_ref["bridge"] is not None:
                 error_message = f"模型未配置：{exc}"
@@ -850,7 +849,9 @@ def _stream(
                 terminal_status = final_node.status if final_node is not None else "abort"
                 rendered_error = terminal_error_text(bridge.terminal_error or {}) if bridge.terminal_error else ""
                 if terminal_status == "abort":
-                    rendered_error = rendered_error or "The run was aborted because an internal error interrupted execution."
+                    rendered_error = (
+                        rendered_error or "The run was aborted because an internal error interrupted execution."
+                    )
                 enqueue_terminal(
                     {
                         "type": "error",

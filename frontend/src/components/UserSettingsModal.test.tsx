@@ -21,11 +21,9 @@ const api = vi.hoisted(() => ({
   discoverProviderModels: vi.fn(),
   setTimezone: vi.fn(),
   getSyncStatus: vi.fn(),
-  getCloudSnapshots: vi.fn(),
   getSyncJob: vi.fn(),
   updateSyncPreferences: vi.fn(),
-  saveToCloud: vi.fn(),
-  restoreCloudSnapshot: vi.fn(),
+  syncNow: vi.fn(),
   getRagTree: vi.fn(),
   uploadRagDocument: vi.fn(),
   deleteRagDocument: vi.fn(),
@@ -87,8 +85,7 @@ const settings = {
   sync_preferences: { auto_save_enabled: false, auto_save_rule: "idle_5m" as const },
   sync_state: {
     local_revision: 2,
-    uploaded_revision: 1,
-    cloud_snapshot_id: null,
+    cloud_revision: 1,
     status: "dirty" as const,
     last_error: "",
     updated_at: 1,
@@ -141,19 +138,17 @@ describe("UserSettingsModal", () => {
       state: settings.sync_state,
       job: null,
     });
-    api.getCloudSnapshots.mockResolvedValue([]);
     api.updateSyncPreferences.mockImplementation(async (value) => value);
     api.getRagTree.mockResolvedValue([]);
     api.uploadRagDocument.mockResolvedValue({ job_id: "job-upload" });
     api.deleteRagDocument.mockResolvedValue({ deleted: "document-ready", warning: null });
     api.reindexRagDocument.mockResolvedValue({ job_id: "job-reindex" });
-    api.saveToCloud.mockResolvedValue({
+    api.syncNow.mockResolvedValue({
       id: "job-1",
-      kind: "save",
+      kind: "sync",
       status: "queued",
       phase: "queued",
       progress: 0,
-      snapshot_id: null,
       error: "",
       created_at: 1,
       updated_at: 1,
@@ -253,7 +248,7 @@ describe("UserSettingsModal", () => {
     expect(await screen.findByText("需要管理员批准")).toBeInTheDocument();
   });
 
-  it("saves cloud preferences and starts a background cloud snapshot", async () => {
+  it("saves cloud preferences and starts an incremental event sync", async () => {
     renderModal();
     await screen.findByDisplayValue("user@example.com");
     await userEvent.click(screen.getByRole("menuitem", { name: "云同步" }));
@@ -264,9 +259,9 @@ describe("UserSettingsModal", () => {
       auto_save_rule: "idle_5m",
     }));
     expect((await screen.findAllByText("保存成功")).length).toBeGreaterThanOrEqual(1);
-    await userEvent.click(screen.getByRole("button", { name: "保存到云端" }));
-    await waitFor(() => expect(api.saveToCloud).toHaveBeenCalledWith(false));
-    expect((await screen.findAllByText("保存成功")).length).toBeGreaterThanOrEqual(2);
+    await userEvent.click(screen.getByRole("button", { name: "立即同步" }));
+    await waitFor(() => expect(api.syncNow).toHaveBeenCalledWith(false));
+    expect(await screen.findByText("同步已启动")).toBeInTheDocument();
   });
 
   it("checks dirty state for mask and close button but keeps Escape disabled", async () => {

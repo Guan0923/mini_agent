@@ -39,7 +39,7 @@ class CloudAuthExpired(CloudApiError):
 
 
 class CloudConflict(CloudSyncConflict, CloudApiError):
-    """A cloud head changed while uploading a snapshot."""
+    """A cloud head changed while uploading an event batch."""
 
     def __init__(self, message: str, *, status_code: int | None = 409, retryable: bool = False) -> None:
         CloudApiError.__init__(self, message, status_code=status_code, retryable=retryable)
@@ -307,6 +307,11 @@ class CloudClient:
             raise CloudApiError("云端返回了无效的事件批次。")
         return dict(payload)
 
+    def list_sync_heads(self) -> list[dict[str, object]]:
+        payload = self._request("GET", "/v1/sync/heads")
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("heads"), list):
+            raise CloudApiError("云端返回了无效的同步 head 列表。")
+        return [dict(item) for item in payload["heads"] if isinstance(item, Mapping)]
 
 
 __all__ = ["CloudApiError", "CloudAuthExpired", "CloudClient", "CloudConflict", "CloudSession", "CloudUnavailable"]

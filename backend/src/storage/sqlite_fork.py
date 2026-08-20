@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
 from backend.domain import RunProvenance, Session, new_run_id
 from backend.domain.runtime_state import NodeWriter, message_payload, resolve_fork_anchor
 from backend.runtime.core.context import text_messages
-
-from .codec import decode_runtime_state
 
 
 class SQLiteForkMixin:
@@ -20,7 +19,9 @@ class SQLiteForkMixin:
 
         for summary in self.list_sessions(state="all"):
             with self._connection(summary.session_id) as source:
-                row = source.execute("SELECT 1 FROM runs WHERE run_id=?", (run_id,)).fetchone()
+                row = source.execute(
+                    "SELECT 1 FROM json_objects WHERE namespace='run' AND object_id=?", (run_id,)
+                ).fetchone()
             if row is not None:
                 return summary
         return None
@@ -30,18 +31,18 @@ class SQLiteForkMixin:
         for summary in self.list_sessions(state="all"):
             with self._connection(summary.session_id) as connection:
                 rows = connection.execute(
-                    "SELECT s.run_id,s.task,s.status,s.updated_at FROM session_runs AS s "
-                    "JOIN runs AS r ON r.run_id=s.run_id "
-                    "WHERE s.status!='running' AND r.status!='running' ORDER BY s.updated_at DESC"
+                    "SELECT payload_json FROM json_objects WHERE namespace='run' ORDER BY updated_at DESC,object_id DESC"
                 ).fetchall()
             result.extend(
                 {
-                    "run_id": str(row[0]),
-                    "task": str(row[1]),
-                    "status": str(row[2]),
-                    "updated_at": str(row[3]),
+                    "run_id": str(payload.get("run_id") or ""),
+                    "task": str(payload.get("task") or ""),
+                    "status": str(payload.get("status") or ""),
+                    "updated_at": str(payload.get("updated_at") or ""),
                 }
                 for row in rows
+                if isinstance(payload := json.loads(str(row[0])), dict)
+                if payload.get("status") != "running"
             )
         return sorted(result, key=lambda item: item["updated_at"], reverse=True)
 
@@ -51,13 +52,13 @@ class SQLiteForkMixin:
         for summary in self.list_sessions(state="all"):
             with self._connection(summary.session_id) as source:
                 row = source.execute(
-                    "SELECT s.status, s.task, r.state_json FROM session_runs AS s "
-                    "LEFT JOIN runs AS r ON r.run_id=s.run_id WHERE s.run_id=?",
+                    "SELECT payload_json FROM json_objects WHERE namespace='run' AND object_id=?",
                     (run_id,),
                 ).fetchone()
             if row is None:
                 continue
-            if row[0] == "running":
+            run_payload = json.loads(str(row[0]))
+            if run_payload.get("status") == "running":
                 raise ValueError("A running run cannot be forked.")
             nodes = self.load_nodes(summary.session_id)
             meaningful_nodes = [node for node in nodes if node.data_type != "root"]
@@ -67,11 +68,9 @@ class SQLiteForkMixin:
                 # Keep that run forkable through the non-authoritative
                 # execution projection; newly-created conversations always
                 # use the node path below.
-                if row[2] is None:
+                state = self.load_runtime(summary.session_id)
+                if state is None or state.current_run is None:
                     raise ValueError("Session has no RuntimeState nodes to fork.")
-                state = decode_runtime_state(str(row[2]))
-                if state.current_run is None:
-                    raise ValueError("Run snapshot cannot be forked.")
                 target = self.create_session(f"Fork: {summary.title}", local_only=summary.local_only)
                 state.session_id = target.session_id
                 state.current_run.run_id = new_run_id()
@@ -143,12 +142,12 @@ class SQLiteForkMixin:
             self.start_turn(
                 target.session_id,
                 new_id,
-                str(row[1]),
+                str(run_payload.get("task") or ""),
                 provenance,
                 append_user_message=False,
             )
-            if row[2] is not None:
-                state = decode_runtime_state(str(row[2]))
+            state = self.load_runtime(summary.session_id)
+            if state is not None:
                 if state.current_run is not None:
                     state.session_id = target.session_id
                     state.current_run.run_id = new_id

@@ -32,7 +32,6 @@ import {
   getSyncJob,
   getSyncStatus,
   syncNow,
-  saveToCloud,
   setTimezone,
   updateAgentConfig,
   updateProfile,
@@ -539,8 +538,7 @@ export default function UserSettingsModal({
     setCloudLoading(true);
     setError("");
     try {
-      const runSync = syncNow ?? saveToCloud;
-      const job = await runSync(force);
+      const job = await syncNow(force);
       setSyncJob(job);
       await refreshCloud();
       message.success("同步已启动");
@@ -1180,11 +1178,11 @@ export default function UserSettingsModal({
                 type="info"
                 showIcon
                 title="游客数据仅保存在本机"
-                description="登录正式账户后才能保存和恢复云端版本。"
+                description="登录正式账户后才能同步加密的会话事件。"
               />
             ) : null}
             <Typography.Paragraph type="secondary">
-              云端保存包含用户设置、提供商密钥、会话、workspace、上传文件和 Skills；Benchmark、日志和缓存不会上传。
+              云端只同步加密的日志、消息、运行状态、checkpoint 和同步元数据；workspace、上传文件、Skills、RAG、插件与 MCP 始终保留在本机。
             </Typography.Paragraph>
             <Form layout="vertical" disabled={!cloudAvailable}>
               <Form.Item label="自动保存">

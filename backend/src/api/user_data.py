@@ -328,16 +328,14 @@ def _copy_tree_without_symlinks(source: Path, target: Path) -> None:
 
 
 def _session_has_active_run(connection: sqlite3.Connection) -> bool:
-    """Check known run tables while tolerating a minimal SQLite state DB."""
+    """Check the JSON run objects without reading a legacy projection."""
 
-    for table in ("session_runs", "runs"):
-        try:
-            if connection.execute(f"SELECT 1 FROM {table} WHERE status='running' LIMIT 1").fetchone():
-                return True
-        except sqlite3.OperationalError as exc:
-            if "no such table" not in str(exc).lower():
-                raise
-    return False
+    return (
+        connection.execute(
+            "SELECT 1 FROM json_objects WHERE namespace='run' AND json_extract(payload_json,'$.status')='running' LIMIT 1"
+        ).fetchone()
+        is not None
+    )
 
 
 def user_benchmark_root(data_root: Path, user_id: str) -> Path:
