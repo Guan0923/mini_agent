@@ -29,10 +29,9 @@ import {
   activateProviderConfig,
   deleteProviderConfig,
   discoverProviderModels,
-  getCloudSnapshots,
   getSyncJob,
   getSyncStatus,
-  restoreCloudSnapshot,
+  syncNow,
   saveToCloud,
   setTimezone,
   updateAgentConfig,
@@ -50,7 +49,6 @@ import {
   type SandboxConfig,
   type RagConfig,
   type RagCapabilities,
-  type CloudSnapshot,
   type SyncJob,
 } from "../api";
 import type { AuthUser } from "../types";
@@ -126,8 +124,8 @@ const defaultSyncPreferences = {
 
 const defaultSyncState = {
   local_revision: 0,
-  uploaded_revision: 0,
-  cloud_snapshot_id: null,
+  cloud_revision: 0,
+  pending_event_count: 0,
   status: "local_only" as const,
   last_error: "",
   updated_at: null,
@@ -197,7 +195,6 @@ export default function UserSettingsModal({
   const [managedModelOpen, setManagedModelOpen] = useState<Record<string, boolean>>({});
   const [managedModelFeedback, setManagedModelFeedback] = useState<Record<string, ProviderModelFeedback>>({});
   const [syncJob, setSyncJob] = useState<SyncJob | null>(null);
-  const [cloudSnapshots, setCloudSnapshots] = useState<CloudSnapshot[]>([]);
   const [cloudLoading, setCloudLoading] = useState(false);
   const [ragCapabilities, setRagCapabilities] = useState<RagCapabilities | null>(null);
   const [brokerStatus, setBrokerStatus] = useState<SandboxBrokerStatus | null>(null);
@@ -339,9 +336,8 @@ export default function UserSettingsModal({
   async function refreshCloud(): Promise<void> {
     if (user?.kind === "guest") return;
     try {
-      const [status, snapshots] = await Promise.all([getSyncStatus(), getCloudSnapshots()]);
+      const status = await getSyncStatus();
       setSyncJob(status.job);
-      setCloudSnapshots(snapshots);
       setSettings((current) => current ? {
         ...current,
         sync_preferences: status.preferences,
@@ -543,30 +539,18 @@ export default function UserSettingsModal({
     setCloudLoading(true);
     setError("");
     try {
-      const job = await saveToCloud(force);
+      const runSync = syncNow ?? saveToCloud;
+      const job = await runSync(force);
       setSyncJob(job);
       await refreshCloud();
-      message.success("保存成功");
+      message.success("同步已启动");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "启动云端保存失败。");
+      setError(cause instanceof Error ? cause.message : "启动云端同步失败。");
     } finally {
       setCloudLoading(false);
     }
   }
 
-  function confirmRestore(snapshot: CloudSnapshot): void {
-    modal.confirm({
-      title: `恢复云端版本 ${snapshot.version}？`,
-      content: "恢复会覆盖当前本地设置、会话和文件。系统会先保留一份本地恢复副本。",
-      okText: "恢复",
-      cancelText: "取消",
-      okButtonProps: { danger: true },
-      onOk: async () => {
-        const job = await restoreCloudSnapshot(snapshot.id);
-        setSyncJob(job);
-      },
-    });
-  }
 
   function updateProviderDraft(id: string, patch: Partial<{ provider_name: string; model: string; api_key: string }>) {
     setProviderDrafts((current) => ({ ...current, [id]: { ...(current[id] ?? { provider_name: "", model: "", api_key: "" }), ...patch } }));
@@ -1234,13 +1218,10 @@ export default function UserSettingsModal({
                 type="warning"
                 showIcon
                 title="本地数据与云端最新版本冲突"
-                description="请选择上传本地数据生成新版本，或使用一个云端版本覆盖本地。"
-                action={<Space wrap>
-                  <Button onClick={() => void startCloudSave(true)}>使用本地数据</Button>
-                  {cloudSnapshots[0] ? (
-                    <Button danger onClick={() => confirmRestore(cloudSnapshots[0])}>使用最新云端版本</Button>
-                  ) : null}
-                </Space>}
+                 description="同步会保留完整事件历史；请先拉取远端增量后再重试。"
+                 action={<Space wrap>
+                   <Button onClick={() => void startCloudSave(true)}>重试同步</Button>
+                 </Space>}
               />
             ) : null}
 
@@ -1248,7 +1229,7 @@ export default function UserSettingsModal({
               <div className="cloud-sync-job" aria-live="polite">
                 <Space>
                   <Tag color={syncJob.status === "complete" ? "green" : syncJob.status === "failed" ? "red" : "blue"}>
-                    {syncJob.kind === "restore" ? "恢复" : "保存"}
+                    同步
                   </Tag>
                   <Typography.Text>{syncJob.phase}</Typography.Text>
                 </Space>
@@ -1266,28 +1247,13 @@ export default function UserSettingsModal({
                 loading={cloudLoading || syncJob?.status === "queued" || syncJob?.status === "running"}
                 onClick={() => void startCloudSave(false)}
               >
-                保存到云端
+                立即同步
               </Button>
               <Typography.Text type="secondary">
-                状态：{settings.sync_state.status} · 本地版本 {settings.sync_state.local_revision}
+                状态：{settings.sync_state.status} · 本地 revision {settings.sync_state.local_revision} · 云端 revision {settings.sync_state.cloud_revision} · 待同步事件 {settings.sync_state.pending_event_count}
               </Typography.Text>
             </Space> : null}
 
-            {cloudAvailable ? <><Typography.Title level={5}>最近云端版本</Typography.Title>
-            <List
-              locale={{ emptyText: "暂无云端版本" }}
-              dataSource={cloudSnapshots}
-              renderItem={(item) => (
-                <List.Item
-                  actions={[<Button key="restore" danger onClick={() => confirmRestore(item)}>恢复</Button>]}
-                >
-                  <List.Item.Meta
-                    title={`版本 ${item.version}`}
-                    description={`${new Date(item.completed_at).toLocaleString()} · ${formatBytes(item.archive_size)} · ${item.device_id}`}
-                  />
-                </List.Item>
-              )}
-            /></> : null}
           </div>
         )}
         {error ? <Typography.Text type="danger">{error}</Typography.Text> : null}

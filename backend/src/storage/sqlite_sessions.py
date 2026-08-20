@@ -67,7 +67,18 @@ class SQLiteSessionMixin:
                     timestamp=session.created_at,
                     parent=root_parent,
                 )
-                self._queue(connection, session.session_id)
+                # The first event is the only complete baseline.  All later
+                # writes append small JSON deltas and never re-export this
+                # document into the local outbox.
+                baseline = self._build_baseline(connection, session.session_id)
+                self._queue(
+                    connection,
+                    session.session_id,
+                    kind="baseline",
+                    payload=baseline,
+                    object_namespace="session",
+                    object_id=session.session_id,
+                )
         except Exception:
             # A failed schema/metadata initialization must not leave a
             # session directory that later looks like a valid conversation.
@@ -211,8 +222,14 @@ class SQLiteSessionMixin:
                 raise ValueError(f"Unknown session: {session_id}")
             if row[0] is not None:
                 raise ValueError("Deleted sessions cannot change their client binding.")
-            connection.execute("UPDATE session_meta SET client_id=?, updated_at=?", (client_id, utc_now()))
-            self._queue(connection, session_id)
+            timestamp = utc_now()
+            connection.execute("UPDATE session_meta SET client_id=?, updated_at=?", (client_id, timestamp))
+            self._queue(
+                connection,
+                session_id,
+                kind="session_metadata_updated",
+                payload={"client_id": client_id, "updated_at": timestamp},
+            )
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Unknown session: {session_id}")
@@ -223,7 +240,6 @@ class SQLiteSessionMixin:
 
         with self._connection_for_existing(session_id) as connection:
             connection.execute("UPDATE session_meta SET local_only=1 WHERE session_id=?", (session_id,))
-            connection.execute("DELETE FROM sync_outbox")
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Unknown session: {session_id}")
@@ -314,11 +330,17 @@ class SQLiteSessionMixin:
                 raise ValueError(f"Unknown session: {session_id}")
             if row[0] is not None:
                 raise ValueError("Deleted sessions cannot be renamed.")
+            timestamp = utc_now()
             connection.execute(
                 "UPDATE session_meta SET title=?, title_is_custom=?, updated_at=?",
-                (cleaned, int(title_is_custom), utc_now()),
+                (cleaned, int(title_is_custom), timestamp),
             )
-            self._queue(connection, session_id)
+            self._queue(
+                connection,
+                session_id,
+                kind="session_metadata_updated",
+                payload={"title": cleaned, "title_is_custom": bool(title_is_custom), "updated_at": timestamp},
+            )
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Unknown session: {session_id}")
@@ -336,8 +358,14 @@ class SQLiteSessionMixin:
                 raise ValueError(f"Unknown session: {session_id}")
             if row[1] is not None:
                 raise ValueError("Deleted sessions cannot be restored.")
-            connection.execute("UPDATE session_meta SET archived_at=NULL, updated_at=?", (utc_now(),))
-            self._queue(connection, session_id)
+            timestamp = utc_now()
+            connection.execute("UPDATE session_meta SET archived_at=NULL, updated_at=?", (timestamp,))
+            self._queue(
+                connection,
+                session_id,
+                kind="session_metadata_updated",
+                payload={"archived_at": None, "updated_at": timestamp},
+            )
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Unknown session: {session_id}")
@@ -389,7 +417,16 @@ class SQLiteSessionMixin:
                 f"UPDATE session_meta SET {', '.join(assignments)} WHERE session_id=?",
                 values,
             )
-            self._queue(connection, session_id)
+            self._queue(
+                connection,
+                session_id,
+                kind="session_metadata_updated",
+                payload={
+                    "archived_at": archived_at,
+                    "deleted_at": deleted_at,
+                    "updated_at": values[0],
+                },
+            )
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Unknown session: {session_id}")

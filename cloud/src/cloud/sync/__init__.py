@@ -1,5 +1,5 @@
-"""Cloud snapshot persistence ports."""
+"""Cloud encrypted event persistence ports."""
 
-from .repository import CloudSyncConflict, EncryptedSnapshotChunk, PostgresCloudSnapshotRepository
+from .repository import CloudSyncConflict, PostgresCloudEventRepository
 
-__all__ = ["CloudSyncConflict", "EncryptedSnapshotChunk", "PostgresCloudSnapshotRepository"]
+__all__ = ["CloudSyncConflict", "PostgresCloudEventRepository"]

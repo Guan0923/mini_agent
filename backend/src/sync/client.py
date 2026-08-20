@@ -12,11 +12,15 @@ import requests
 
 from backend.jobs import AdmissionPolicy, JobLane, JobRegistry, JobScopeKind, ThreadJob
 
+from .events import decrypt_event_batch, encrypt_event_batch
+
 _LOG = logging.getLogger(__name__)
 
 
 class SyncTransport(Protocol):
     def post(self, path: str, payload: dict[str, object]) -> dict[str, object]: ...
+
+    def get(self, path: str) -> dict[str, object]: ...
 
 
 class RequestsSyncTransport:
@@ -44,33 +48,88 @@ class RequestsSyncTransport:
             raise ValueError("Sync service returned a non-object response.")
         return value
 
+    def get(self, path: str) -> dict[str, object]:
+        response = requests.get(f"{self._base_url}{path}", headers=self._headers, timeout=self._timeout)
+        response.raise_for_status()
+        value = response.json()
+        if not isinstance(value, dict):
+            raise ValueError("Sync service returned a non-object response.")
+        return value
+
 
 class SyncClient:
-    def __init__(self, device_id: str, transport: SyncTransport) -> None:
+    def __init__(self, device_id: str, transport: SyncTransport, key_provider=None) -> None:
         self.device_id = device_id
         self.transport = transport
+        self.key_provider = key_provider
 
     def synchronize(self, store) -> None:
         operations = store.pending_sync_operations()
         if operations:
-            result = self.transport.post("/v1/sync/push", {"operations": operations})
-            acknowledgements = result.get("acknowledged", [])
-            if isinstance(acknowledgements, list):
-                store.acknowledge_sync_operations([item for item in acknowledgements if isinstance(item, dict)])
+            acknowledgements: list[dict[str, object]] = []
+            for operation in operations:
+                session_id = str(operation["session_id"])
+                events = operation.get("events", [])
+                if not isinstance(events, list):
+                    raise ValueError("Local sync operation has invalid events.")
+                if self.key_provider is None:
+                    raise ValueError("An authenticated user DEK provider is required for event synchronization.")
+                key = self.key_provider(session_id)
+                event_ids = [str(item["event_id"]) for item in events if isinstance(item, dict) and item.get("event_id")]
+                envelope = encrypt_event_batch([item for item in events if isinstance(item, dict)], key, aad=session_id)
+                result = self.transport.post(
+                    "/v1/sync/push",
+                    {
+                        "session_id": session_id,
+                        "parent_revision": int(operation.get("base_revision", 0)),
+                        "device_id": self.device_id,
+                        "event_id": str(operation["operation_id"]),
+                        "event_ids": event_ids,
+                        "envelope": envelope,
+                        "checksum": str(envelope["checksum"]),
+                    },
+                )
+                acknowledgements.append(
+                    {
+                        "session_id": session_id,
+                        "event_ids": event_ids,
+                        "revision": int(result.get("revision", result.get("head_revision", 0))),
+                    }
+                )
+            store.acknowledge_sync_operations(acknowledgements)
         # Local project conversations never participate in cloud sync.  Keep
         # them out of the pull cursor as well as the push outbox so their
         # session identifiers are not disclosed to the sync service.
         known = {
             summary.session_id: store.remote_revision(summary.session_id)
-            for summary in store.list_sessions()
+            for summary in store.list_sessions(state="all")
             if not summary.local_only
         }
-        result = self.transport.post("/v1/sync/pull", {"known": known})
-        sessions = result.get("sessions", [])
-        if isinstance(sessions, list):
-            for item in sessions:
-                if isinstance(item, dict):
-                    store.apply_remote_snapshot(item, local_device_id=self.device_id)
+        pull = getattr(self.transport, "get", None)
+        if not callable(pull):
+            return
+        for session_id, revision in known.items():
+            result = pull(f"/v1/sync/pull?session_id={session_id}&after_revision={revision}")
+            raw_events = result.get("events", [])
+            if not isinstance(raw_events, list):
+                continue
+            for item in raw_events:
+                if not isinstance(item, dict):
+                    continue
+                if self.key_provider is None:
+                    raise ValueError("An authenticated user DEK provider is required for event synchronization.")
+                key = self.key_provider(session_id)
+                events = decrypt_event_batch(item.get("envelope", {}), key, aad=session_id)
+                store.apply_sync_events(
+                    {
+                        "session_id": session_id,
+                        "revision": int(item.get("revision", 0)),
+                        "owner_device_id": self.device_id,
+                        "parent_revision": int(item.get("parent_revision", revision - 1)),
+                        "events": events,
+                    },
+                    local_device_id=self.device_id,
+                )
 
 
 class SyncCoordinator:

@@ -9,34 +9,23 @@ export interface SyncPreferences {
 
 export interface SyncState {
   local_revision: number;
-  uploaded_revision: number;
-  cloud_snapshot_id: string | null;
-  status: "local_only" | "dirty" | "saving" | "synced" | "conflict" | "restoring" | "error";
+  cloud_revision: number;
+  pending_event_count: number;
+  status: "local_only" | "dirty" | "syncing" | "synced" | "conflict" | "error";
   last_error: string;
   updated_at: number | null;
 }
 
 export interface SyncJob {
   id: string;
-  kind: "save" | "restore";
-  status: "queued" | "running" | "complete" | "failed" | "conflict" | "cancelled";
+  kind: "sync";
+  status: "queued" | "running" | "completed" | "complete" | "failed" | "error" | "conflict" | "cancelled";
   phase: string;
   progress: number;
-  snapshot_id: string | null;
   error: string;
   created_at: number;
   updated_at: number;
   cancel_requested?: boolean;
-}
-
-export interface CloudSnapshot {
-  id: string;
-  version: number;
-  local_revision: number;
-  device_id: string;
-  archive_size: number;
-  chunk_count: number;
-  completed_at: string;
 }
 
 export interface SyncStatus {
@@ -58,13 +47,16 @@ export function updateSyncPreferences(preferences: SyncPreferences): Promise<Syn
   });
 }
 
-export function saveToCloud(force = false): Promise<SyncJob> {
-  return requestJson<SyncJob>("/api/sync/save", {
+export function syncNow(force = false): Promise<SyncJob> {
+  return requestJson<SyncJob>("/api/sync/now", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ force }),
   });
 }
+
+/** @deprecated Use syncNow; retained only for embedded clients during rollout. */
+export const saveToCloud = syncNow;
 
 export function getSyncJob(id: string): Promise<SyncJob> {
   return requestJson<SyncJob>(`/api/sync/jobs/${encodeURIComponent(id)}`);
@@ -72,12 +64,4 @@ export function getSyncJob(id: string): Promise<SyncJob> {
 
 export function cancelSyncJob(id: string): Promise<SyncJob> {
   return requestJson<SyncJob>(`/api/sync/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
-}
-
-export function getCloudSnapshots(): Promise<CloudSnapshot[]> {
-  return requestJson<CloudSnapshot[]>("/api/sync/snapshots");
-}
-
-export function restoreCloudSnapshot(id: string): Promise<SyncJob> {
-  return requestJson<SyncJob>(`/api/sync/snapshots/${encodeURIComponent(id)}/restore`, { method: "POST" });
 }

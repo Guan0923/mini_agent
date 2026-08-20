@@ -36,7 +36,7 @@ class WebAppState:
         secret_key: str | None = None,
         cloud_url: str | None = None,
         cloud_client: Any | None = None,
-        snapshot_repository: Any | None = None,
+        event_repository: Any | None = None,
         project_picker: Callable[[], Path | None] | None = None,
         job_registry: JobRegistry | None = None,
         sandbox_broker: WindowsBrokerClient | None = None,
@@ -71,6 +71,7 @@ class WebAppState:
         # so a partial update can never be interleaved with another update.
         self.active_runtime_config_locks: dict[tuple[str, str], RLock] = {}
         self.snapshot_manager = None
+        self.event_sync_manager = None
         if auth_repository is not None:
             self.auth = auth_repository
             if settings_repository is not None and settings_repository is not auth_repository:
@@ -107,21 +108,21 @@ class WebAppState:
 
             self.cloud_client = CloudClient(configured_cloud_url)
 
-        if snapshot_repository is None and self.cloud_client is not None:
-            from backend.cloud.snapshot_repository import HttpCloudSnapshotRepository
+        if event_repository is None and self.cloud_client is not None:
+            from backend.cloud.event_repository import HttpCloudEventRepository
 
-            snapshot_repository = HttpCloudSnapshotRepository(
+            event_repository = HttpCloudEventRepository(
                 self.cloud_client.base_url,
                 self._cloud_token_for_user,
                 self._clear_cloud_token_for_user,
             )
-        if snapshot_repository is not None:
-            from backend.sync.snapshots import SnapshotManager
+        if event_repository is not None:
+            from backend.sync.events_manager import EventSyncManager
 
-            self.snapshot_manager = SnapshotManager(
+            self.snapshot_manager = EventSyncManager(
                 data_root,
                 self.settings,
-                snapshot_repository,
+                event_repository,
                 job_registry=self.job_registry,
                 user_allowed=lambda user_id: (
                     (identity := self.auth.user_by_id(user_id)) is not None
@@ -129,6 +130,7 @@ class WebAppState:
                     and self.cloud_client is not None
                 ),
             )
+            self.event_sync_manager = self.snapshot_manager
         if mailer is not None:
             self.mailer = mailer
         else:
@@ -273,7 +275,8 @@ class WebAppState:
             else {
                 "local_revision": 0,
                 "uploaded_revision": 0,
-                "cloud_snapshot_id": None,
+                "cloud_revision": 0,
+                "pending_event_count": 0,
                 "status": "local_only",
                 "last_error": "",
                 "updated_at": None,

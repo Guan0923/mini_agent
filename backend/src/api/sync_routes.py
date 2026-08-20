@@ -1,4 +1,4 @@
-"""Authenticated local API for cloud snapshot preferences and jobs."""
+"""Authenticated local API for encrypted JSON event synchronization."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ class SyncPreferencesBody(BaseModel):
     auto_save_rule: Literal["idle_5m", "after_run", "hourly"]
 
 
-class SaveBody(BaseModel):
+class SyncNowBody(BaseModel):
     force: bool = False
 
 
@@ -41,7 +41,7 @@ def status(request: Request, identity: UserIdentity = Depends(require_user)) -> 
         return {
             "available": False,
             "preferences": {"auto_save_enabled": False, "auto_save_rule": "idle_5m"},
-            "state": {"status": "local_only", "local_revision": 0, "uploaded_revision": 0},
+            "state": {"status": "local_only", "local_revision": 0, "cloud_revision": 0, "pending_event_count": 0},
             "job": None,
         }
     if state.snapshot_manager is None:
@@ -72,15 +72,15 @@ def update_preferences(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/save", status_code=202)
-def save(
-    body: SaveBody,
+@router.post("/now", status_code=202)
+def sync_now(
+    body: SyncNowBody,
     request: Request,
     identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
     _require_cloud_identity(identity)
     state: WebAppState = request.app.state.web
-    return _manager(state).start_save(identity.id, force=body.force)
+    return _manager(state).sync_now(identity.id, force=body.force)
 
 
 @router.get("/jobs/{job_id}")
@@ -114,39 +114,3 @@ def cancel_job(
     if current is None:
         raise HTTPException(status_code=404, detail="同步任务不存在。")
     return current
-
-
-@router.get("/snapshots")
-def snapshots(request: Request, identity: UserIdentity = Depends(require_user)) -> list[dict[str, object]]:
-    _require_cloud_identity(identity)
-    state: WebAppState = request.app.state.web
-    return _manager(state).snapshots(identity.id)
-
-
-@router.post("/snapshots/{snapshot_id}/restore", status_code=202)
-def restore(
-    snapshot_id: str,
-    request: Request,
-    identity: UserIdentity = Depends(require_user),
-) -> dict[str, object]:
-    _require_cloud_identity(identity)
-    state: WebAppState = request.app.state.web
-    return _manager(state).start_restore(identity.id, snapshot_id)
-
-
-@router.post("/conflicts/use-local", status_code=202)
-def resolve_with_local(request: Request, identity: UserIdentity = Depends(require_user)) -> dict[str, object]:
-    _require_cloud_identity(identity)
-    state: WebAppState = request.app.state.web
-    return _manager(state).start_save(identity.id, force=True)
-
-
-@router.post("/conflicts/use-cloud", status_code=202)
-def resolve_with_cloud(
-    snapshot_id: str,
-    request: Request,
-    identity: UserIdentity = Depends(require_user),
-) -> dict[str, object]:
-    _require_cloud_identity(identity)
-    state: WebAppState = request.app.state.web
-    return _manager(state).start_restore(identity.id, snapshot_id)

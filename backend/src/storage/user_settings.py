@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
     local_revision INTEGER NOT NULL DEFAULT 0,
     uploaded_revision INTEGER NOT NULL DEFAULT 0,
     cloud_snapshot_id TEXT,
+    pending_event_count INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'local_only',
     last_error TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL
@@ -186,8 +187,11 @@ class UserSettingsStore(AuthSettingsMixin):
 
     def sync_state_for_user(self, user_id: str) -> dict[str, object]:
         with self._connection() as connection:
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(sync_state)")}
+            if "pending_event_count" not in columns:
+                connection.execute("ALTER TABLE sync_state ADD COLUMN pending_event_count INTEGER NOT NULL DEFAULT 0")
             row = connection.execute(
-                """SELECT local_revision,uploaded_revision,cloud_snapshot_id,status,last_error,updated_at
+                """SELECT local_revision,uploaded_revision,cloud_snapshot_id,pending_event_count,status,last_error,updated_at
                 FROM sync_state WHERE user_id=?""",
                 (user_id,),
             ).fetchone()
@@ -195,7 +199,8 @@ class UserSettingsStore(AuthSettingsMixin):
             return {
                 "local_revision": 0,
                 "uploaded_revision": 0,
-                "cloud_snapshot_id": None,
+                "cloud_revision": 0,
+                "pending_event_count": 0,
                 "status": "local_only",
                 "last_error": "",
                 "updated_at": None,
@@ -203,10 +208,11 @@ class UserSettingsStore(AuthSettingsMixin):
         return {
             "local_revision": int(row[0]),
             "uploaded_revision": int(row[1]),
-            "cloud_snapshot_id": str(row[2]) if row[2] else None,
-            "status": str(row[3]),
-            "last_error": str(row[4] or ""),
-            "updated_at": float(row[5]),
+            "cloud_revision": int(row[1]),
+            "pending_event_count": int(row[3]),
+            "status": str(row[4]),
+            "last_error": str(row[5] or ""),
+            "updated_at": float(row[6]),
         }
 
     def set_sync_status(self, user_id: str, status: str, *, error: str = "") -> None:
@@ -220,18 +226,30 @@ class UserSettingsStore(AuthSettingsMixin):
                 (user_id, status, error[:1000], now),
             )
 
-    def mark_uploaded(self, user_id: str, snapshot_id: str, revision: int) -> None:
+    def set_sync_metrics(self, user_id: str, *, local_revision: int, cloud_revision: int, pending_event_count: int) -> None:
         now = time.time()
         with self._connection(immediate=True) as connection:
             connection.execute(
                 """INSERT INTO sync_state
-                (user_id,local_revision,uploaded_revision,cloud_snapshot_id,status,last_error,updated_at)
-                VALUES (?,?,?,?, 'synced','',?) ON CONFLICT(user_id) DO UPDATE SET
+                (user_id,local_revision,uploaded_revision,pending_event_count,status,last_error,updated_at)
+                VALUES (?,?,?,?,'dirty','',?) ON CONFLICT(user_id) DO UPDATE SET
+                local_revision=excluded.local_revision,uploaded_revision=excluded.uploaded_revision,
+                pending_event_count=excluded.pending_event_count,updated_at=excluded.updated_at""",
+                (user_id, int(local_revision), int(cloud_revision), int(pending_event_count), now),
+            )
+
+    def mark_uploaded(self, user_id: str, event_batch_id: str, revision: int) -> None:
+        now = time.time()
+        with self._connection(immediate=True) as connection:
+            connection.execute(
+                """INSERT INTO sync_state
+                (user_id,local_revision,uploaded_revision,cloud_snapshot_id,pending_event_count,status,last_error,updated_at)
+                VALUES (?,?,?,?,0, 'synced','',?) ON CONFLICT(user_id) DO UPDATE SET
                 uploaded_revision=excluded.uploaded_revision,
                 cloud_snapshot_id=excluded.cloud_snapshot_id,
                 status=CASE WHEN sync_state.local_revision=excluded.uploaded_revision THEN 'synced' ELSE 'dirty' END,
                 last_error='',updated_at=excluded.updated_at""",
-                (user_id, revision, revision, snapshot_id, now),
+                (user_id, revision, revision, event_batch_id, now),
             )
 
 

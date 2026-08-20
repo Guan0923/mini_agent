@@ -2,13 +2,12 @@
 
 from .auth_repository import PostgresAuthRepository
 from .crypto import CloudMasterCipher, SecretDecryptionError
-from .snapshot_repository import CloudSyncConflict, EncryptedSnapshotChunk, PostgresCloudSnapshotRepository
+from .event_repository import CloudSyncConflict, PostgresCloudEventRepository
 
 __all__ = [
     "CloudMasterCipher",
     "CloudSyncConflict",
-    "EncryptedSnapshotChunk",
     "PostgresAuthRepository",
-    "PostgresCloudSnapshotRepository",
+    "PostgresCloudEventRepository",
     "SecretDecryptionError",
 ]

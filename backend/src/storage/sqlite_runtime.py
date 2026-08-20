@@ -70,7 +70,15 @@ class SQLiteRuntimeMixin:
                 self._node_values(node),
             )
             connection.execute("UPDATE session_meta SET updated_at=?", (node.timestamp,))
-            self._queue(connection, node.session_id)
+            self._queue(
+                connection,
+                node.session_id,
+                kind="node_upserted",
+                payload={"node": node.to_dict()},
+                object_namespace="runtime_node",
+                object_id=node.id,
+            )
+            self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
 
     def get_node(self, session_id: str, node_id: str) -> TreeRuntimeState | None:
         with self._connection(session_id) as connection:
@@ -122,11 +130,19 @@ class SQLiteRuntimeMixin:
 
     def load_nodes(self, session_id: str) -> list[TreeRuntimeState]:
         with self._connection(session_id) as connection:
-            rows = connection.execute(
-                "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json "
-                "FROM runtime_nodes ORDER BY timestamp,id"
+            objects = connection.execute(
+                "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace='runtime_node' ORDER BY updated_at,object_id",
+                (session_id,),
             ).fetchall()
-        result = {node.key: node for node in (self._node_from_row(row) for row in rows)}
+            if objects:
+                nodes = [TreeRuntimeState.from_dict(json.loads(str(row[0]))) for row in objects]
+            else:
+                rows = connection.execute(
+                    "SELECT session_id,parent_session_id,id,parent_id,version,first_kept_entry_id,compaction_idx,user,provider_name,model_json,permission_mode,running_mode,usage_json,cwd,timestamp,status,data_json "
+                    "FROM runtime_nodes ORDER BY timestamp,id"
+                ).fetchall()
+                nodes = [self._node_from_row(row) for row in rows]
+        result = {node.key: node for node in nodes}
         pending = list(result.values())
         while pending:
             node = pending.pop()
@@ -191,9 +207,17 @@ class SQLiteRuntimeMixin:
                 ),
             )
             connection.execute("UPDATE session_meta SET updated_at=?", (node.timestamp,))
-            self._queue(connection, node.session_id)
+            self._queue(
+                connection,
+                node.session_id,
+                kind="node_finalized",
+                payload={"node": node.to_dict()},
+                object_namespace="runtime_node",
+                object_id=node.id,
+            )
+            self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
 
-    def runtime_node_snapshot(self, session_id: str) -> dict[str, object]:
+    def runtime_state_document(self, session_id: str) -> dict[str, object]:
         """Return the new sync shape; no legacy runtime tables are included."""
 
         session = self.get_session(session_id)
@@ -308,8 +332,39 @@ class SQLiteRuntimeMixin:
                     "(SELECT 1 FROM session_messages WHERE run_id=? AND role='user')",
                     (run_id, task, timestamp, run_id),
                 )
+                self._queue(
+                    connection,
+                    session_id,
+                    kind="runtime_message_appended",
+                    payload={
+                        "run_id": run_id,
+                        "sequence": 1,
+                        "kind": "user",
+                        "message": task,
+                        "data": {},
+                        "created_at": timestamp,
+                    },
+                    object_namespace="runtime_message",
+                    object_id=f"{run_id}:1",
+                )
             connection.execute("UPDATE session_meta SET title=?, updated_at=?", (title, timestamp))
-            self._queue(connection, session_id)
+            self._queue(
+                connection,
+                session_id,
+                kind="turn_started",
+                payload={
+                    "run_id": run_id,
+                    "task": task,
+                    "provenance": {
+                        "workflow_id": origin.workflow_id,
+                        "attempt": origin.attempt,
+                        "trigger": origin.trigger,
+                        "source_session_id": origin.source_session_id,
+                        "source_run_id": origin.source_run_id,
+                    },
+                    "append_user_message": append_user_message,
+                },
+            )
 
     def _chain_has_user_message(self, connection: sqlite3.Connection, session_id: str) -> bool:
         """Return whether the full parent chain contains a user message.
@@ -374,7 +429,12 @@ class SQLiteRuntimeMixin:
                 (run_id, content, timestamp),
             )
             connection.execute("UPDATE session_meta SET updated_at=?", (timestamp,))
-            self._queue(connection, session_id)
+            self._queue(
+                connection,
+                session_id,
+                kind="turn_input_appended",
+                payload={"run_id": run_id, "role": "user", "content": content, "created_at": timestamp},
+            )
 
     def finish_turn(self, session_id: str, run_id: str, status: RunStatus, answer: str | None) -> None:
         timestamp = utc_now()
@@ -399,8 +459,28 @@ class SQLiteRuntimeMixin:
                     "INSERT INTO session_messages(run_id,role,content,created_at) VALUES (?, 'assistant', ?, ?)",
                     (run_id, content, timestamp),
                 )
+            self._queue(
+                connection,
+                session_id,
+                kind="runtime_message_appended",
+                payload={
+                    "run_id": run_id,
+                    "sequence": 2,
+                    "kind": "assistant",
+                    "message": content,
+                    "data": {"status": str(status)},
+                    "created_at": timestamp,
+                },
+                object_namespace="runtime_message",
+                object_id=f"{run_id}:2",
+            )
             connection.execute("UPDATE session_meta SET updated_at=?", (timestamp,))
-            self._queue(connection, session_id)
+            self._queue(
+                connection,
+                session_id,
+                kind="turn_finished",
+                payload={"run_id": run_id, "status": str(status), "content": content, "created_at": timestamp},
+            )
 
     def save(self, runtime, reason: str) -> None:
         self._save_state(runtime.state, reason)
@@ -463,11 +543,46 @@ class SQLiteRuntimeMixin:
                 )
                 self._save_runtime_messages(connection, run.runtime_messages, run.run_id)
             connection.execute("UPDATE session_meta SET updated_at=?", (timestamp,))
-            self._queue(connection, state.session_id)
+            state_payload = state.to_dict(include_runtime_messages=False)
+            # Chat history and audit messages have their own immutable append
+            # events; keeping them out of this state delta prevents a growing
+            # conversation from being copied into every checkpoint event.
+            state_payload["messages"] = []
+            self._queue(
+                connection,
+                state.session_id,
+                kind="runtime_state_saved",
+                payload={
+                    "reason": reason,
+                    "state": state_payload,
+                    "run_id": run.run_id if run is not None else None,
+                },
+            )
+            self._put_json_object(connection, state.session_id, "runtime_state", state.session_id, json.loads(payload), timestamp)
+            if run is not None:
+                checkpoint_payload = {
+                    "run_id": run.run_id,
+                    "reason": reason,
+                    "state": state_payload,
+                    "created_at": timestamp,
+                }
+                self._queue(
+                    connection,
+                    state.session_id,
+                    kind="checkpoint_recorded",
+                    payload=checkpoint_payload,
+                    object_namespace="checkpoint",
+                    object_id=f"{run.run_id}:{timestamp}:{reason}",
+                )
 
     def load_runtime(self, session_id: str) -> RuntimeState | None:
         with self._connection(session_id) as connection:
-            row = connection.execute("SELECT state_json FROM session_runtime").fetchone()
+            row = connection.execute(
+                "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace='runtime_state' LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                row = connection.execute("SELECT state_json FROM session_runtime").fetchone()
         if row is None:
             return None
         state = decode_runtime_state(str(row[0]))
@@ -482,10 +597,57 @@ class SQLiteRuntimeMixin:
                 raise ValueError(f"Unknown session run: {run_id}")
             self._insert_runtime_message(connection, message, run_id)
             connection.execute("UPDATE session_meta SET updated_at=?", (message.timestamp,))
-            self._queue(connection, session_id)
+            self._queue(
+                connection,
+                session_id,
+                kind="runtime_message_appended",
+                payload={
+                    "run_id": run_id,
+                    "sequence": message.sequence,
+                    "kind": message.kind,
+                    "message": message.message,
+                    "data": message.data,
+                    "created_at": message.timestamp,
+                },
+                object_namespace="runtime_message",
+                object_id=f"{run_id}:{message.sequence}",
+            )
+            self._put_json_object(
+                connection,
+                session_id,
+                "runtime_message",
+                f"{run_id}:{message.sequence}",
+                {
+                    "run_id": run_id,
+                    "sequence": message.sequence,
+                    "kind": message.kind,
+                    "message": message.message,
+                    "data": message.data,
+                    "created_at": message.timestamp,
+                },
+                message.timestamp,
+            )
 
     def load_runtime_messages(self, session_id: str, run_id: str | None = None) -> list[RuntimeMessage]:
         with self._connection(session_id) as connection:
+            objects = connection.execute(
+                "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace='runtime_message' ORDER BY object_id",
+                (session_id,),
+            ).fetchall()
+            if objects:
+                values = [json.loads(str(row[0])) for row in objects]
+                if run_id is not None:
+                    values = [item for item in values if str(item.get("run_id") or "") == run_id]
+                return [
+                    RuntimeMessage(
+                        int(item.get("sequence", 0)),
+                        str(item.get("kind") or ""),
+                        str(item.get("message") or ""),
+                        str(item.get("created_at") or utc_now()),
+                        dict(item.get("data") or {}),
+                    )
+                    for item in values
+                ]
             query = "SELECT sequence, kind, message, data_json, created_at FROM runtime_messages"
             values: tuple[object, ...] = () if run_id is None else (run_id,)
             if run_id is not None:
@@ -495,6 +657,27 @@ class SQLiteRuntimeMixin:
             RuntimeMessage(int(row[0]), str(row[1]), str(row[2]), str(row[4]), decode_message_data(str(row[3])))
             for row in rows
         ]
+
+    @staticmethod
+    def _put_json_object(
+        connection: sqlite3.Connection,
+        session_id: str,
+        namespace: str,
+        object_id: str,
+        payload: dict[str, object],
+        updated_at: str,
+    ) -> None:
+        connection.execute(
+            "INSERT INTO json_objects(session_id,namespace,object_id,payload_json,updated_at) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(session_id,namespace,object_id) DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at",
+            (
+                session_id,
+                namespace,
+                object_id,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                updated_at,
+            ),
+        )
 
     def resume_runtime(self, source: RuntimeState, resumed: RuntimeState) -> None:
         self._save_state(source, f"run_{source.current_run.status}" if source.current_run else "resume")

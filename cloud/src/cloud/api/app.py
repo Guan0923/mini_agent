@@ -1,4 +1,4 @@
-"""FastAPI application for the remote account and snapshot control plane."""
+"""FastAPI application for the remote account and encrypted event control plane."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from cloud.auth.mail import NullMailer, SMTPMailer, SMTPSettings
 from cloud.auth.service import CloudAuthService
 from cloud.auth.types import AuthStorageUnavailable
-from cloud.storage import CloudMasterCipher, PostgresAuthRepository, PostgresCloudSnapshotRepository
+from cloud.storage import CloudMasterCipher, PostgresAuthRepository, PostgresCloudEventRepository
 
 from .routes import build_router
 
@@ -20,12 +20,12 @@ from .routes import build_router
 @dataclass
 class CloudAppState:
     auth: Any
-    snapshots: Any
+    events: Any
     auth_service: CloudAuthService
     mailer: Any
 
     def close(self) -> None:
-        for resource in (self.mailer, self.auth, self.snapshots):
+        for resource in (self.mailer, self.auth, self.events):
             close = getattr(resource, "close", None)
             if callable(close):
                 close()
@@ -36,39 +36,38 @@ def create_app(
     database_url: str | None = None,
     secret_key: str | None = None,
     auth_repository: Any | None = None,
-    snapshot_repository: Any | None = None,
+    event_repository: Any | None = None,
     mailer: Any | None = None,
 ) -> FastAPI:
     """Create the cloud app.
 
     Repositories may be injected by tests. Production startup requires a
-    PostgreSQL URL and a master secret for user data key envelopes.  The
-    master-secret check is performed here, at the cloud boundary, so a
-    misconfigured deployment cannot start and accept account traffic before
-    its snapshot encryption path is usable.
+    PostgreSQL URL and a master secret for user data key envelopes. The
+    master-secret check is performed here so a misconfigured deployment
+    cannot accept account traffic before event encryption is usable.
     """
 
     configured_url = (database_url or os.environ.get("DATABASE_URL", "")).strip()
     if auth_repository is None and not configured_url:
         raise RuntimeError("DATABASE_URL is required for the cloud service.")
     auth = auth_repository or PostgresAuthRepository(configured_url)
-    if snapshot_repository is None:
+    if event_repository is None:
         master_cipher = CloudMasterCipher(secret_key)
         # Resolve the active key once during startup.  ``CloudMasterCipher``
         # intentionally derives versioned keys lazily for rotations, but an
         # absent deployment secret must be a startup error rather than a
         # delayed 500 on the first account synchronization.
         master_cipher.validate()
-        snapshots = PostgresCloudSnapshotRepository(configured_url, master_cipher=master_cipher)
+        events = PostgresCloudEventRepository(configured_url, master_cipher=master_cipher)
     else:
-        snapshots = snapshot_repository
+        events = event_repository
     resolved_mailer = mailer
     if resolved_mailer is None:
         smtp = SMTPSettings.from_environment()
         resolved_mailer = SMTPMailer(smtp) if smtp is not None else NullMailer()
     state = CloudAppState(
         auth=auth,
-        snapshots=snapshots,
+        events=events,
         auth_service=CloudAuthService(auth, resolved_mailer),
         mailer=resolved_mailer,
     )
@@ -83,13 +82,13 @@ def create_app(
     @app.get("/ready")
     def ready() -> dict[str, str]:
         state.auth.ping()
-        # Authentication and snapshot repositories are separate adapters even
+        # Authentication and event repositories are separate adapters even
         # though production currently shares one PostgreSQL database.  Probe
         # both when the adapter exposes ``ping`` so a partially initialized
         # cloud deployment cannot report ready while sync traffic is broken.
-        ping_snapshots = getattr(state.snapshots, "ping", None)
-        if callable(ping_snapshots):
-            ping_snapshots()
+        ping_events = getattr(state.events, "ping", None)
+        if callable(ping_events):
+            ping_events()
         return {"status": "ready", "service": "mini-agent-cloud", "database": "ok"}
 
     @app.exception_handler(AuthStorageUnavailable)

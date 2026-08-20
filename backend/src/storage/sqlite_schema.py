@@ -9,7 +9,7 @@ from backend.domain.runtime_state import create_root_node, session_root_id
 
 from .codec import is_default_session_title, normalize_session_title
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 # Keep the structural version stable: v4 databases only need the session-root
 # migration and should not have their message tree dropped. New databases use
 # the three-state CHECK constraint below; stale failed rows are intentionally
@@ -20,7 +20,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_meta (
     session_id TEXT PRIMARY KEY, title TEXT NOT NULL, owner_device_id TEXT NOT NULL,
     remote_revision INTEGER NOT NULL DEFAULT 0, read_only INTEGER NOT NULL DEFAULT 0,
-    schema_version INTEGER NOT NULL DEFAULT 7, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 8, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     client_id TEXT, archived_at TEXT, deleted_at TEXT,
     local_only INTEGER NOT NULL DEFAULT 0, title_is_custom INTEGER NOT NULL DEFAULT 0
 );
@@ -71,11 +71,32 @@ CREATE INDEX IF NOT EXISTS runtime_nodes_session_timestamp_idx
     ON runtime_nodes (session_id, timestamp, id);
 CREATE INDEX IF NOT EXISTS runtime_nodes_parent_idx
     ON runtime_nodes (parent_session_id, parent_id, timestamp, id);
-CREATE TABLE IF NOT EXISTS sync_outbox (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT UNIQUE, base_revision INTEGER NOT NULL DEFAULT 0,
-    kind TEXT NOT NULL DEFAULT 'snapshot', payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
-    acknowledged_at TEXT
+-- v8 JSON event storage.  Business payloads are kept as JSON documents;
+-- scalar columns exist only for ordering, idempotency, and synchronization.
+CREATE TABLE IF NOT EXISTS json_objects (
+    session_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, namespace, object_id)
 );
+CREATE INDEX IF NOT EXISTS json_objects_session_idx
+    ON json_objects (session_id, namespace, updated_at, object_id);
+CREATE TABLE IF NOT EXISTS json_events (
+    session_id TEXT NOT NULL,
+    local_sequence INTEGER NOT NULL,
+    event_id TEXT NOT NULL UNIQUE,
+    base_revision INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    acknowledged_at TEXT,
+    PRIMARY KEY (session_id, local_sequence)
+);
+CREATE INDEX IF NOT EXISTS json_events_pending_idx
+    ON json_events (session_id, acknowledged_at, local_sequence);
 CREATE TABLE IF NOT EXISTS workspace_files (
     session_id TEXT NOT NULL,
     relative_path TEXT NOT NULL,
@@ -108,6 +129,41 @@ class SQLiteSchemaMixin:
     device_id: str
 
     def _migrate_schema(self, connection: sqlite3.Connection) -> None:
+        # The v8 JSON event store is intentionally a protocol break.  Never
+        # reinterpret or mutate a pre-v8 relationship/snapshot database: the
+        # owner explicitly removes those files before first use.
+        meta_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(session_meta)")}
+        schema_default = next(
+            (str(row[4]).strip("'") for row in connection.execute("PRAGMA table_info(session_meta)") if str(row[1]) == "schema_version"),
+            str(SCHEMA_VERSION),
+        )
+        if schema_default != str(SCHEMA_VERSION):
+            raise RuntimeError(
+                "Unsupported legacy state.db schema; remove the old state.db before using JSON event storage."
+            )
+        prior_version_row = (
+            connection.execute("SELECT schema_version FROM session_meta LIMIT 1").fetchone()
+            if "schema_version" in meta_columns
+            else None
+        )
+        if prior_version_row is not None and int(prior_version_row[0] or 0) < SCHEMA_VERSION:
+            raise RuntimeError(
+                "Unsupported legacy state.db schema; remove the old state.db before using JSON event storage."
+            )
+        if prior_version_row is None and meta_columns and connection.execute("SELECT 1 FROM session_meta LIMIT 1").fetchone() is not None:
+            legacy_tables = {
+                str(row[0])
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if "sync_outbox" in legacy_tables or "runtime_nodes" in legacy_tables:
+                # A metadata table without a v8 row is an old database, not a
+                # partially initialized new one, when any runtime table exists.
+                if "session_meta" in legacy_tables and legacy_tables.intersection(
+                    {"sync_outbox", "runtime_nodes", "session_runtime", "checkpoints"}
+                ):
+                    raise RuntimeError(
+                        "Unsupported legacy state.db schema; remove the old state.db before using JSON event storage."
+                    )
         runtime_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(runtime_nodes)")}
         required_runtime_columns = {
             "provider_name",
@@ -116,15 +172,7 @@ class SQLiteSchemaMixin:
             "running_mode",
             "usage_json",
         }
-        meta_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(session_meta)")}
-        prior_version_row = (
-            connection.execute("SELECT schema_version FROM session_meta LIMIT 1").fetchone()
-            if "schema_version" in meta_columns
-            else None
-        )
-        prior_version = (
-            int(prior_version_row[0]) if prior_version_row is not None and prior_version_row[0] is not None else 1
-        )
+        prior_version = int(prior_version_row[0]) if prior_version_row is not None else SCHEMA_VERSION
         # RuntimeState 0.3 is a protocol break.  Preserve the existing one-way
         # rebuild for pre-v4 databases, but v4 -> v5 only adds the formal
         # session root and must retain the canonical message tree.
@@ -169,11 +217,7 @@ class SQLiteSchemaMixin:
         ):
             if name not in meta_columns:
                 connection.execute(f"ALTER TABLE session_meta ADD COLUMN {name} {definition}")
-        if prior_version < 7:
-            self._migrate_legacy_permissions(connection)
-        connection.execute(
-            "UPDATE session_meta SET schema_version=? WHERE schema_version < ?", (SCHEMA_VERSION, SCHEMA_VERSION)
-        )
+        connection.execute("UPDATE session_meta SET schema_version=? WHERE schema_version IS NULL", (SCHEMA_VERSION,))
         connection.execute(
             "UPDATE session_meta SET owner_device_id=? WHERE owner_device_id IS NULL OR owner_device_id=''",
             (self.device_id,),
@@ -192,45 +236,8 @@ class SQLiteSchemaMixin:
                 "UPDATE session_meta SET schema_version=? WHERE schema_version < ?",
                 (SCHEMA_VERSION, SCHEMA_VERSION),
             )
-        outbox_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(sync_outbox)")}
-        for name, definition in (
-            ("operation_id", "TEXT"),
-            ("base_revision", "INTEGER NOT NULL DEFAULT 0"),
-            ("kind", "TEXT NOT NULL DEFAULT 'snapshot'"),
-            ("acknowledged_at", "TEXT"),
-        ):
-            if name not in outbox_columns:
-                connection.execute(f"ALTER TABLE sync_outbox ADD COLUMN {name} {definition}")
-        # v5 -> v6 provenance backfill.  A placeholder title is replaced by
-        # the first local user message; any other title is conservatively
-        # treated as a manual rename so historical titles are never
-        # overwritten by automatic naming.  Runs after the outbox columns are
-        # ready because cloud-backed sessions re-queue their canonical
-        # snapshot in the same transaction; the upgrade and the backfill
-        # commit together.
-        if "title_is_custom" not in meta_columns:
-            self._backfill_title_is_custom(connection)
-        legacy_outbox = connection.execute("SELECT 1 FROM sync_outbox WHERE operation_id IS NULL LIMIT 1").fetchone()
-        if legacy_outbox is not None:
-            connection.execute("DELETE FROM sync_outbox WHERE operation_id IS NULL")
-            meta = connection.execute("SELECT session_id,read_only FROM session_meta").fetchone()
-            if meta is not None and not int(meta[1]):
-                self._queue(connection, str(meta[0]))
-
-        # A database created by an older client may already have an outbox
-        # entry before the local project binding is imported.  Once the
-        # session is marked local-only, remove that stale payload immediately.
-        local_only = connection.execute("SELECT local_only FROM session_meta LIMIT 1").fetchone()
-        if local_only is not None and int(local_only[0]):
-            connection.execute("DELETE FROM sync_outbox")
-
-        # Every v5 session has a deterministic root.  This runs after the
-        # outbox columns are ready so a migrated cloud-backed session can queue
-        # the new canonical snapshot in the same transaction.
-        if self._ensure_session_root(connection):
-            meta = connection.execute("SELECT session_id,local_only,read_only FROM session_meta LIMIT 1").fetchone()
-            if meta is not None and not int(meta[1]) and not int(meta[2]):
-                self._queue(connection, str(meta[0]))
+        # New databases are created with their deterministic root by
+        # create_session.  No legacy snapshot/outbox backfill is performed.
 
     @staticmethod
     def _migrate_legacy_permissions(connection: sqlite3.Connection) -> None:
@@ -323,6 +330,10 @@ class SQLiteSchemaMixin:
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             self._node_values(root),
         )
+        connection.execute(
+            "INSERT INTO json_objects(session_id,namespace,object_id,payload_json,updated_at) VALUES (?,?,?,?,?)",
+            (session_id, "runtime_node", root.id, json.dumps(root.to_dict(), ensure_ascii=False, separators=(",", ":")), str(meta[1])),
+        )
         direct_children = [
             row for row in all_local_nodes if str(row[1]) == session_id and str(row[2]) in legacy_root_ids
         ]
@@ -360,6 +371,10 @@ class SQLiteSchemaMixin:
                 usage_json,cwd,timestamp,status,data_json
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             self._node_values(root),
+        )
+        connection.execute(
+            "INSERT INTO json_objects(session_id,namespace,object_id,payload_json,updated_at) VALUES (?,?,?,?,?)",
+            (session_id, "runtime_node", root.id, json.dumps(root.to_dict(), ensure_ascii=False, separators=(",", ":")), timestamp),
         )
 
 

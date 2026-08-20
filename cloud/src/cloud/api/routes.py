@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -12,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from cloud.auth.mail import MailDeliveryError
 from cloud.auth.types import AuthError, AuthStorageUnavailable, RateLimitError, UserIdentity
-from cloud.sync.repository import CloudSyncConflict, EncryptedSnapshotChunk
+from cloud.sync.repository import CloudSyncConflict
 
 
 class EmailRequest(BaseModel):
@@ -45,24 +44,14 @@ class KeyRequest(BaseModel):
     dek: str = Field(min_length=32, max_length=256)
 
 
-class SnapshotBeginRequest(BaseModel):
-    snapshot_id: str = Field(min_length=1, max_length=160)
-    parent_snapshot_id: str | None = Field(default=None, max_length=160)
-    local_revision: int = Field(ge=0)
+class SyncPushRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=160)
+    parent_revision: int = Field(ge=0)
     device_id: str = Field(min_length=1, max_length=160)
-    force: bool = False
-
-
-class SnapshotChunkRequest(BaseModel):
-    nonce: str = Field(min_length=1, max_length=128)
-    ciphertext: str = Field(min_length=1, max_length=2_000_000)
+    event_id: str = Field(min_length=1, max_length=200)
+    event_ids: list[str] = Field(default_factory=list, max_length=4096)
+    envelope: dict[str, object]
     checksum: str = Field(min_length=64, max_length=128)
-
-
-class SnapshotCompleteRequest(BaseModel):
-    archive_sha256: str = Field(min_length=64, max_length=128)
-    archive_size: int = Field(ge=1)
-    chunk_count: int = Field(ge=1)
 
 
 def _state(request: Request):
@@ -110,6 +99,46 @@ def _auth_error(exc: Exception) -> HTTPException:
 
 def build_router() -> APIRouter:
     router = APIRouter(prefix="/v1", tags=["cloud"])
+
+    @router.post("/sync/push")
+    def sync_push(
+        body: SyncPushRequest,
+        request: Request,
+        identity: Annotated[UserIdentity, Depends(current_identity)],
+    ) -> dict[str, object]:
+        if str(body.envelope.get("checksum") or "") != body.checksum:
+            raise HTTPException(status_code=422, detail="加密事件批次校验和无效。")
+        declared_count = body.envelope.get("event_count")
+        if declared_count is not None and int(declared_count) != len(body.event_ids):
+            raise HTTPException(status_code=422, detail="事件数量与加密批次不匹配。")
+        if len(set(body.event_ids)) != len(body.event_ids):
+            raise HTTPException(status_code=422, detail="事件 ID 不得重复。")
+        try:
+            return _state(request).events.push_events(
+                identity.id,
+                session_id=body.session_id,
+                parent_revision=body.parent_revision,
+                device_id=body.device_id,
+                event_id=body.event_id,
+                event_ids=body.event_ids,
+                envelope=body.envelope,
+                checksum=body.checksum,
+            )
+        except CloudSyncConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.get("/sync/pull")
+    def sync_pull(
+        request: Request,
+        identity: Annotated[UserIdentity, Depends(current_identity)],
+        session_id: str,
+        after_revision: int = 0,
+    ) -> dict[str, object]:
+        if after_revision < 0:
+            raise HTTPException(status_code=422, detail="after_revision must be non-negative")
+        return _state(request).events.pull_events(identity.id, session_id=session_id, after_revision=after_revision)
 
     @router.post("/auth/register/code", status_code=202)
     def register_code(body: EmailRequest, request: Request) -> dict[str, str]:
@@ -210,13 +239,6 @@ def build_router() -> APIRouter:
             return JSONResponse({"status": "expired"}, status_code=410)
         return JSONResponse({"status": "invalid_grant"}, status_code=400)
 
-    @router.get("/sync/snapshots")
-    def list_snapshots(
-        request: Request,
-        identity: Annotated[UserIdentity, Depends(current_identity)],
-    ) -> list[dict[str, object]]:
-        return _state(request).snapshots.list_snapshots(identity.id)
-
     @router.post("/sync/keys")
     @router.post("/sync/keys/ensure")
     def ensure_key(
@@ -229,7 +251,7 @@ def build_router() -> APIRouter:
         if len(dek) != 32:
             raise HTTPException(status_code=422, detail="数据密钥长度无效。")
         try:
-            _state(request).snapshots.ensure_user_key(identity.id, dek)
+            _state(request).events.ensure_user_key(identity.id, dek)
         except CloudSyncConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
@@ -241,104 +263,8 @@ def build_router() -> APIRouter:
     def recover_key(
         request: Request, identity: Annotated[UserIdentity, Depends(current_identity)]
     ) -> dict[str, str | None]:
-        key = _state(request).snapshots.recover_user_key(identity.id)
+        key = _state(request).events.recover_user_key(identity.id)
         return {"dek": base64.urlsafe_b64encode(key).decode("ascii") if key is not None else None}
-
-    @router.post("/sync/snapshots/begin")
-    def begin_snapshot(
-        body: SnapshotBeginRequest,
-        request: Request,
-        identity: Annotated[UserIdentity, Depends(current_identity)],
-    ) -> dict[str, int]:
-        try:
-            version = _state(request).snapshots.begin_snapshot(
-                snapshot_id=body.snapshot_id,
-                user_id=identity.id,
-                parent_snapshot_id=body.parent_snapshot_id,
-                local_revision=body.local_revision,
-                device_id=body.device_id,
-                force=body.force,
-            )
-        except CloudSyncConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {"version": version}
-
-    @router.put("/sync/snapshots/{snapshot_id}/chunks/{sequence}")
-    def append_chunk(
-        snapshot_id: str,
-        sequence: int,
-        body: SnapshotChunkRequest,
-        request: Request,
-        identity: Annotated[UserIdentity, Depends(current_identity)],
-    ) -> dict[str, object]:
-        if sequence < 0:
-            raise HTTPException(status_code=422, detail="快照分块序号无效。")
-        try:
-            nonce = base64.b64decode(body.nonce.encode("ascii"), altchars=b"-_", validate=True)
-            ciphertext = base64.b64decode(body.ciphertext.encode("ascii"), altchars=b"-_", validate=True)
-        except (ValueError, UnicodeError) as exc:
-            raise HTTPException(status_code=422, detail="快照分块格式无效。") from exc
-        if len(nonce) != 12 or len(ciphertext) < 16:
-            raise HTTPException(status_code=422, detail="快照分块格式无效。")
-        if body.checksum != hashlib.sha256(ciphertext).hexdigest():
-            raise HTTPException(status_code=422, detail="快照分块校验和无效。")
-        chunk = EncryptedSnapshotChunk(sequence, nonce, ciphertext, body.checksum)
-        try:
-            _state(request).snapshots.append_chunk(identity.id, snapshot_id, chunk)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"accepted": True, "sequence": sequence}
-
-    @router.post("/sync/snapshots/{snapshot_id}/complete")
-    def complete_snapshot(
-        snapshot_id: str,
-        body: SnapshotCompleteRequest,
-        request: Request,
-        identity: Annotated[UserIdentity, Depends(current_identity)],
-    ) -> dict[str, bool]:
-        try:
-            _state(request).snapshots.complete_snapshot(
-                identity.id,
-                snapshot_id,
-                archive_sha256=body.archive_sha256,
-                archive_size=body.archive_size,
-                chunk_count=body.chunk_count,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"completed": True}
-
-    @router.post("/sync/snapshots/{snapshot_id}/fail")
-    def fail_snapshot(
-        snapshot_id: str, request: Request, identity: Annotated[UserIdentity, Depends(current_identity)]
-    ) -> dict[str, bool]:
-        _state(request).snapshots.fail_snapshot(identity.id, snapshot_id)
-        return {"failed": True}
-
-    @router.get("/sync/snapshots/{snapshot_id}")
-    def download_snapshot(
-        snapshot_id: str,
-        request: Request,
-        identity: Annotated[UserIdentity, Depends(current_identity)],
-    ) -> dict[str, object]:
-        try:
-            metadata, chunks = _state(request).snapshots.download(identity.id, snapshot_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return {
-            "metadata": metadata,
-            "chunks": [
-                {
-                    "sequence": item.sequence,
-                    "nonce": base64.urlsafe_b64encode(item.nonce).decode("ascii"),
-                    "ciphertext": base64.urlsafe_b64encode(item.ciphertext).decode("ascii"),
-                    "checksum": item.checksum,
-                }
-                for item in chunks
-            ],
-        }
 
     return router
 

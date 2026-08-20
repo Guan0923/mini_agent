@@ -215,11 +215,11 @@ def _prepare_user(request: Request, identity: UserIdentity, *, first_cloud_login
     if manager is None or identity.is_guest:
         return
     try:
+        # Event synchronization performs encrypted pull/replay on demand;
+        # there is no snapshot list or ZIP restore step during login.
         manager.recover_key_if_available(identity.id)
         if first_cloud_login or not had_local_user_db:
-            snapshots = manager.snapshots(identity.id)
-            if snapshots:
-                manager.start_restore(identity.id, str(snapshots[0]["id"]))
+            manager.sync_now(identity.id, force=False)
     except Exception:
         # Authentication and local usage remain available while the sync page
         # exposes any cloud/key recovery failure for explicit user action.

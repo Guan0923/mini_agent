@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { getCurrentUser, getGuestImportStatus, getSyncStatus, guestLogin as guestLoginRequest, login as loginRequest, logout as logoutRequest, resolveGuestImport, setUnauthorizedHandler } from "../api";
+import { getCurrentUser, getGuestImportStatus, guestLogin as guestLoginRequest, login as loginRequest, logout as logoutRequest, resolveGuestImport, setUnauthorizedHandler } from "../api";
 import { resetLegacyBrowserState } from "../app/storage";
 import type { AuthUser } from "../types";
 
@@ -62,24 +62,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!user || user.kind === "guest") return;
     let active = true;
-    async function resolveWhenRestoreSettled(): Promise<void> {
-      // A first account login can start an automatic cloud restore before the
-      // auth response is returned. Wait for that restore to finish before
-      // importing guest sessions, otherwise the restore could overwrite the
-      // sessions we just copied.
-      for (let attempt = 0; attempt < 120 && active; attempt += 1) {
-        try {
-          const sync = await getSyncStatus();
-          const job = sync.job;
-          if (!job || job.kind !== "restore" || !["queued", "running"].includes(job.status)) break;
-        } catch {
-          // Cloud sync is optional (and may be unavailable in local/test
-          // deployments); in that case the guest import can proceed.
-          break;
-        }
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 1000));
-      }
-      if (!active) return;
+    async function resolveWhenSyncReady(): Promise<void> {
       const latest = await getCurrentUser();
       if (latest && active) setUserState(latest);
       if (!active || !latest?.guest_import) return;
@@ -91,7 +74,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await resolveGuestImport(accepted ? "import" : "dismiss");
       if (active) setUserState((current) => current ? { ...current, guest_import: null } : current);
     }
-    void resolveWhenRestoreSettled().catch(() => undefined);
+    void resolveWhenSyncReady().catch(() => undefined);
     return () => { active = false; };
   }, [user?.id, user?.kind]);
 

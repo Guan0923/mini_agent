@@ -10,12 +10,15 @@ import base64
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
 from backend.storage.auth.types import UserIdentity
-from backend.sync.cloud_repository import CloudSyncConflict, EncryptedSnapshotChunk
+
+
+class CloudSyncConflict(RuntimeError):
+    """The cloud head changed before this event batch was accepted."""
 
 
 class CloudApiError(RuntimeError):
@@ -265,81 +268,45 @@ class CloudClient:
             raise CloudApiError("云端返回了无效的数据密钥长度。")
         return key
 
-    def list_snapshots(self) -> list[dict[str, object]]:
-        payload = self._request("GET", "/v1/sync/snapshots")
-        return [dict(item) for item in payload if isinstance(item, Mapping)] if isinstance(payload, list) else []
+    def push_events(
+        self,
+        *,
+        session_id: str,
+        parent_revision: int,
+        device_id: str,
+        event_id: str,
+        envelope: Mapping[str, object],
+        checksum: str,
+        event_ids: list[str] | None = None,
+    ) -> dict[str, object]:
+        """Push one encrypted JSON event batch to the cloud head."""
 
-    def begin_snapshot(
-        self, *, snapshot_id: str, parent_snapshot_id: str | None, local_revision: int, device_id: str, force: bool
-    ) -> int:
-        if not snapshot_id or len(snapshot_id) > 160 or "/" in snapshot_id or "\\" in snapshot_id:
-            raise ValueError("Snapshot id is invalid.")
-        if not device_id or len(device_id) > 160:
-            raise ValueError("Device id is invalid.")
         payload = self._request(
             "POST",
-            "/v1/sync/snapshots/begin",
+            "/v1/sync/push",
             json={
-                "snapshot_id": snapshot_id,
-                "parent_snapshot_id": parent_snapshot_id,
-                "local_revision": local_revision,
+                "session_id": session_id,
+                "parent_revision": parent_revision,
                 "device_id": device_id,
-                "force": force,
+                "event_id": event_id,
+                "event_ids": list(event_ids or []),
+                "envelope": dict(envelope),
+                "checksum": checksum,
             },
         )
         if not isinstance(payload, Mapping):
-            raise CloudApiError("云端返回了无效的快照版本。")
-        return int(payload.get("version") or 0)
+            raise CloudApiError("云端返回了无效的事件确认。")
+        return dict(payload)
 
-    def append_chunk(self, snapshot_id: str, chunk: EncryptedSnapshotChunk) -> None:
-        safe_snapshot_id = quote(snapshot_id, safe="-_.~")
-        self._request(
-            "PUT",
-            f"/v1/sync/snapshots/{safe_snapshot_id}/chunks/{chunk.sequence}",
-            json={
-                "nonce": base64.urlsafe_b64encode(chunk.nonce).decode("ascii"),
-                "ciphertext": base64.urlsafe_b64encode(chunk.ciphertext).decode("ascii"),
-                "checksum": chunk.checksum,
-            },
-        )
+    def pull_events(self, *, session_id: str, after_revision: int) -> dict[str, object]:
+        """Pull encrypted JSON events after a local revision."""
 
-    def complete_snapshot(self, snapshot_id: str, *, archive_sha256: str, archive_size: int, chunk_count: int) -> None:
-        safe_snapshot_id = quote(snapshot_id, safe="-_.~")
-        self._request(
-            "POST",
-            f"/v1/sync/snapshots/{safe_snapshot_id}/complete",
-            json={
-                "archive_sha256": archive_sha256,
-                "archive_size": archive_size,
-                "chunk_count": chunk_count,
-            },
-        )
-
-    def fail_snapshot(self, snapshot_id: str) -> None:
-        safe_snapshot_id = quote(snapshot_id, safe="-_.~")
-        self._request("POST", f"/v1/sync/snapshots/{safe_snapshot_id}/fail")
-
-    def download(self, snapshot_id: str) -> tuple[dict[str, object], list[EncryptedSnapshotChunk]]:
-        safe_snapshot_id = quote(snapshot_id, safe="-_.~")
-        payload = self._request("GET", f"/v1/sync/snapshots/{safe_snapshot_id}")
+        query = urlencode({"session_id": session_id, "after_revision": after_revision})
+        payload = self._request("GET", f"/v1/sync/pull?{query}")
         if not isinstance(payload, Mapping):
-            raise CloudApiError("云端返回了无效的快照数据。")
-        metadata = dict(payload.get("metadata") or {})
-        chunks: list[EncryptedSnapshotChunk] = []
-        for item in payload.get("chunks", []) if isinstance(payload, Mapping) else []:
-            if not isinstance(item, Mapping):
-                continue
-            try:
-                chunk = EncryptedSnapshotChunk(
-                    int(item.get("sequence") or 0),
-                    base64.b64decode(str(item.get("nonce") or "").encode("ascii"), altchars=b"-_", validate=True),
-                    base64.b64decode(str(item.get("ciphertext") or "").encode("ascii"), altchars=b"-_", validate=True),
-                    str(item.get("checksum") or ""),
-                )
-            except (TypeError, ValueError) as exc:
-                raise CloudApiError("云端返回了无效的快照分块。") from exc
-            chunks.append(chunk)
-        return metadata, chunks
+            raise CloudApiError("云端返回了无效的事件批次。")
+        return dict(payload)
+
 
 
 __all__ = ["CloudApiError", "CloudAuthExpired", "CloudClient", "CloudConflict", "CloudSession", "CloudUnavailable"]
