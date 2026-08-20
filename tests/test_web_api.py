@@ -481,6 +481,110 @@ def test_rewind_inherits_title_provenance_and_retitles_without_first_user(tmp_pa
         assert store.get_session_summary(manual_payload["session_id"]).title == "手工标题"
 
 
+@pytest.mark.parametrize("source_status", ["running", "abort", "success"])
+def test_fork_and_rewind_use_resumable_anchor_for_terminal_attempts(
+    tmp_path: Path,
+    source_status: str,
+) -> None:
+    state = WebAppState(tmp_path / source_status)
+    with TestClient(create_app(state)) as client:
+        user = client.post("/api/auth/guest").json()["user"]
+        store = _store(state, user["id"])
+        source = store.create_session(f"source-{source_status}")
+        root = store.get_session_root(source.session_id)
+        assert root is not None
+        writer = NodeWriter(store)
+        stable = writer.create(
+            session_id=source.session_id,
+            parent=root,
+            data=message_payload("assistant", "stable context"),
+        )
+        stable = writer.delete(stable.session_id, stable.id)
+        selected = writer.create(
+            session_id=source.session_id,
+            parent=stable,
+            data=message_payload("assistant", "selected attempt"),
+        )
+        if source_status == "abort":
+            selected = writer.abort(selected.session_id, selected.id)
+        elif source_status == "success":
+            selected = writer.delete(selected.session_id, selected.id)
+
+        before_rewind = {node.key for node in store.load_nodes(source.session_id)}
+        rewound = client.post(
+            f"/api/sessions/{source.session_id}/rewind",
+            json={
+                "source_node_id": selected.id,
+                "source_node_session_id": selected.session_id,
+            },
+        )
+        assert rewound.status_code == 200, rewound.text
+        assert rewound.json()["rewind_source_node_id"] == stable.id
+        assert rewound.json()["rewind_source_session_id"] == stable.session_id
+        assert {node.key for node in store.load_nodes(source.session_id)} == before_rewind
+
+        forked = client.post(
+            f"/api/sessions/{source.session_id}/fork",
+            json={
+                "title": f"fork-{source_status}",
+                "source_node_id": selected.id,
+                "source_node_session_id": selected.session_id,
+            },
+        )
+        assert forked.status_code == 200, forked.text
+        target_root = store.get_session_root(forked.json()["session_id"])
+        assert target_root is not None
+        expected_anchor = selected if source_status == "success" else stable
+        assert (target_root.parent_session_id, target_root.parent_id) == expected_anchor.key
+        if source_status in {"running", "abort"}:
+            assert store.list_children(selected.session_id, selected.id) == []
+            persisted = store.get_node(selected.session_id, selected.id)
+            assert persisted is not None and persisted.status == source_status
+
+
+def test_fork_accepts_only_full_node_keys_from_the_loaded_ancestor_tree(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web")
+    with TestClient(create_app(state)) as client:
+        user = client.post("/api/auth/guest").json()["user"]
+        store = _store(state, user["id"])
+        writer = NodeWriter(store)
+
+        ancestor_session = store.create_session("ancestor")
+        ancestor_root = store.get_session_root(ancestor_session.session_id)
+        assert ancestor_root is not None
+        ancestor = writer.create(
+            session_id=ancestor_session.session_id,
+            parent=ancestor_root,
+            data=message_payload("assistant", "ancestor"),
+        )
+        ancestor = writer.delete(ancestor.session_id, ancestor.id)
+        branch = store.create_session("branch", root_parent=ancestor.key)
+
+        valid = client.post(
+            f"/api/sessions/{branch.session_id}/fork",
+            json={"source_node_id": ancestor.id, "source_node_session_id": ancestor.session_id},
+        )
+        assert valid.status_code == 200, valid.text
+        valid_root = store.get_session_root(valid.json()["session_id"])
+        assert valid_root is not None
+        assert (valid_root.parent_session_id, valid_root.parent_id) == ancestor.key
+
+        unrelated_session = store.create_session("unrelated")
+        unrelated_root = store.get_session_root(unrelated_session.session_id)
+        assert unrelated_root is not None
+        unrelated = writer.create(
+            session_id=unrelated_session.session_id,
+            parent=unrelated_root,
+            data=message_payload("assistant", "unrelated"),
+        )
+        unrelated = writer.delete(unrelated.session_id, unrelated.id)
+        rejected = client.post(
+            f"/api/sessions/{branch.session_id}/fork",
+            json={"source_node_id": unrelated.id, "source_node_session_id": unrelated.session_id},
+        )
+        assert rejected.status_code == 400
+
+
 def test_chat_request_accepts_and_limits_structured_references() -> None:
     from backend.api.chat.routes import ChatRequest, FileReference
 

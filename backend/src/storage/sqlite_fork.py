@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 from backend.domain import RunProvenance, Session, new_run_id
-from backend.domain.runtime_state import NodeWriter, message_payload
+from backend.domain.runtime_state import NodeWriter, message_payload, resolve_fork_anchor
 from backend.runtime.core.context import text_messages
 
 from .codec import decode_runtime_state
@@ -125,10 +125,13 @@ class SQLiteForkMixin:
                     raise
                 return target
             source_leaf = max(nodes, key=lambda item: (item.timestamp, item.id))
+            source_anchor = resolve_fork_anchor(source_leaf, self.get_node)
+            if source_anchor.key not in {node.key for node in nodes}:
+                raise ValueError("Fork source parent does not belong to the source ancestry tree.")
             target = self.create_session(
                 f"Fork: {summary.title}",
                 local_only=summary.local_only,
-                root_parent=(source_leaf.session_id, source_leaf.id),
+                root_parent=source_anchor.key,
             )
             new_id = new_run_id()
             provenance = RunProvenance(
