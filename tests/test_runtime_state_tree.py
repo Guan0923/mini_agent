@@ -360,6 +360,24 @@ def test_parent_reference_and_fork() -> None:
     assert tree.ancestors("fork", fork.id) == [root, child, fork]
 
 
+@pytest.mark.parametrize("source_status", ["running", "abort"])
+def test_tree_fork_uses_parent_of_running_or_abort_leaf(source_status: str) -> None:
+    tree = RuntimeStateTree()
+    stable = tree.create_child(session_id="source", data=message_payload("assistant", "stable"))
+    selected = tree.create_child(
+        session_id="source",
+        parent=stable,
+        data=message_payload("assistant", "attempt"),
+        status=source_status,
+    )
+
+    fork = tree.fork(selected, session_id="fork")
+
+    assert (fork.parent_session_id, fork.parent_id) == stable.key
+    assert tree.is_leaf(selected.session_id, selected.id)
+    assert tree.ancestors("fork", fork.id) == [stable, fork]
+
+
 def test_sealed_nodes_are_replaced_only_at_delete() -> None:
     frames: list[NodeFrame] = []
     store = InMemoryNodeStore()
@@ -1100,3 +1118,38 @@ def test_sqlite_fork_loads_cross_session_ancestors(tmp_path: Path) -> None:
         (target_root.session_id, target_root.id),
         (fork_node.session_id, fork_node.id),
     ]
+
+
+def test_legacy_run_fork_normalizes_running_and_abort_leaf_anchors(tmp_path: Path) -> None:
+    for source_status in ("running", "abort", "success"):
+        store = SQLiteSessionStore(ClientPaths(tmp_path / source_status), "device")
+        source = store.create_session(f"source-{source_status}")
+        run_id = f"run-{source_status}"
+        store.start_turn(source.session_id, run_id, "task")
+        store.finish_turn(source.session_id, run_id, "completed", "done")
+        root = store.get_session_root(source.session_id)
+        assert root is not None
+        writer = NodeWriter(store)
+        stable = writer.create(
+            session_id=source.session_id,
+            parent=root,
+            data=message_payload("assistant", "stable context"),
+        )
+        stable = writer.delete(stable.session_id, stable.id)
+        selected = writer.create(
+            session_id=source.session_id,
+            parent=stable,
+            data=message_payload("assistant", "selected attempt"),
+        )
+        if source_status == "abort":
+            selected = writer.abort(selected.session_id, selected.id)
+        elif source_status == "success":
+            selected = writer.delete(selected.session_id, selected.id)
+
+        target = store.fork_run(run_id)
+        target_root = store.get_session_root(target.session_id)
+        assert target_root is not None
+        expected_anchor = selected if source_status == "success" else stable
+        assert (target_root.parent_session_id, target_root.parent_id) == expected_anchor.key
+        if source_status in {"running", "abort"}:
+            assert store.list_children(selected.session_id, selected.id) == []

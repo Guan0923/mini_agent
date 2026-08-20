@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, StrictBool, model_validator
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS
-from backend.domain.runtime_state import RuntimeStateValidationError
+from backend.domain.runtime_state import RuntimeStateValidationError, resolve_fork_anchor
 from backend.providers import ModelConfigurationError
 from backend.runtime import build_application as _default_build_application
 from backend.storage.auth.crypto import SecretDecryptionError
@@ -699,29 +699,32 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
             # historical branches work without accepting an arbitrary node
             # from another conversation.
             source_node = None
+            source_session_id = body.source_node_session_id or source.session_id
             loader = getattr(store, "load_nodes", None)
+            loaded_nodes = list(loader(source.session_id)) if callable(loader) else []
             if callable(loader):
                 candidates = [
-                    node for node in loader(source.session_id) if str(getattr(node, "id", "")) == body.source_node_id
+                    node
+                    for node in loaded_nodes
+                    if str(getattr(node, "id", "")) == body.source_node_id
+                    and str(getattr(node, "session_id", "")) == source_session_id
                 ]
-                source_node = next(
-                    (
-                        node
-                        for node in candidates
-                        if str(getattr(node, "session_id", ""))
-                        == (body.source_node_session_id or source.session_id)
-                    ),
-                    None if body.source_node_session_id else (candidates[0] if candidates else None),
-                )
-            if source_node is None:
-                source_node = store.get_node(body.source_node_session_id or source.session_id, body.source_node_id)
+                source_node = candidates[0] if candidates else None
+            if source_node is None and not loaded_nodes and source_session_id == source.session_id:
+                source_node = store.get_node(source_session_id, body.source_node_id)
             if source_node is None:
                 raise ValueError("指定的 source_node_id 不属于当前会话。")
+            loaded_keys = {getattr(node, "key", None) for node in loaded_nodes}
+            if loaded_nodes and source_node.key not in loaded_keys:
+                raise ValueError("指定的 source_node_id 不属于当前会话祖先树。")
+            anchor = resolve_fork_anchor(source_node, store.get_node)
+            if loaded_nodes and anchor.key not in loaded_keys:
+                raise ValueError("指定节点的父节点不属于当前会话祖先树。")
             target = store.create_session(
                 title,
                 client_id=client_id,
                 local_only=source.local_only,
-                root_parent=(source_node.session_id, source_node.id),
+                root_parent=anchor.key,
                 title_is_custom=title_is_custom,
             )
         elif body.run_id:

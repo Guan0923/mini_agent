@@ -1042,18 +1042,19 @@ class RuntimeStateTree:
         source_node = source if isinstance(source, RuntimeState) else self.get(*source)
         if not self.is_leaf(source_node.session_id, source_node.id):
             raise RuntimeStateValidationError("Fork source must be a leaf node.")
+        anchor = resolve_fork_anchor(source_node, self.try_get)
         return self.create_child(
             session_id=session_id or new_session_id(),
-            parent=source_node,
-            first_kept_entry_id=source_node.firstKeptEntryId,
-            compaction_idx=source_node.compactionIdx,
-            user=kwargs.pop("user", source_node.user),
-            provider_name=kwargs.pop("provider_name", kwargs.pop("provider", source_node.provider_name)),
-            model=kwargs.pop("model", source_node.model),
-            permission_mode=kwargs.pop("permission_mode", source_node.permission_mode),
-            running_mode=kwargs.pop("running_mode", source_node.running_mode),
+            parent=anchor,
+            first_kept_entry_id=anchor.firstKeptEntryId,
+            compaction_idx=anchor.compactionIdx,
+            user=kwargs.pop("user", anchor.user),
+            provider_name=kwargs.pop("provider_name", kwargs.pop("provider", anchor.provider_name)),
+            model=kwargs.pop("model", anchor.model),
+            permission_mode=kwargs.pop("permission_mode", anchor.permission_mode),
+            running_mode=kwargs.pop("running_mode", anchor.running_mode),
             usage=kwargs.pop("usage", None),
-            cwd=kwargs.pop("cwd", source_node.cwd),
+            cwd=kwargs.pop("cwd", anchor.cwd),
             status=kwargs.pop("status", "running"),
             **kwargs,
         )
@@ -1643,6 +1644,20 @@ def parent_reference(node: RuntimeState) -> tuple[str, str] | None:
     return (node.parent_session_id, node.parent_id) if node.parent_id else None
 
 
+def resolve_fork_anchor(
+    source: RuntimeState,
+    get_node: Callable[[str, str], RuntimeState | None],
+) -> RuntimeState:
+    """Return the durable context node a new session fork should inherit."""
+
+    if source.status not in {"running", "abort"} or not source.parent_id:
+        return source
+    parent = get_node(source.parent_session_id, source.parent_id)
+    if parent is None:
+        raise RuntimeStateValidationError("Fork source parent does not exist.")
+    return parent
+
+
 __all__ = [
     "APP_VERSION",
     "CONTENT_BLOCK_TYPES",
@@ -1686,6 +1701,7 @@ __all__ = [
     "parent_reference",
     "recoverable",
     "reparent_node",
+    "resolve_fork_anchor",
     "root_payload",
     "session_root_id",
     "utc_iso",
