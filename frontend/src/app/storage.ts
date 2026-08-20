@@ -5,7 +5,7 @@ import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
 export const STORAGE_KEY = "mini-agent-conversations";
 export const ARCHIVE_READ_KEY = "mini-agent-archive-read";
 export const BROWSER_STATE_VERSION_KEY = "mini-agent-browser-state-version";
-export const BROWSER_STATE_VERSION = "runtime-state-tree-4";
+export const BROWSER_STATE_VERSION = "runtime-state-tree-5";
 export type ArchiveReadState = Record<string, string>;
 
 const LEGACY_BROWSER_PREFIXES = [STORAGE_KEY, ARCHIVE_READ_KEY, "mini-agent-session-modes"];
@@ -139,6 +139,7 @@ export function transcriptToMessages(transcript: SessionMessage[]): ChatMessage[
     nodeId: message.id?.includes(":")
       ? message.id.slice(message.id.indexOf(":") + 1)
       : undefined,
+    nodeSessionId: message.node_session_id ?? (message.id?.includes(":") ? message.id.slice(0, message.id.indexOf(":")) : undefined),
     sourceNodeId: message.source_node_id ?? undefined,
     references: message.references,
     timelineSeq: message.timeline_seq,

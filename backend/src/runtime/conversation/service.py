@@ -393,7 +393,7 @@ class ConversationService(ConversationSessionController):
             elif bridge.abort_category is not None:
                 bridge.finish("abort", state.final_answer or "", category=bridge.abort_category, code=bridge.abort_code)
             else:
-                bridge.finish("failed", state.final_answer or "")
+                bridge.finish("abort", state.final_answer or "", category="agent", code="runtime_failed")
         if self.session_store is not None and self.active_session is not None:
             self.session_store.finish_turn(
                 self.active_session.session_id,

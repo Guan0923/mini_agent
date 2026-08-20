@@ -53,7 +53,7 @@ export interface AgentShellProps {
   onModeChange: (mode: ChatMode) => void;
   onEnsureSession: (id: string) => Promise<string>;
   onFork: (conversationId: string, messageId: string) => Promise<void>;
-  onRewind: (conversationId: string, messageId: string) => Promise<{ content: string; sessionId: string; sourceNodeId?: string; branch?: boolean } | undefined>;
+  onRewind: (conversationId: string, messageId: string) => Promise<{ content: string; sessionId: string; sourceNodeId?: string; sourceNodeSessionId?: string; branch?: boolean } | undefined>;
   onSelectSession: (sessionId: string) => Promise<string>;
   onReload: (id: string) => Promise<void>;
   onRefresh: () => Promise<void>;

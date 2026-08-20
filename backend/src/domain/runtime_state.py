@@ -27,7 +27,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 APP_VERSION = "0.3.0"
 DEFAULT_COMPACTION_RETENTION = 8
 
-NodeStatus: TypeAlias = Literal["failed", "success", "abort"]
+NodeStatus: TypeAlias = Literal["running", "success", "abort"]
 TerminalErrorCategory: TypeAlias = Literal["unknown", "tool", "agent", "user", "network"]
 NodeDataType: TypeAlias = Literal["message", "compaction", "root"]
 MessageRole: TypeAlias = Literal["user", "assistant", "tool_result", "bash"]
@@ -48,7 +48,7 @@ ContentBlockType: TypeAlias = Literal[
     "skill_snapshot",
 ]
 
-NODE_STATUSES = frozenset({"failed", "success", "abort"})
+NODE_STATUSES = frozenset({"running", "success", "abort"})
 NODE_DATA_TYPES = frozenset({"message", "compaction", "root"})
 REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 THINKING_MODES = frozenset({"enable", "disable"})
@@ -218,7 +218,7 @@ def message_payload(
 
 
 def terminal_error_payload(
-    status: Literal["failed", "abort"],
+    status: Literal["abort"],
     category: TerminalErrorCategory | None = None,
     *,
     code: str | None = None,
@@ -226,16 +226,12 @@ def terminal_error_payload(
 ) -> dict[str, str]:
     """Build the stable, provider-neutral reason attached to a terminal node.
 
-    ``failed`` is deliberately the last-resort state and therefore never
-    claims a cause that the runtime could not prove.  ``abort`` carries the
+    ``abort`` carries the
     best known source category so presentation and the next model turn share
     exactly the same explanation.
     """
 
-    if status == "failed":
-        resolved_category: TerminalErrorCategory = "unknown"
-        message = FAILED_TERMINAL_MESSAGE
-    elif status == "abort":
+    if status == "abort":
         resolved_category = category or "unknown"
         if resolved_category not in ABORT_TERMINAL_MESSAGES:
             raise RuntimeStateValidationError(f"Unsupported terminal error category: {resolved_category!r}.")
@@ -442,7 +438,7 @@ class RuntimeState:
     usage: dict[str, int | None] = field(default_factory=lambda: {name: None for name in USAGE_FIELDS})
     cwd: str = ""
     timestamp: str = field(default_factory=utc_iso)
-    status: NodeStatus = "failed"
+    status: NodeStatus = "running"
     data: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -476,7 +472,7 @@ class RuntimeState:
         object.__setattr__(self, "model", _normalize_model(self.model))
         object.__setattr__(self, "usage", _normalize_usage(self.usage))
         object.__setattr__(self, "data", validate_data(self.data))
-        if not self.data and self.status != "failed":
+        if not self.data and self.status != "running":
             raise RuntimeStateValidationError("A complete runtime node must contain message or compaction data.")
         if self.first_kept_entry_id in {None, ""}:
             object.__setattr__(self, "first_kept_entry_id", self.id)
@@ -532,7 +528,7 @@ class RuntimeState:
 
     @property
     def is_terminal(self) -> bool:
-        return self.status in NODE_STATUSES
+        return self.status in {"success", "abort"}
 
     @property
     def data_type(self) -> str | None:
@@ -658,7 +654,7 @@ class RuntimeState:
             usage=_mapping(raw.get("usage"), "usage"),
             cwd=_string_field(raw, "cwd"),
             timestamp=timestamp,
-            status=raw.get("status", "failed"),  # type: ignore[arg-type]
+            status=raw.get("status", "running"),  # type: ignore[arg-type]
             data=_mapping(raw.get("data", {}), "data"),
         )
 
@@ -683,7 +679,7 @@ class RuntimeState:
         compaction_idx: str | None = None,
         id: str | None = None,
         timestamp: str | None = None,
-        status: NodeStatus = "failed",
+        status: NodeStatus = "running",
     ) -> RuntimeState:
         """Create a node and derive ancestry pointers for normal children."""
 
@@ -838,6 +834,23 @@ class InMemoryNodeStore:
                 raise RuntimeStateValidationError(f"Node already exists: {node.session_id}/{node.id}.")
             if node.parent_id and (node.parent_session_id, node.parent_id) not in self._nodes:
                 raise RuntimeStateValidationError("A node parent must be present in the store.")
+            if node.status == "running":
+                active = [
+                    item
+                    for item in self._nodes.values()
+                    if item.session_id == node.session_id
+                    and item.status == "running"
+                    and not any(
+                        child.parent_session_id == item.session_id and child.parent_id == item.id
+                        for child in self._nodes.values()
+                    )
+                ]
+                if active:
+                    raise RuntimeStateValidationError("A session may have only one running leaf.")
+                if node.parent_id:
+                    parent = self._nodes[(node.parent_session_id, node.parent_id)]
+                    if parent.status == "running":
+                        raise RuntimeStateValidationError("A running node cannot have a running child.")
             self._nodes[node.key] = node.clone()
 
     def get_node(self, session_id: str, node_id: str) -> RuntimeState | None:
@@ -861,8 +874,10 @@ class InMemoryNodeStore:
             existing = self._nodes.get(node.key)
             if existing is None:
                 raise KeyError(f"Unknown node: {node.session_id}/{node.id}.")
-            if existing.status != "failed":
-                raise RuntimeStateValidationError("Sealed runtime nodes are read-only.")
+            if existing.status != "running":
+                raise RuntimeStateValidationError("Only running runtime nodes can be finalized.")
+            if node.status not in {"success", "abort"}:
+                raise RuntimeStateValidationError("A runtime node can only be finalized as success or abort.")
             if self.list_children(node.session_id, node.id):
                 raise RuntimeStateValidationError("Only a leaf node can be finalized.")
             self._nodes[node.key] = node.clone()
@@ -915,6 +930,12 @@ class RuntimeStateTree:
             raise RuntimeStateValidationError(f"Node already exists: {node.session_id}/{node.id}.")
         if node.parent_id and (node.parent_session_id, node.parent_id) not in self._nodes:
             raise RuntimeStateValidationError("A node parent must be present in the tree.")
+        if node.status == "running":
+            active = [item for item in self._nodes.values() if item.session_id == node.session_id and item.status == "running" and self.is_leaf(item.session_id, item.id)]
+            if active:
+                raise RuntimeStateValidationError("A session may have only one running leaf.")
+            if node.parent_id and self.get(node.parent_session_id, node.parent_id).status == "running":
+                raise RuntimeStateValidationError("A running node cannot have a running child.")
         self._nodes[node.key] = node.clone()
         return node.clone()
 
@@ -986,6 +1007,10 @@ class RuntimeStateTree:
         if parent is not None:
             parent_key = parent.key if isinstance(parent, RuntimeState) else parent
             parent_node = self.get(*parent_key)
+        # RuntimeStateTree represents already-materialized history. Streaming
+        # execution uses NodeWriter, which explicitly creates running leaves;
+        # static tree helpers therefore remain terminal by default.
+        kwargs.setdefault("status", "success")
         node = RuntimeState.create(
             session_id=session_id,
             parent=parent_node,
@@ -1029,6 +1054,7 @@ class RuntimeStateTree:
             running_mode=kwargs.pop("running_mode", source_node.running_mode),
             usage=kwargs.pop("usage", None),
             cwd=kwargs.pop("cwd", source_node.cwd),
+            status=kwargs.pop("status", "running"),
             **kwargs,
         )
 
@@ -1079,14 +1105,17 @@ class RuntimeStateTree:
         data: Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> RuntimeState:
-        """Create a continuation from a failed or user-paused leaf."""
+        """Create a continuation from a running recovery or aborted leaf."""
 
         source_node = source if isinstance(source, RuntimeState) else self.get(*source)
-        if source_node.status not in {"abort", "failed"}:
-            raise RuntimeStateValidationError("Only failed or abort nodes can be resumed.")
+        if source_node.status not in {"running", "abort"}:
+            raise RuntimeStateValidationError("Only running or abort nodes can be resumed.")
         if not self.is_leaf(source_node.session_id, source_node.id):
             raise RuntimeStateValidationError("Only a leaf node can be resumed.")
-        return self.create_child(session_id=source_node.session_id, parent=source_node, data=data, **kwargs)
+        if source_node.status == "running":
+            return source_node.clone()
+        parent = self.try_get(source_node.parent_session_id, source_node.parent_id) if source_node.parent_id else None
+        return self.create_child(session_id=source_node.session_id, parent=parent, data=data, status="running", **kwargs)
 
     def compact(
         self,
@@ -1365,10 +1394,11 @@ class NodeWriter:
                 usage=usage,
                 cwd=cwd,
             )
-            # Persistence receives only an empty failed placeholder.  The
+            # Persistence receives only an empty running placeholder.  The
             # fully populated copy is kept in the writer's dynamic sidecar
             # until the terminal delete atomically seals the leaf.
             placeholder = node.with_data({})
+            placeholder.status = "running"
             # A persisted placeholder is a recovery marker, not a partial
             # provider accounting record.  It keeps the complete top-level
             # runtime configuration so a crash can be resumed with the same
@@ -1431,11 +1461,11 @@ class NodeWriter:
             if usage is not None:
                 node.usage = _normalize_usage(usage)
             if status is not None:
-                if not isinstance(status, str) or status != "failed":
+                if status != "running":
                     raise RuntimeStateValidationError(
-                        "node.update keeps status='failed'; terminal status belongs to node.delete."
+                        "node.update keeps status='running'; terminal status belongs to node.delete."
                     )
-                node.status = "failed"
+                node.status = "running"
             self._dynamic[node.key] = node.clone()
             self.emit(NodeFrame("node.update", node.clone()))
             return node.clone()
@@ -1480,8 +1510,8 @@ class NodeWriter:
 
     def delete(self, session_id: str, node_id: str, *, status: NodeStatus = "success") -> RuntimeState:
         with self._lock:
-            if not isinstance(status, str) or status not in NODE_STATUSES:
-                raise RuntimeStateValidationError(f"Unsupported node status: {status!r}.")
+            if status not in {"success", "abort"}:
+                raise RuntimeStateValidationError("A node can only be finalized as success or abort.")
             node = self.current(session_id, node_id)
             if node.data_type == "root":
                 raise RuntimeStateValidationError("Root nodes are immutable.")
@@ -1500,7 +1530,7 @@ class NodeWriter:
         session_id: str,
         node_id: str,
         *,
-        status: Literal["failed", "abort"],
+        status: Literal["abort"],
         category: TerminalErrorCategory | None = None,
         code: str | None = None,
         detail: str | None = None,
@@ -1522,7 +1552,9 @@ class NodeWriter:
         return self.delete(session_id, node_id, status=status)
 
     def fail(self, session_id: str, node_id: str) -> RuntimeState:
-        return self._finish_with_error(session_id, node_id, status="failed")
+        """Compatibility alias: all runtime failures are abort terminal nodes."""
+
+        return self.abort(session_id, node_id, category="agent", code="runtime_failed")
 
     def abort(
         self,
@@ -1551,11 +1583,22 @@ class NodeWriter:
     ) -> RuntimeState:
         """Start a new dynamic child from a failed/aborted source."""
 
-        if source.status not in {"abort", "failed"}:
-            raise RuntimeStateValidationError("Only failed or abort nodes can be resumed.")
+        if source.status not in {"running", "abort"}:
+            raise RuntimeStateValidationError("Only running or abort nodes can be resumed.")
         if self.store.list_children(source.session_id, source.id):
             raise RuntimeStateValidationError("Only a leaf node can be resumed.")
-        return self.create(parent=source, session_id=source.session_id, data=data, **kwargs)
+        if source.status == "running":
+            with self._lock:
+                current = self.store.get_node(source.session_id, source.id) or source
+                dynamic = current.clone()
+                if not dynamic.data:
+                    dynamic.data = message_payload("assistant", [])
+                dynamic.status = "running"
+                self._dynamic[dynamic.key] = dynamic
+                self.emit(NodeFrame("node.update", dynamic.clone()))
+                return dynamic.clone()
+        parent = self.store.get_node(source.parent_session_id, source.parent_id) if source.parent_id else None
+        return self.create(parent=parent, session_id=source.session_id, data=data, **kwargs)
 
     def active_nodes(self) -> list[RuntimeState]:
         with self._lock:
@@ -1563,10 +1606,14 @@ class NodeWriter:
 
 
 def recoverable(node: RuntimeState) -> bool:
-    """Whether a failed node can be safely retried without replaying effects."""
+    """Whether a stopped/recovered leaf can be safely resumed."""
 
-    if node.status != "failed":
+    if node.status not in {"running", "abort"}:
         return False
+    # Recovery reuses the leaf identity but feeds only its parent path to the
+    # model, so an orphaned running node never replays its partial effects.
+    if node.status == "running":
+        return True
     if node.data.get("type") != "message":
         return True
     message = node.data.get("message")

@@ -35,7 +35,7 @@ def _payload(value: RuntimeState | Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _messages(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    # A running node has two representations: a durable failed placeholder
+    # A running node has two representations: a durable running placeholder
     # and a dynamic copy with the same ``(session_id, id)``.  Provider context
     # must contain one logical message.  Preserve path order while allowing a
     # non-empty dynamic copy to replace its empty placeholder in place.
@@ -51,7 +51,7 @@ def _messages(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[Mappin
         data = raw.get("data") if "data" in raw else raw
         empty_placeholder = isinstance(data, Mapping) and not data and key is not None
         if empty_placeholder:
-            # A durable failed marker is not a model message.  Keep it only as
+            # A durable running marker is not a model message.  Keep it only as
             # a slot so a following dynamic copy can replace it without
             # changing the ordering of the ancestor path.
             if key not in positions:
@@ -79,7 +79,7 @@ def _messages(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[Mappin
         status = _status(value)
         if _is_message(value):
             message = dict(_payload(value))
-            if status in {"failed", "abort"}:
+            if status == "abort":
                 # Terminal metadata is part of the next model turn even when
                 # a crash left the message content empty.  Keep the reason in
                 # a regular text block so every provider adapter can transmit
@@ -93,7 +93,7 @@ def _messages(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[Mappin
                 elif not blocks:
                     reason = terminal_error_text(terminal_error_payload(status))
                 else:
-                    # Dynamic streaming nodes carry status="failed" until
+                    # Dynamic streaming nodes carry status="running" until
                     # their final replacement.  Their non-empty content is
                     # live model context, not a terminal error.
                     reason = ""
@@ -104,7 +104,7 @@ def _messages(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[Mappin
         elif isinstance(data, Mapping) and data.get("type") == "compaction":
             summary = str(data.get("summary") or "")
             result.append({"role": "user", "content": [{"type": "text", "text": f"[compaction]\n{summary}"}]})
-        elif status in {"failed", "abort"}:
+        elif status == "abort":
             # A process may stop after the failed placeholder is committed but
             # before its final delete frame. Keep that durable safety marker
             # (including abort categories) useful to the next turn instead of

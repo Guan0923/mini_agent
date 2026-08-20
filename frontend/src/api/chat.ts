@@ -7,6 +7,7 @@ export type RagMode = "off" | "tool" | "forced";
 export interface StreamOptions {
   sessionId?: string;
   sourceNodeId?: string;
+  sourceNodeSessionId?: string;
   branch?: boolean;
   mode?: ChatMode;
   permissionMode?: PermissionMode;
@@ -105,6 +106,7 @@ export async function streamChat(
       prompt,
       session_id: normalized.sessionId,
       source_node_id: normalized.sourceNodeId,
+      source_node_session_id: normalized.sourceNodeSessionId,
       ...(normalized.branch ? { branch: true } : {}),
       mode: normalized.mode ?? "agent",
       ...(normalized.mode ? { running_mode: normalized.mode } : {}),
@@ -134,6 +136,7 @@ export async function streamResume(
   mode?: ChatMode,
   ragMode: RagMode = "off",
   fullAccessAcknowledged = false,
+  sourceNodeSessionId?: string,
 ): Promise<"completed" | "aborted"> {
   return streamEndpoint(
     `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
@@ -142,6 +145,7 @@ export async function streamResume(
       ...(fullAccessAcknowledged ? { full_access_acknowledged: true } : {}),
       reasoning_effort: reasoningEffort,
       source_node_id: sourceNodeId,
+      source_node_session_id: sourceNodeSessionId,
       provider_name: providerName,
       model,
       ...(mode ? { mode } : {}),

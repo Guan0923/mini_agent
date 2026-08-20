@@ -195,6 +195,7 @@ export function integrateRuntimeNodeFrame(conversation: Conversation, frame: Run
       messages[index] = {
         ...messages[index],
         nodeId: frame.node.id,
+        nodeSessionId: frame.node.session_id,
         sourceNodeId: frame.node.parent_id || undefined,
         references: projection.references,
       };
@@ -207,7 +208,7 @@ export function integrateRuntimeNodeFrame(conversation: Conversation, frame: Run
         ? messages[index].runtimeNodeIds!
         : [...(messages[index].runtimeNodeIds ?? []), key];
       messages[index] = projectMessageNodes(
-        { ...messages[index], runtimeNodeIds, sourceNodeId: frame.node.id },
+        { ...messages[index], runtimeNodeIds, nodeSessionId: frame.node.session_id, sourceNodeId: frame.node.id },
         next,
         frame.type === "node.delete" ? undefined : key,
       );

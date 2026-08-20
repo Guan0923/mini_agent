@@ -35,6 +35,7 @@ export interface SessionMessage {
   error?: string;
   running?: boolean;
   source_node_id?: string | null;
+  node_session_id?: string | null;
   references?: FileReference[];
   timeline_seq?: number;
   timeline_time?: number;
@@ -98,6 +99,7 @@ export async function forkSession(
   clientId: string,
   fallbackMessages: Array<Pick<ChatMessage, "role" | "content">>,
   sourceNodeId?: string,
+  sourceNodeSessionId?: string,
 ): Promise<SessionInfo> {
   return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
     method: "POST",
@@ -108,6 +110,7 @@ export async function forkSession(
       client_id: clientId,
       fallback_messages: fallbackMessages,
       source_node_id: sourceNodeId,
+      source_node_session_id: sourceNodeSessionId,
     }),
   });
 }
@@ -119,6 +122,7 @@ export async function rewindSession(
   clientId: string,
   fallbackMessages: Array<Pick<ChatMessage, "role" | "content">>,
   sourceNodeId?: string,
+  sourceNodeSessionId?: string,
 ): Promise<SessionInfo> {
   return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/rewind`, {
     method: "POST",
@@ -129,6 +133,7 @@ export async function rewindSession(
       client_id: clientId,
       fallback_messages: fallbackMessages,
       source_node_id: sourceNodeId,
+      source_node_session_id: sourceNodeSessionId,
     }),
   });
 }

@@ -71,7 +71,10 @@ export interface TodoItem {
   status: TodoStatus;
 }
 
-export type RuntimeNodeStatus = "failed" | "success" | "abort";
+// ``failed`` is accepted only at the browser boundary for stale cached
+// payloads; newly persisted/runtime frames are restricted to the three-state
+// protocol (running, success, abort).
+export type RuntimeNodeStatus = "running" | "success" | "abort" | "failed";
 export type RuntimeNodeDataType = "message" | "compaction" | "root";
 export type ThinkingMode = "enable" | "disable";
 export interface RuntimeNodeModel {
@@ -138,7 +141,9 @@ export interface ChatMessage {
   runId?: string;
   /** Durable runtime node id for rewind targets. */
   nodeId?: string;
+  nodeSessionId?: string;
   sourceNodeId?: string;
+  sourceNodeSessionId?: string;
   runtimeNodeIds?: string[];
   decision?: DecisionRequest;
   /** Structured file references attached to a user message. */
