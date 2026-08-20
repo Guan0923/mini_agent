@@ -64,6 +64,31 @@ def test_upload_round_trip_and_binary_integrity(client: TestClient) -> None:
     assert "private" in content.headers["cache-control"]
     assert content.headers["content-disposition"].startswith("attachment")
 
+    available = client.head(
+        f"/api/sessions/{client.session_id}/files/content?source=upload&path=bin.dat"  # type: ignore[attr-defined]
+    )
+    assert available.status_code == 200
+    assert available.content == b""
+    assert available.headers["x-content-type-options"] == "nosniff"
+
+    missing = client.head(
+        f"/api/sessions/{client.session_id}/files/content?source=upload&path=missing.dat"  # type: ignore[attr-defined]
+    )
+    assert missing.status_code == 404
+
+
+def test_project_file_head_probe(client: TestClient, state: WebAppState) -> None:
+    identity = client.get("/api/auth/me").json()
+    workspace = state.user_workspace(identity["id"], client.session_id)  # type: ignore[attr-defined]
+    project_file = workspace / "biome.jsonc"
+    project_file.write_text("{}", encoding="utf-8")
+
+    available = client.head(
+        f"/api/sessions/{client.session_id}/files/content?source=project&path=biome.jsonc"  # type: ignore[attr-defined]
+    )
+    assert available.status_code == 200
+    assert available.content == b""
+
 
 def test_image_preview_is_inline_and_download_is_attachment(client: TestClient) -> None:
     payload = b"\x89PNG\r\n\x1a\n" + b"0" * 16

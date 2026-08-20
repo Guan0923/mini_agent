@@ -34,26 +34,35 @@ export function createRunController(callbacks: RunControllerCallbacks) {
 
     const onMessage = (message: StreamMessage) => {
       const active = callbacks.activeRuns.get(request.conversationId);
-      if (active?.controller !== controller || controller.signal.aborted) return;
+      if (active?.controller !== controller) return;
       if (message.type === "job" && message.job_id) {
-        if (active?.controller === controller) active.jobId = message.job_id;
-        if (active?.stopRequested) void cancelJob(message.job_id).catch(() => undefined);
+        active.jobId = message.job_id;
+        if (active.cancelTimer) {
+          clearTimeout(active.cancelTimer);
+          active.cancelTimer = undefined;
+        }
+        if (active.stopRequested && !active.cancelIssued) {
+          active.cancelIssued = true;
+          void cancelJob(message.job_id)
+            .catch(() => undefined)
+            .finally(() => controller.abort());
+        }
         return;
       } else if ((message.type === "node.create" || message.type === "node.update" || message.type === "node.delete") && message.node) {
-        if (active?.stopRequested) return;
+        if (active.stopRequested || controller.signal.aborted) return;
         nodeProtocol = true;
         const frame: RuntimeNodeFrame = { type: message.type, node: message.node };
         callbacks.applyRuntimeNodeFrame?.(frame);
         callbacks.updateConversation?.(request.conversationId, (conversation) => integrateRuntimeNodeFrame(conversation, frame));
         if (message.type === "node.delete") finalNode = message.node;
       } else if (message.type === "run_segment") {
-        if (active?.stopRequested) return;
+        if (active.stopRequested || controller.signal.aborted) return;
         const segment = message.segment;
         if (segment) callbacks.updateLastMessage(request.conversationId, (item) => applyRunSegment(item, segment));
         const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
         if (runId) callbacks.updateLastMessage(request.conversationId, (item) => ({ ...item, runId }));
       } else if (message.type === "event") {
-        if (active?.stopRequested) return;
+        if (active.stopRequested || controller.signal.aborted) return;
         const kind = message.kind ?? "";
         if (kind === "response_delta" && !nodeProtocol) {
           const content = (message.data?.content as string | undefined) ?? message.message ?? "";
@@ -75,6 +84,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
         const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
         if (runId) callbacks.updateLastMessage(request.conversationId, (item) => ({ ...item, runId }));
       } else if (message.type === "done") {
+        if (active.stopRequested || controller.signal.aborted) return;
         sawDone = true;
         callbacks.updateLastMessage(request.conversationId, (item) => ({
           ...item,
@@ -91,6 +101,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
         }
         void callbacks.refreshSessions().catch(() => undefined);
       } else if (message.type === "error") {
+        if (active.stopRequested || controller.signal.aborted) return;
         callbacks.updateLastMessage(request.conversationId, (item) => ({
           ...item,
           error: message.error ?? message.message ?? "发生错误",
@@ -172,14 +183,6 @@ export function createRunController(callbacks: RunControllerCallbacks) {
     const active = callbacks.activeRuns.get(id);
     if (!active) return;
     active.stopRequested = true;
-    if (active.jobId) {
-      void cancelJob(active.jobId).catch(() => undefined);
-      // Keep the SSE open until the backend emits its terminal frame. This
-      // prevents a second request from racing the still-running job.
-      active.cancelTimer = setTimeout(() => active.controller.abort(), 2000);
-    } else {
-      active.cancelTimer = setTimeout(() => active.controller.abort(), 2000);
-    }
     callbacks.updateLastMessage(id, (item) => ({
       ...item,
       running: true,
@@ -187,6 +190,14 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       error: "The run was aborted at the user's request.",
       decision: undefined,
     }));
+    if (active.jobId && !active.cancelIssued) {
+      active.cancelIssued = true;
+      void cancelJob(active.jobId)
+        .catch(() => undefined)
+        .finally(() => active.controller.abort());
+    } else if (!active.jobId && !active.cancelTimer) {
+      active.cancelTimer = setTimeout(() => active.controller.abort(), 2000);
+    }
   }
 
   return { runConversation, stopConversation };

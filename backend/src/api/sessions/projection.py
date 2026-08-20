@@ -79,6 +79,7 @@ def _terminal_error(node: Any, message: Mapping[str, Any] | None = None) -> str 
 def _terminal_entry(node: Any, error: str) -> dict[str, Any]:
     return {
         "id": f"{node.session_id}:{node.id}:assistant",
+        "node_session_id": node.session_id,
         "run_id": None,
         "role": "assistant",
         "content": error,
@@ -174,6 +175,7 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
             content = "".join(_text(block.get("text")) for block in blocks if block.get("type") in {"text", "bash"})
             payload: dict[str, Any] = {
                 "id": f"{node.session_id}:{node.id}",
+                "node_session_id": node.session_id,
                 "run_id": None,
                 "role": "user",
                 "content": content,
@@ -210,6 +212,7 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
         if current_assistant is None:
             current_assistant = {
                 "id": f"{node.session_id}:{node.id}:assistant",
+                "node_session_id": node.session_id,
                 "run_id": None,
                 "role": "assistant",
                 "content": "",
@@ -219,6 +222,7 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
             }
             result.append(current_assistant)
         current_assistant["source_node_id"] = node.id
+        current_assistant["node_session_id"] = node.session_id
         if isinstance(message.get("run_id"), str) and message["run_id"]:
             current_assistant["run_id"] = message["run_id"]
         error_text = _terminal_error(node, message)

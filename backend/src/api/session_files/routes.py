@@ -111,6 +111,37 @@ def session_file_content(
         raise _file_error(exc) from exc
 
 
+@router.head("/sessions/{session_id}/files/content")
+def session_file_content_head(
+    session_id: str,
+    request: Request,
+    source: str,
+    path: str,
+    download: bool = False,
+    identity: UserIdentity = Depends(require_user),
+) -> Response:
+    """Validate an authenticated file reference without returning its body."""
+
+    state: WebAppState = request.app.state.web
+    try:
+        store = _store_for(state, identity, session_id)
+        resolved = store.resolve(source, path)
+        mime = _mime_type(resolved.name)
+        is_image = _is_image_file(resolved.name, mime)
+        disposition = "attachment" if download or not is_image else "inline"
+        return Response(
+            status_code=200,
+            media_type=mime,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": f'{disposition}; filename="{_safe_filename(resolved.name)}"',
+                "Cache-Control": "private, no-store",
+            },
+        )
+    except SessionFileError as exc:
+        raise _file_error(exc) from exc
+
+
 @router.delete("/sessions/{session_id}/files")
 def delete_session_file(
     session_id: str,

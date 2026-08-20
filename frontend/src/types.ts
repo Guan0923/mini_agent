@@ -141,6 +141,7 @@ export interface ChatMessage {
   runId?: string;
   /** Durable runtime node id for rewind targets. */
   nodeId?: string;
+  /** Session that owns nodeId; needed for cross-session fork ancestors. */
   nodeSessionId?: string;
   sourceNodeId?: string;
   sourceNodeSessionId?: string;

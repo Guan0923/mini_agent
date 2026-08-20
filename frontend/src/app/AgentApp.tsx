@@ -537,6 +537,7 @@ function AgentApp() {
         branchId,
         importableMessages(prefix),
         source.messages[index].sourceNodeId,
+        source.messages[index].nodeSessionId,
       );
       const branch = summaryToConversation(summary, {
         id: branchId,

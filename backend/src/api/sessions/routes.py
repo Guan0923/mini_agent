@@ -809,7 +809,7 @@ def rewind_session(
     request: Request,
     identity: UserIdentity = Depends(require_user),
 ) -> dict:
-    """Resolve a same-session rewind parent without mutating the session."""
+    """Resolve a rewind parent without mutating the session."""
     state: WebAppState = request.app.state.web
     store = _store(state, identity.id)
     source = _require_branchable(store, session_id)

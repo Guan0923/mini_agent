@@ -25,6 +25,7 @@ export interface SessionInfo {
 
 export interface SessionMessage {
   id?: string;
+  node_session_id?: string | null;
   run_id?: string | null;
   role: "user" | "assistant";
   content: string;
@@ -35,7 +36,6 @@ export interface SessionMessage {
   error?: string;
   running?: boolean;
   source_node_id?: string | null;
-  node_session_id?: string | null;
   references?: FileReference[];
   timeline_seq?: number;
   timeline_time?: number;

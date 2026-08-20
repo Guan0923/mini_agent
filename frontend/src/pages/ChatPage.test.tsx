@@ -557,6 +557,24 @@ describe("ChatPage file references", () => {
     expect(screen.getByText("notes.md", { selector: ".file-mention-label" })).toBeInTheDocument();
   });
 
+  it("closes the file menu after Tab completion and reopens for a new query", async () => {
+    mocks.searchSessionFiles.mockResolvedValue([
+      { source: "project", path: "biome.jsonc", name: "biome.jsonc", size: 10, mime: "application/json", mtime: "2026-01-01T00:00:00+00:00", is_image: false },
+    ]);
+    const user = userEvent.setup();
+    const { container } = render(<Harness initial={sessionConversation()} />);
+    const textarea = screen.getByPlaceholderText("输入任务，按 Enter 发送");
+    await user.type(textarea, "请查看 @bio");
+    await waitFor(() => expect(container.querySelector(".file-item")).not.toBeNull());
+
+    await user.keyboard("{Tab}");
+    await waitFor(() => expect(container.querySelector(".file-item")).toBeNull());
+    expect(screen.getByText("biome.jsonc", { selector: ".file-mention-label" })).toBeInTheDocument();
+
+    await user.type(textarea, " @bio");
+    await waitFor(() => expect(container.querySelector(".file-item")).not.toBeNull());
+  });
+
   it("inserts quoted tokens for paths with spaces", async () => {
     mocks.searchSessionFiles.mockResolvedValue([
       { source: "project", path: "my notes.txt", name: "my notes.txt", size: 10, mime: "text/plain", mtime: "2026-01-01T00:00:00+00:00", is_image: false },

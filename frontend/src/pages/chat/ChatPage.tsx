@@ -19,7 +19,7 @@ import type { RagMode } from "../../api/chat";
 import type { ProviderConfig } from "../../api";
 import { HELP_TEXT, parseCommand } from "../../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../../commands/completion";
-import { fileKeyAction, toCandidates, type FileCandidate, type FileTrigger } from "../../commands/fileCompletion";
+import { completionToken, fileKeyAction, toCandidates, type FileCandidate, type FileTrigger } from "../../commands/fileCompletion";
 import MarkdownContent from "../../components/MarkdownContent";
 import { AssistantMessage, MessageActions, MessageReferenceChip } from "./messageParts";
 import Composer, { type SettingsSelectKey } from "./Composer";
@@ -146,6 +146,8 @@ export default function ChatPage({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingDraft, setEditingDraft] = useState("");
   const [rewindPending, setRewindPending] = useState(false);
+  const [editingSubmitting, setEditingSubmitting] = useState(false);
+  const editingSubmittingRef = useRef(false);
   const [references, setReferences] = useState<FileReference[]>([]);
   const [fileTriggerState, setFileTriggerState] = useState<FileTrigger | null>(null);
   const [fileCandidates, setFileCandidates] = useState<FileCandidate[]>([]);
@@ -154,15 +156,26 @@ export default function ChatPage({
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const fileSearchTimerRef = useRef<number | null>(null);
   const latestFileTriggerRef = useRef<FileTrigger | null>(null);
+  const fileMenuDismissedPromptRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const activeStreamRef = useRef<{
+    controller: AbortController;
+    jobId?: string;
+    stopRequested: boolean;
+    cancelIssued: boolean;
+    cancelTimer?: number;
+  } | null>(null);
+  const pendingRewindRef = useRef<{
+    conversationId: string;
+    sessionId: string;
+    sourceNodeId?: string;
+    sourceNodeSessionId?: string;
+    branch: boolean;
+  } | null>(null);
   const editorRef = useRef<FileMentionEditorHandle>(null);
   const editRef = useRef<TextAreaRef>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const discardedUploadUidsRef = useRef(new Set<string>());
-  const pendingRewindRef = useRef<{ conversationId: string; sessionId: string; sourceNodeId?: string; sourceNodeSessionId?: string; branch?: boolean } | null>(null);
-  const activeJobIdRef = useRef<string | null>(null);
-  const stopRequestedRef = useRef(false);
-  const stopFallbackTimerRef = useRef<number | null>(null);
 
   const messages = conversation?.messages ?? [];
   const busy = runningProp ?? localBusy;
@@ -294,8 +307,12 @@ export default function ChatPage({
     setReferences([]);
     setFileTriggerState(null);
     setFileCandidates([]);
+    fileMenuDismissedPromptRef.current = null;
+    setFileMenuDismissedFor(null);
     setPendingUploads([]);
     pendingRewindRef.current = null;
+    editingSubmittingRef.current = false;
+    setEditingSubmitting(false);
     // Upload callbacks use the uid set above to delete files that finish after
     // the composer has moved to another conversation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -310,6 +327,9 @@ export default function ChatPage({
 
   function handleEditorChange(change: FileMentionChange) {
     const { prompt: value, references: inlineReferences, trigger } = change;
+    const dismissedPrompt = fileMenuDismissedPromptRef.current;
+    const preserveDismissedMenu = dismissedPrompt === value;
+    if (!preserveDismissedMenu && dismissedPrompt !== null) fileMenuDismissedPromptRef.current = null;
     setInput(value);
     if (value !== input) pendingRewindRef.current = null;
     setReferences(inlineReferences);
@@ -326,7 +346,7 @@ export default function ChatPage({
       setFileMenuDismissedFor(null);
       return;
     }
-    setFileMenuDismissedFor(null);
+    setFileMenuDismissedFor(preserveDismissedMenu ? value : null);
     setActiveFileIndex(0);
     if (fileSearchTimerRef.current !== null) {
       window.clearTimeout(fileSearchTimerRef.current);
@@ -351,6 +371,11 @@ export default function ChatPage({
   function completeFile(index = activeFileIndex) {
     const candidate = fileCandidates[index];
     if (!candidate || !fileTriggerState) return;
+    const token = completionToken(candidate.reference.path);
+    const completedPrompt = `${input.slice(0, fileTriggerState.start)}${token}${input.slice(fileTriggerState.end)}`;
+    fileMenuDismissedPromptRef.current = completedPrompt;
+    setFileMenuDismissedFor(completedPrompt);
+    setFileCandidates([]);
     editorRef.current?.replaceCurrentMention(candidate.reference, candidate.label);
   }
 
@@ -477,20 +502,31 @@ export default function ChatPage({
   ) {
     const controller = new AbortController();
     abortRef.current = controller;
-    activeJobIdRef.current = null;
-    stopRequestedRef.current = false;
+    const activeStream: NonNullable<typeof activeStreamRef.current> = { controller, stopRequested: false, cancelIssued: false };
+    activeStreamRef.current = activeStream;
     setLocalBusy(true);
     try {
       let nodeProtocol = false;
       let sawDone = false;
       let finalNode: import("../../types").RuntimeStateNode | undefined;
+      const cancelStreamJob = (jobId: string) => {
+        if (activeStream.cancelIssued) return;
+        activeStream.cancelIssued = true;
+        void cancelJob(jobId)
+          .catch(() => undefined)
+          .finally(() => controller.abort());
+      };
       const onMessage = (message: StreamMessage) => {
         if (message.type === "job" && message.job_id) {
-          activeJobIdRef.current = message.job_id;
-          if (stopRequestedRef.current) void cancelJob(message.job_id).catch(() => undefined);
+          activeStream.jobId = message.job_id;
+          if (activeStream.cancelTimer !== undefined) {
+            window.clearTimeout(activeStream.cancelTimer);
+            activeStream.cancelTimer = undefined;
+          }
+          if (activeStream.stopRequested) cancelStreamJob(message.job_id);
           return;
         }
-        if (stopRequestedRef.current && message.type !== "done" && message.type !== "error") return;
+        if (activeStream.stopRequested || controller.signal.aborted) return;
         if (message.type === "run_segment") {
           if (message.segment) updateLast((item) => applyRunSegment(item, message.segment!), conversationId);
           const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
@@ -634,10 +670,8 @@ export default function ChatPage({
         setLast({ error: String((error as Error).message ?? error), running: false, decision: undefined }, conversationId);
       }
     } finally {
-      if (stopFallbackTimerRef.current !== null) window.clearTimeout(stopFallbackTimerRef.current);
-      stopFallbackTimerRef.current = null;
-      activeJobIdRef.current = null;
-      stopRequestedRef.current = false;
+      if (activeStream.cancelTimer !== undefined) window.clearTimeout(activeStream.cancelTimer);
+      if (activeStreamRef.current === activeStream) activeStreamRef.current = null;
       setLocalBusy(false);
       abortRef.current = null;
     }
@@ -705,6 +739,7 @@ export default function ChatPage({
 
 
   async function executeCommand(name: string, argument: string) {
+    pendingRewindRef.current = null;
     editorRef.current?.clear();
     setReferences([]);
     setCommandMenuDismissedFor(null);
@@ -742,7 +777,7 @@ export default function ChatPage({
 
   async function send() {
     const prompt = input.trim();
-    if (busy || pendingUploads.some((upload) => upload.status === "uploading")) return;
+    if (busy || activeStreamRef.current || pendingUploads.some((upload) => upload.status === "uploading")) return;
     if (recoveryMode && conversation?.sessionId && activeRuntimeNode) {
       await dispatchRun(
         conversation.id,
@@ -793,12 +828,19 @@ export default function ChatPage({
       onStopRun(conversation.id);
       return;
     }
-    stopRequestedRef.current = true;
-    if (activeJobIdRef.current) {
-      void cancelJob(activeJobIdRef.current).catch(() => undefined);
-    }
-    if (stopFallbackTimerRef.current === null) {
-      stopFallbackTimerRef.current = window.setTimeout(() => abortRef.current?.abort(), 2000);
+    const activeStream = activeStreamRef.current;
+    if (activeStream) {
+      activeStream.stopRequested = true;
+      if (activeStream.jobId && !activeStream.cancelIssued) {
+        void cancelJob(activeStream.jobId)
+          .catch(() => undefined)
+          .finally(() => activeStream.controller.abort());
+        activeStream.cancelIssued = true;
+      } else if (!activeStream.jobId && activeStream.cancelTimer === undefined) {
+        activeStream.cancelTimer = window.setTimeout(() => activeStream.controller.abort(), 2000);
+      }
+    } else {
+      abortRef.current?.abort();
     }
     setLast({
       running: true,
@@ -819,13 +861,13 @@ export default function ChatPage({
       const content = typeof result === "string" ? result : result.content;
       editorRef.current?.restore(content, message?.references ?? []);
       pendingRewindRef.current = typeof result === "string"
-        ? { conversationId: conversation.id, sessionId: conversation.sessionId ?? conversation.id }
+        ? { conversationId: conversation.id, sessionId: conversation.sessionId ?? conversation.id, branch: false }
         : {
           conversationId: conversation.id,
           sessionId: result.sessionId,
           sourceNodeId: result.sourceNodeId,
           sourceNodeSessionId: result.sourceNodeSessionId,
-          branch: result.branch,
+          branch: Boolean(result.branch),
         };
       setInput(content);
       setReferences(message?.references ?? []);
@@ -837,6 +879,7 @@ export default function ChatPage({
 
   function beginEdit(message: ChatMessage) {
     if (busy || !onRewind || !message.content) return;
+    pendingRewindRef.current = null;
     setEditingMessageId(message.id);
     setEditingDraft(message.content);
   }
@@ -847,11 +890,12 @@ export default function ChatPage({
   }
 
   async function saveEdit(message: ChatMessage) {
-    if (!conversation || !onRewind || busy || !editingDraft.trim() || rewindPending) {
-      if (!rewindPending) cancelEdit();
+    if (!conversation || !onRewind || busy || !editingDraft.trim() || rewindPending || editingSubmitting || editingSubmittingRef.current) {
       return;
     }
     setRewindPending(true);
+    editingSubmittingRef.current = true;
+    setEditingSubmitting(true);
     try {
       const result = await onRewind(conversation.id, message.id);
       if (result === undefined) return;
@@ -859,6 +903,7 @@ export default function ChatPage({
       const sessionId = typeof result === "string" ? conversation.sessionId : result.sessionId;
       if (!sessionId) return;
       cancelEdit();
+      pendingRewindRef.current = null;
       await runPrompt(
         nextPrompt,
         {
@@ -872,6 +917,8 @@ export default function ChatPage({
       );
     } finally {
       setRewindPending(false);
+      editingSubmittingRef.current = false;
+      setEditingSubmitting(false);
     }
   }
 
@@ -958,8 +1005,8 @@ export default function ChatPage({
                           autoSize={{ minRows: 2, maxRows: 8 }}
                         />
                         <div className="message-edit-actions">
-                          <Button type="text" onClick={cancelEdit} disabled={busy}>取消</Button>
-                          <Button type="primary" loading={rewindPending} onClick={() => void saveEdit(message)} disabled={busy || !editingDraft.trim()}>保存并重新生成</Button>
+                          <Button type="text" onClick={cancelEdit}>取消</Button>
+                          <Button type="primary" onClick={() => void saveEdit(message)} loading={rewindPending || editingSubmitting} disabled={!editingDraft.trim() || editingSubmitting || rewindPending || busy}>保存并重新生成</Button>
                         </div>
                       </div>
                     ) : (

@@ -21,5 +21,6 @@ export interface ActiveRun {
   sessionId: string;
   jobId?: string;
   stopRequested?: boolean;
+  cancelIssued?: boolean;
   cancelTimer?: ReturnType<typeof setTimeout>;
 }
