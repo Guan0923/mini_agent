@@ -16,6 +16,8 @@ from .broker_service import (
     WindowsServiceInstaller,
 )
 from .errors import (
+    BrokerInstallationError,
+    BrokerInstallFailureCode,
     SandboxCleanupPending,
     SandboxError,
     SandboxFailureCode,
@@ -34,6 +36,7 @@ from .native_windows import (
     WindowsRestrictedTokenFactory,
     WindowsSandboxAccount,
     windows_pipe_security_attributes,
+    windows_service_sid,
 )
 from .policy import (
     FileAccessMode,
@@ -57,6 +60,8 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalGrant",
     "ApprovalStore",
+    "BrokerInstallFailureCode",
+    "BrokerInstallationError",
     "AccountLease",
     "AccountPool",
     "AggregateLimits",
@@ -103,6 +108,7 @@ __all__ = [
     "WindowsRestrictedTokenFactory",
     "WindowsSandboxAccount",
     "windows_pipe_security_attributes",
+    "windows_service_sid",
     "WfpController",
     "UserAccountPools",
     "authorization_hash",

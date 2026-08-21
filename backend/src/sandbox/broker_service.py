@@ -9,6 +9,7 @@ security boundary.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -16,6 +17,7 @@ import logging
 import os
 import secrets
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -27,7 +29,14 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 
-from .errors import SandboxCleanupPending, SandboxError, SandboxFailureCode, SandboxInitializationError
+from .errors import (
+    BrokerInstallationError,
+    BrokerInstallFailureCode,
+    SandboxCleanupPending,
+    SandboxError,
+    SandboxFailureCode,
+    SandboxInitializationError,
+)
 from .manifest import ResourceManifest, ResourceRecord
 from .reclaimer import SandboxResourceReclaimer
 
@@ -44,6 +53,19 @@ def _canonical(value: Mapping[str, Any]) -> bytes:
 def _default_program_data() -> Path:
     root = os.environ.get("PROGRAMDATA") if os.name == "nt" else None
     return Path(root or (Path(tempfile.gettempdir()) / "mini-agent-programdata")) / "Mini-Agent" / "SandboxBroker"
+
+
+def _atomic_temporary(parent: Path, prefix: str) -> tuple[int, str]:
+    if os.name != "nt":
+        return tempfile.mkstemp(prefix=prefix, dir=parent)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    for _ in range(16):
+        temporary = parent / f"{prefix}{uuid.uuid4().hex}"
+        try:
+            return os.open(temporary, flags, 0o666), str(temporary)
+        except FileExistsError:
+            continue
+    raise OSError("Could not allocate a Broker temporary file")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +130,7 @@ class BrokerConfiguration:
             if existing != self.installation_id:
                 raise SandboxInitializationError("Broker installation identity does not match ProgramData")
             return
-        fd, temporary = tempfile.mkstemp(prefix=".installation.id.", dir=self.program_data)
+        fd, temporary = _atomic_temporary(self.program_data, ".installation.id.")
         try:
             with os.fdopen(fd, "w", encoding="ascii") as stream:
                 stream.write(self.installation_id)
@@ -142,22 +164,24 @@ class WindowsDpapiProvider:
 
     def protect(self, value: bytes) -> bytes:
         try:
-            return bytes(
-                self._win32crypt.CryptProtectData(
-                    value,
-                    "Mini-Agent Sandbox Broker",
-                    None,
-                    None,
-                    None,
-                    0x4,
-                )[1]
+            result = self._win32crypt.CryptProtectData(
+                value,
+                "Mini-Agent Sandbox Broker",
+                None,
+                None,
+                None,
+                0x4,
             )
+            blob = result[1] if isinstance(result, tuple) else result
+            return bytes(blob)
         except Exception as exc:  # pragma: no cover - Windows-only adapter
             raise SandboxInitializationError("DPAPI could not protect the Broker key") from exc
 
     def unprotect(self, value: bytes) -> bytes:
         try:
-            return bytes(self._win32crypt.CryptUnprotectData(value, None, None, None, 0)[1])
+            result = self._win32crypt.CryptUnprotectData(value, None, None, None, 0)
+            blob = result[1] if isinstance(result, tuple) else result
+            return bytes(blob)
         except Exception as exc:  # pragma: no cover - Windows-only adapter
             raise SandboxInitializationError("DPAPI could not unprotect the Broker key") from exc
 
@@ -187,21 +211,26 @@ class DpapiKeyStore:
     def ensure(self) -> bytes:
         with self._lock:
             if self.path.exists():
-                return self.load()
+                try:
+                    if self.path.stat().st_size > 0:
+                        return self.load()
+                except OSError as exc:
+                    raise SandboxInitializationError("Broker installation key is unavailable") from exc
             key = secrets.token_bytes(32)
             protected = self._provider().protect(key)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
+            fd, temporary = _atomic_temporary(self.path.parent, f".{self.path.name}.")
             try:
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(protected)
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temporary, self.path)
-                try:
-                    os.chmod(self.path, 0o600)
-                except OSError:
-                    pass
+                if os.name != "nt":
+                    try:
+                        os.chmod(self.path, 0o600)
+                    except OSError:
+                        pass
             finally:
                 try:
                     os.unlink(temporary)
@@ -241,6 +270,8 @@ class WindowsServiceInstaller:
         is_windows: bool | None = None,
         backend_sid_path: Path | None = None,
         program_data_path: Path | None = None,
+        service_code_path: Path | None = None,
+        service_code_boundary_path: Path | None = None,
     ) -> None:
         if not service_command or any(not isinstance(item, str) or not item for item in service_command):
             raise ValueError("service_command must contain non-empty strings")
@@ -251,115 +282,261 @@ class WindowsServiceInstaller:
         self.is_windows = os.name == "nt" if is_windows is None else is_windows
         self.backend_sid_path = Path(backend_sid_path) if backend_sid_path is not None else None
         self.program_data_path = Path(program_data_path) if program_data_path is not None else None
+        self.service_code_path = Path(service_code_path) if service_code_path is not None else None
+        self.service_code_boundary_path = (
+            Path(service_code_boundary_path) if service_code_boundary_path is not None else None
+        )
+        if (self.service_code_path is None) != (self.service_code_boundary_path is None):
+            raise ValueError("service_code_path and service_code_boundary_path must be provided together")
 
     def install(self) -> None:
         self._require_windows()
-        self._write_backend_sid()
-        command = subprocess.list2cmdline(list(self.service_command))
-        self._run(
-            [
-                "sc.exe",
-                "create",
-                self.service_name,
-                "type=",
-                "own",
-                "start=",
-                "demand",
-                "obj=",
-                r"NT SERVICE\MiniAgentSandboxBroker",
-                "binPath=",
-                command,
-            ]
-        )
-        self._run(["sc.exe", "sidtype", self.service_name, "unrestricted"])
-        self._secure_program_data()
-        self._run(["sc.exe", "start", self.service_name])
+        self._run_transaction("install")
 
     def repair(self) -> None:
         self._require_windows()
         query = self.runner(["sc.exe", "query", self.service_name], check=False, capture_output=True)
         if getattr(query, "returncode", 1) != 0:
-            self.install()
+            self._run_transaction("install")
             return
-        self._run(["sc.exe", "config", self.service_name, "start=", "demand"])
-        self._secure_program_data()
-        self._run(["sc.exe", "start", self.service_name])
 
-    def _run(self, command: list[str]) -> None:
-        if not self._runner_injected:
-            self._run_elevated(command)
+        self._run_transaction("repair")
+
+    def _run_transaction(self, operation: str) -> None:
+        backend_sid = self._current_user_sid()
+        if self._runner_injected:
+            self._run_local_transaction(operation, backend_sid)
             return
-        result = self.runner(command, check=False, capture_output=True)
-        if getattr(result, "returncode", 1) != 0:
-            raise SandboxInitializationError("Broker Windows service control failed")
+        self._run_elevated_transaction(operation, backend_sid)
 
-    def _run_elevated(self, command: list[str]) -> None:
-        """Run one control-plane command through the interactive UAC broker."""
+    def _run_local_transaction(self, operation: str, backend_sid: str | None) -> None:
+        """Execute the same transaction through an injected test runner."""
+
+        sid: str | None = None
+        if self.backend_sid_path is not None and backend_sid is not None:
+            try:
+                self.backend_sid_path.parent.mkdir(parents=True, exist_ok=True)
+                self.backend_sid_path.write_text(backend_sid, encoding="ascii")
+                sid = backend_sid
+            except OSError as exc:
+                raise BrokerInstallationError(
+                    BrokerInstallFailureCode.ACL_FAILED,
+                    "Broker 文件权限配置失败，请以管理员权限重试。",
+                ) from exc
+        from .install_helper import (
+            _managed_file_acl_commands,
+            _program_data_acl_commands,
+            _sid_acl_command,
+            _source_acl_grants,
+        )
+
+        command = subprocess.list2cmdline(list(self.service_command))
+        commands: list[list[str]] = []
+        if self.backend_sid_path is not None and sid is not None:
+            commands.append(_sid_acl_command(self.backend_sid_path, sid, None))
+        if operation == "install":
+            commands.extend(
+                [
+                    [
+                        "sc.exe",
+                        "create",
+                        self.service_name,
+                        "type=",
+                        "own",
+                        "start=",
+                        "demand",
+                        "obj=",
+                        f"NT SERVICE\\{self.service_name}",
+                        "binPath=",
+                        command,
+                    ],
+                    ["sc.exe", "sidtype", self.service_name, "unrestricted"],
+                ]
+            )
+        else:
+            commands.extend(
+                [
+                    ["sc.exe", "stop", self.service_name],
+                    [
+                        "sc.exe",
+                        "config",
+                        self.service_name,
+                        "type=",
+                        "own",
+                        "start=",
+                        "demand",
+                        "obj=",
+                        f"NT SERVICE\\{self.service_name}",
+                        "binPath=",
+                        command,
+                    ],
+                    ["sc.exe", "sidtype", self.service_name, "unrestricted"],
+                ]
+            )
+        if self.program_data_path is not None and self.backend_sid_path is not None:
+            try:
+                # Build the ACL command through the same validation as the
+                # elevated helper, while executing it with the injected runner.
+                persisted_sid = self.backend_sid_path.read_text(encoding="ascii").strip()
+                commands.extend(
+                    _program_data_acl_commands(
+                        self.program_data_path,
+                        self.backend_sid_path,
+                        persisted_sid,
+                        self.service_name,
+                    )
+                )
+                for name in ("installation.id", "installation.key.dpapi"):
+                    commands.extend(
+                        _managed_file_acl_commands(
+                            self.program_data_path / name,
+                            persisted_sid,
+                            self.service_name,
+                        )
+                    )
+            except (OSError, ValueError) as exc:
+                raise BrokerInstallationError(
+                    BrokerInstallFailureCode.ACL_FAILED,
+                    "Broker 文件权限配置失败，请以管理员权限重试。",
+                ) from exc
+        if self.service_code_path is not None and self.service_code_boundary_path is not None:
+            try:
+                commands.extend(
+                    grant.runner_command()
+                    for grant in _source_acl_grants(
+                        self.service_code_path, self.service_code_boundary_path, self.service_name
+                    )
+                )
+            except ValueError as exc:
+                raise BrokerInstallationError(
+                    BrokerInstallFailureCode.ACL_FAILED,
+                    "Broker 文件权限配置失败，请以管理员权限重试。",
+                ) from exc
+        commands.append(["sc.exe", "start", self.service_name])
+        for command_args in commands:
+            result = self.runner(command_args, check=False, capture_output=True)
+            returncode = int(getattr(result, "returncode", 1))
+            service_already_running = command_args[:2] == ["sc.exe", "start"] and returncode == 1056
+            service_already_stopped = command_args[:2] == ["sc.exe", "stop"] and returncode == 1062
+            if returncode != 0 and not service_already_running and not service_already_stopped:
+                if command_args[0].lower() in {"icacls.exe", "takeown.exe", "win32-acl"}:
+                    failure_code = BrokerInstallFailureCode.ACL_FAILED
+                    message = "Broker 文件权限配置失败，请以管理员权限重试。"
+                elif len(command_args) > 1 and command_args[1].lower() == "start":
+                    failure_code = BrokerInstallFailureCode.SERVICE_START_FAILED
+                    message = "Broker Windows 服务启动失败。"
+                else:
+                    failure_code = BrokerInstallFailureCode.SERVICE_FAILED
+                    message = "Windows 服务创建或配置失败。"
+                raise BrokerInstallationError(
+                    failure_code,
+                    message,
+                )
+
+    def _run_elevated_transaction(self, operation: str, backend_sid: str | None) -> None:
+        """Run the complete control-plane operation behind one UAC prompt."""
 
         try:
-            import win32api  # type: ignore[import-not-found]
             import win32con  # type: ignore[import-not-found]
+            import win32event  # type: ignore[import-not-found]
             import win32process  # type: ignore[import-not-found]
+            from win32com.shell import shell  # type: ignore[import-not-found]
         except ImportError as exc:  # pragma: no cover - Windows install path
-            raise SandboxInitializationError("pywin32 is required for Broker UAC elevation") from exc
+            raise BrokerInstallationError(
+                BrokerInstallFailureCode.DEPENDENCY_MISSING,
+                "缺少 Windows Broker 安装依赖，请重新安装后端依赖。",
+            ) from exc
+
+        payload = {
+            "operation": operation,
+            "service_name": self.service_name,
+            "service_command": list(self.service_command),
+            "backend_sid": backend_sid,
+            "backend_sid_path": str(self.backend_sid_path) if self.backend_sid_path is not None else None,
+            "program_data_path": str(self.program_data_path) if self.program_data_path is not None else None,
+            "service_code_path": str(self.service_code_path) if self.service_code_path is not None else None,
+            "service_code_boundary_path": (
+                str(self.service_code_boundary_path) if self.service_code_boundary_path is not None else None
+            ),
+        }
+        encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii")
+        parameters = subprocess.list2cmdline(["-m", "backend.sandbox.install_helper", encoded])
+        handle: Any | None = None
         try:  # pragma: no cover - requires an interactive Windows desktop
-            result = win32api.ShellExecuteEx(
+            result = shell.ShellExecuteEx(
                 fMask=getattr(win32con, "SEE_MASK_NOCLOSEPROCESS", 0x00000040),
                 lpVerb="runas",
-                lpFile=command[0],
-                lpParameters=subprocess.list2cmdline(command[1:]),
+                lpFile=sys.executable,
+                lpParameters=parameters,
                 nShow=getattr(win32con, "SW_HIDE", 0),
             )
             handle = result["hProcess"] if isinstance(result, Mapping) else result
-            win32process.GetExitCodeProcess(handle)
-            import win32event  # type: ignore[import-not-found]
-
             win32event.WaitForSingleObject(handle, win32event.INFINITE)
             code = int(win32process.GetExitCodeProcess(handle))
-            win32api.CloseHandle(handle)
         except Exception as exc:
-            raise SandboxInitializationError("Broker Windows service control failed") from exc
-        if code != 0:
-            raise SandboxInitializationError("Broker Windows service control failed")
+            winerror = getattr(exc, "winerror", None)
+            if winerror is None and getattr(exc, "args", None):
+                first = exc.args[0]
+                winerror = first if isinstance(first, int) else None
+            if winerror == 1223:
+                raise BrokerInstallationError(
+                    BrokerInstallFailureCode.UAC_CANCELLED,
+                    "安装已取消，请在 UAC 提示中批准 Broker 安装。",
+                ) from exc
+            if winerror in {5, 740}:
+                raise BrokerInstallationError(
+                    BrokerInstallFailureCode.ADMIN_REQUIRED,
+                    "需要管理员权限才能安装沙箱 Broker。",
+                ) from exc
+            raise BrokerInstallationError(
+                BrokerInstallFailureCode.UNKNOWN,
+                "沙箱 Broker 安装失败，请查看后端日志。",
+            ) from exc
+        finally:
+            if handle is not None:
+                try:
+                    import win32api  # type: ignore[import-not-found]
 
-    def _secure_program_data(self) -> None:
-        path = self.program_data_path
-        sid_path = self.backend_sid_path
-        if path is None or sid_path is None:
+                    win32api.CloseHandle(handle)
+                except Exception:
+                    pass
+        if code == 0:
             return
-        try:
-            backend_sid = sid_path.read_text(encoding="ascii").strip()
-        except OSError as exc:
-            raise SandboxInitializationError("Broker backend SID is unavailable") from exc
-        if not backend_sid or not path.is_absolute() or len(path.parts) < 3:
-            raise SandboxInitializationError("Broker ProgramData path is invalid")
-        # The path and SID are generated by the installer; quote them for the
-        # command parser before handing the operation to elevated icacls.
-        grants = [
-            "SYSTEM:(OI)(CI)(F)",
-            "Administrators:(OI)(CI)(F)",
-            f"{backend_sid}:(OI)(CI)(M)",
-            r"NT SERVICE\MiniAgentSandboxBroker:(OI)(CI)(M)",
-        ]
-        self._run(
-            [
-                "icacls.exe",
-                str(path),
-                "/inheritance:r",
-                "/grant:r",
-                *grants,
-                "/T",
-                "/C",
-            ]
+        from .install_helper import (
+            EXIT_ACL_FAILED,
+            EXIT_FILESYSTEM_FAILED,
+            EXIT_INVALID,
+            EXIT_SERVICE_START_FAILED,
         )
 
-    def _require_windows(self) -> None:
-        if not self.is_windows:
-            raise SandboxInitializationError("Windows Broker service is unavailable on this platform")
+        if code == EXIT_FILESYSTEM_FAILED:
+            raise BrokerInstallationError(
+                BrokerInstallFailureCode.ACL_FAILED,
+                "Broker 文件权限配置失败，请以管理员权限重试。",
+            )
+        if code == EXIT_ACL_FAILED:
+            raise BrokerInstallationError(
+                BrokerInstallFailureCode.ACL_FAILED,
+                "Broker 文件权限配置失败，请以管理员权限重试。",
+            )
+        if code == EXIT_SERVICE_START_FAILED:
+            raise BrokerInstallationError(
+                BrokerInstallFailureCode.SERVICE_START_FAILED,
+                "Broker Windows 服务启动失败。",
+            )
+        if code == EXIT_INVALID:
+            raise BrokerInstallationError(
+                BrokerInstallFailureCode.UNKNOWN,
+                "沙箱 Broker 安装失败，请查看后端日志。",
+            )
+        raise BrokerInstallationError(
+            BrokerInstallFailureCode.SERVICE_FAILED,
+            "Windows 服务创建或启动失败。",
+        )
 
-    def _write_backend_sid(self) -> None:
+    def _current_user_sid(self) -> str | None:
         if self.backend_sid_path is None:
-            return
+            return None
         try:
             import win32api  # type: ignore[import-not-found]
             import win32con  # type: ignore[import-not-found]
@@ -367,35 +544,21 @@ class WindowsServiceInstaller:
 
             token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
             sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
-            value = win32security.ConvertSidToStringSid(sid)
-            try:
-                self.backend_sid_path.parent.mkdir(parents=True, exist_ok=True)
-                self.backend_sid_path.write_text(value, encoding="ascii")
-            except OSError:
-                if self._runner_injected:
-                    raise
-                script = (
-                    "$ErrorActionPreference='Stop'; "
-                    f"New-Item -ItemType Directory -Force -LiteralPath {_powershell_quote(str(self.backend_sid_path.parent))} | Out-Null; "
-                    f"Set-Content -LiteralPath {_powershell_quote(str(self.backend_sid_path))} "
-                    f"-Value {_powershell_quote(value)} -Encoding ascii"
-                )
-                self._run_elevated(
-                    [
-                        "powershell.exe",
-                        "-NoLogo",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-Command",
-                        script,
-                    ]
-                )
-        except Exception as exc:  # pragma: no cover - requires Windows install permissions
-            raise SandboxInitializationError("Broker backend SID could not be persisted") from exc
+            return str(win32security.ConvertSidToStringSid(sid))
+        except ImportError as exc:  # pragma: no cover - Windows install path
+            raise BrokerInstallationError(
+                BrokerInstallFailureCode.DEPENDENCY_MISSING,
+                "缺少 Windows Broker 安装依赖，请重新安装后端依赖。",
+            ) from exc
+        except Exception as exc:  # pragma: no cover - Windows install path
+            raise BrokerInstallationError(
+                BrokerInstallFailureCode.UNKNOWN,
+                "无法读取当前 Windows 用户身份，请查看后端日志。",
+            ) from exc
 
-
-def _powershell_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
+    def _require_windows(self) -> None:
+        if not self.is_windows:
+            raise SandboxInitializationError("Windows Broker service is unavailable on this platform")
 
 
 @dataclass(frozen=True, slots=True)
@@ -787,6 +950,8 @@ class WindowsNamedPipeServer:
         self.pipe_handle_factory = pipe_handle_factory
         self.security_attributes_factory = security_attributes_factory
         self._closed = False
+        self._listener_lock = RLock()
+        self._listener_handle: Any | None = None
 
     def serve_once(self) -> None:
         if os.name != "nt":
@@ -817,13 +982,24 @@ class WindowsNamedPipeServer:
         try:
             while not self._closed and not (stop is not None and stop()):
                 handle = self.pipe_handle_factory() if self.pipe_handle_factory is not None else self._create_pipe()
+                with self._listener_lock:
+                    if self._closed:
+                        self._close_handle(handle)
+                        break
+                    self._listener_handle = handle
                 try:
                     import win32pipe  # type: ignore[import-not-found]
 
                     win32pipe.ConnectNamedPipe(handle, None)
                 except Exception:
                     self._close_handle(handle)
+                    if self._closed:
+                        break
                     raise
+                finally:
+                    with self._listener_lock:
+                        if self._listener_handle is handle:
+                            self._listener_handle = None
                 workers.submit(self._serve_connected, handle)
         finally:
             workers.shutdown(wait=True, cancel_futures=True)
@@ -831,12 +1007,11 @@ class WindowsNamedPipeServer:
     def close(self) -> None:
         self._closed = True
         self.service.close()
-        if os.name == "nt" and self.pipe_handle_factory is None:
-            try:
-                with open(self.service.configuration.pipe_name, "r+b", buffering=0):
-                    pass
-            except OSError:
-                pass
+        with self._listener_lock:
+            handle = self._listener_handle
+            self._listener_handle = None
+        if handle is not None:
+            self._close_handle(handle)
 
     def _create_pipe(self) -> Any:
         try:
@@ -856,6 +1031,25 @@ class WindowsNamedPipeServer:
                 self._security_attributes(),
             )
         except Exception as exc:  # pragma: no cover - Windows-only adapter
+            # The service host does not configure Python logging handlers, so
+            # retain only the numeric Win32 failure in the Application log.
+            # This makes field diagnosis possible without leaking the pipe
+            # name, ACL/SDDL, or any filesystem paths.
+            try:
+                import servicemanager  # type: ignore[import-not-found]
+
+                winerror = getattr(exc, "winerror", None)
+                servicemanager.LogErrorMsg(
+                    f"Broker named-pipe creation failed (winerror={winerror!s})"
+                )
+            except Exception:
+                pass
+            logger.error(
+                "Broker named-pipe creation failed type=%s winerror=%s",
+                type(exc).__name__,
+                getattr(exc, "winerror", None),
+                exc_info=False,
+            )
             raise SandboxInitializationError("Broker named-pipe creation failed") from exc
 
     def _serve_connected(self, handle: Any) -> None:

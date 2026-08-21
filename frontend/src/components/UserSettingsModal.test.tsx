@@ -239,13 +239,13 @@ describe("UserSettingsModal", () => {
   });
 
   it("renders Broker install failures in the sandbox status", async () => {
-    api.installSandboxBroker.mockRejectedValueOnce(new Error("需要管理员批准"));
+    api.installSandboxBroker.mockRejectedValueOnce(new Error("Broker 文件权限配置失败，请以管理员权限重试。"));
     const user = userEvent.setup();
     renderModal();
     await screen.findByDisplayValue("user@example.com");
     await user.click(screen.getByRole("menuitem", { name: "沙箱" }));
     await user.click(screen.getByRole("button", { name: "安装" }));
-    expect(await screen.findByText("需要管理员批准")).toBeInTheDocument();
+    expect(await screen.findByText("Broker 文件权限配置失败，请以管理员权限重试。")).toBeInTheDocument();
   });
 
   it("saves cloud preferences and starts an incremental event sync", async () => {

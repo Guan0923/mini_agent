@@ -14,9 +14,12 @@ import uuid
 from base64 import b64decode, b64encode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .errors import (
+    BrokerInstallationError,
+    BrokerInstallFailureCode,
     SandboxCleanupPending,
     SandboxError,
     SandboxFailureCode,
@@ -95,6 +98,8 @@ class WindowsBrokerClient:
             (sys.executable, "-m", "backend.sandbox.service_main", "run"),
             backend_sid_path=configuration.backend_sid_path,
             program_data_path=configuration.program_data,
+            service_code_path=Path(__file__).resolve().parents[1],
+            service_code_boundary_path=Path(__file__).resolve().parents[3],
         )
         try:
             key = key_store.load()
@@ -158,7 +163,10 @@ class WindowsBrokerClient:
                 except Exception as exc:
                     last_error = exc
                     if time.monotonic() >= deadline:
-                        raise SandboxInitializationError("Broker service did not become ready") from last_error
+                        raise BrokerInstallationError(
+                            BrokerInstallFailureCode.NOT_READY,
+                            "Broker 服务已安装但未能在限定时间内就绪。",
+                        ) from last_error
                     time.sleep(0.1)
         else:
             payload = self.request(operation, {})

@@ -1,210 +1,133 @@
 # Mini-Agent
 
-Mini-Agent 是一个面向学习与实验的 Python Agent Harness。它用可观察的终端界面展示模型决策、工具调用、规划、审批、上下文压缩、持久化恢复、项目级 Skills、MCP 工具服务和并发 Subagents。
+Mini-Agent 是一个 local-first Agent 应用：Agent Runtime、模型调用、工具执行、会话历史和工作区在用户电脑上的 backend 中运行；浏览器前端通过 loopback HTTP/SSE 访问它。账户、邮件验证和加密云同步由可选的 cloud 服务提供，只有 cloud 访问 PostgreSQL。
 
-当前版本要求 Python 3.11+。系统按 frontend、backend、tui、cloud 四个部署边界组织：backend 在用户电脑 loopback 上运行 Agent Runtime 和本地 SQLite，frontend 只访问 backend，cloud 独占 PostgreSQL、SMTP 和云端密钥。
-
-## 已实现能力
-
-- **执行与规划**：Agent 直接基于对话与工具结果自由决策；独立的只读 Plan mode 可调研、提问并提交 Plan Review。
-- **安全工具**：提供 workspace-confined 的文件读取、搜索、写入和精确编辑，以及网页搜索、受 SSRF 防护的网页抓取和跨平台命令执行；写入、命令和联网操作需要审批。
-- **分层 Skills**：用户级 Skill 位于 `~/.mini_agent/<user_id>/skills`；项目 `.mini_agent/skills` 中的 Skill 属于不可信仓库内容，默认不生效，逐个审批其完整目录指纹后才可使用（见下文）。
-- **并发 Subagents**：父 Agent 可把独立工作交给多个子 Agent 并发执行；批次结果持久化，同路径写入和命令执行有进程内协调。
-- **MCP**：既可通过 stdio 暴露安全只读工具，也可从全局/项目 `mcp.toml` 加载外部 server；外部工具始终需要审批且不进入 Plan mode。
-- **耐久运行**：backend 使用 `~/.mini_agent/client.db` 保存本地浏览器会话哈希，认证用户使用 `~/.mini_agent/<user_id>/runtime/<session_id>/state.db`，每个会话拥有独立的 `workspace/` 与 `uploads/`。
-- **可观察 TUI**：流式展示 reasoning、响应、工具与 Subagent 事件；支持详情级别、下一轮消息队列、历史和结构化 trace。
-- **上下文与审计**：按上下文窗口估算 token，支持自动或手动压缩；Web 运行轨迹以会话 SQLite 为准，诊断日志位于用户树之外。
-
-尚未完成的主要方向包括强执行沙箱、统一的全局时间/费用/工具输出预算、后台进程管理、Replay/Eval、浏览器前端和跨进程 Subagent 调度。当前 Subagents 是单进程、单层并发能力，不是分布式多 Agent 系统。
-
-## 快速开始
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
-python run.py --planner rule "calculate 1 + 1"
-```
-
-Web 登录后会创建 `~/.mini_agent/client.db` 以及 `~/.mini_agent/<user_id>/config.toml`、`user.db` 和稳定的设备 ID。简单偏好由 TOML 管理，多提供商、加密 API Key、加密 cloud token 和同步事务状态由本地 SQLite 管理；cloud 只接收本地加密快照。没有网络时游客和已登录账户仍可运行本地 Agent。
-
-```powershell
-# 交互式 TUI；三个入口等价
-python run.py
-python -m tui
-mini-agent
-
-# 单任务、离线规则规划器、恢复会话
-python run.py "整理并总结 README.md"
-python run.py --planner rule "calculate (18 + 6) * 4"
-mini-agent --resume session_xxx
-```
-
-主要 CLI 参数：
-
-```text
---workspace PATH
---planner llm|rule
---max-tool-calls N
---log-dir PATH
---resume SESSION_ID
-```
-
-`--max-tool-calls` 控制单次 Agent 工作流中允许进入执行流程的工具调用总数，范围为 `1–1000`，默认值为 `32`；成功、失败和重复调用都会计入。模型网络请求固定最多重试 5 次（最多 6 次请求），不可由 CLI 覆盖。
-
-## 配置
-
-以下 `~/.mini_agent/config.toml` 仅用于尚未接入账户存储的独立离线 TUI；Web 用户不要在此保存提供商密钥：
-
-```toml
-[model]
-provider = "chat_completions"
-provider_name = "default"
-protocol = "chat_completions"
-api_key = "replace-with-your-key"
-base_url = "https://api.example.com/v1"
-model = "replace-with-your-model"
-max_tokens = 8192
-context_size = 1024000
-tokenizer_model = ""
-
-[runtime]
-log_full_messages = true
-max_tool_calls = 32
-
-[sync]
-# device_id 由客户端自动生成
-# url = "https://sync.example.com"
-# token = "replace-with-a-sync-bearer-token"
-```
-
-同步只接受无 URL 凭据、query 或 fragment 的 HTTPS endpoint；网络失败会保留本地 outbox，并在下次启动、checkpoint 或正常退出时重试，不进行固定轮询。不要提交真实模型密钥、同步 token、认证头或生产数据。
-
-## TUI 工作流
-
-TUI 使用 alternate screen，消息区可滚动，状态栏和输入框固定在底部。Enter 提交，Ctrl+J 换行；运行中提交的普通消息会排队，在当前 run 完成或 Esc 协作式取消后合并为下一轮。审批出现时，审批选项独占输入区域。
-
-| 命令 | 说明 |
-| --- | --- |
-| `/agent`、`/plan` | 切换正常执行和只读规划/讨论模式。 |
-| `/permission` | 选择当前进程的逐次审批或 Full access。 |
-| `/display [minimal\|medium\|verbose]` | 选择 transcript 详情级别。 |
-| `/skills`、`/tools` | 查看发现的 Skills 和当前工具。 |
-| `/compact` | 立即压缩旧上下文。 |
-| `/trace`、`/history` | 查看最近运行 trace 或当前会话历史。 |
-| `/sessions`、`/resume [id]` | 列出并恢复持久化会话。 |
-| `/fork [run_id]` | 从任意非运行中 run 创建当前设备拥有的新 session。 |
-| `/time` | 选择会话时区，供模型通过时间工具按需查询。 |
-| `/new [title]`、`/clear [title]` | 准备新 session；不会删除旧 session。 |
-| `/help`、`/quit` | 查看帮助或退出。 |
-
-任务中可用 `@relative/path` 注入 workspace 文件，也可用 `$skill-name` 显式激活 Skill。Plan mode 只暴露只读调研工具以及 `request_user_input`、`request_plan_review`；只有后者会打开 Plan Review，批准后会创建独立、可审计的 Agent run。
-
-## 用户级与项目 Skills
-
-用户级 Skill 位于 `~/.mini_agent/<user_id>/skills/<skill-name>/SKILL.md`，属于账户拥有、直接可用的内容。项目 Skill 位于 `<workspace>/.mini_agent/skills/<skill-name>/SKILL.md`，被视为不可信仓库内容：**默认不生效，也不会出现在 Skill 选择请求中**。项目会话首次使用某个项目 Skill 时，Web 会逐个弹出信任审批，只有批准当前完整目录指纹后该 Skill 才进入本次运行；`full_access`、benchmark 和后台运行不会自动批准。manifest 示例：
-
-```markdown
----
-name: review-python
-description: Review Python changes for correctness, typing, and tests.
----
-
-# Workflow
-
-Read changed files, inspect focused tests, and report concrete findings.
-```
-
-- 名称仅允许小写字母、数字和连字符，最长 64 字符，且必须与目录名一致。
-- frontmatter 只允许 `name`、`description`、`metadata` 和 `allowed-tools`；manifest 最大 64 KiB，正文最多 1000 行。
-- LLM planner 先根据名称和描述选择 Skill，再把完整正文加入当前 run；Rule planner 不做语义选择。
-- 激活内容、根目录和 SHA-256 会进入 checkpoint；恢复和 Plan handoff 使用原快照。
-- Skill 可带 `scripts/`、`references/`、`assets/`，但不会注册新工具，也不能绕过 workspace、JSON Schema 或审批策略。
-- **项目 Skill 信任**：信任按单个 Skill 独立记录在 `~/.mini_agent/<user_id>/config.toml` 的 `[project_skill_trust]`，绑定项目路径哈希与该 Skill 完整目录树 SHA-256。修改 `SKILL.md`、脚本、引用或资源文件后，该 Skill 需要重新审批；新增 Skill 不会继承任何已有信任。项目设置菜单可随时撤销全部项目 Skill 信任。
-- 未信任的项目 Skill 名称、描述和正文不会进入模型请求；用户显式引用未信任的 `$skill-name` 会清晰失败。
-
-无效 Skill 会在启动时快速失败并指出文件和原因。
-
-## 并发 Subagents
-
-LLM 可调用 `delegate_tasks` 提交一组具有唯一 ID 的独立任务。每个子 Agent 拥有标准 workspace 工具、独立 run/session 状态和父 run 的取消信号；父 Agent 收到有序、可分页的结果后继续综合。
-
-同一批任务在线程池中并发运行；同路径文件写入串行化，命令执行与所有文件写入互斥，审批仍由父交互通道处理。子 Agent 没有 delegation 工具，因此不会递归派生。恢复时，未完成批次标为 `indeterminate`。有先后依赖、共享状态或高冲突写入的任务应由父 Agent 顺序执行。
-
-## MCP Server
-
-```powershell
-mini-agent-mcp --workspace C:\path\to\workspace
-```
-
-通用 MCP 客户端配置：
-
-```json
-{
-  "mcpServers": {
-    "mini-agent": {
-      "command": "mini-agent-mcp",
-      "args": ["--workspace", "C:\\path\\to\\workspace"]
-    }
-  }
-}
-```
-
-MCP adapter 只暴露 `read_file`、`glob`、`grep`、`get_current_time`。写入、命令和联网工具不会通过该 server 暴露；所有参数仍经过共享 JSON Schema 校验，路径仍限制在指定 workspace 内。MCP server 本身不需要模型密钥或 PostgreSQL。
-
-客户端只读取用户级 `~/.mini_agent/<user_id>/mcp/servers.toml`；项目目录中的 `.mini_agent/mcp.toml` 不再参与配置。
-
-```toml
-[servers.example]
-command = "example-mcp-server"
-args = ["--stdio"]
-# cwd = "C:/path/to/workspace"
-# env = { EXAMPLE_MODE = "readonly" }
-# Sensitive values must be references, never plaintext:
-# env_refs = { EXAMPLE_TOKEN = "env://EXAMPLE_TOKEN" }
-```
-
-发现的工具注册为 `mcp_<server>_<tool>`。外部 server 使用长生命周期 stdio session；其工具始终需要审批且不向 Plan mode 暴露。MCP 初始化、调用和关闭超时由 `config.toml` 的 `[mcp]` 设置。
-
-Skills 默认只由显式 `$skill-name` 激活且不会额外调用模型；设置 `skills.auto_select = true` 才启用自动选择。Subagent 的批次数量、worker 数和执行期限由 `[subagents]` 设置，父运行状态和持久化事件始终由父线程串行更新。
+当前客户端方向是 Web 前端；`tui/` 是仍可运行的遗留 Textual 入口，不再承载新功能。
 
 ## 架构
 
 ```text
-TUI -> ConversationService -> AgentRunner -> workflows -> planner / tools
-                                  |              |
-                                  |              +-> Skills / Subagents
-                                  +-> RuntimeEvent / checkpoints
-
-MCP stdio -> McpToolAdapter -> safe ToolRegistry subset
-LLMClient -> JsonHttpTransport <-> protocol adapter
-SQLite     <-> local sessions / RuntimeState / audit / checkpoints / outbox
-Local backend HTTP client <-> cloud API <-> PostgreSQL account records, key envelopes and latest three ciphertext snapshots
-Browser/TUI <-> loopback backend API; cloud never owns Agent Runtime or workspace files
-JSONL      <-> ~/.mini_agent-cache/logs/<user_id> redacted diagnostics
+React/Vite frontend ── HTTP/SSE ──> FastAPI backend (127.0.0.1:8000)
+                                      ├─ Runtime / planners / providers
+                                      ├─ tools / Skills / MCP / Sandbox
+                                      ├─ per-user SQLite / sync outbox
+                                      └─ optional HTTPS ──> cloud (8100) ──> PostgreSQL
 ```
 
-- `backend/src/domain/`：provider-neutral message、plan、session、skill 和 run state。
-- `backend/src/planning/`：规则/LLM planner、上下文管理、模型请求生命周期和结构化输出。
-- `backend/src/runtime/`：应用装配、conversation、workflow、Plan mode、hooks、恢复和 Subagent 协调。
-- `backend/src/providers/`：通用 HTTP/SSE transport、Provider 门面以及 Chat Completions、Responses、Messages 协议适配器。
-- `backend/src/tools/`：ToolRegistry、JSON Schema、文件、网页、命令和 delegation tool。
-- `backend/src/mcp/`：只读 MCP adapter 与分层外部 stdio MCP client。
-- `backend/src/storage/sqlite.py`、`backend/src/sync/`：本地会话存储、同步客户端和快照端口；`backend/src/cloud/`：cloud HTTPS client 与 HTTP snapshot adapter。
-- `cloud/src/cloud/`：独立账户、设备授权、密钥封装和 PostgreSQL snapshot API。
-- `backend/src/observability/`：事件扇出、JSONL 记录与脱敏。
-- `tui/src/`：CLI、Textual 组件、screen、rendering、view 和 widget（**已废弃**，不再投入新开发）。
-- `frontend/`：浏览器前端；只能通过版本化 backend API 通信。
+- `frontend/` 只调用 backend API；开发时 Vite 将 `/api` 和 `/benchmark` 代理到 8000，生产时 backend 可托管 `frontend/dist`。
+- `backend/` 负责 FastAPI、Agent Runtime、会话、模型 Provider、工具、项目、RAG、MCP、Sandbox、审计和同步；不连接 PostgreSQL，不负责 SMTP 或 cloud 主密钥。
+- `cloud/` 负责账户、密码/验证码、设备授权、密钥封装、加密快照和 PostgreSQL。
+- `tui/` 直接复用 backend/domain/runtime 包，是兼容性入口，不是 Web API 替代实现。
+- `benchmarks/`、`docs/`、`scripts/` 是支持目录。
 
-依赖保持向内：domain 不依赖外层；provider 不导入 storage；web 前端只通过 backend API 通信（TUI 已废弃，仅作遗留入口）。详细契约见 [docs/architecture.md](docs/architecture.md)。
+## 能力
+
+Web 对话、流式事件、历史/分支/恢复、消息队列、取消运行、Plan mode、用户澄清、Plan Review、工具审批、Full access、workspace-confined 文件/搜索/网页/命令工具、文件引用与上传、RAG、Provider 设置、项目 Skills 信任、单层 Subagents、只读 stdio MCP、审批型外部 MCP、Windows Sandbox Broker、本地 SQLite 和加密增量同步均已纳入当前架构。Broker 未就绪时严格沙箱不会自动降级为普通进程。
+
+## 快速开始
+
+需要 Python 3.11+、Node.js 20+ 和 `uv`；cloud/PostgreSQL/Qdrant 仅在对应功能需要时使用。
+
+```powershell
+uv sync
+cd frontend
+npm ci
+cd ..
+uv run python -m backend.api
+```
+
+另开终端启动前端：
+
+```powershell
+cd frontend
+npm run dev
+```
+
+浏览器打开 <http://127.0.0.1:5173>。只运行本地游客/离线 Agent 不需要 Docker 或 cloud。若不使用 `uv`，可执行 `python -m pip install -e "backend[sync]" -e tui`。
+
+### 可选 cloud、PostgreSQL 和 Qdrant
+
+```powershell
+$env:MINI_AGENT_SECRET_KEY = "replace-with-a-32-byte-development-secret"
+docker compose up -d postgres cloud
+$env:CLOUD_URL = "http://127.0.0.1:8100"
+docker compose up -d qdrant  # 仅在需要向量检索时
+```
+
+`DATABASE_URL`、`MINI_AGENT_SECRET_KEY` 和 SMTP 只属于 cloud 进程/部署密钥，不要写入 frontend 或本地用户 TOML。
+
+### 生产本地模式
+
+```powershell
+cd frontend
+npm run build
+cd ..
+uv run python -m backend.api
+```
+
+backend 发现 `frontend/dist` 后会托管它。需要 HTTPS 或非默认来源时，在用户配置的 `[web]` 中设置精确的 `public_url`、`allowed_origins` 和 `cookie_secure`。
+
+## 遗留 TUI
+
+```powershell
+uv run python run.py --planner rule "calculate (18 + 6) * 4"
+uv run python -m tui
+uv run mini-agent --resume <session_id>
+```
+
+TUI 配置位于 `~/.mini_agent-cache/tui/config.toml`。Web 用户的 Provider、加密 API Key 和同步状态属于每个用户的 `user.db`，不会从 TUI 配置导入。
+
+## 本地数据与安全边界
+
+| 数据 | 位置 | 说明 |
+| --- | --- | --- |
+| 浏览器会话缓存 | `~/.mini_agent-cache/auth/client.db` | 哈希后的本地会话和身份缓存 |
+| 用户偏好 | `~/.mini_agent/<user_id>/config.toml` | 非敏感设置、能力开关和项目 Skill 信任 |
+| Provider/同步状态 | `~/.mini_agent/<user_id>/user.db` | 加密 API Key、cloud token、同步事务 |
+| 会话运行时 | `~/.mini_agent/<user_id>/runtime/<session_id>/` | `state.db`、`workspace/`、`uploads/` |
+| 脱敏日志 | `~/.mini_agent-cache/logs/<user_id>/` | JSONL 诊断与事件 |
+
+项目 `.mini_agent/skills/` 是不可信内容，项目 Skill 必须逐个审批。模型参数、网页结果和外部 MCP 输出都要经过 schema、路径边界和审批。不要提交 API Key、Cookie、认证头、sync token、SMTP 密码、cloud 主密钥或真实用户数据。
+
+## 目录结构
+
+```text
+backend/src/domain/          provider-neutral domain
+backend/src/planning/        rule/LLM planner
+backend/src/runtime/         application/conversation/execution/Plan/recovery
+backend/src/providers/       generic transport and provider adapters
+backend/src/tools/           ToolRegistry and grouped tools
+backend/src/mcp/             stdio server and external MCP client
+backend/src/storage/         local SQLite and user settings
+backend/src/sync/            encrypted snapshot sync/outbox
+backend/src/observability/   redaction and JSONL events
+frontend/                    React/Vite/TypeScript client
+cloud/src/cloud/             account and PostgreSQL service
+tui/src/                     deprecated Textual client
+benchmarks/                  benchmark tasks and graders
+docs/                        architecture and development notes
+tests/                       focused Python tests
+```
+
+依赖方向保持向内：domain 不依赖外层；provider 不导入 storage；frontend 不导入 Python；PostgreSQL 只由 cloud 访问。详见 [docs/architecture.md](docs/architecture.md)、[docs/development.md](docs/development.md) 和 [frontend/README.md](frontend/README.md)。
 
 ## 开发与验证
 
 ```powershell
-python -m ruff check .
-python -m ruff format --check .
-python -m pytest -q
-python -m pytest --cov=backend --cov-report=term-missing
+uv run python -m ruff check .
+uv run python -m ruff format --check .
+uv run python -m pytest -q
+cd frontend
+npm run typecheck
+npm test -- --run
+npm run build
 ```
 
-backend 单元测试和游客模式不需要 PostgreSQL；只有 cloud 集成测试和 cloud 部署需要它。启动方式、跨域配置及本地存储约定见 [frontend/README.md](frontend/README.md) 与 [docs/development.md](docs/development.md)。
+PostgreSQL 集成测试使用独立测试数据库。Windows 若 pytest 临时目录 ACL 阻止创建目录，请使用当前用户有权限的唯一 `--basetemp`，不要删除其他任务的临时目录。
+
+## 入口
+
+- Backend：`python -m backend.api`，默认 `127.0.0.1:8000`
+- Frontend：`cd frontend; npm run dev`，默认 `127.0.0.1:5173`
+- Cloud：`python -m cloud` 或 Compose，默认 `127.0.0.1:8100`
+- Read-only MCP：`mini-agent-mcp --workspace <path>`

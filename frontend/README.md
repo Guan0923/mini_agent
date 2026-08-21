@@ -33,7 +33,7 @@ npm install     # 首次需要
 npm run dev
 ```
 
-然后浏览器打开 http://localhost:5173 。Vite 会把 `/api` 和 `/benchmark` 代理到本机 backend 的 8000 端口。浏览器不会直连 cloud；模型 Provider 配置和 API Key 由登录用户在 Web 设置页填写；服务端不会从独立 TUI 的 `~/.mini_agent/config.toml` 导入模型密钥。
+然后浏览器打开 http://localhost:5173 。Vite 会把 `/api` 和 `/benchmark` 代理到本机 backend 的 8000 端口。浏览器不会直连 cloud；模型 Provider 配置和 API Key 由登录用户在 Web 设置页填写；服务端不会从遗留 TUI 的 `~/.mini_agent-cache/tui/config.toml` 导入模型密钥。
 
 注册及密码重置由 cloud 的 SMTP 配置发送；本地 backend 不读取 SMTP 或 PostgreSQL 环境变量。
 
@@ -57,7 +57,7 @@ cookie_secure = true
 ## 配置说明
 
 - cloud 从环境读取 `DATABASE_URL`、`MINI_AGENT_SECRET_KEY` 和 SMTP 配置；backend 从 `CLOUD_URL`（或 `MINI_AGENT_CLOUD_URL`）读取 cloud HTTPS 地址。
-- PostgreSQL 保存账户、密码哈希、验证码、登录/设备会话、限流、用户数据密钥封装和加密快照；backend 的 `~/.mini_agent/client.db` 只保存本地会话哈希和身份缓存，每个用户的 `~/.mini_agent/<user_id>/user.db` 保存提供商集合、加密 API Key、加密 cloud token 与同步事务状态。
+- PostgreSQL 保存账户、密码哈希、验证码、登录/设备会话、限流、用户数据密钥封装和加密快照；backend 的 `~/.mini_agent-cache/auth/client.db` 只保存本地会话哈希和身份缓存，每个用户的 `~/.mini_agent/<user_id>/user.db` 保存提供商集合、加密 API Key、加密 cloud token 与同步事务状态。
 - 每个用户的对话工作区、会话库和上传文件都在 `~/.mini_agent/<user_id>/runtime/<session_id>/` 下隔离保存，benchmark 沙箱位于用户树之外。
 - 聊天历史、工具结果和 RuntimeState 保存在用户电脑上的本地 SQLite；cloud 永远只接收本地打包后的加密快照。
 

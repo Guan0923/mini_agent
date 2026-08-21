@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getCurrentUser, login, streamChat, streamResume } from "./api";
+import { getCurrentUser, installSandboxBroker, login, streamChat, streamResume } from "./api";
 import type { StreamMessage } from "./types";
 
 afterEach(() => {
@@ -122,5 +122,22 @@ describe("web auth API", () => {
     const fetchMock = vi.mocked(fetch);
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/auth/login");
     expect((fetchMock.mock.calls[0]?.[1] as RequestInit).credentials).toBe("include");
+  });
+
+  it("preserves a categorized Broker failure code while showing its safe detail", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: "需要管理员权限才能安装沙箱 Broker。", code: "broker_admin_required" }), {
+          status: 503,
+        }),
+      ),
+    );
+
+    await expect(installSandboxBroker()).rejects.toMatchObject({
+      status: 503,
+      message: "需要管理员权限才能安装沙箱 Broker。",
+      code: "broker_admin_required",
+    });
   });
 });

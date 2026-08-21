@@ -13,6 +13,19 @@ class SandboxFailureCode(StrEnum):
     CLEANUP_PENDING = "cleanup_pending"
 
 
+class BrokerInstallFailureCode(StrEnum):
+    """Stable, user-safe failure categories for Broker control-plane actions."""
+
+    UAC_CANCELLED = "broker_uac_cancelled"
+    ADMIN_REQUIRED = "broker_admin_required"
+    DEPENDENCY_MISSING = "broker_dependency_missing"
+    ACL_FAILED = "broker_acl_failed"
+    SERVICE_FAILED = "broker_service_failed"
+    SERVICE_START_FAILED = "broker_service_start_failed"
+    NOT_READY = "broker_not_ready"
+    UNKNOWN = "broker_install_failed"
+
+
 class SandboxError(RuntimeError):
     """Base error which never contains command lines or environment values."""
 
@@ -31,6 +44,15 @@ class SandboxInitializationError(SandboxError):
         super().__init__(message, SandboxFailureCode.INIT_FAILED)
 
 
+class BrokerInstallationError(SandboxInitializationError):
+    """A categorized Broker installation failure safe to expose at the API boundary."""
+
+    def __init__(self, code: BrokerInstallFailureCode, message: str) -> None:
+        super().__init__(message)
+        self.broker_code = code
+        self.safe_message = message
+
+
 class SandboxResourceExceeded(SandboxError):
     def __init__(self, message: str) -> None:
         super().__init__(message, SandboxFailureCode.RESOURCE_EXCEEDED)
@@ -43,6 +65,8 @@ class SandboxCleanupPending(SandboxError):
 
 __all__ = [
     "SandboxCleanupPending",
+    "BrokerInstallFailureCode",
+    "BrokerInstallationError",
     "SandboxError",
     "SandboxFailureCode",
     "SandboxInitializationError",

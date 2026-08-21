@@ -327,6 +327,22 @@ def windows_pipe_security_attributes(*allowed_sid_strings: str) -> Any:
         raise SandboxInitializationError("Broker named-pipe ACL could not be created") from exc
 
 
+def windows_service_sid(service_name: str) -> str:
+    """Resolve the virtual service account SID used by a Windows service.
+
+    The service SID must be present in the pipe DACL: Windows checks
+    ``FILE_CREATE_PIPE_INSTANCE`` against the first instance's security
+    descriptor when the service creates the next listener instance.
+    """
+
+    modules = _modules()
+    try:
+        sid, _, _ = modules["security"].LookupAccountName(None, f"NT SERVICE\\{service_name}")
+        return str(modules["security"].ConvertSidToStringSid(sid))
+    except Exception as exc:  # pragma: no cover - Windows-only adapter
+        raise SandboxInitializationError("Broker service account SID is unavailable") from exc
+
+
 class WindowsPowerShellWfpController:
     """Create account-scoped outbound rules through the NetSecurity/WFP layer."""
 
@@ -524,4 +540,5 @@ __all__ = [
     "WindowsSandboxAccount",
     "WindowsPowerShellWfpController",
     "windows_pipe_security_attributes",
+    "windows_service_sid",
 ]

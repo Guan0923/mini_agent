@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import sys
 import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,8 @@ from backend.sandbox import (
     SandboxResourceExceeded,
     WindowsBrokerClient,
     WindowsBrokerService,
+    WindowsDpapiProvider,
+    WindowsNamedPipeServer,
     migrate_legacy_permission_mode,
     normalize_permission_mode,
     resolve_network_rules,
@@ -190,6 +194,83 @@ def test_broker_managed_process_proxies_communicate() -> None:
     )
     assert isinstance(process, BrokerManagedProcess)
     assert process.communicate(timeout=1) == (b"ok", b"")
+
+
+def test_dpapi_key_store_repairs_an_empty_placeholder(tmp_path: Path) -> None:
+    class FakeDpapi:
+        def protect(self, value: bytes) -> bytes:
+            return b"protected:" + value
+
+        def unprotect(self, value: bytes) -> bytes:
+            return value.removeprefix(b"protected:")
+
+    path = tmp_path / "installation.key.dpapi"
+    path.write_bytes(b"")
+    store = DpapiKeyStore(path, provider=FakeDpapi())
+
+    key = store.ensure()
+
+    assert len(key) == 32
+    assert path.read_bytes() == b"protected:" + key
+    assert store.load() == key
+
+
+def test_windows_dpapi_provider_accepts_pywin32_bytes_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeWin32Crypt:
+        @staticmethod
+        def CryptProtectData(value, *args):
+            return b"protected:" + value
+
+        @staticmethod
+        def CryptUnprotectData(value, *args):
+            return value.removeprefix(b"protected:")
+
+    monkeypatch.setitem(sys.modules, "win32crypt", FakeWin32Crypt)
+    provider = WindowsDpapiProvider()
+
+    protected = provider.protect(b"key")
+
+    assert protected == b"protected:key"
+    assert provider.unprotect(protected) == b"key"
+
+
+def test_named_pipe_close_releases_a_blocked_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    connected = threading.Event()
+    released = threading.Event()
+    handle = object()
+
+    class Service:
+        configuration = types.SimpleNamespace(pipe_name=r"\\.\pipe\test")
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    service = Service()
+
+    def connect_named_pipe(current, overlapped) -> None:
+        assert current is handle
+        assert overlapped is None
+        connected.set()
+        released.wait(timeout=2)
+        raise OSError("listener closed")
+
+    monkeypatch.setitem(sys.modules, "win32pipe", types.SimpleNamespace(ConnectNamedPipe=connect_named_pipe))
+    monkeypatch.setitem(
+        sys.modules,
+        "win32file",
+        types.SimpleNamespace(CloseHandle=lambda current: released.set() if current is handle else None),
+    )
+    server = WindowsNamedPipeServer(service, pipe_handle_factory=lambda: handle)
+    worker = threading.Thread(target=server.serve_forever)
+    worker.start()
+    assert connected.wait(timeout=1)
+
+    server.close()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert service.closed is True
 
 
 def test_broker_service_verifies_requests_and_recovers_owned_orphans(tmp_path: Path) -> None:

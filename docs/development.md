@@ -14,7 +14,7 @@ The editable install exposes the `mini-agent` command and keeps the `src/` packa
 
 ### Client configuration and optional synchronization
 
-The local backend keeps `client.db` under `~/.mini_agent/` for hashed browser sessions and cached identities. Authenticated users keep `config.toml` and `user.db` under `~/.mini_agent/<user_id>/`; TOML owns non-sensitive preferences, while SQLite owns providers, encrypted credentials, cloud token and sync transaction state. PostgreSQL remains behind the independent `cloud` service and keeps account data plus encrypted cloud snapshot chunks and key envelopes. Deployment-only values are supplied through the cloud process environment. Standalone offline TUI account binding remains out of scope.
+The local backend keeps `client.db` under `~/.mini_agent-cache/auth/` for hashed browser sessions and cached identities. Authenticated users keep `config.toml` and `user.db` under `~/.mini_agent/<user_id>/`; TOML owns non-sensitive preferences, while SQLite owns providers, encrypted credentials, cloud token and sync transaction state. PostgreSQL remains behind the independent `cloud` service and keeps account data plus encrypted cloud snapshot chunks and key envelopes. Deployment-only values are supplied through the cloud process environment. Standalone offline TUI account binding remains out of scope.
 
 Each authenticated or guest session is stored in `~/.mini_agent/<user_id>/runtime/<session_id>/`, containing `state.db`, `workspace/`, and `uploads/`. Cloud save uses SQLite Online Backup, copies the explicit allowlist to immutable staging, compresses and AES-GCM encrypts bounded chunks, and retains the latest three completed PostgreSQL snapshots. Guest identities never use cloud sync.
 
@@ -68,7 +68,7 @@ python run.py "读取 README.md"
 mini-agent
 ```
 
-The rule planner is offline and deterministic. The standalone TUI reads `[model]` only from `~/.mini_agent/config.toml`; Web provider credentials remain in per-user `user.db` and never appear in TOML.
+The rule planner is offline and deterministic. The standalone TUI reads `[model]` only from `~/.mini_agent-cache/tui/config.toml`; Web provider credentials remain in per-user `user.db` and never appear in TOML.
 
 ### Skills, Subagents, and MCP
 

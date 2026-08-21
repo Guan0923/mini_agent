@@ -8,7 +8,7 @@ The deployable system has four responsibilities. The browser and terminal are cl
 
 ```text
 frontend/ ──HTTP/SSE──> local backend (127.0.0.1:8000)
-tui/      ──future unified protocol──┘
+tui/      ──shared backend packages────┘
                               │ HTTPS (optional)
                               ▼
                        cloud API (8100) ──> PostgreSQL
@@ -16,7 +16,7 @@ tui/      ──future unified protocol──┘
 
 - `frontend/` is a browser client. It never imports Python and only calls the local backend contract. Vite proxies `/api` and `/benchmark` to port 8000 during development; a production backend may serve `frontend/dist`.
 - `backend/` owns the Agent Runtime, model/provider calls, tools, workspace, per-session SQLite, local settings, browser sessions and cloud synchronization jobs. It binds to loopback and has no PostgreSQL, SMTP or account-password authority.
-- `tui/` remains an independent terminal client for this change. Its Web protocol compatibility is intentionally unchanged.
+- `tui/` remains a deprecated terminal client that directly reuses the backend/domain/runtime packages. It is retained for compatibility and is not the Web API implementation.
 - `cloud/` is an independent FastAPI service for accounts, mail verification, device grants, bearer tokens, key envelopes and encrypted snapshot metadata/chunks. It owns `DATABASE_URL`, SMTP and the cloud master key; it must not import Agent Runtime modules.
 - `benchmarks/`, `docs/` and `scripts/` are support directories, not deployment layers.
 

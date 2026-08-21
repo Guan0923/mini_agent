@@ -1,64 +1,97 @@
-# Legacy workspace credentials must never be committed.
+# Secrets and local environment files
 .env
 .env.*
 !.env.example
 
-# Python artifacts
-.python-version
+# Python caches, virtual environments, packages and coverage
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.pytest_tmp*/
-bt_*/
-probe*/
-pytest-of-*/
-pytest_*.txt
-*.out.txt
-.ruff_cache/
-.mypy_cache/
-.coverage
-htmlcov/
+*.egg-info/
+.python-version
+.venv/
+venv/
+env/
 build/
 dist/
-*.egg-info/
 .tox/
 .nox/
 .hypothesis/
+.ruff_cache/
+.mypy_cache/
+.coverage
 coverage.xml
-.venv/
-venv/
+htmlcov/
 
-# Local runtime logs
+# Python test artifacts
+/.pytest_cache/
+/.pytest_tmp*/
+/.pytest-*/
+/pytest-of-*/
+pytest_*.txt
+*.out.txt
+
+# Local databases and runtime state
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+/.mini_agent-cache/
+/.mini_agent/*
+!/.mini_agent/skills/
+!/.mini_agent/skills/**
+webapp-data/
+backend/webapp-data/
 logs/
-.mini_agent/*
-.agent-logs/
+*.log
+*.jsonl
+
+# Local backend and sandbox launch output
 /backend_run*.log
 /backend_stdout.log
 /backend_stderr.log
-!.mini_agent/skills/
-!.mini_agent/skills/**
+/.backend.restart-*.log
+/.frontend.restart-*.log
 
-# Local editor settings
-.vscode/
-
-# Benchmark run artifacts
-benchmarks/output/
-
-# Web app
-frontend/node_modules/
+# JavaScript and frontend artifacts
+node_modules/
 frontend/dist/
-webapp-data/
-
-# Local desktop task metadata
-.reasonix/
-
-# Local runtime artifacts
-.dsh-token-usage.json
-.backend.restart-*.log
-.frontend.restart-*.log
-
-# Linked git worktrees
-.worktrees/
-
-# Local sandbox tool caches
+frontend/.vite/
+frontend/.cache/
+frontend/.review-*.png
+.npm/
 .npm-cache/
+.pnpm-store/
+.pnpm-debug.log
+.nyc_output/
+
+# Browser and e2e test output
+playwright-report/
+test-results/
+blob-report/
+
+# Benchmark, uv and agent task caches
+benchmarks/output/
+benchmarks/artifacts/
+bt_*/
+/.tmp-*/
+/.tmp_*/
+/.uv-cache*/
+/.uv-python*/
+/.mini_agent-local/
+/.h-*/
+/.p-*/
+/.h[0-9]*/
+/.p[0-9]*/
+
+# Local editor and task metadata
+.reasonix/
+.dsh-token-usage.json
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Linked worktrees
+.worktrees/

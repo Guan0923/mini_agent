@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .broker_service import BrokerConfiguration, WindowsBrokerService, WindowsNamedPipeServer
 from .errors import SandboxInitializationError
-from .native_windows import windows_pipe_security_attributes
+from .native_windows import windows_pipe_security_attributes, windows_service_sid
 
 
 def _configuration() -> BrokerConfiguration:
@@ -24,9 +24,12 @@ def _server() -> WindowsNamedPipeServer:
         backend_sid = configuration.backend_sid_path.read_text(encoding="ascii").strip()
     except OSError as exc:
         raise SandboxInitializationError("Broker backend SID is unavailable") from exc
+    service_sid = windows_service_sid("MiniAgentSandboxBroker")
     return WindowsNamedPipeServer(
         service,
-        security_attributes_factory=lambda: windows_pipe_security_attributes(backend_sid),
+        # The service SID is required for subsequent CreateNamedPipe calls;
+        # the backend SID remains the only non-privileged client grant.
+        security_attributes_factory=lambda: windows_pipe_security_attributes(backend_sid, service_sid),
     )
 
 
