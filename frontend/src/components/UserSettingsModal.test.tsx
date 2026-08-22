@@ -155,6 +155,15 @@ describe("UserSettingsModal", () => {
     });
   });
 
+  it("renders the settings spinner inside the full content-area loading container", () => {
+    api.getSettings.mockReturnValue(new Promise(() => undefined));
+    renderModal();
+
+    const loading = document.querySelector(".user-settings-modal .ant-modal-body > .user-settings-loading");
+    expect(loading).toBeInTheDocument();
+    expect(loading?.querySelector(".ant-spin")).toBeInTheDocument();
+  });
+
   it("switches among profile, agent, and provider sections", async () => {
     renderModal();
     expect(await screen.findByDisplayValue("user@example.com")).toBeDisabled();

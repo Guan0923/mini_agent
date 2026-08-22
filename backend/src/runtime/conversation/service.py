@@ -76,10 +76,54 @@ class ConversationService(ConversationSessionController):
         self.runtime_node_bridge = bridge
         self._node_bridge_events_external = events_external
 
+    def compact_context(self):
+        """Compact an idle conversation through the canonical message-tree bridge."""
+
+        if self.runtime is None:
+            return super().compact_context()
+        bridge = self.runtime_node_bridge
+        if bridge is None or bridge.closed:
+            bridge = self._node_bridge_for_runtime("")
+            self.runtime_node_bridge = bridge
+            self._node_bridge_events_external = False
+        previous_on_event = self.runtime.services.on_event
+        if bridge is not None:
+            bridge.bind_runtime(self.runtime)
+            bridge.start_for_compaction()
+
+            def sink(event):
+                bridge.handle(event)
+                if previous_on_event is not None:
+                    previous_on_event(event)
+
+            self.runtime.services.on_event = sink
+        canonical_context = bool(self.runtime.model_nodes())
+        try:
+            result = super().compact_context()
+        finally:
+            self.runtime.services.on_event = previous_on_event
+            if bridge is not None:
+                bridge.closed = True
+            self.runtime_node_bridge = None
+            self._node_bridge_events_external = False
+        if canonical_context and result.compacted:
+            # Keep the legacy transcript as a compatibility projection only;
+            # the durable message tree remains authoritative for subsequent
+            # model requests and API history reads.
+            projected = self.runtime.model_messages()
+            self.runtime.state.messages = projected
+            if self.runtime.state.current_run is not None:
+                self.runtime.state.current_run.history = self.runtime.state.messages
+                self.runtime.state.current_run.turn_start_index = min(1, len(projected))
+            self.runtime.save()
+        self.conversation = text_messages(self.runtime.state.messages)
+        return result
+
     def _node_bridge_for_runtime(
         self,
         prompt: str,
         references: list[Mapping[str, str]] | None = None,
+        batch_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> RuntimeEventNodeBridge | None:
         """Create a local bridge from the latest durable node configuration."""
 
@@ -135,6 +179,7 @@ class ConversationService(ConversationSessionController):
             running_mode=running_mode,
             cwd=str(getattr(self.runtime.state, "workspace_root", "") or ""),
             references=references,
+            batch_messages=batch_messages,
             emit=lambda _frame: None,
         )
 
@@ -143,12 +188,13 @@ class ConversationService(ConversationSessionController):
         prompt: str,
         on_event: EventHandler | None,
         references: list[Mapping[str, str]] | None = None,
+        batch_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         """Bind a bridge to the runtime and compose its local event sink."""
 
         bridge = self.runtime_node_bridge
         if bridge is None or bridge.closed:
-            bridge = self._node_bridge_for_runtime(prompt, references)
+            bridge = self._node_bridge_for_runtime(prompt, references, batch_messages)
             self.runtime_node_bridge = bridge
             self._node_bridge_events_external = False
         if bridge is None or self.runtime is None:
@@ -182,8 +228,10 @@ class ConversationService(ConversationSessionController):
         trigger: RunTrigger = "embedding",
         request_parameters: Mapping[str, Any] | None = None,
         references: Sequence[Mapping[str, str]] = (),
+        batch_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> RunState:
-        prepared = self._prepare(task, structured=bool(references))
+        batch = [dict(item) for item in batch_messages or []]
+        prepared = self._prepare(task, structured=bool(references or batch))
         state = self._run_single_turn(
             prepared,
             mode=mode,
@@ -195,6 +243,7 @@ class ConversationService(ConversationSessionController):
             trigger=trigger,
             request_parameters=request_parameters,
             references=list(references),
+            batch_messages=batch or None,
         )
         handoff = state.handoff
         if handoff is None:
@@ -316,6 +365,7 @@ class ConversationService(ConversationSessionController):
         source_run_id: str | None = None,
         request_parameters: Mapping[str, Any] | None = None,
         references: list[Mapping[str, str]] | None = None,
+        batch_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> RunState:
         provenance = RunProvenance(
             trigger=trigger,
@@ -330,7 +380,13 @@ class ConversationService(ConversationSessionController):
             if self.runtime.state.status == "running":
                 raise RuntimeError("The active session already has a running turn; resume or terminate it first.")
             run_id = new_run_id()
-            self.session_store.start_turn(session.session_id, run_id, prepared, provenance)
+            self.session_store.start_turn(
+                session.session_id,
+                run_id,
+                prepared,
+                provenance,
+                append_user_message=not batch_messages,
+            )
         else:
             if self.runtime is None:
                 self.runtime = self.runner.empty_runtime(session_id=new_session_id())
@@ -340,7 +396,11 @@ class ConversationService(ConversationSessionController):
             run_id = new_run_id()
         assert self.runtime is not None
         turn_start_index = len(self.runtime.state.messages)
-        self.runtime.state.messages.append(UserMessage(content=prepared))
+        runtime_messages = [str(item.get("content") or "") for item in batch_messages or []]
+        if runtime_messages:
+            self.runtime.state.messages.extend(UserMessage(content=item) for item in runtime_messages)
+        else:
+            self.runtime.state.messages.append(UserMessage(content=prepared))
         self.runtime.state.current_run = RunState(
             task=prepared,
             mode=mode,
@@ -367,7 +427,7 @@ class ConversationService(ConversationSessionController):
         # embedding executions as well as Web SSE.  Web attaches a bridge
         # ahead of time so it can expose the active dynamic leaf to PATCH;
         # local callers get an equivalent bridge here.
-        self._bind_node_bridge(prepared, on_event, references)
+        self._bind_node_bridge(prepared, on_event, references, batch_messages)
         # ``mode`` is the initial runtime configuration for this turn.  The
         # runner refreshes ``RunState.mode`` from ``state.running_mode`` at
         # dispatch time and the bridge's ``bind_runtime`` derives it from the
@@ -389,7 +449,7 @@ class ConversationService(ConversationSessionController):
             if state.status in {"completed", "success"}:
                 bridge.finish("success", state.final_answer or "")
             elif state.status == "cancelled":
-                bridge.finish("abort", state.final_answer or "", category="user", code="user_cancelled")
+                bridge.finish("cancel", state.final_answer or "")
             elif bridge.abort_category is not None:
                 bridge.finish("abort", state.final_answer or "", category=bridge.abort_category, code=bridge.abort_code)
             else:

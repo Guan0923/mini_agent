@@ -76,6 +76,7 @@ class RuntimeEventNodeBridge:
         cwd: str = "",
         thinking_level: str = "medium",
         references: Sequence[Mapping[str, str]] | None = None,
+        batch_messages: Sequence[Mapping[str, Any]] | None = None,
         emit: Callable[[NodeFrame], None],
     ) -> None:
         self.store = store
@@ -107,6 +108,7 @@ class RuntimeEventNodeBridge:
         # canonical user node.  They are deliberately never injected into the
         # prompt text; the agent reads referenced files through its tools.
         self.references = [dict(item) for item in references or []]
+        self.batch_messages = [dict(item) for item in batch_messages or []]
         self.writer = NodeWriter(store, emit=emit)
         self.parent: RuntimeState | None = None
         self.assistant: RuntimeState | None = None
@@ -316,14 +318,16 @@ class RuntimeEventNodeBridge:
             if self.last_node is None:
                 raise RuntimeError("Node bridge has no starting node.")
             return self.last_node
+        if self.batch_messages:
+            self._start_batch_users()
+            self._ensure_assistant()
+            return self.last_node  # type: ignore[return-value]
         if self.source_node_id:
             self.parent = self.store.get_node(self.source_node_session_id, self.source_node_id)
             if self.parent is None:
                 raise ValueError("source_node_id does not belong to the active session.")
-            if self.store.list_children(self.parent.session_id, self.parent.id) and not self.allow_branch:
-                raise ValueError("source_node_id must identify a leaf node.")
-            if not self.prompt and self.parent.status not in {"running", "abort"}:
-                raise ValueError("A resume source must be running or abort.")
+            if not self.prompt and self.parent.status not in {"running", "cancel", "abort"}:
+                raise ValueError("A resume source must be running, cancel, or abort.")
         elif self.parent is None:
             load_nodes = getattr(self.store, "load_nodes", None)
             if callable(load_nodes):
@@ -333,17 +337,6 @@ class RuntimeEventNodeBridge:
                     leaves = [item for item in existing if (item.session_id, item.id) not in parent_keys]
                     if leaves:
                         self.parent = max(leaves, key=lambda item: (item.timestamp, item.id))
-        # A continuation request may carry the dynamic leaf id while the
-        # durable database still contains only its failed placeholder.  The
-        # placeholder is intentionally used as the parent reference; its
-        # contents are replaced by the writer's dynamic copy at the next
-        # provider boundary and are never sent as an empty message.
-        if (
-            self.parent is not None
-            and self.store.list_children(self.parent.session_id, self.parent.id)
-            and not self.allow_branch
-        ):
-            raise ValueError("The continuation parent must be a leaf node.")
         if self.parent is None and self.source_node_id is None:
             # Configuration is part of the user node now; no synthetic change
             # nodes are written into the history.
@@ -364,7 +357,8 @@ class RuntimeEventNodeBridge:
                 if parent is not None:
                     self.parent = parent
             # ``/resume`` has no new user text.  Continue directly from the
-            # paused/failed leaf instead of persisting an empty user message.
+            # paused/cancelled or aborted leaf instead of persisting an empty
+            # user message.
             # Resume configuration is represented by the next assistant node;
             # avoid mutating a sealed historical parent.
             self.last_node = self.parent
@@ -394,6 +388,90 @@ class RuntimeEventNodeBridge:
         # runtime-config updates always target a dynamic leaf.  Its durable
         # placeholder is filtered from model context until it has content.
         self._ensure_assistant()
+        return self.last_node
+
+    def _start_batch_users(self) -> None:
+        """Atomically append terminal user nodes for one queued batch."""
+
+        if self.source_node_id:
+            self.parent = self.store.get_node(self.source_node_session_id, self.source_node_id)
+            if self.parent is None:
+                raise ValueError("source_node_id does not belong to the active session.")
+        elif self.parent is None:
+            loader = getattr(self.store, "load_nodes", None)
+            if callable(loader):
+                existing = list(loader(self.session_id))
+                parent_keys = {(item.parent_session_id, item.parent_id) for item in existing if item.parent_id}
+                leaves = [item for item in existing if (item.session_id, item.id) not in parent_keys]
+                if leaves:
+                    self.parent = max(leaves, key=lambda item: (item.timestamp, item.id))
+        if self.parent is not None and self.parent.status == "running":
+            raise ValueError("A queued batch cannot start from a running node.")
+        if self.parent is not None and not self.allow_branch:
+            # A fork session has an immutable local root whose parent is the
+            # cross-session anchor.  That root is an ancestry marker, not a
+            # conversation child, so it must not make the anchor look
+            # non-leaf to the first batch submitted in the fork.
+            children = [
+                child
+                for child in self.store.list_children(self.parent.session_id, self.parent.id)
+                if child.data_type != "root"
+            ]
+            if children:
+                raise ValueError("A queued batch source must identify a leaf node.")
+        create_batch = getattr(self.store, "create_finalized_nodes", None)
+        if not callable(create_batch):
+            raise RuntimeError("The runtime store does not support atomic finalized node batches.")
+        nodes: list[RuntimeState] = []
+        parent = self.parent
+        for item in self.batch_messages:
+            content = str(item.get("content") or "")
+            if not content.strip():
+                raise ValueError("Queued messages must not be empty.")
+            raw_refs = item.get("references")
+            refs = [dict(ref) for ref in raw_refs] if isinstance(raw_refs, Sequence) and not isinstance(raw_refs, (str, bytes)) else []
+            node = RuntimeState.create(
+                session_id=self.session_id,
+                parent=parent,
+                user=self.user,
+                provider_name=self.provider_name,
+                model=self.model_config,
+                permission_mode=self.permission_mode,
+                running_mode=self.running_mode,
+                cwd=self.cwd,
+                timestamp=self.writer._next_timestamp(parent),
+                status="success",
+                data=message_payload("user", content, source="user", **({"references": refs} if refs else {})),
+            )
+            nodes.append(node)
+            parent = node
+        create_batch(nodes)
+        for node in nodes:
+            self.writer.emit(NodeFrame("node.create", node.clone()))
+            self.writer.emit(NodeFrame("node.delete", node.clone()))
+        self.parent = parent
+        self.last_node = parent
+        self.started = True
+
+    def start_for_compaction(self) -> RuntimeState | None:
+        """Bind an idle bridge to the current durable leaf without creating a run node."""
+
+        if self.started:
+            return self.last_node
+        if self.source_node_id:
+            self.parent = self.store.get_node(self.source_node_session_id, self.source_node_id)
+            if self.parent is None:
+                raise ValueError("source_node_id does not belong to the active session.")
+        else:
+            load_nodes = getattr(self.store, "load_nodes", None)
+            if callable(load_nodes):
+                existing = list(load_nodes(self.session_id))
+                parent_keys = {(item.parent_session_id, item.parent_id) for item in existing if item.parent_id}
+                leaves = [item for item in existing if (item.session_id, item.id) not in parent_keys]
+                if leaves:
+                    self.parent = max(leaves, key=lambda item: (item.timestamp, item.id))
+        self.last_node = self.parent
+        self.started = True
         return self.last_node
 
     def _ensure_assistant(self) -> RuntimeState:
@@ -875,8 +953,7 @@ class RuntimeEventNodeBridge:
                     code=self.abort_code or str(data.get("error_type") or "agent_error"),
                 )
         elif kind in {"cancelled", "run_suspended"}:
-            stop_reason = str(data.get("stop_reason") or data.get("reason") or "")
-            self.finish("abort", message, category="user", code=stop_reason or "user_cancelled")
+            self.finish("cancel", message)
         elif kind in {"approval_requested", "approval_granted"}:
             self._append_event_block("approval", kind, message, data)
         elif kind in {"user_input_requested", "user_input_received"}:
@@ -932,6 +1009,16 @@ class RuntimeEventNodeBridge:
                 compaction_idx="",
             )
             self.last_node = self.writer.delete(node.session_id, node.id, status="success")
+            if self.runtime is not None:
+                # ``RuntimeState.messages`` is only a compatibility cache.
+                # Re-project it after the canonical summary is sealed so
+                # automatic compaction and manual compaction expose the same
+                # transcript to legacy callers without becoming a second
+                # source of truth.
+                projected = self.runtime.model_messages()
+                self.runtime.state.messages = projected
+                if self.runtime.state.current_run is not None:
+                    self.runtime.state.current_run.history = self.runtime.state.messages
 
     def handle_input(self, payload: Mapping[str, Any]) -> None:
         """Store approval/question prompts as canonical content blocks."""
@@ -957,14 +1044,14 @@ class RuntimeEventNodeBridge:
     ) -> RuntimeState | None:
         if self.closed:
             return self.last_node
-        if status not in {"success", "abort"}:
-            raise ValueError("A runtime bridge can only finish as success or abort.")
-        if status != "success":
+        if status not in {"success", "cancel", "abort"}:
+            raise ValueError("A runtime bridge can only finish as success, cancel, or abort.")
+        if status == "abort":
             self.terminal_error = terminal_error_payload(
                 status,
-                category if status == "abort" else None,
+                category,
                 code=code or self.abort_code or None,
-                detail=final_answer if status == "abort" else None,
+                detail=final_answer,
             )
             fallback = terminal_error_text(self.terminal_error)
             # A caller-provided terminal answer (for example ``fail_run``'s
@@ -973,19 +1060,35 @@ class RuntimeEventNodeBridge:
             # answers that already equal the template (e.g. cancel wording).
             if not final_answer or final_answer == fallback:
                 final_answer = fallback
-        if self.assistant is None and (final_answer or status != "success"):
+        # A user cancellation is a terminal state transition, not an
+        # assistant reply.  Keep any streamed/tool blocks exactly as they are
+        # and never turn the cancellation reason into a synthetic "已停止"
+        # message.  The canonical cancel node must have the same data shape as
+        # a successful assistant node while preserving partial output.
+        if self.assistant is None and (status != "success" or final_answer):
             self._ensure_assistant()
-            self.assistant_blocks = [{"type": "text", "text": final_answer}] if final_answer else []
-            if status != "success" and not self.assistant_blocks:
+            self.assistant_blocks = (
+                [{"type": "text", "text": final_answer}]
+                if status != "cancel" and final_answer
+                else []
+            )
+            if status == "abort" and not self.assistant_blocks:
                 self.assistant_blocks = [{"type": "text", "text": "Execution did not complete."}]
             self._update_assistant()
-        elif self.assistant is not None and final_answer:
+        elif self.assistant is not None and final_answer and status != "cancel":
             # A plan/control-only run may never emit response_delta or an
             # assistant_message event.  The terminal run result is still the
             # canonical assistant text and must not be lost merely because a
             # dynamic node already contains approval/plan blocks.
-            self.assistant_blocks = [block for block in self.assistant_blocks if block.get("type") != "text"]
-            self.assistant_blocks.append({"type": "text", "text": final_answer})
+            has_text = any(block.get("type") == "text" for block in self.assistant_blocks)
+            if status != "abort" or not has_text:
+                self.assistant_blocks = [block for block in self.assistant_blocks if block.get("type") != "text"]
+                self.assistant_blocks.append({"type": "text", "text": final_answer})
+            self._update_assistant()
+        elif self.assistant is not None and status == "cancel" and not self.assistant.data:
+            # A user can cancel before the first response delta.  Materialize
+            # the empty assistant message so the cancelled terminal node has
+            # the same typed data shape as a successful node.
             self._update_assistant()
         if self.assistant is not None:
             try:
@@ -1006,8 +1109,8 @@ class RuntimeEventNodeBridge:
         """Close a stream by sealing its running marker as abort.
 
         This is used for an uncaught/unknown worker exception. The running
-        leaf is sealed as ``abort`` so the tree never retains a second failed
-        state or an unowned dynamic identity.
+        leaf is sealed as ``abort`` so the tree never retains an unsealed
+        running marker or an unowned dynamic identity.
         """
 
         if self.assistant is None:
@@ -1021,6 +1124,24 @@ class RuntimeEventNodeBridge:
 
     def finish_exception(self, error: BaseException) -> RuntimeState | None:
         """Finish an uncaught worker exception without losing its category."""
+
+        # A batch can fail while atomically creating its finalized user
+        # messages (for example because one message is invalid or the store
+        # rejects the transaction).  In that phase no assistant turn exists
+        # and the whole user batch must remain out of the tree; creating an
+        # abort assistant here would make the failed batch look partially
+        # accepted and would also move the canonical leaf unexpectedly.
+        if self.batch_messages and self.assistant is None and not self.started:
+            self.abort_category = self.abort_category or self._exception_category(error) or "agent"
+            self.abort_code = self.abort_code or error.__class__.__name__
+            self.terminal_error = terminal_error_payload(
+                "abort",
+                self.abort_category,
+                code=self.abort_code,
+                detail=str(error),
+            )
+            self.closed = True
+            return self.last_node
 
         category = self.abort_category or self._exception_category(error) or "agent"
         return self.finish(

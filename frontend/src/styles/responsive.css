@@ -94,8 +94,10 @@
 }
 
 .user-settings-loading {
+  flex: 1 1 auto;
   display: grid;
-  min-height: 300px;
+  min-height: 0;
+  width: 100%;
   place-items: center;
 }
 
@@ -258,10 +260,6 @@
 
   .user-settings-detail {
     padding: 18px 4px 4px;
-  }
-
-  .user-settings-loading {
-    min-height: 240px;
   }
 
   .user-settings-detail .ant-space-compact {

@@ -6,6 +6,7 @@ import type { AgentConfig, ProviderConfig, RagConfig } from "../api";
 import type { ChatRunRequest } from "./types";
 import type { ChatMode, Conversation, DisplayMode, Page } from "../types";
 import type { ProjectInfo } from "../api";
+import type { QueuedMessage } from "./types";
 import AppSidebar from "../components/AppSidebar";
 import BenchmarkPage from "../pages/BenchmarkPage";
 import ChatPage from "../pages/ChatPage";
@@ -59,6 +60,8 @@ export interface AgentShellProps {
   onRefresh: () => Promise<void>;
   onRun: (request: ChatRunRequest) => Promise<void>;
   onStopRun: (conversationId: string) => void;
+  queuedMessages?: Map<string, QueuedMessage[]>;
+  onQueuedMessagesChange?: (conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) => void;
   onClearError: () => void;
   onDisplayModeUpdate: (config: AgentConfig) => void;
   onProviderConfigUpdate: (config: ProviderConfig) => void;
@@ -170,6 +173,8 @@ export default function AgentShell(props: AgentShellProps) {
               running={Boolean(props.current?.messages.some((message) => message.running))}
               onRun={props.onRun}
               onStopRun={props.onStopRun}
+              queuedMessages={props.queuedMessages?.get(props.current?.id ?? "") ?? []}
+              onQueuedMessagesChange={props.onQueuedMessagesChange}
             />
           ) : props.page === "trash" ? <TrashPage conversations={props.archivedConversations} projects={props.removedProjects} onRestore={props.onRestore} onDelete={props.onDelete} onRestoreProject={props.onRestoreProject} /> : <BenchmarkPage />}
         </Layout.Content>

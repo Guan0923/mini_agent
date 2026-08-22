@@ -1,4 +1,4 @@
-import { Alert, Avatar, BorderBeam, Collapse, App as AntApp, message as staticMessage } from "antd";
+import { Alert, BorderBeam, Collapse, App as AntApp, message as staticMessage } from "antd";
 import { BranchesOutlined, CopyOutlined, EditOutlined, FileTextOutlined, RollbackOutlined, ToolOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, DecisionRequest, DisplayMode, FileReference, RunPresentationSegment, RunPresentationTool, ToolEvent } from "../../types";
@@ -8,6 +8,7 @@ import DecisionCard from "../../components/DecisionCard";
 import IconAction from "../../components/IconAction";
 import MarkdownContent from "../../components/MarkdownContent";
 import ShimmerText from "../../components/ShimmerText";
+import AssistantIcon from "../../components/AssistantIcon";
 
 export async function copyText(value: string): Promise<void> {
   const clipboard = typeof window !== "undefined" ? window.navigator.clipboard : navigator.clipboard;
@@ -368,7 +369,7 @@ export function AssistantMessage({
   );
   return (
     <div className="message assistant">
-      <Avatar className="avatar" size={32}>A</Avatar>
+      <AssistantIcon className="assistant-icon" />
       <div className="bubble">
         {msg.running ? <BorderBeam>{frame}</BorderBeam> : frame}
       </div>

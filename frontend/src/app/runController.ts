@@ -1,4 +1,4 @@
-import { streamChat, streamResume } from "../api";
+import { streamChat, streamChatBatch, streamResume } from "../api";
 import { cancelJob } from "../api";
 import type { ChatMessage, RuntimeNodeFrame, StreamMessage } from "../types";
 import type { ActiveRun, ChatRunRequest } from "./types";
@@ -37,19 +37,22 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       if (active?.controller !== controller) return;
       if (message.type === "job" && message.job_id) {
         active.jobId = message.job_id;
-        if (active.cancelTimer) {
+        if (active.cancelTimer && !active.stopRequested) {
           clearTimeout(active.cancelTimer);
           active.cancelTimer = undefined;
         }
         if (active.stopRequested && !active.cancelIssued) {
           active.cancelIssued = true;
-          void cancelJob(message.job_id)
-            .catch(() => undefined)
-            .finally(() => controller.abort());
+          // Keep the SSE reader alive after asking the worker to stop.  The
+          // worker's final node.delete frame is the canonical cancel commit;
+          // aborting the transport here races that frame and loses the
+          // durable partial assistant node.  The no-job path still has its
+          // bounded fallback timer below.
+          void cancelJob(message.job_id).catch(() => undefined);
         }
         return;
       } else if ((message.type === "node.create" || message.type === "node.update" || message.type === "node.delete") && message.node) {
-        if (active.stopRequested || controller.signal.aborted) return;
+        if ((active.stopRequested || controller.signal.aborted) && message.type !== "node.delete") return;
         nodeProtocol = true;
         const frame: RuntimeNodeFrame = { type: message.type, node: message.node };
         callbacks.applyRuntimeNodeFrame?.(frame);
@@ -89,7 +92,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
         callbacks.updateLastMessage(request.conversationId, (item) => ({
           ...item,
           content: message.final_answer ?? "",
-          status: message.status,
+          status: message.status === "cancelled" ? "cancel" : message.status,
           metrics: message.metrics,
           ...(message.status === "completed" || message.status === "success" ? { error: undefined } : {}),
           running: false,
@@ -123,28 +126,43 @@ export function createRunController(callbacks: RunControllerCallbacks) {
             request.providerName,
             request.model,
             request.mode,
-            "off",
-            false,
+            request.ragMode ?? "off",
+            request.permissionMode === "full_access",
             request.sourceNodeSessionId,
           )
-        : await streamChat(request.prompt ?? "", onMessage, controller.signal, {
-            sessionId: request.sessionId,
-            sourceNodeId: request.sourceNodeId,
-            sourceNodeSessionId: request.sourceNodeSessionId,
-            branch: request.branch,
-            mode: request.mode,
-            permissionMode: request.permissionMode,
-            reasoningEffort: request.reasoningEffort,
-            providerName: request.providerName,
-            model: request.model,
-            references: request.references,
-          });
+        : request.batchMessages
+          ? await streamChatBatch(request.batchMessages, onMessage, controller.signal, {
+              sessionId: request.sessionId,
+              sourceNodeId: request.sourceNodeId,
+              sourceNodeSessionId: request.sourceNodeSessionId,
+              branch: request.branch,
+              mode: request.mode,
+              permissionMode: request.permissionMode,
+              reasoningEffort: request.reasoningEffort,
+              fullAccessAcknowledged: request.permissionMode === "full_access",
+              providerName: request.providerName,
+              model: request.model,
+              ragMode: request.ragMode,
+            })
+          : await streamChat(request.prompt ?? "", onMessage, controller.signal, {
+              sessionId: request.sessionId,
+              sourceNodeId: request.sourceNodeId,
+              sourceNodeSessionId: request.sourceNodeSessionId,
+              branch: request.branch,
+              mode: request.mode,
+              permissionMode: request.permissionMode,
+              reasoningEffort: request.reasoningEffort,
+              providerName: request.providerName,
+              model: request.model,
+              ragMode: request.ragMode,
+              references: request.references,
+            });
       if (result === "aborted") {
         callbacks.updateLastMessage(request.conversationId, (item) => ({
           ...item,
           running: false,
-          status: "已停止",
-          error: "The run was aborted at the user's request.",
+          status: "cancel",
+          error: undefined,
           decision: undefined,
         }));
       } else if (!sawDone && finalNode) {
@@ -185,16 +203,16 @@ export function createRunController(callbacks: RunControllerCallbacks) {
     active.stopRequested = true;
     callbacks.updateLastMessage(id, (item) => ({
       ...item,
-      running: true,
-      status: "已停止",
-      error: "The run was aborted at the user's request.",
+      running: false,
+      status: "cancel",
+      error: undefined,
       decision: undefined,
     }));
     if (active.jobId && !active.cancelIssued) {
       active.cancelIssued = true;
-      void cancelJob(active.jobId)
-        .catch(() => undefined)
-        .finally(() => active.controller.abort());
+      // Do not abort the stream immediately: apply the terminal node.delete
+      // emitted after the backend records status=cancel.
+      void cancelJob(active.jobId).catch(() => undefined);
     } else if (!active.jobId && !active.cancelTimer) {
       active.cancelTimer = setTimeout(() => active.controller.abort(), 2000);
     }

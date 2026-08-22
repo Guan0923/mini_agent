@@ -87,7 +87,6 @@ def _terminal_entry(node: Any, error: str) -> dict[str, Any]:
         "error": error,
         "status": node.status,
         "source_node_id": node.id,
-        "node_session_id": node.session_id,
     }
 
 
@@ -181,7 +180,6 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
                 "content": content,
                 "events": [],
                 "source_node_id": node.parent_id or None,
-                "node_session_id": node.session_id,
                 "timeline_seq": timeline_seq,
                 "timeline_time": _timeline_time(node),
                 "timeline_text": _timeline_text(blocks),
@@ -218,7 +216,6 @@ def project_node_transcript(nodes: list[Any]) -> list[dict[str, Any]]:
                 "content": "",
                 "events": [],
                 "source_node_id": node.id,
-                "node_session_id": node.session_id,
             }
             result.append(current_assistant)
         current_assistant["source_node_id"] = node.id

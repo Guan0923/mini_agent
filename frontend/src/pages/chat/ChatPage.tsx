@@ -11,6 +11,7 @@ import {
   searchSessionFiles,
   sessionFileContentUrl,
   streamChat,
+  streamChatBatch,
   streamResume,
   submitDecision,
   uploadSessionFiles,
@@ -22,13 +23,14 @@ import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex 
 import { completionToken, fileKeyAction, toCandidates, type FileCandidate, type FileTrigger } from "../../commands/fileCompletion";
 import MarkdownContent from "../../components/MarkdownContent";
 import { AssistantMessage, MessageActions, MessageReferenceChip } from "./messageParts";
-import Composer, { type SettingsSelectKey } from "./Composer";
+import Composer, { type ComposerActionMode, type SettingsSelectKey } from "./Composer";
 import type { FileMentionChange, FileMentionEditorHandle } from "./FileMentionEditor";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import { latestTodoList } from "./todoPanel";
 import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "../../app/runtimeDetailProjection";
 import { leafNodes } from "../../app/runtimeNodeReducer";
 import { applyRunSegment } from "../../app/runSegmentReducer";
+import type { QueuedMessage } from "../../app/types";
 import { DEFAULT_RUNTIME_NODE_MODEL, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
 import type {
   ChatMessage,
@@ -64,6 +66,8 @@ interface Props {
   running?: boolean;
   onRun?: (request: ChatRunRequest) => Promise<void>;
   onStopRun?: (conversationId: string) => void;
+  queuedMessages?: QueuedMessage[];
+  onQueuedMessagesChange?: (conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) => void;
 }
 
 interface RewindResult {
@@ -102,6 +106,8 @@ interface ChatRunRequest {
   sourceNodeSessionId?: string;
   branch?: boolean;
   references?: FileReference[];
+  batchMessages?: Array<{ content: string; references?: FileReference[] }>;
+  ragMode?: RagMode;
 }
 
 function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
@@ -127,6 +133,8 @@ export default function ChatPage({
   running: runningProp,
   onRun,
   onStopRun,
+  queuedMessages = [],
+  onQueuedMessagesChange = () => undefined,
 }: Props) {
   const mode = selectedMode ?? "agent";
   const enhancedChatOptions = selectedMode !== undefined;
@@ -134,6 +142,7 @@ export default function ChatPage({
   const isMobile = screens.md === false && (typeof window === "undefined" || window.innerWidth < 768);
   const [input, setInput] = useState("");
   const [localBusy, setLocalBusy] = useState(false);
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("read_only");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
   const ragMode: RagMode = ragEnabled ? "tool" : "off";
@@ -174,11 +183,25 @@ export default function ChatPage({
   } | null>(null);
   const editorRef = useRef<FileMentionEditorHandle>(null);
   const editRef = useRef<TextAreaRef>(null);
+  const fullAccessConfirmRef = useRef<{ destroy: () => void } | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const discardedUploadUidsRef = useRef(new Set<string>());
+  const batchFlushRef = useRef(false);
+  // IDs captured when a batch request starts.  Items added while that batch
+  // is running belong to the next FIFO batch and must never be removed when
+  // the submitted user frames are acknowledged.
+  const batchInFlightIdsRef = useRef<Set<string> | null>(null);
+  const batchSourceKeyRef = useRef<string | null>(null);
+  const batchExpectedUserCountRef = useRef(0);
+  const batchKnownUserKeysRef = useRef<Set<string>>(new Set());
+  const canonicalRunningRef = useRef(false);
 
   const messages = conversation?.messages ?? [];
-  const busy = runningProp ?? localBusy;
+  // A batch has no optimistic assistant message by design.  Keep the
+  // composer in its running interaction mode from the moment the batch
+  // request is sent until its SSE cleanup, including the tiny interval
+  // between the user frames and the assistant node.create frame.
+  const busy = (runningProp ?? localBusy) || batchSubmitting;
   const todo = useMemo(() => latestTodoList(messages), [messages]);
   const filteredCommands = commandSuggestions(input);
   const commandMenuVisible = !busy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
@@ -200,7 +223,75 @@ export default function ChatPage({
     const sorted = [...sessionLeaves].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
     return sorted[sorted.length - 1];
   })();
-  const recoveryMode = !busy && (activeRuntimeNode?.status === "running" || activeRuntimeNode?.status === "abort");
+  const recoveryMode = !busy && activeRuntimeNode?.status === "cancel";
+  const hasDraft = Boolean(input.trim() || references.length > 0 || pendingUploads.some((upload) => upload.status === "done"));
+  const actionMode: ComposerActionMode = ((activeRuntimeNode?.status === "running" && !hasDraft) || (!activeRuntimeNode && busy && !hasDraft))
+    ? "pause"
+    : activeRuntimeNode?.status === "running" || (!activeRuntimeNode && busy)
+      ? "send"
+      : activeRuntimeNode?.status === "cancel" && !input.trim() && references.length === 0 && pendingUploads.every((upload) => upload.status !== "done")
+        ? "resume"
+        : activeRuntimeNode?.status === "cancel"
+          ? "send"
+          : "send";
+  const projectUnavailable = conversation?.projectId !== undefined && conversation.projectAvailable === false;
+  const canPatchRuntimeConfig = activeRuntimeNode?.status === "running";
+
+  useEffect(() => {
+    const node = activeRuntimeNode;
+    const status = node?.status;
+    if (batchFlushRef.current && batchExpectedUserCountRef.current > 0) {
+      const known = batchKnownUserKeysRef.current;
+      const submittedUserCount = (conversation?.runtimeNodes ?? []).filter((candidate) => {
+        const message = candidate.data.type === "message"
+          ? candidate.data.message as { role?: unknown } | undefined
+          : undefined;
+        return message?.role === "user"
+          && candidate.status === "success"
+          && !known.has(`${candidate.session_id}:${candidate.id}`);
+      }).length;
+      if (submittedUserCount >= batchExpectedUserCountRef.current) {
+        const submitted = batchInFlightIdsRef.current;
+        if (submitted && submitted.size > 0) {
+          onQueuedMessagesChange(conversation?.id ?? "", (items) => items.filter((item) => !submitted.has(item.id)));
+        }
+        batchInFlightIdsRef.current = null;
+        batchExpectedUserCountRef.current = 0;
+        batchKnownUserKeysRef.current = new Set();
+        batchSourceKeyRef.current = null;
+      }
+    }
+    if (status === "running") {
+      canonicalRunningRef.current = true;
+      if (
+        batchFlushRef.current
+        && node
+        && node.data.type === "message"
+        && (node.data.message as { role?: unknown } | undefined)?.role === "assistant"
+        && `${node.session_id}:${node.id}` !== batchSourceKeyRef.current
+      ) {
+        const submitted = batchInFlightIdsRef.current;
+        if (submitted && submitted.size > 0) {
+          onQueuedMessagesChange(conversation?.id ?? "", (items) => items.filter((item) => !submitted.has(item.id)));
+          batchInFlightIdsRef.current = null;
+          batchSourceKeyRef.current = null;
+        }
+      }
+      return;
+    }
+    if (
+      canonicalRunningRef.current
+      && !batchFlushRef.current
+      && queuedMessages.length > 0
+      && conversation?.id
+      && (status === "success" || status === "cancel" || status === "abort")
+    ) {
+      canonicalRunningRef.current = false;
+      batchFlushRef.current = true;
+      setBatchSubmitting(true);
+      void flushQueuedMessages();
+    }
+  }, [activeRuntimeNode?.id, activeRuntimeNode?.status, busy, queuedMessages.length, conversation?.id]);
 
   useEffect(() => {
     const node = activeRuntimeNode;
@@ -256,7 +347,7 @@ export default function ChatPage({
     full_access_acknowledged?: boolean;
     running_mode?: ChatMode;
   }) {
-    if (!conversation?.sessionId || !activeRuntimeNode) return;
+    if (!conversation?.sessionId || !activeRuntimeNode || activeRuntimeNode.status !== "running") return;
     try {
       await patchRuntimeConfig(conversation.sessionId, {
         node_id: activeRuntimeNode.id,
@@ -272,7 +363,7 @@ export default function ChatPage({
   }
 
   useEffect(() => {
-    if (!busy || !activeRuntimeNode || !configuredProviderName || !requestModel) return;
+    if (!busy || !canPatchRuntimeConfig || !activeRuntimeNode || !configuredProviderName || !requestModel) return;
     if (
       activeRuntimeNode.provider_name === configuredProviderName
       && activeRuntimeModel.current_model === requestModel.current_model
@@ -285,7 +376,9 @@ export default function ChatPage({
     });
   }, [
     busy,
+    canPatchRuntimeConfig,
     activeRuntimeNode?.id,
+    activeRuntimeNode?.status,
     activeRuntimeNode?.provider_name,
     activeRuntimeModel.current_model,
     activeRuntimeModel.context_length,
@@ -297,6 +390,14 @@ export default function ChatPage({
   ]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  useEffect(() => () => {
+    // Static antd confirmations are mounted outside ChatPage.  Tie the
+    // confirmation lifetime back to this page so a conversation switch or
+    // unmount cannot leave an orphaned modal blocking the next interaction.
+    fullAccessConfirmRef.current?.destroy();
+    fullAccessConfirmRef.current = null;
+  }, []);
 
   useEffect(() => {
     for (const upload of pendingUploads) {
@@ -380,7 +481,7 @@ export default function ChatPage({
   }
 
   function handlePickFiles(files: FileList | File[]) {
-    if (!conversation?.sessionId || busy) return;
+    if (!conversation?.sessionId) return;
     const selected = Array.from(files).filter((file) => file.size > 0);
     if (selected.length === 0) return;
     const sessionId = conversation.sessionId;
@@ -474,6 +575,15 @@ export default function ChatPage({
     updateLast((message) => ({ ...message, ...fields }), conversationId);
   }
 
+  function defaultSourceNodeId(): string | undefined {
+    return conversation?.lastNodeId ?? conversation?.forkAnchorNodeId;
+  }
+
+  function defaultSourceNodeSessionId(): string | undefined {
+    if (conversation?.forkAnchorNodeId) return conversation.forkAnchorSessionId;
+    return [...messages].reverse().find((message) => message.role === "assistant")?.nodeSessionId;
+  }
+
   async function ensureSession(): Promise<{ conversationId: string; sessionId: string }> {
     if (!conversation) {
       const id = await onNew();
@@ -499,6 +609,7 @@ export default function ChatPage({
     sourceNodeSessionId?: string | null,
     references?: FileReference[],
     branch = false,
+    batchMessages?: QueuedMessage[],
   ) {
     const controller = new AbortController();
     abortRef.current = controller;
@@ -512,26 +623,27 @@ export default function ChatPage({
       const cancelStreamJob = (jobId: string) => {
         if (activeStream.cancelIssued) return;
         activeStream.cancelIssued = true;
-        void cancelJob(jobId)
-          .catch(() => undefined)
-          .finally(() => controller.abort());
+        // Keep the reader alive until the backend emits the canonical
+        // terminal node.delete frame for status=cancel.
+        void cancelJob(jobId).catch(() => undefined);
       };
       const onMessage = (message: StreamMessage) => {
         if (message.type === "job" && message.job_id) {
           activeStream.jobId = message.job_id;
-          if (activeStream.cancelTimer !== undefined) {
+          if (activeStream.cancelTimer !== undefined && !activeStream.stopRequested) {
             window.clearTimeout(activeStream.cancelTimer);
             activeStream.cancelTimer = undefined;
           }
           if (activeStream.stopRequested) cancelStreamJob(message.job_id);
           return;
         }
-        if (activeStream.stopRequested || controller.signal.aborted) return;
         if (message.type === "run_segment") {
+          if (activeStream.stopRequested || controller.signal.aborted) return;
           if (message.segment) updateLast((item) => applyRunSegment(item, message.segment!), conversationId);
           const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
           if (runId) setLast({ runId }, conversationId);
         } else if (message.type === "event") {
+          if (activeStream.stopRequested || controller.signal.aborted) return;
           const kind = message.kind ?? "";
           if (kind === "response_delta" && !nodeProtocol) {
             const content = (message.data?.content as string | undefined) ?? message.message ?? "";
@@ -550,10 +662,11 @@ export default function ChatPage({
           const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
           if (runId) setLast({ runId }, conversationId);
         } else if (message.type === "done") {
+          if (activeStream.stopRequested || controller.signal.aborted) return;
           sawDone = true;
           setLast({
             content: message.final_answer ?? "",
-            status: message.status,
+            status: message.status === "cancelled" ? "cancel" : message.status,
             metrics: message.metrics,
             ...(message.status === "completed" || message.status === "success" ? { error: undefined } : {}),
             running: false,
@@ -573,11 +686,12 @@ export default function ChatPage({
             finalNode = message.node;
           }
         } else if (message.type === "error") {
+          if (activeStream.stopRequested || controller.signal.aborted) return;
           setLast({ error: message.error ?? message.message ?? "发生错误", running: false, decision: undefined }, conversationId);
         }
       };
       if (resume) {
-        const resumeSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
+        const resumeSourceNodeId = sourceNodeId === undefined ? defaultSourceNodeId() : sourceNodeId ?? undefined;
         const result = resumeSourceNodeId
           ? await streamResume(
               sessionId,
@@ -609,8 +723,8 @@ export default function ChatPage({
             );
         if (result === "aborted") setLast({
           running: false,
-          status: "已停止",
-          error: "The run was aborted at the user's request.",
+          status: "cancel",
+          error: undefined,
           decision: undefined,
         }, conversationId);
         else if (!sawDone && finalNode) {
@@ -629,7 +743,7 @@ export default function ChatPage({
         // Keep the historical positional session-id call for an empty tree.
         // Once a node exists, use the object form so the optimistic source
         // node travels with the request and the backend can validate it.
-        const chatSourceNodeId = sourceNodeId === undefined ? conversation?.lastNodeId : sourceNodeId ?? undefined;
+        const chatSourceNodeId = sourceNodeId === undefined ? defaultSourceNodeId() : sourceNodeId ?? undefined;
         const options = chatSourceNodeId
           ? (enhancedChatOptions
             ? { sessionId, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, sourceNodeSessionId: sourceNodeSessionId ?? undefined, branch, references, ragMode }
@@ -640,16 +754,30 @@ export default function ChatPage({
           : (enhancedChatOptions
             ? { sessionId, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, providerName: requestProviderName, model: requestModel, references, ragMode }
             : (ragMode !== "off" ? { sessionId, ragMode } : sessionId));
-        const result = await streamChat(
-          prompt ?? "",
-          onMessage,
-          controller.signal,
-          options,
-        );
+        const result = batchMessages
+          ? await streamChatBatch(batchMessages, onMessage, controller.signal, {
+              sessionId,
+              sourceNodeId: chatSourceNodeId,
+              sourceNodeSessionId: sourceNodeSessionId ?? undefined,
+              branch,
+              providerName: requestProviderName,
+              model: requestModel,
+              mode,
+              permissionMode,
+              reasoningEffort,
+              fullAccessAcknowledged: permissionMode === "full_access",
+              ragMode,
+            })
+          : await streamChat(
+              prompt ?? "",
+              onMessage,
+              controller.signal,
+              options,
+            );
         if (result === "aborted") setLast({
           running: false,
-          status: "已停止",
-          error: "The run was aborted at the user's request.",
+          status: "cancel",
+          error: undefined,
           decision: undefined,
         }, conversationId);
         else if (!sawDone && finalNode) {
@@ -682,10 +810,11 @@ export default function ChatPage({
     sessionId: string,
     prompt: string | null,
     resume = false,
-    sourceNodeId: string | null = conversation?.lastNodeId ?? null,
-    sourceNodeSessionId: string | null = null,
+    sourceNodeId: string | null = defaultSourceNodeId() ?? null,
+    sourceNodeSessionId: string | null = defaultSourceNodeSessionId() ?? null,
     references?: FileReference[],
     branch = false,
+    batchMessages?: QueuedMessage[],
   ) {
     if (onRun) {
       await onRun({
@@ -702,10 +831,118 @@ export default function ChatPage({
         sourceNodeSessionId: sourceNodeSessionId ?? undefined,
         branch,
         references,
+        batchMessages,
+        ragMode,
       });
       return;
     }
-    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId, sourceNodeSessionId, references, branch);
+    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId, sourceNodeSessionId, references, branch, batchMessages);
+  }
+
+  function updateQueue(updater: (items: QueuedMessage[]) => QueuedMessage[]) {
+    if (!conversation?.id) return;
+    onQueuedMessagesChange(conversation.id, updater);
+  }
+
+  function queueCurrentPrompt(prompt: string, itemReferences?: FileReference[]) {
+    if (!prompt.trim() && (!itemReferences || itemReferences.length === 0)) return;
+    updateQueue((items) => [
+      ...items,
+      { id: crypto.randomUUID(), content: prompt, references: itemReferences },
+    ]);
+    editorRef.current?.clear();
+    setInput("");
+    setReferences([]);
+    // The uploaded files are already represented by references on this queue
+    // item.  Detach them from the composer so a subsequent queued message
+    // cannot accidentally inherit the same upload; keep the server-side files
+    // because the queue item still needs them when its batch is flushed.
+    setPendingUploads([]);
+  }
+
+  function queueReferences(): FileReference[] {
+    const uploadedReferences = pendingUploads
+      .filter((upload) => upload.status === "done" && upload.path)
+      .map((upload) => ({ source: "upload" as const, path: upload.path! }));
+    return [...references, ...uploadedReferences].filter((reference, index, all) =>
+      all.findIndex((candidate) => candidate.source === reference.source && candidate.path === reference.path) === index,
+    );
+  }
+
+  function editQueuedMessage(item: QueuedMessage) {
+    const currentPrompt = input.trim();
+    const currentReferences = queueReferences();
+    if (currentPrompt || currentReferences.length > 0) {
+      updateQueue((items) => items.map((candidate) => candidate.id === item.id
+        ? { ...candidate, content: currentPrompt, references: currentReferences }
+        : candidate));
+      editorRef.current?.clear();
+      setInput("");
+      setReferences([]);
+      setPendingUploads([]);
+      return;
+    }
+    updateQueue((items) => items.filter((candidate) => candidate.id !== item.id));
+    editorRef.current?.restore(item.content, item.references);
+    setInput(item.content);
+    setReferences(item.references ?? []);
+    window.setTimeout(() => editorRef.current?.focus(), 0);
+  }
+
+  function sendQueuedMessage() {
+    if (!conversation?.sessionId || busy || batchFlushRef.current || queuedMessages.length === 0) return;
+    batchFlushRef.current = true;
+    batchInFlightIdsRef.current = new Set(queuedMessages.map((item) => item.id));
+    batchSourceKeyRef.current = activeRuntimeNode ? `${activeRuntimeNode.session_id}:${activeRuntimeNode.id}` : null;
+    setBatchSubmitting(true);
+    void flushQueuedMessages();
+  }
+
+  async function flushQueuedMessages() {
+    // Snapshot both content and IDs.  React may render a new queue while the
+    // request is in flight; that new content must remain available for the
+    // next run.
+    const items = queuedMessages.slice();
+    if (!conversation?.sessionId || items.length === 0) {
+      batchFlushRef.current = false;
+      batchInFlightIdsRef.current = null;
+      batchExpectedUserCountRef.current = 0;
+      batchKnownUserKeysRef.current = new Set();
+      setBatchSubmitting(false);
+      return;
+    }
+    if (!batchInFlightIdsRef.current) batchInFlightIdsRef.current = new Set(items.map((item) => item.id));
+    batchExpectedUserCountRef.current = items.length;
+    batchKnownUserKeysRef.current = new Set(
+      (conversation.runtimeNodes ?? [])
+        .filter((node) => node.data.type === "message" && (node.data.message as { role?: unknown } | undefined)?.role === "user")
+        .map((node) => `${node.session_id}:${node.id}`),
+    );
+    try {
+      const source = activeRuntimeNode;
+      if (batchSourceKeyRef.current === null && source) {
+        batchSourceKeyRef.current = `${source.session_id}:${source.id}`;
+      }
+      await dispatchRun(
+        conversation.id,
+        conversation.sessionId,
+        null,
+        false,
+        source?.id ?? null,
+        source?.session_id ?? null,
+        undefined,
+        false,
+        items,
+      );
+    } catch (error) {
+      // A rejected batch leaves its in-memory items untouched.  Surface the
+      // failure on the current assistant projection without converting the
+      // queued content into optimistic canonical messages.
+      setLast({ error: String((error as Error).message ?? error), running: false, decision: undefined });
+    } finally {
+      batchFlushRef.current = false;
+      setBatchSubmitting(false);
+    }
   }
 
   async function runPrompt(
@@ -730,8 +967,8 @@ export default function ChatPage({
       sessionId,
       prompt,
       false,
-      target ? target.sourceNodeId ?? null : conversation?.lastNodeId ?? null,
-      target ? target.sourceNodeSessionId ?? null : undefined,
+      target ? target.sourceNodeId ?? null : defaultSourceNodeId() ?? null,
+      target ? target.sourceNodeSessionId ?? null : defaultSourceNodeSessionId() ?? null,
       references,
       target?.branch ?? false,
     );
@@ -777,7 +1014,10 @@ export default function ChatPage({
 
   async function send() {
     const prompt = input.trim();
-    if (busy || activeStreamRef.current || pendingUploads.some((upload) => upload.status === "uploading")) return;
+    // A running assistant no longer blocks the composer: a draft is handed
+    // to the in-memory FIFO queue below.  Only an in-progress upload prevents
+    // submission because its final reference is not available yet.
+    if (pendingUploads.some((upload) => upload.status === "uploading")) return;
     if (recoveryMode && conversation?.sessionId && activeRuntimeNode) {
       await dispatchRun(
         conversation.id,
@@ -791,16 +1031,19 @@ export default function ChatPage({
       );
       return;
     }
-    const uploadedReferences = pendingUploads
-      .filter((upload) => upload.status === "done" && upload.path)
-      .map((upload) => ({ source: "upload" as const, path: upload.path! }));
-    const mergedReferences = [...references, ...uploadedReferences].filter((reference, index, all) =>
-      all.findIndex((candidate) => candidate.source === reference.source && candidate.path === reference.path) === index,
-    );
+    const mergedReferences = queueReferences();
     if (!prompt && mergedReferences.length === 0) return;
+    // Slash commands are control actions, not conversational turns.  They
+    // must never be persisted into the running FIFO queue.  Keep command
+    // handling ahead of the running branch so `/new`, `/compact`, etc. remain
+    // explicit commands even while an assistant is active.
     const command = parseCommand(prompt);
     if (command && prompt) {
       await executeCommand(command.name, command.argument);
+      return;
+    }
+    if (busy) {
+      queueCurrentPrompt(prompt, mergedReferences);
       return;
     }
     const rewindTarget = pendingRewindRef.current;
@@ -832,9 +1075,9 @@ export default function ChatPage({
     if (activeStream) {
       activeStream.stopRequested = true;
       if (activeStream.jobId && !activeStream.cancelIssued) {
-        void cancelJob(activeStream.jobId)
-          .catch(() => undefined)
-          .finally(() => activeStream.controller.abort());
+        // Do not abort immediately: the final node.delete frame is the
+        // durable cancel commit and must still reach the projection layer.
+        void cancelJob(activeStream.jobId).catch(() => undefined);
         activeStream.cancelIssued = true;
       } else if (!activeStream.jobId && activeStream.cancelTimer === undefined) {
         activeStream.cancelTimer = window.setTimeout(() => activeStream.controller.abort(), 2000);
@@ -842,13 +1085,16 @@ export default function ChatPage({
     } else {
       abortRef.current?.abort();
     }
+    // Stop is an explicit user action: switch the composer out of the busy
+    // state immediately while the transport cancellation finishes in the
+    // background.
+    setLocalBusy(false);
     setLast({
-      running: true,
-      status: "已停止",
-      error: "The run was aborted at the user's request.",
+      running: false,
+      status: "cancel",
+      error: undefined,
       decision: undefined,
     });
-    setLocalBusy(true);
   }
 
   async function rewindMessage(messageId: string) {
@@ -1071,34 +1317,42 @@ export default function ChatPage({
         onKeyDown={handleComposerKeyDown}
         onComplete={completeCommand}
         onActiveCommandChange={setActiveCommandIndex}
-        onModeChange={(value) => { onModeChange(value); void updateRuntimeConfig({ running_mode: value }); setOpenSettingsSelect(null); }}
+        onModeChange={(value) => { onModeChange(value); if (canPatchRuntimeConfig) void updateRuntimeConfig({ running_mode: value }); setOpenSettingsSelect(null); }}
         onPermissionChange={async (value) => {
           const next = value === "approval_for_me" ? "read_only" : value;
           if (next === "full_access" && permissionMode !== "full_access") {
             const confirmed = await new Promise<boolean>((resolve) => {
-              Modal.confirm({
+              fullAccessConfirmRef.current = Modal.confirm({
                 title: "启用 Full access？",
                 content: "这会同时放开文件和网络访问，并标记为非沙箱运行。",
                 okText: "继续",
                 cancelText: "取消",
-                onOk: () => resolve(true),
-                onCancel: () => resolve(false),
+                onOk: () => {
+                  fullAccessConfirmRef.current = null;
+                  resolve(true);
+                },
+                onCancel: () => {
+                  fullAccessConfirmRef.current = null;
+                  resolve(false);
+                },
               });
             });
             if (!confirmed) return;
           }
           setPermissionMode(next);
-          void updateRuntimeConfig({ permission_mode: next, full_access_acknowledged: next === "full_access" });
+          if (canPatchRuntimeConfig) void updateRuntimeConfig({ permission_mode: next, full_access_acknowledged: next === "full_access" });
           setOpenSettingsSelect(null);
         }}
-        onReasoningChange={(value) => { setReasoningEffort(value); setRuntimeModel((current) => ({ ...current, reasoning_effort: value })); void updateRuntimeConfig({ model: { reasoning_effort: value } }); setOpenSettingsSelect(null); }}
+        onReasoningChange={(value) => { setReasoningEffort(value); setRuntimeModel((current) => ({ ...current, reasoning_effort: value })); if (canPatchRuntimeConfig) void updateRuntimeConfig({ model: { reasoning_effort: value } }); setOpenSettingsSelect(null); }}
         onSettingsSelectChange={setOpenSettingsSelect}
         onOpenSettings={() => setSettingsOpen(true)}
         onCloseSettings={() => setSettingsOpen(false)}
         onStop={stop}
         onSend={() => void send()}
-        disabled={busy || (conversation?.projectId !== undefined && conversation.projectAvailable === false)}
-        disabledReason={busy ? "当前会话正在运行，请先中止" : conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
+        actionMode={actionMode}
+        submitDisabled={projectUnavailable || (actionMode === "send" && busy && !hasDraft)}
+        disabled={projectUnavailable}
+        disabledReason={conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
         startMode={recoveryMode}
         fileCandidates={fileCandidates}
         fileMenuVisible={fileMenuVisible}
@@ -1110,6 +1364,10 @@ export default function ChatPage({
         sessionId={conversation?.sessionId}
         pendingUploads={pendingUploads}
         uploadsUploading={pendingUploads.some((upload) => upload.status === "uploading")}
+        queuedMessages={queuedMessages}
+        onQueueSend={sendQueuedMessage}
+        onQueueEdit={editQueuedMessage}
+        onQueueDelete={(item) => updateQueue((items) => items.filter((candidate) => candidate.id !== item.id))}
         onRemoveUpload={removePendingUpload}
         onRetryUpload={retryUpload}
         onUploadPreview={(index) => {

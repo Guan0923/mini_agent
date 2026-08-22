@@ -23,10 +23,10 @@ coverage.xml
 htmlcov/
 
 # Python test artifacts
-/.pytest_cache/
-/.pytest_tmp*/
-/.pytest-*/
-/pytest-of-*/
+.pytest_cache/
+.pytest_tmp*/
+.pytest-*/
+pytest-of-*/
 pytest_*.txt
 *.out.txt
 
@@ -64,6 +64,8 @@ frontend/.review-*.png
 .pnpm-store/
 .pnpm-debug.log
 .nyc_output/
+coverage/
+frontend/coverage/
 
 # Browser and e2e test output
 playwright-report/
@@ -95,3 +97,9 @@ desktop.ini
 
 # Linked worktrees
 .worktrees/
+
+# Local agent metadata and private notes
+.agents/
+.claude/
+.scripts/
+学习笔记.md

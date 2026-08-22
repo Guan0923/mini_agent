@@ -191,10 +191,8 @@
   color: var(--accent-dark);
 }
 
-.avatar {
+.assistant-icon {
   flex: 0 0 auto;
-  color: #fff;
-  background: linear-gradient(135deg, #087f8d, #42b9c1);
 }
 
 .composer-settings-controls {

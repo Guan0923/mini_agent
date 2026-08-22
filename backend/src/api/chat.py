@@ -6,6 +6,8 @@ from backend.runtime import build_application as _default_build_application
 
 from .chat import routes as _routes
 from .chat.routes import (
+    BatchChatRequest,
+    BatchMessage,
     ChatRequest,
     ReasoningEffort,
     ResumeRequest,
@@ -28,6 +30,8 @@ def _stream(*args: object, **kwargs: object):
 
 
 __all__ = [
+    "BatchChatRequest",
+    "BatchMessage",
     "ChatRequest",
     "ReasoningEffort",
     "ResumeRequest",

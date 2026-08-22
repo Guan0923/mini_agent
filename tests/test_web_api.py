@@ -5,10 +5,12 @@ import time
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.api.app import create_app
 from backend.api.chat import ChatRequest, ResumeRequest, _reasoning_parameters
+from backend.api.chat.routes import _validate_source_node
 from backend.api.interrupts import make_interactive_interrupt, registry
 from backend.api.sessions.routes import _store
 from backend.api.state import WebAppState
@@ -536,6 +538,8 @@ def test_fork_and_rewind_use_resumable_anchor_for_terminal_attempts(
         assert target_root is not None
         expected_anchor = selected if source_status == "success" else stable
         assert (target_root.parent_session_id, target_root.parent_id) == expected_anchor.key
+        assert forked.json()["fork_anchor_node_id"] == expected_anchor.id
+        assert forked.json()["fork_anchor_session_id"] == expected_anchor.session_id
         if source_status in {"running", "abort"}:
             assert store.list_children(selected.session_id, selected.id) == []
             persisted = store.get_node(selected.session_id, selected.id)
@@ -568,6 +572,8 @@ def test_fork_accepts_only_full_node_keys_from_the_loaded_ancestor_tree(tmp_path
         valid_root = store.get_session_root(valid.json()["session_id"])
         assert valid_root is not None
         assert (valid_root.parent_session_id, valid_root.parent_id) == ancestor.key
+        assert valid.json()["fork_anchor_node_id"] == ancestor.id
+        assert valid.json()["fork_anchor_session_id"] == ancestor.session_id
 
         unrelated_session = store.create_session("unrelated")
         unrelated_root = store.get_session_root(unrelated_session.session_id)
@@ -583,6 +589,64 @@ def test_fork_accepts_only_full_node_keys_from_the_loaded_ancestor_tree(tmp_path
             json={"source_node_id": unrelated.id, "source_node_session_id": unrelated.session_id},
         )
         assert rejected.status_code == 400
+
+
+def test_source_node_validation_allows_non_leaf_ancestor_and_preserves_boundaries(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web")
+    with TestClient(create_app(state)) as client:
+        user = client.post("/api/auth/guest").json()["user"]
+        store = _store(state, user["id"])
+        writer = NodeWriter(store)
+
+        source_session = store.create_session("source")
+        source_root = store.get_session_root(source_session.session_id)
+        assert source_root is not None
+        source = writer.create(
+            session_id=source_session.session_id,
+            parent=source_root,
+            data=message_payload("assistant", "fork anchor"),
+        )
+        source = writer.delete(source.session_id, source.id)
+        existing_child = writer.create(
+            session_id=source_session.session_id,
+            parent=source,
+            data=message_payload("user", "existing branch"),
+        )
+        writer.delete(existing_child.session_id, existing_child.id)
+        branch = store.create_session("branch", root_parent=source.key)
+
+        _validate_source_node(
+            store,
+            branch.session_id,
+            source.id,
+            source_node_session_id=source.session_id,
+        )
+
+        unrelated_session = store.create_session("unrelated")
+        unrelated_root = store.get_session_root(unrelated_session.session_id)
+        assert unrelated_root is not None
+        unrelated = writer.create(
+            session_id=unrelated_session.session_id,
+            parent=unrelated_root,
+            data=message_payload("assistant", "unrelated"),
+        )
+        unrelated = writer.delete(unrelated.session_id, unrelated.id)
+        with pytest.raises(HTTPException, match="source_node_id 不属于当前会话祖先树"):
+            _validate_source_node(
+                store,
+                branch.session_id,
+                unrelated.id,
+                source_node_session_id=unrelated.session_id,
+            )
+
+        with pytest.raises(HTTPException, match="只能从 running、cancel 或 abort 节点恢复"):
+            _validate_source_node(
+                store,
+                branch.session_id,
+                source.id,
+                source_node_session_id=source.session_id,
+                resume=True,
+            )
 
 
 def test_chat_request_accepts_and_limits_structured_references() -> None:

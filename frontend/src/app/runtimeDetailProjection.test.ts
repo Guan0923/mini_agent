@@ -78,6 +78,23 @@ describe("runtime detail projection", () => {
     expect(current.messages[1].runtimeNodeIds).toEqual(["s:assistant"]);
   });
 
+  it("clears a fork anchor after the first runtime node arrives", () => {
+    const current = {
+      ...conversation(),
+      forkAnchorNodeId: "ancestor-node",
+      forkAnchorSessionId: "ancestor-session",
+    };
+    const next = integrateRuntimeNodeFrame(current, {
+      type: "node.create",
+      node: node("assistant", "user", { role: "assistant", content: [] }, "running"),
+    });
+    expect(next).toMatchObject({
+      lastNodeId: "assistant",
+      forkAnchorNodeId: undefined,
+      forkAnchorSessionId: undefined,
+    });
+  });
+
   it("treats an empty assistant update as authoritative", () => {
     const first = node("assistant", "user", {
       role: "assistant",
@@ -91,7 +108,7 @@ describe("runtime detail projection", () => {
   });
 
   it("does not surface the failed placeholder from a dynamic node", () => {
-    const placeholder = node("assistant", "user", { role: "assistant", content: [] }, "failed");
+    const placeholder = node("assistant", "user", { role: "assistant", content: [] }, "abort");
     const current = integrateRuntimeNodeFrame(conversation(), { type: "node.update", node: placeholder });
 
     expect(current.messages[1].error).toBeUndefined();
@@ -101,7 +118,7 @@ describe("runtime detail projection", () => {
     const tool = node("tool", "user", {
       role: "tool_result",
       content: [{ type: "tool_result", tool: "search", status: "succeeded", content: "ok" }],
-    }, "failed");
+    }, "abort");
 
     expect(projectRuntimeNode(tool)?.events[0]?.kind).toBe("tool_result");
   });
@@ -117,7 +134,7 @@ describe("runtime detail projection", () => {
         status: "failed",
         failure_code: "user_denied",
       }],
-    }, "failed");
+    }, "abort");
     const skipped = node("skipped", "denied", {
       role: "tool_result",
       content: [{
@@ -128,7 +145,7 @@ describe("runtime detail projection", () => {
         status: "failed",
         failure_code: "user_denied_batch",
       }],
-    }, "failed");
+    }, "abort");
 
     expect(projectRuntimeNode(denied)).toMatchObject({
       error: undefined,
@@ -180,13 +197,13 @@ describe("runtime detail projection", () => {
     expect(projectRuntimeNode(aborted)?.error).toContain("network error");
   });
 
-  it("uses the generic failed reason when a legacy node has no error metadata", () => {
-    const failed = node("failed", "user", { role: "assistant", content: [] }, "failed");
+  it("uses the generic abort reason when a terminal node has no error metadata", () => {
+    const failed = node("failed", "user", { role: "assistant", content: [] }, "abort");
 
     expect(projectRuntimeNode(failed)).toMatchObject({
       role: "assistant",
       content: "",
-      error: "An unknown error caused the system to encounter an exception.",
+      error: "The run was aborted for an unknown reason.",
     });
   });
 

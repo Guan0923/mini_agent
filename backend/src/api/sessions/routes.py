@@ -691,6 +691,7 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
         else (source.title_is_custom if not body.title or normalize_session_title(body.title) == source.title else True)
     )
     target = None
+    fork_anchor: tuple[str, str] | None = None
     try:
         if body.source_node_id:
             # ``load_nodes`` includes the cross-session ancestors of a fork,
@@ -727,6 +728,7 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
                 root_parent=anchor.key,
                 title_is_custom=title_is_custom,
             )
+            fork_anchor = anchor.key
         elif body.run_id:
             records = store.load_conversation_records(source.session_id)
             if not any(str(record["run_id"]) == body.run_id for record in records):
@@ -757,7 +759,11 @@ def _branch_session(store, source, body: BranchRequest, *, rewind: bool):
         raise
     summary = store.get_session_summary(target.session_id)
     assert summary is not None
-    return summary
+    if fork_anchor is None:
+        root = store.get_session_root(target.session_id)
+        if root is not None and root.parent_id and root.parent_session_id:
+            fork_anchor = (root.parent_session_id, root.parent_id)
+    return summary, fork_anchor
 
 
 def _copy_or_bind_project(state: WebAppState, user_id: str, source_session_id: str, target_session_id: str) -> None:
@@ -788,7 +794,7 @@ def fork_session(
     _require_session_workspace(state, identity.id, source.session_id)
     target_id: str | None = None
     try:
-        summary = _branch_session(store, source, body, rewind=False)
+        summary, fork_anchor = _branch_session(store, source, body, rewind=False)
         target_id = summary.session_id
         _copy_or_bind_project(state, identity.id, source.session_id, summary.session_id)
     except Exception as exc:
@@ -799,7 +805,11 @@ def fork_session(
             except Exception:
                 pass
         raise _mutation_error(exc) from exc
-    return _summary_for_user(state, identity.id, summary)
+    payload = _summary_for_user(state, identity.id, summary)
+    if fork_anchor is not None:
+        payload["fork_anchor_node_id"] = fork_anchor[1]
+        payload["fork_anchor_session_id"] = fork_anchor[0]
+    return payload
 
 
 @router.post("/sessions/{session_id}/rewind")

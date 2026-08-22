@@ -47,6 +47,39 @@ class SQLiteRuntimeMixin:
             self._touch_session(connection, node.session_id, node.timestamp)
             self._append_event(connection, node.session_id, kind="node_upserted", payload={"node": node.to_dict()})
 
+    def create_finalized_nodes(self, nodes: list[TreeRuntimeState] | tuple[TreeRuntimeState, ...]) -> None:
+        """Atomically append an ordered batch of terminal canonical nodes."""
+
+        if not nodes:
+            return
+        session_id = nodes[0].session_id
+        if any(node.session_id != session_id for node in nodes):
+            raise ValueError("A finalized node batch must belong to one session.")
+        with self._connection(session_id) as connection:
+            self._assert_writable(connection)
+            self._session_document(connection, session_id)
+            existing = self._objects(connection, session_id, "runtime_node")
+            by_key = {(node.session_id, node.id): node for node in existing}
+            staged = dict(by_key)
+            for node in nodes:
+                if node.status not in {"success", "cancel", "abort"}:
+                    raise ValueError("A finalized node batch must contain terminal nodes.")
+                if node.key in staged:
+                    raise ValueError(f"Runtime node already exists: {node.session_id}/{node.id}")
+                if node.parent_id and (node.parent_session_id, node.parent_id) not in staged:
+                    # Branch sessions may continue from an ancestor stored in
+                    # another session database.  The local transaction cannot
+                    # stage that external row, but it must still exist before
+                    # the child batch is accepted.
+                    if node.parent_session_id == session_id or self.get_node(node.parent_session_id, node.parent_id) is None:
+                        raise ValueError("A finalized node parent must be present in the store.")
+                staged[node.key] = node
+            timestamp = nodes[-1].timestamp
+            for node in nodes:
+                self._put_json_object(connection, session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+                self._append_event(connection, session_id, kind="node_finalized", payload={"node": node.to_dict()})
+            self._touch_session(connection, session_id, timestamp)
+
     def get_node(self, session_id: str, node_id: str) -> TreeRuntimeState | None:
         if not self.paths.session_db(session_id).exists():
             return None
@@ -98,8 +131,8 @@ class SQLiteRuntimeMixin:
                 raise ValueError(f"Unknown runtime node: {node.session_id}/{node.id}")
             if str(existing.get("status")) != "running":
                 raise ValueError("Sealed runtime nodes are read-only.")
-            if node.status not in {"success", "abort"}:
-                raise ValueError("A runtime node can only be finalized as success or abort.")
+            if node.status not in {"success", "cancel", "abort"}:
+                raise ValueError("A runtime node can only be finalized as success, cancel, or abort.")
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
             self._touch_session(connection, node.session_id, node.timestamp)
             self._append_event(connection, node.session_id, kind="node_finalized", payload={"node": node.to_dict()})

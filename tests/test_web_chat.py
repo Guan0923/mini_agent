@@ -96,6 +96,15 @@ class _NodeApp(_FakeApp):
         return self.conversation
 
 
+class _CancelledConversation(_TerminalConversation):
+    def run_task(self, _prompt: str, **kwargs: object) -> SimpleNamespace:
+        sink = kwargs["on_event"]
+        assert callable(sink)
+        sink(RuntimeEvent("response_delta", "partial"))
+        sink(RuntimeEvent("cancelled", "Run cancelled by user", {"stop_reason": "user_cancelled"}))
+        return SimpleNamespace(status="cancelled", final_answer="", run_id="run-cancelled")
+
+
 def test_closing_sse_stream_requests_runtime_cancellation(monkeypatch, tmp_path: Path) -> None:
     conversation = _BlockingConversation()
     app = _FakeApp(conversation)
@@ -150,6 +159,29 @@ def test_completed_sse_stream_delivers_done_payload(monkeypatch, tmp_path: Path)
     assert app.closed is True
 
 
+def test_cancelled_sse_stream_delivers_cancel_without_error_payload(monkeypatch, tmp_path: Path) -> None:
+    app = _NodeApp(_CancelledConversation([]))
+    monkeypatch.setattr(chat, "build_application", lambda *_args, **_kwargs: app)
+    state = SimpleNamespace(chat_workspace=tmp_path)
+
+    async def scenario() -> list[dict[str, object]]:
+        stream = chat._stream(state, "pause me", False)
+        items = [item async for item in stream]
+        return [json.loads(item.removeprefix("data: ").strip()) for item in items]
+
+    items = asyncio.run(scenario())
+    terminal = next(item for item in items if item.get("status") == "cancel")
+    assert terminal["type"] == "done"
+    assert "error" not in terminal
+    assert any(
+        item.get("type") == "node.delete"
+        and isinstance(item.get("node"), dict)
+        and item["node"].get("status") == "cancel"
+        for item in items
+    )
+    assert app.closed is True
+
+
 @pytest.mark.parametrize(
     ("outcome", "status", "expected"),
     [
@@ -161,7 +193,7 @@ def test_completed_sse_stream_delivers_done_payload(monkeypatch, tmp_path: Path)
             "abort",
             "internal tool error",
         ),
-        (RuntimeError("unexpected failure"), "failed", "unknown error caused the system"),
+        (RuntimeError("unexpected failure"), "abort", "agent encountered an internal error"),
     ],
 )
 def test_terminal_sse_payload_explains_failed_and_abort_reasons(

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { applyRuntimeNodeFrame, leafNodes } from "./runtimeNodeReducer";
 import type { RuntimeStateNode } from "../types";
 
-const node = (id: string, parentId = "", status: RuntimeStateNode["status"] = "failed"): RuntimeStateNode => ({
+const node = (id: string, parentId = "", status: RuntimeStateNode["status"] = "abort"): RuntimeStateNode => ({
   session_id: "s",
   parent_session_id: parentId ? "s" : "",
   id,
@@ -26,7 +26,7 @@ describe("runtime node reducer", () => {
   it("replaces complete updates and keeps the final delete node", () => {
     let state = new Map<string, RuntimeStateNode>();
     state = applyRuntimeNodeFrame(state, { type: "node.create", node: node("a") });
-    state = applyRuntimeNodeFrame(state, { type: "node.update", node: node("a", "", "failed") });
+  state = applyRuntimeNodeFrame(state, { type: "node.update", node: node("a", "", "abort") });
     state = applyRuntimeNodeFrame(state, { type: "node.delete", node: node("a", "", "success") });
     expect(state.get("s:a")?.status).toBe("success");
   });

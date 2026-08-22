@@ -117,6 +117,51 @@ class ChatRequest(BaseModel):
         return self
 
 
+class BatchMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=100_000)
+    references: list[FileReference] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def require_content(self) -> BatchMessage:
+        self.content = self.content.strip()
+        if not self.content:
+            raise ValueError("batch message content must not be empty")
+        return self
+
+
+class BatchChatRequest(BaseModel):
+    messages: list[BatchMessage] = Field(min_length=1, max_length=100)
+    interactive: bool = False
+    session_id: str
+    mode: Literal["agent", "plan"] = "agent"
+    running_mode: Literal["agent", "plan"] | None = None
+    permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None
+    full_access_acknowledged: StrictBool = False
+    reasoning_effort: ReasoningEffort = "medium"
+    provider_name: str | None = Field(default=None, min_length=1, max_length=80)
+    model: RuntimeModelRequest | None = None
+    source_node_id: str | None = None
+    source_node_session_id: str | None = None
+    branch: bool = False
+    rag_mode: Literal["off", "tool", "forced"] = "off"
+
+    @model_validator(mode="after")
+    def normalize_running_mode(self) -> BatchChatRequest:
+        if self.running_mode is not None:
+            if self.mode != "agent" and self.mode != self.running_mode:
+                raise ValueError("mode and running_mode must match")
+            self.mode = self.running_mode
+        return self
+
+    @model_validator(mode="after")
+    def require_full_access_acknowledgement(self) -> BatchChatRequest:
+        if self.permission_mode == "full_access" and not self.full_access_acknowledged:
+            raise ValueError("full_access requires explicit joint file and network confirmation")
+        return self
+
+
 class ResumeRequest(BaseModel):
     permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None
     full_access_acknowledged: StrictBool = False
@@ -284,6 +329,7 @@ def _validate_source_node(
     source_node_session_id: str | None = None,
     resume: bool = False,
     allow_branch: bool = False,
+    require_leaf: bool = False,
 ) -> None:
     """Validate the optimistic-concurrency source before opening an SSE stream."""
 
@@ -297,11 +343,12 @@ def _validate_source_node(
         loaded = getattr(store, "load_nodes", lambda _sid: [])(session_id)
         if source.key not in {getattr(item, "key", None) for item in loaded}:
             raise HTTPException(status_code=409, detail="source_node_id 不属于当前会话祖先树")
-    children = getattr(store, "list_children", lambda *_: [])(source.session_id, source.id)
-    if children and not allow_branch:
-        raise HTTPException(status_code=409, detail="source_node_id 必须是当前会话的叶子节点")
-    if resume and source.status not in {"running", "abort"}:
-        raise HTTPException(status_code=409, detail="只能从 running 或 abort 节点恢复")
+    if require_leaf and not allow_branch and callable(getattr(store, "list_children", None)):
+        children = [child for child in store.list_children(source.session_id, source.id) if getattr(child, "data_type", None) != "root"]
+        if children:
+            raise HTTPException(status_code=409, detail="批量对话的 source_node_id 必须是当前叶子节点")
+    if resume and source.status not in {"running", "cancel", "abort"}:
+        raise HTTPException(status_code=409, detail="只能从 running、cancel 或 abort 节点恢复")
 
 
 def _session_has_active_execution(state: WebAppState, user_id: str, session_id: str) -> bool:
@@ -390,6 +437,7 @@ def _stream(
     runtime_config: dict[str, object] | None = None,
     request_model: RuntimeModelRequest | None = None,
     references: list[dict[str, str]] | None = None,
+    batch_messages: list[dict[str, object]] | None = None,
     operation: Callable[..., object] | None = None,
     rag_mode: Literal["off", "tool", "forced"] = "off",
 ):
@@ -626,6 +674,7 @@ def _stream(
                     source_node_id,
                     source_node_session_id=source_node_session_id,
                     allow_branch=branch,
+                    require_leaf=bool(batch_messages),
                 )
             if callable(getattr(node_store, "create_node", None)):
                 if getattr(conversation, "active_session", None) is None:
@@ -675,7 +724,11 @@ def _stream(
                         running_mode=mode,
                         cwd=str(workspace),
                         references=references,
-                        emit=lambda frame: q.put(frame.to_dict()) if not cancellation_requested() else None,
+                        batch_messages=batch_messages,
+                        # A cancellation request must not suppress the final
+                        # node.delete frame: that frame is the canonical
+                        # status=cancel commit consumed by the client.
+                        emit=lambda frame: q.put(frame.to_dict()),
                     )
                     bridge_ref["bridge"].apply_runtime_config(
                         {
@@ -715,6 +768,7 @@ def _stream(
                     cancel_requested=cancellation_requested,
                     request_parameters=request_parameters,
                     references=references or [],
+                    batch_messages=batch_messages,
                 )
             else:
                 run_state = operation(
@@ -735,8 +789,8 @@ def _stream(
                     requested_status = "success"
                     category = None
                 elif old_status == "cancelled":
-                    requested_status = "abort"
-                    category = "user"
+                    requested_status = "cancel"
+                    category = None
                 elif bridge.abort_category is not None:
                     requested_status = "abort"
                     category = bridge.abort_category
@@ -774,11 +828,12 @@ def _stream(
                 # stream still needs the normal top-level terminal envelope so
                 # clients can apply one consistent lifecycle transition.  The
                 # delete frame is intentionally queued first by ``finish``.
+                terminal_is_error = terminal_status == "abort"
                 enqueue_terminal(
                     {
-                        "type": "done" if terminal_status == "success" else "error",
+                        "type": "error" if terminal_is_error else "done",
                         "status": terminal_status,
-                        "final_answer": final_answer if terminal_status == "success" else rendered_error,
+                        "final_answer": rendered_error if terminal_is_error else final_answer,
                         "session_id": active_session.session_id if active_session is not None else session_id,
                         "run_id": run_state.run_id
                         if run_state is not None
@@ -791,9 +846,7 @@ def _stream(
                             "tool_calls": finished.get("tool_calls", finish_data.get("tool_calls")),
                             "active_skills": finished.get("active_skills", finish_data.get("active_skills", [])),
                         },
-                        **(
-                            {"error": rendered_error or FAILED_TERMINAL_MESSAGE} if terminal_status != "success" else {}
-                        ),
+                        **({"error": rendered_error or FAILED_TERMINAL_MESSAGE} if terminal_is_error else {}),
                     }
                 )
             else:
@@ -845,8 +898,17 @@ def _stream(
         except Exception as exc:
             bridge = bridge_ref["bridge"]
             if bridge is not None:
+                batch_user_phase_failed = bool(
+                    getattr(bridge, "batch_messages", None)
+                    and bridge.assistant is None
+                    and not bridge.started
+                )
                 final_node = bridge.finish_exception(exc)
-                terminal_status = final_node.status if final_node is not None else "abort"
+                # ``finish_exception`` intentionally leaves the canonical
+                # tree untouched when the atomic user batch itself failed.
+                # The old source node is returned only as a context marker and
+                # must not make the SSE error look like a successful run.
+                terminal_status = "abort" if batch_user_phase_failed else final_node.status if final_node is not None else "abort"
                 rendered_error = terminal_error_text(bridge.terminal_error or {}) if bridge.terminal_error else ""
                 if terminal_status == "abort":
                     rendered_error = (
@@ -1004,6 +1066,83 @@ async def chat(
             model_config=_model_config_snapshot(state, identity.id),
             runtime_config=state.runtime_config_for_user(identity.id),
             references=references,
+            rag_mode=body.rag_mode,
+        ),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/chat/batch")
+async def chat_batch(
+    body: BatchChatRequest, request: Request, identity: UserIdentity = Depends(require_user)
+) -> StreamingResponse:
+    """Create a FIFO user-message batch and run one assistant turn."""
+
+    state: WebAppState = request.app.state.web
+    store = _store(state, identity.id)
+    session_id = body.session_id
+    _require_active(store, session_id)
+    try:
+        state.session_workspace(identity.id, session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if _session_has_active_execution(state, identity.id, session_id):
+        raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
+    nodes = getattr(store, "load_nodes", lambda _session_id: [])(session_id)
+    has_history = _has_conversation_nodes(nodes)
+    if has_history:
+        _require_explicit_runtime_config(
+            provider_name=body.provider_name,
+            model=body.model,
+            permission_mode=body.permission_mode,
+            running_mode=body.running_mode,
+            permission_mode_explicit="permission_mode" in body.model_fields_set,
+            running_mode_explicit="running_mode" in body.model_fields_set,
+        )
+        if not body.source_node_id:
+            raise HTTPException(status_code=409, detail="批量续聊请求必须提交当前最后节点 ID。")
+    _validate_source_node(
+        store,
+        session_id,
+        body.source_node_id,
+        source_node_session_id=body.source_node_session_id,
+        allow_branch=body.branch,
+        require_leaf=True,
+    )
+    batch_messages: list[dict[str, object]] = []
+    flattened_references: list[dict[str, str]] = []
+    for item in body.messages:
+        refs = _validate_references(
+            state,
+            identity,
+            session_id,
+            item.references,
+        )
+        batch_messages.append({"content": item.content.strip(), "references": refs})
+        flattened_references.extend(refs)
+    prompt = "\n\n".join(str(item["content"]) for item in batch_messages)
+    return StreamingResponse(
+        _stream(
+            state,
+            prompt,
+            identity=identity,
+            session_id=session_id,
+            source_node_id=body.source_node_id,
+            source_node_session_id=body.source_node_session_id,
+            branch=body.branch,
+            mode=body.mode,
+            interactive=body.interactive,
+            permission_mode=body.permission_mode,
+            reasoning_effort=body.reasoning_effort,
+            provider_name=body.provider_name,
+            model_snapshot=body.model.model_dump() if body.model is not None else None,
+            request_model=body.model,
+            user_preferences=state.agent_preferences_for_user(identity.id),
+            default_timezone=str(state.agent_config_for_user(identity.id).get("timezone", DEFAULT_TIME_ZONE)),
+            model_config=_model_config_snapshot(state, identity.id),
+            runtime_config=state.runtime_config_for_user(identity.id),
+            references=flattened_references,
+            batch_messages=batch_messages,
             rag_mode=body.rag_mode,
         ),
         media_type="text/event-stream",

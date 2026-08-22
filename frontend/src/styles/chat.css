@@ -226,14 +226,9 @@
   border-color: transparent;
 }
 
-.avatar {
+.assistant-icon {
   width: 32px;
   height: 32px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #4f6bff, #8b5cf6);
-  color: #fff;
-  font-weight: 700;
-  font-size: 14px;
   display: flex;
   align-items: center;
   justify-content: center;

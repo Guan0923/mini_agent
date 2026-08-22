@@ -23,6 +23,7 @@ import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnrea
 import type { ArchiveReadState } from "./storage";
 import AgentShell from "./AgentShell";
 import { createRunController } from "./runController";
+import type { QueuedMessage } from "./types";
 import { effectiveDisplayMode } from "./displayMode";
 import type {
   ChatMessage,
@@ -51,6 +52,8 @@ function AgentApp() {
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const activeRunsRef = useRef(new Map<string, import("./types").ActiveRun>());
+  const queuedMessagesRef = useRef(new Map<string, QueuedMessage[]>());
+  const [, refreshQueuedMessages] = useState(0);
 
   useEffect(() => {
     if (!user?.id) {
@@ -264,6 +267,14 @@ function AgentApp() {
     setConversations((previous) => previous.map((conversation) => (conversation.id === id ? updater(conversation) : conversation)));
   }
 
+  function updateQueuedMessages(conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) {
+    const current = queuedMessagesRef.current.get(conversationId) ?? [];
+    const next = updater(current);
+    if (next.length > 0) queuedMessagesRef.current.set(conversationId, next);
+    else queuedMessagesRef.current.delete(conversationId);
+    refreshQueuedMessages((value) => value + 1);
+  }
+
   function updateLastMessage(id: string, updater: (message: ChatMessage) => ChatMessage) {
     updateConversation(id, (conversation) => {
       const messages = [...conversation.messages];
@@ -340,6 +351,7 @@ function AgentApp() {
       title: title?.trim() || "新对话",
       messages: [],
       messagesLoaded: true,
+      runtimeNodes: [],
     });
     setModeBySession((currentModes) => ({ ...currentModes, [summary.session_id]: draftMode }));
     setConversations((previous) => [conversation, ...previous]);
@@ -361,6 +373,7 @@ function AgentApp() {
         title: result.session.title || "新对话",
         messages: [],
         messagesLoaded: true,
+        runtimeNodes: [],
       });
       setProjects((previous) => [result.project, ...previous.filter((item) => item.project_id !== result.project.project_id)]);
       setConversations((previous) => [conversation, ...previous]);
@@ -394,6 +407,7 @@ function AgentApp() {
         title: result.session.title || "新对话",
         messages: [],
         messagesLoaded: true,
+        runtimeNodes: [],
       });
       setConversations((previous) => [conversation, ...previous]);
       setProjects((previous) => previous.map((item) => item.project_id === projectId ? result.project : item));
@@ -703,6 +717,8 @@ function AgentApp() {
       onRefresh={refreshSessions}
       onRun={runConversation}
       onStopRun={stopConversation}
+      queuedMessages={queuedMessagesRef.current}
+      onQueuedMessagesChange={updateQueuedMessages}
       onClearError={() => setActionError(null)}
       onDisplayModeUpdate={(config) => setDisplayMode(effectiveDisplayMode(config.display_mode))}
       onProviderConfigUpdate={setProviderConfig}

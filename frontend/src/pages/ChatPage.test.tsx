@@ -27,6 +27,35 @@ const baseConversation = (): Conversation => ({
   messages: [],
 });
 
+function runtimeLeaf(status: "running" | "success" | "cancel" | "abort") {
+  return {
+    session_id: "session-config",
+    parent_session_id: "",
+    id: `node-${status}`,
+    parent_id: "",
+    version: "0.3.0",
+    firstKeptEntryId: `node-${status}`,
+    compactionIdx: `node-${status}`,
+    user: "",
+    provider_name: "provider",
+    model: {
+      reasoning_effort: "medium",
+      current_model: "model",
+      context_length: 128000,
+      output_length: 16000,
+      thinking: "enable",
+      temperature: 0.7,
+    },
+    permission_mode: "read_only",
+    running_mode: "agent",
+    usage: { input_tokens: null, cached_tokens: null, output_tokens: null, reasoning_tokens: null, total_tokens: null },
+    cwd: "",
+    timestamp: "2026-08-22T00:00:00+00:00",
+    status,
+    data: { type: "message", message: { role: "assistant", content: [] } },
+  } as NonNullable<Conversation["runtimeNodes"]>[number];
+}
+
 const initialClipboardDescriptor = Object.getOwnPropertyDescriptor(window.navigator, "clipboard");
 
 function Harness({
@@ -39,16 +68,18 @@ function Harness({
   onConversationUpdate,
   providerConfig,
   ragEnabled = false,
+  running,
 }: {
   initial?: Conversation | null;
   onEnsureSession?: (id: string) => Promise<string>;
   onFork?: (conversationId: string, messageId: string) => Promise<void>;
   onRewind?: (conversationId: string, messageId: string) => Promise<{ content: string; sessionId: string } | string | undefined>;
-  onRun?: (request: { conversationId: string; sessionId: string; prompt: string | null; resume: boolean; mode: ChatMode; permissionMode: PermissionMode; reasoningEffort: ReasoningEffort; providerName?: string; model?: RuntimeConfigModel }) => Promise<void>;
+  onRun?: (request: { conversationId: string; sessionId: string; prompt: string | null; resume: boolean; mode: ChatMode; permissionMode: PermissionMode; reasoningEffort: ReasoningEffort; providerName?: string; model?: RuntimeConfigModel; sourceNodeId?: string; sourceNodeSessionId?: string }) => Promise<void>;
   onStopRun?: (conversationId: string) => void;
   onConversationUpdate?: (conversation: Conversation) => void;
   providerConfig?: ProviderConfig | null;
   ragEnabled?: boolean;
+  running?: boolean;
 }) {
   const [conversation, setConversation] = React.useState<Conversation | null>(initial);
 
@@ -57,6 +88,7 @@ function Harness({
       conversation={conversation}
       providerConfig={providerConfig}
       ragEnabled={ragEnabled}
+      running={running}
       onUpdate={(id, updater) => setConversation((current) => {
         if (current?.id !== id) return current;
         const next = updater(current);
@@ -123,12 +155,12 @@ describe("ChatPage run lifecycle", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByRole("status", { name: "思考中" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "停止" }));
+    await user.click(screen.getByRole("button", { name: "暂停" }));
 
     await waitFor(() => expect(screen.queryByRole("status", { name: "思考中" })).not.toBeInTheDocument());
-    expect(screen.getByText("已停止")).toBeInTheDocument();
+    expect(screen.queryByText("已停止")).not.toBeInTheDocument();
     expect(resolveStream).toBeDefined();
-    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
   });
 
   it("keeps streamed partial content after cancellation", async () => {
@@ -147,9 +179,9 @@ describe("ChatPage run lifecycle", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
     expect(await screen.findByText("已收到的部分")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "停止" }));
+    await user.click(screen.getByRole("button", { name: "暂停" }));
     expect(screen.getByText("已收到的部分")).toBeInTheDocument();
-    expect(screen.getByText("已停止")).toBeInTheDocument();
+    expect(screen.queryByText("已停止")).not.toBeInTheDocument();
   });
 
   it("clears running state and renders stream failures", async () => {
@@ -160,8 +192,9 @@ describe("ChatPage run lifecycle", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("⚠️ 连接提前关闭")).toBeInTheDocument();
+    expect(screen.getByText("失败任务")).toBeInTheDocument();
     expect(screen.queryByRole("status", { name: "思考中" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
   });
 
   it("can create an empty conversation before the first streamed update", async () => {
@@ -282,6 +315,67 @@ describe("ChatPage run lifecycle", () => {
     expect(screen.getAllByText("high", { exact: true }).length).toBeGreaterThan(0);
   });
 
+  it("keeps configuration changes local when the canonical leaf is not running", async () => {
+    const initial: Conversation = {
+      ...baseConversation(),
+      sessionId: "session-config",
+      lastNodeId: "node-success",
+      runtimeNodes: [runtimeLeaf("success")],
+    };
+    const user = userEvent.setup();
+    render(<Harness initial={initial} />);
+
+    await user.click(screen.getByRole("combobox", { name: "权限模式" }));
+    await user.click(screen.getByRole("option", { name: "工作区读写" }));
+    await user.click(screen.getByRole("combobox", { name: "思考等级" }));
+    await user.click(screen.getByRole("option", { name: "high" }));
+
+    expect(screen.getAllByText("工作区读写", { exact: true }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("high", { exact: true }).length).toBeGreaterThan(0);
+    expect(mocks.patchRuntimeConfig).not.toHaveBeenCalled();
+  });
+
+  it("patches configuration when the canonical leaf is running", async () => {
+    const initial: Conversation = {
+      ...baseConversation(),
+      sessionId: "session-config",
+      lastNodeId: "node-running",
+      runtimeNodes: [runtimeLeaf("running")],
+    };
+    render(<Harness
+      initial={initial}
+      running
+      providerConfig={{
+        id: "provider-config",
+        is_active: true,
+        provider_name: "configured-provider",
+        protocol: "responses",
+        base_url: "https://example.test/v1",
+        model: "configured-model",
+        max_tokens: 16000,
+        context_size: 128000,
+        tokenizer_model: "configured-model",
+        api_key_configured: true,
+      }}
+    />);
+
+    await waitFor(() => expect(mocks.patchRuntimeConfig).toHaveBeenCalledWith(
+      "session-config",
+      expect.objectContaining({ node_id: "node-running", provider_name: "configured-provider" }),
+    ));
+  });
+
+  it("renders the assistant as a direct BugTwoTone icon", () => {
+    const initial: Conversation = {
+      ...baseConversation(),
+      messages: [{ id: "assistant-icon", role: "assistant", content: "回答", events: [] }],
+    };
+    const { container } = render(<Harness initial={initial} />);
+
+    expect(screen.getByRole("img", { name: "助手" })).toBeInTheDocument();
+    expect(container.querySelector(".ant-avatar")).toBeNull();
+  });
+
   it("uses the global RAG setting without a composer knowledge-base selector", async () => {
     mocks.streamChat.mockImplementation(
       (_prompt: string, onMessage: (message: StreamMessage) => void) => {
@@ -332,6 +426,27 @@ describe("ChatPage run lifecycle", () => {
         context_length: 128000,
         output_length: 16000,
       }),
+    }));
+  });
+
+  it("reuses the backend fork anchor for the first continuation", async () => {
+    const onRun = vi.fn().mockResolvedValue(undefined);
+    const initial: Conversation = {
+      ...baseConversation(),
+      sessionId: "branch-session",
+      messagesLoaded: true,
+      forkAnchorNodeId: "ancestor-node",
+      forkAnchorSessionId: "ancestor-session",
+    };
+    const user = userEvent.setup();
+    render(<Harness initial={initial} onRun={onRun} />);
+
+    await user.type(screen.getByPlaceholderText("输入任务，按 Enter 发送"), "分支续聊");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
+      sourceNodeId: "ancestor-node",
+      sourceNodeSessionId: "ancestor-session",
     }));
   });
 
@@ -408,7 +523,7 @@ describe("ChatPage run lifecycle", () => {
     await user.click(screen.getByText("点击我编辑"));
     expect(screen.getByRole("textbox", { name: "编辑用户消息" })).toHaveValue("点击我编辑");
   });
-  it("keeps reasoning before the circular send button", () => {
+  it("keeps reasoning before the icon-only send button", () => {
     const { container } = render(<Harness />);
     const box = container.querySelector(".composer-box");
     expect(box).not.toBeNull();
@@ -416,7 +531,9 @@ describe("ChatPage run lifecycle", () => {
       .map((input) => input.getAttribute("aria-label"));
     expect(labels).toEqual(["运行模式", "权限模式", "思考等级"]);
     const send = screen.getByRole("button", { name: "发送" });
-    expect(send).toHaveClass("ant-btn-circle", "send-btn");
+    expect(send).toHaveClass("send-btn");
+    expect(send).not.toHaveClass("ant-btn");
+    expect(send.querySelector(".anticon-arrow-up")).toBeInTheDocument();
     expect(send.previousElementSibling).toHaveClass("composer-toolbar");
   });
 

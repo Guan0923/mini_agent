@@ -19,6 +19,11 @@ export interface StreamOptions {
   ragMode?: RagMode;
 }
 
+export interface BatchChatMessage {
+  content: string;
+  references?: FileReference[];
+}
+
 async function streamEndpoint(
   url: string,
   body: Record<string, unknown>,
@@ -151,6 +156,39 @@ export async function streamResume(
       ...(mode ? { mode } : {}),
       ...(mode ? { running_mode: mode } : {}),
       ...(ragMode !== "off" ? { rag_mode: ragMode } : {}),
+    },
+    onMessage,
+    signal,
+  );
+}
+
+export async function streamChatBatch(
+  messages: BatchChatMessage[],
+  onMessage: (message: StreamMessage) => void,
+  signal: AbortSignal,
+  options: StreamOptions & { sessionId: string },
+): Promise<"completed" | "aborted"> {
+  const normalized = options;
+  return streamEndpoint(
+    "/api/chat/batch",
+    {
+      session_id: normalized.sessionId,
+      messages: messages.map((message) => ({
+        content: message.content,
+        references: message.references,
+      })),
+      source_node_id: normalized.sourceNodeId,
+      source_node_session_id: normalized.sourceNodeSessionId,
+      ...(normalized.branch ? { branch: true } : {}),
+      mode: normalized.mode ?? "agent",
+      ...(normalized.mode ? { running_mode: normalized.mode } : {}),
+      permission_mode: normalized.permissionMode,
+      ...(normalized.fullAccessAcknowledged ? { full_access_acknowledged: true } : {}),
+      reasoning_effort: normalized.reasoningEffort,
+      provider_name: normalized.providerName,
+      model: normalized.model,
+      interactive: normalized.permissionMode != null,
+      ...(normalized.ragMode && normalized.ragMode !== "off" ? { rag_mode: normalized.ragMode } : {}),
     },
     onMessage,
     signal,

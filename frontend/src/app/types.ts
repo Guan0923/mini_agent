@@ -1,4 +1,5 @@
 import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, RuntimeConfigModel } from "../types";
+import type { RagMode } from "../api/chat";
 
 export interface ChatRunRequest {
   conversationId: string;
@@ -14,6 +15,8 @@ export interface ChatRunRequest {
   sourceNodeSessionId?: string;
   branch?: boolean;
   references?: FileReference[];
+  batchMessages?: Array<{ content: string; references?: FileReference[] }>;
+  ragMode?: RagMode;
 }
 
 export interface ActiveRun {
@@ -23,4 +26,10 @@ export interface ActiveRun {
   stopRequested?: boolean;
   cancelIssued?: boolean;
   cancelTimer?: ReturnType<typeof setTimeout>;
+}
+
+export interface QueuedMessage {
+  id: string;
+  content: string;
+  references?: import("../types").FileReference[];
 }

@@ -71,10 +71,7 @@ export interface TodoItem {
   status: TodoStatus;
 }
 
-// ``failed`` is accepted only at the browser boundary for stale cached
-// payloads; newly persisted/runtime frames are restricted to the three-state
-// protocol (running, success, abort).
-export type RuntimeNodeStatus = "running" | "success" | "abort" | "failed";
+export type RuntimeNodeStatus = "running" | "success" | "cancel" | "abort";
 export type RuntimeNodeDataType = "message" | "compaction" | "root";
 export type ThinkingMode = "enable" | "disable";
 export interface RuntimeNodeModel {
@@ -169,6 +166,9 @@ export interface Conversation {
   deletedAt?: string;
   messagesLoaded?: boolean;
   lastNodeId?: string;
+  /** Anchor returned by fork for the first continuation on the new branch. */
+  forkAnchorNodeId?: string;
+  forkAnchorSessionId?: string;
   runtimeNodes?: RuntimeStateNode[];
   projectId?: string;
   localOnly?: boolean;

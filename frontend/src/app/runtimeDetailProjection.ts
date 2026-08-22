@@ -43,6 +43,7 @@ export interface ProjectedNodeDetails {
   runId?: string;
   error?: string;
   references?: FileReference[];
+  status?: RuntimeStateNode["status"];
 }
 
 function projectedReferences(message: Record<string, unknown>): FileReference[] | undefined {
@@ -77,10 +78,9 @@ function terminalNodeError(
   terminal = true,
 ): string | undefined {
   if (!terminal) return undefined;
-  if (node.status !== "failed" && node.status !== "abort") return undefined;
+  if (node.status !== "abort") return undefined;
   const embedded = message ? terminalError(message) : undefined;
   if (embedded) return embedded;
-  if (node.status === "failed") return "An unknown error caused the system to encounter an exception.";
   if (node.status === "abort") return "The run was aborted for an unknown reason.";
   return undefined;
 }
@@ -149,6 +149,7 @@ export function projectRuntimeNode(node: RuntimeStateNode, terminal = true): Pro
     runId: typeof message.run_id === "string" ? message.run_id : undefined,
     error: terminalNodeError(node, message, terminal && !containsRecoverableToolFailure),
     references: role === "user" ? projectedReferences(message) : undefined,
+    status: node.status,
   };
 }
 
@@ -173,6 +174,8 @@ function projectMessageNodes(
     content: hasAssistantProjection ? projections.map((item) => item.content).join("") : message.content,
     events: hasAssistantProjection ? projectedEvents : message.events,
     runId: [...projections].reverse().find((item) => item.runId)?.runId ?? message.runId,
+    status: projections[projections.length - 1]?.status,
+    running: projections[projections.length - 1]?.status === "running",
     ...(projectedError ? { error: projectedError } : {}),
   };
 }
@@ -190,30 +193,36 @@ export function integrateRuntimeNodeFrame(conversation: Conversation, frame: Run
   const key = nodeKey(frame.node);
 
   if (projection?.role === "user") {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index].role !== "user") continue;
-      messages[index] = {
-        ...messages[index],
-        nodeId: frame.node.id,
-        nodeSessionId: frame.node.session_id,
-        sourceNodeId: frame.node.parent_id || undefined,
-        references: projection.references,
-      };
-      break;
-    }
+    const existingIndex = messages.findIndex((message) => message.nodeId === frame.node.id && message.nodeSessionId === frame.node.session_id);
+    const optimisticIndex = messages.findIndex((message) => message.role === "user" && !message.nodeId);
+    const index = existingIndex >= 0 ? existingIndex : optimisticIndex;
+    const projected = {
+      id: index >= 0 ? messages[index].id : `${frame.node.session_id}:${frame.node.id}`,
+      role: "user" as const,
+      content: projection.content,
+      events: index >= 0 ? messages[index].events : [],
+      nodeId: frame.node.id,
+      nodeSessionId: frame.node.session_id,
+      sourceNodeId: frame.node.parent_id || undefined,
+      references: projection.references,
+    };
+    if (index >= 0) messages[index] = { ...messages[index], ...projected };
+    else messages.push(projected);
   } else if (projection?.role === "assistant" || projection?.role === "tool_result") {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index].role !== "assistant") continue;
-      const runtimeNodeIds = messages[index].runtimeNodeIds?.includes(key)
-        ? messages[index].runtimeNodeIds!
-        : [...(messages[index].runtimeNodeIds ?? []), key];
-      messages[index] = projectMessageNodes(
-        { ...messages[index], runtimeNodeIds, nodeSessionId: frame.node.session_id, sourceNodeId: frame.node.id },
-        next,
-        frame.type === "node.delete" ? undefined : key,
-      );
-      break;
-    }
+    const existingIndex = messages.findIndex((message) => message.role === "assistant" && message.runtimeNodeIds?.includes(key));
+    const optimisticIndex = messages.findIndex((message) => message.role === "assistant" && !message.runtimeNodeIds && message.running);
+    const index = existingIndex >= 0 ? existingIndex : optimisticIndex;
+    const base = index >= 0
+      ? messages[index]
+      : { id: `${frame.node.session_id}:${frame.node.id}:assistant`, role: "assistant" as const, content: "", events: [] };
+    const runtimeNodeIds = base.runtimeNodeIds?.includes(key) ? base.runtimeNodeIds : [...(base.runtimeNodeIds ?? []), key];
+    const projected = projectMessageNodes(
+      { ...base, runtimeNodeIds, nodeSessionId: frame.node.session_id, sourceNodeId: frame.node.id },
+      next,
+      frame.type === "node.delete" ? undefined : key,
+    );
+    if (index >= 0) messages[index] = projected;
+    else messages.push(projected);
   }
 
   return {
@@ -221,6 +230,8 @@ export function integrateRuntimeNodeFrame(conversation: Conversation, frame: Run
     messages,
     runtimeNodes: [...next.values()],
     lastNodeId: frame.node.id,
+    forkAnchorNodeId: undefined,
+    forkAnchorSessionId: undefined,
   };
 }
 

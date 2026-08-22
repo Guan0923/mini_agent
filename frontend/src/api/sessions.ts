@@ -14,6 +14,8 @@ export interface SessionInfo {
   archived_at?: string | null;
   deleted_at?: string | null;
   last_node_id?: string | null;
+  fork_anchor_node_id?: string | null;
+  fork_anchor_session_id?: string | null;
   local_only?: boolean;
   title_is_custom?: boolean;
   project_id?: string | null;

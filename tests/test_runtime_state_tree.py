@@ -84,6 +84,12 @@ def test_runtime_model_and_usage_validation_and_removed_data_types() -> None:
         RuntimeState.create(session_id="s", data={"type": "model_change", "model": "old"})
 
 
+@pytest.mark.parametrize("status", ["failed", "completed", "cancelled"])
+def test_removed_runtime_node_statuses_are_rejected(status: str) -> None:
+    with pytest.raises(RuntimeStateValidationError, match="Unsupported node status"):
+        RuntimeState.create(session_id="s", status=status)  # type: ignore[arg-type]
+
+
 def test_session_root_is_deterministic_and_uses_neutral_runtime_defaults() -> None:
     first = create_root_node("session_root")
     second = create_root_node("session_root")
@@ -599,12 +605,30 @@ def test_failed_and_abort_lifecycle() -> None:
     writer = NodeWriter(store)
     failed = writer.create(session_id="s")
     writer.fail("s", failed.id)
-    assert store.get_node("s", failed.id).status == "failed"
+    assert store.get_node("s", failed.id).status == "abort"
     paused = writer.create(session_id="s", parent=failed)
     writer.abort("s", paused.id)
     assert store.get_node("s", paused.id).status == "abort"
     resumed = RuntimeStateTree([failed, paused]).resume(paused, data=message_payload("user", "continue"))
     assert resumed.parent_id == paused.id
+
+
+def test_cancel_lifecycle_preserves_cancel_node_when_resumed() -> None:
+    store = InMemoryNodeStore()
+    writer = NodeWriter(store)
+    node = writer.create(session_id="s", data=message_payload("assistant", "partial answer"))
+    cancelled = writer.delete("s", node.id, status="cancel")
+
+    assert cancelled.status == "cancel"
+    assert cancelled.data["message"]["content"][0]["text"] == "partial answer"
+
+    resumed = RuntimeStateTree(store.all_nodes("s")).resume(
+        cancelled,
+        data=message_payload("assistant", []),
+    )
+    assert resumed.status == "running"
+    assert resumed.parent_id == cancelled.id
+    assert store.get_node("s", cancelled.id).status == "cancel"
 
 
 def test_failed_node_records_generic_reason_for_ui_and_next_model_turn() -> None:
@@ -615,7 +639,7 @@ def test_failed_node_records_generic_reason_for_ui_and_next_model_turn() -> None
     failed = writer.fail("s", node.id)
 
     error = failed.data["message"]["error"]
-    assert failed.status == "failed"
+    assert failed.status == "abort"
     assert error == {"category": "unknown", "message": FAILED_TERMINAL_MESSAGE}
     assert project_node_transcript([failed])[0]["error"] == FAILED_TERMINAL_MESSAGE
     assert to_chat_completions([failed]) == [{"role": "assistant", "content": FAILED_TERMINAL_MESSAGE}]
@@ -686,11 +710,6 @@ def test_provider_adapters_do_not_duplicate_an_existing_terminal_reason() -> Non
             "network error",
         ),
         ([RuntimeEvent("error", "planner failed")], "agent", "agent encountered an internal error"),
-        (
-            [RuntimeEvent("cancelled", "Run cancelled by user", {"stop_reason": "user_cancelled"})],
-            "user",
-            "user's request",
-        ),
     ],
 )
 def test_bridge_classifies_abort_reason_for_projection_and_model_context(
@@ -711,6 +730,19 @@ def test_bridge_classifies_abort_reason_for_projection_and_model_context(
     transcript = project_node_transcript(store.all_nodes("s"))
     assert expected in transcript[-1]["error"]
     assert expected in str(to_chat_completions([terminal])[-1]["content"])
+
+
+def test_bridge_maps_user_cancellation_to_cancel_without_error_payload() -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(store, session_id="s", prompt="hello", emit=lambda _frame: None)
+    bridge.start()
+    bridge.handle(RuntimeEvent("response_delta", "partial"))
+    bridge.handle(RuntimeEvent("cancelled", "Run cancelled by user", {"stop_reason": "user_cancelled"}))
+
+    terminal = bridge.last_node
+    assert terminal is not None and terminal.status == "cancel"
+    assert terminal.data["message"]["content"][0]["text"] == "partial"
+    assert "error" not in terminal.data["message"]
 
 
 @pytest.mark.parametrize(
@@ -741,7 +773,8 @@ def test_unknown_uncaught_exception_keeps_empty_failed_placeholder() -> None:
 
     persisted = store.get_node("s", dynamic.id)
     assert terminal is not None
-    assert persisted is not None and persisted.status == "failed" and persisted.data == {}
+    assert persisted is not None and persisted.status == "abort"
+    assert persisted.data["type"] == "message"
     assert not any(frame.type == "node.delete" and frame.node.id == dynamic.id for frame in frames)
 
 
@@ -855,7 +888,7 @@ def test_sqlite_node_atomic_finalization_and_snapshot(tmp_path: Path) -> None:
     session = store.create_session()
     writer = NodeWriter(store)
     node = writer.create(session_id=session.session_id, data=message_payload("user", "hello"))
-    assert store.get_node(session.session_id, node.id).status == "failed"
+    assert store.get_node(session.session_id, node.id).status == "running"
     writer.update(node.session_id, node.id, data=message_payload("user", "hello"))
     writer.delete(node.session_id, node.id)
     snapshot = store.export_runtime_node_snapshot(session.session_id)
@@ -1118,6 +1151,33 @@ def test_sqlite_fork_loads_cross_session_ancestors(tmp_path: Path) -> None:
         (target_root.session_id, target_root.id),
         (fork_node.session_id, fork_node.id),
     ]
+
+
+def test_bridge_continues_from_non_leaf_cross_session_source() -> None:
+    store = InMemoryNodeStore()
+    writer = NodeWriter(store)
+    source = writer.create(session_id="source", data=message_payload("assistant", "fork anchor"))
+    source = writer.delete(source.session_id, source.id)
+    existing_child = writer.create(
+        session_id="source",
+        parent=source,
+        data=message_payload("user", "existing branch"),
+    )
+    writer.delete(existing_child.session_id, existing_child.id)
+
+    bridge = RuntimeEventNodeBridge(
+        store,
+        session_id="fork",
+        prompt="continue from fork",
+        source_node_id=source.id,
+        source_node_session_id=source.session_id,
+        emit=lambda _frame: None,
+    )
+    user_node = bridge.start()
+
+    assert user_node.session_id == "fork"
+    assert (user_node.parent_session_id, user_node.parent_id) == source.key
+    assert {child.session_id for child in store.list_children(*source.key)} == {"source", "fork"}
 
 
 def test_legacy_run_fork_normalizes_running_and_abort_leaf_anchors(tmp_path: Path) -> None:

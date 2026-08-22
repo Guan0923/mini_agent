@@ -69,7 +69,8 @@ class ContextManager:
     ) -> ContextCompactionResult:
         """Manually summarize all persisted, already-finished conversation history."""
 
-        original = list(runtime.state.messages)
+        canonical_nodes = [node for node in runtime.model_nodes() if node.data.get("type") != "root"]
+        original = runtime.model_messages() if canonical_nodes else list(runtime.state.messages)
         if not original:
             return ContextCompactionResult(False, 0, 0)
         estimated_before = self._estimate_input_tokens(original, [], {})
@@ -82,7 +83,8 @@ class ContextManager:
             estimated_before=estimated_before,
             estimate_candidate=lambda candidate: self._estimate_input_tokens(candidate, [], {}),
         )
-        self._replace_history(runtime, compressed, 1)
+        if not canonical_nodes:
+            self._replace_history(runtime, compressed, 1)
         self._record(
             runtime,
             "context_compaction_completed",
@@ -95,6 +97,7 @@ class ContextManager:
                 "estimated_tokens_before": estimated_before,
                 "estimated_tokens_after": estimated_after,
                 "target_tokens": self.target_tokens,
+                "summary": summary,
             },
         )
         runtime.save()
@@ -152,6 +155,13 @@ class ContextManager:
         # would reintroduce a second source of truth.
         if history is None:
             self._replace_history(runtime, compressed, 1)
+        else:
+            # Canonical callers keep the tree authoritative, but the runner
+            # still uses this boundary to distinguish completed history from
+            # the active turn on the next request.  Rebase it onto the
+            # compacted compatibility projection instead of the pre-summary
+            # node count.
+            runtime.run.turn_start_index = max(0, len(compressed) - len(source_history[boundary:]))
         self._record(
             runtime,
             "context_compaction_completed",
@@ -164,6 +174,7 @@ class ContextManager:
                 "estimated_tokens_before": estimated_before,
                 "estimated_tokens_after": estimated_after,
                 "target_tokens": self.target_tokens,
+                "summary": summary,
             },
         )
         runtime.save()

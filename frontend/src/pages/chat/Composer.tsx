@@ -1,5 +1,5 @@
 import { Button, Drawer, Progress, Select, Space, Tooltip } from "antd";
-import { ArrowUpOutlined, PaperClipOutlined, SettingOutlined, StopOutlined } from "@ant-design/icons";
+import { ArrowUpOutlined, PauseCircleTwoTone, PaperClipOutlined, PlayCircleTwoTone, SettingOutlined } from "@ant-design/icons";
 import { useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import type { ChatMode, PermissionMode, ReasoningEffort, TodoItem } from "../../types";
 import IconAction from "../../components/IconAction";
@@ -7,13 +7,18 @@ import type { FileCandidate } from "../../commands/fileCompletion";
 import { sessionFileContentUrl } from "../../api/files";
 import { SessionTodoPanel } from "./todoPanel";
 import FileMentionEditor, { type FileMentionChange, type FileMentionEditorHandle } from "./FileMentionEditor";
+import QueuedMessageList from "./QueuedMessageList";
+import type { QueuedMessage } from "../../app/types";
 
 const REASONING_LABELS: Record<ReasoningEffort, string> = { low: "低", medium: "中", high: "高", xhigh: "超高", max: "最大" };
 export type SettingsSelectKey = "mode" | "permission" | "reasoning";
+export type ComposerActionMode = "send" | "pause" | "resume";
 
 export interface ComposerProps {
   input: string;
   busy: boolean;
+  actionMode?: ComposerActionMode;
+  submitDisabled?: boolean;
   startMode?: boolean;
   isMobile: boolean;
   filteredCommands: Array<{ name: string; label: string; description: string }>;
@@ -66,11 +71,16 @@ export interface ComposerProps {
   onRetryUpload: (index: number) => void;
   onUploadPreview: (index: number) => void;
   uploadsUploading?: boolean;
+  queuedMessages?: QueuedMessage[];
+  onQueueSend?: (item: QueuedMessage) => void;
+  onQueueEdit?: (item: QueuedMessage) => void;
+  onQueueDelete?: (item: QueuedMessage) => void;
 }
 
 export default function Composer(props: ComposerProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const actionMode = props.actionMode ?? (props.busy ? "pause" : "send");
 
   function openFilePicker() {
     if (props.disabled || props.uploadsDisabled) return;
@@ -139,6 +149,12 @@ export default function Composer(props: ComposerProps) {
       )}
       {props.commandMenuVisible && <div className="command-menu">{props.filteredCommands.map((command, index) => <button key={command.name} className={`command-item${index === props.activeCommandIndex ? " selected" : ""}`} onMouseEnter={() => props.onActiveCommandChange(index)} onClick={() => props.onComplete(index)}><span className="command-name">{command.name}</span><span className="command-desc">{command.label} · {command.description}</span></button>)}</div>}
       <div className="composer-box-anchor">
+        <QueuedMessageList
+          items={props.queuedMessages ?? []}
+          onSend={(item) => props.onQueueSend?.(item)}
+          onEdit={(item) => props.onQueueEdit?.(item)}
+          onDelete={(item) => props.onQueueDelete?.(item)}
+        />
         {props.pendingUploads.length > 0 ? (
           <div className="composer-uploads composer-reveal-item" data-reveal-index="1" aria-label="上传进度">
             {props.pendingUploads.map((upload, index) => (
@@ -174,7 +190,40 @@ export default function Composer(props: ComposerProps) {
             <IconAction className="file-upload-trigger" label="上传文件" icon={<PaperClipOutlined />} disabled={props.disabled || props.uploadsDisabled} onClick={openFilePicker} />
             {props.isMobile ? <IconAction className="run-settings-trigger" label="运行设置" icon={<SettingOutlined />} disabled={props.disabled} onClick={props.onOpenSettings} /> : settingsControls}
           </div>
-          {props.busy ? <Tooltip title="停止"><Button className="send-btn stop composer-reveal-item" data-reveal-index="5" type="default" danger shape="circle" icon={<StopOutlined />} aria-label="停止" onClick={props.onStop} /> </Tooltip> : <Tooltip title={props.disabledReason || (props.startMode ? "开始" : "发送")}><Button className="send-btn composer-reveal-item" data-reveal-index="5" type="primary" shape="circle" icon={<ArrowUpOutlined />} aria-label={props.startMode ? "开始" : "发送"} onClick={props.onSend} disabled={props.disabled || props.uploadsUploading || (!props.startMode && !props.input.trim() && props.pendingUploads.every((upload) => upload.status !== "done"))} /></Tooltip>}
+          {actionMode === "pause" ? (
+            <button
+              className="send-btn stop composer-reveal-item"
+              data-reveal-index="5"
+              type="button"
+              aria-label="暂停"
+              onClick={props.onStop}
+              disabled={props.submitDisabled}
+            >
+              <PauseCircleTwoTone aria-hidden="true" />
+            </button>
+          ) : actionMode === "resume" ? (
+            <button
+              className="send-btn composer-reveal-item"
+              data-reveal-index="5"
+              type="button"
+              aria-label="继续"
+              onClick={props.onSend}
+              disabled={props.submitDisabled}
+            >
+              <PlayCircleTwoTone aria-hidden="true" />
+            </button>
+          ) : (
+            <button
+              className="send-btn composer-reveal-item"
+              data-reveal-index="5"
+              type="button"
+              aria-label={props.startMode ? "开始" : "发送"}
+              onClick={props.onSend}
+              disabled={props.submitDisabled ?? (props.disabled || props.uploadsUploading || (!props.startMode && !props.input.trim() && props.pendingUploads.every((upload) => upload.status !== "done")))}
+            >
+              <ArrowUpOutlined aria-hidden="true" />
+            </button>
+          )}
         </div>
       </div>
       <Drawer className="run-settings-drawer" title="运行设置" placement="bottom" open={props.settingsOpen} onClose={props.onCloseSettings}>{settingsControls}</Drawer>

@@ -5,11 +5,12 @@ import type { Conversation, RuntimeStateNode, StreamMessage } from "../types";
 const mocks = vi.hoisted(() => ({
   streamChat: vi.fn(),
   streamResume: vi.fn(),
+  cancelJob: vi.fn(),
 }));
 
 vi.mock("../api", () => mocks);
 
-function node(content: string, status: RuntimeStateNode["status"] = "failed"): RuntimeStateNode {
+function node(content: string, status: RuntimeStateNode["status"] = "abort"): RuntimeStateNode {
   return {
     session_id: "session-1",
     parent_session_id: "session-1",
@@ -66,6 +67,41 @@ afterEach(() => {
 });
 
 describe("RuntimeState streaming projection", () => {
+  it("enters the stopped state immediately and cancels a late job exactly once", async () => {
+    const view = harness();
+    let emit: ((message: StreamMessage) => void) | undefined;
+    mocks.cancelJob.mockResolvedValue(undefined);
+    mocks.streamChat.mockImplementation(async (_prompt: string, onMessage: (message: StreamMessage) => void, signal: AbortSignal) => {
+      emit = onMessage;
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      return "aborted" as const;
+    });
+
+    const running = view.controller.runConversation({
+      conversationId: "conversation-1",
+      sessionId: "session-1",
+      prompt: "任务",
+      resume: false,
+      mode: "agent",
+      permissionMode: "approval_for_me",
+      reasoningEffort: "medium",
+    });
+    await Promise.resolve();
+    view.controller.stopConversation("conversation-1");
+
+    expect(view.conversation.messages[1]).toMatchObject({
+      running: false,
+      status: "cancel",
+    });
+    emit?.({ type: "event", kind: "response_delta", message: "迟到内容" });
+    expect(view.conversation.messages[1].content).toBe("");
+    emit?.({ type: "job", job_id: "job-late" });
+    await running;
+
+    expect(mocks.cancelJob).toHaveBeenCalledTimes(1);
+    expect(view.conversation.messages[1]).toMatchObject({ running: false, status: "cancel" });
+  });
+
   it("keeps a user cancellation reason when the stream is aborted", async () => {
     const view = harness();
     mocks.streamChat.mockResolvedValue("aborted");
@@ -81,8 +117,8 @@ describe("RuntimeState streaming projection", () => {
     });
 
     expect(view.conversation.messages[1]).toMatchObject({
-      status: "已停止",
-      error: "The run was aborted at the user's request.",
+      status: "cancel",
+      error: undefined,
       running: false,
     });
   });

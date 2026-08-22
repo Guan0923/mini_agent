@@ -27,7 +27,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 APP_VERSION = "0.3.0"
 DEFAULT_COMPACTION_RETENTION = 8
 
-NodeStatus: TypeAlias = Literal["running", "success", "abort"]
+NodeStatus: TypeAlias = Literal["running", "success", "cancel", "abort"]
 TerminalErrorCategory: TypeAlias = Literal["unknown", "tool", "agent", "user", "network"]
 NodeDataType: TypeAlias = Literal["message", "compaction", "root"]
 MessageRole: TypeAlias = Literal["user", "assistant", "tool_result", "bash"]
@@ -48,7 +48,7 @@ ContentBlockType: TypeAlias = Literal[
     "skill_snapshot",
 ]
 
-NODE_STATUSES = frozenset({"running", "success", "abort"})
+NODE_STATUSES = frozenset({"running", "success", "cancel", "abort"})
 NODE_DATA_TYPES = frozenset({"message", "compaction", "root"})
 REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 THINKING_MODES = frozenset({"enable", "disable"})
@@ -528,7 +528,7 @@ class RuntimeState:
 
     @property
     def is_terminal(self) -> bool:
-        return self.status in {"success", "abort"}
+        return self.status in {"success", "cancel", "abort"}
 
     @property
     def data_type(self) -> str | None:
@@ -818,6 +818,8 @@ class RuntimeNodeStore(Protocol):
 
     def finalize_node(self, node: RuntimeState) -> None: ...
 
+    def create_finalized_nodes(self, nodes: Sequence[RuntimeState]) -> None: ...
+
 
 class InMemoryNodeStore:
     """Small reference store used by tests, embedded runtimes and adapters."""
@@ -853,6 +855,22 @@ class InMemoryNodeStore:
                         raise RuntimeStateValidationError("A running node cannot have a running child.")
             self._nodes[node.key] = node.clone()
 
+    def create_finalized_nodes(self, nodes: Sequence[RuntimeState]) -> None:
+        with self._lock:
+            pending = [node.clone() for node in nodes]
+            if pending and any(node.session_id != pending[0].session_id for node in pending):
+                raise RuntimeStateValidationError("A finalized node batch must belong to one session.")
+            staged = dict(self._nodes)
+            for node in pending:
+                if node.key in staged:
+                    raise RuntimeStateValidationError(f"Node already exists: {node.session_id}/{node.id}.")
+                if node.parent_id and (node.parent_session_id, node.parent_id) not in staged:
+                    raise RuntimeStateValidationError("A finalized node parent must be present in the store.")
+                if node.status not in {"success", "cancel", "abort"}:
+                    raise RuntimeStateValidationError("A finalized batch node must be terminal.")
+                staged[node.key] = node.clone()
+            self._nodes = staged
+
     def get_node(self, session_id: str, node_id: str) -> RuntimeState | None:
         with self._lock:
             node = self._nodes.get((session_id, node_id))
@@ -876,8 +894,8 @@ class InMemoryNodeStore:
                 raise KeyError(f"Unknown node: {node.session_id}/{node.id}.")
             if existing.status != "running":
                 raise RuntimeStateValidationError("Only running runtime nodes can be finalized.")
-            if node.status not in {"success", "abort"}:
-                raise RuntimeStateValidationError("A runtime node can only be finalized as success or abort.")
+            if node.status not in {"success", "cancel", "abort"}:
+                raise RuntimeStateValidationError("A runtime node can only be finalized as success, cancel, or abort.")
             if self.list_children(node.session_id, node.id):
                 raise RuntimeStateValidationError("Only a leaf node can be finalized.")
             self._nodes[node.key] = node.clone()
@@ -1106,16 +1124,19 @@ class RuntimeStateTree:
         data: Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> RuntimeState:
-        """Create a continuation from a running recovery or aborted leaf."""
+        """Create a continuation from a running, cancelled, or aborted leaf."""
 
         source_node = source if isinstance(source, RuntimeState) else self.get(*source)
-        if source_node.status not in {"running", "abort"}:
-            raise RuntimeStateValidationError("Only running or abort nodes can be resumed.")
+        if source_node.status not in {"running", "cancel", "abort"}:
+            raise RuntimeStateValidationError("Only running, cancel, or abort nodes can be resumed.")
         if not self.is_leaf(source_node.session_id, source_node.id):
             raise RuntimeStateValidationError("Only a leaf node can be resumed.")
         if source_node.status == "running":
             return source_node.clone()
-        parent = self.try_get(source_node.parent_session_id, source_node.parent_id) if source_node.parent_id else None
+        if source_node.status == "cancel":
+            parent = source_node
+        else:
+            parent = self.try_get(source_node.parent_session_id, source_node.parent_id) if source_node.parent_id else None
         return self.create_child(session_id=source_node.session_id, parent=parent, data=data, status="running", **kwargs)
 
     def compact(
@@ -1133,7 +1154,7 @@ class RuntimeStateTree:
         if not self.is_leaf(current.session_id, current.id):
             raise RuntimeStateValidationError("Compaction must start from a leaf node.")
         # ``source`` may be the in-memory dynamic clone while the tree holds
-        # only its failed placeholder.  Build the ancestry from durable
+        # only its running placeholder.  Build the ancestry from durable
         # parent links and replace that identity before creating the summary;
         # calling ``ancestors`` first would fail because the dynamic node is
         # intentionally not inserted into the durable tree.
@@ -1194,12 +1215,12 @@ class RuntimeStateTree:
         """
 
         # ``source`` is normally the dynamic sidecar created by ``NodeWriter``.
-        # The durable tree still contains a failed, empty placeholder with the
+        # The durable tree still contains a running, empty placeholder with the
         # same identity until the run commits.  Build the ancestry from the
         # durable tree, then replace that one identity with the supplied
         # dynamic copy before doing any compaction/window processing.
         current = source if isinstance(source, RuntimeState) else self.get(*source)
-        # The dynamic leaf is authoritative during a run.  A failed
+        # The dynamic leaf is authoritative during a run.  A running
         # persistence placeholder with the same identity is never sent to a
         # provider; callers may pass the dynamic copy directly.
         if isinstance(source, RuntimeState) and self.try_get(source.session_id, source.id) is None:
@@ -1234,7 +1255,7 @@ class RuntimeStateTree:
         for item in path:
             unique[item.key] = item
         path = list(unique.values())
-        # An unresolved failed placeholder has no message to send.  It is a
+        # An unresolved running placeholder has no message to send.  It is a
         # recovery marker only; never expose its empty ``data`` object to a
         # provider.  Standalone adapter calls retain their historical error
         # rendering, while this model-context boundary drops the marker.
@@ -1286,8 +1307,8 @@ class NodeFrame:
 class NodeWriter:
     """Create dynamic nodes and publish complete replacement updates.
 
-    The store receives only the failed placeholder and the final delete.  An
-    interrupted process therefore leaves a recoverable failed node, while
+    The store receives only the running placeholder and the final delete.  An
+    interrupted process therefore leaves a recoverable running node, while
     high-volume streaming updates remain ephemeral.
     """
 
@@ -1511,13 +1532,13 @@ class NodeWriter:
 
     def delete(self, session_id: str, node_id: str, *, status: NodeStatus = "success") -> RuntimeState:
         with self._lock:
-            if status not in {"success", "abort"}:
-                raise RuntimeStateValidationError("A node can only be finalized as success or abort.")
+            if status not in {"success", "cancel", "abort"}:
+                raise RuntimeStateValidationError("A node can only be finalized as success, cancel, or abort.")
             node = self.current(session_id, node_id)
             if node.data_type == "root":
                 raise RuntimeStateValidationError("Root nodes are immutable.")
-            if status == "success" and not node.data:
-                raise RuntimeStateValidationError("A successful runtime node must contain typed data.")
+            if status in {"success", "cancel"} and not node.data:
+                raise RuntimeStateValidationError("A successful or cancelled runtime node must contain typed data.")
             node.status = status
             # finalize_node performs the leaf check and replaces the static
             # placeholder in one store transaction.
@@ -1582,10 +1603,10 @@ class NodeWriter:
         data: Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> RuntimeState:
-        """Start a new dynamic child from a failed/aborted source."""
+        """Start a new dynamic child from a cancelled or aborted source."""
 
-        if source.status not in {"running", "abort"}:
-            raise RuntimeStateValidationError("Only running or abort nodes can be resumed.")
+        if source.status not in {"running", "cancel", "abort"}:
+            raise RuntimeStateValidationError("Only running, cancel, or abort nodes can be resumed.")
         if self.store.list_children(source.session_id, source.id):
             raise RuntimeStateValidationError("Only a leaf node can be resumed.")
         if source.status == "running":
@@ -1598,7 +1619,10 @@ class NodeWriter:
                 self._dynamic[dynamic.key] = dynamic
                 self.emit(NodeFrame("node.update", dynamic.clone()))
                 return dynamic.clone()
-        parent = self.store.get_node(source.parent_session_id, source.parent_id) if source.parent_id else None
+        if source.status == "cancel":
+            parent = source
+        else:
+            parent = self.store.get_node(source.parent_session_id, source.parent_id) if source.parent_id else None
         return self.create(parent=parent, session_id=source.session_id, data=data, **kwargs)
 
     def active_nodes(self) -> list[RuntimeState]:
@@ -1609,7 +1633,7 @@ class NodeWriter:
 def recoverable(node: RuntimeState) -> bool:
     """Whether a stopped/recovered leaf can be safely resumed."""
 
-    if node.status not in {"running", "abort"}:
+    if node.status not in {"running", "cancel", "abort"}:
         return False
     # Recovery reuses the leaf identity but feeds only its parent path to the
     # model, so an orphaned running node never replays its partial effects.
