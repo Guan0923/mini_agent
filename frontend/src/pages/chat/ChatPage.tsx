@@ -1,18 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { Button, FloatButton, Grid, Input, Modal } from "antd";
-import { VerticalAlignBottomOutlined } from "@ant-design/icons";
+import { LeftOutlined, RightOutlined, VerticalAlignBottomOutlined } from "@ant-design/icons";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
-  compactSession,
-  cancelJob,
+  compactTurn,
   deleteSessionFile,
   listSkills,
+  patchTurnCurrentData,
   patchRuntimeConfig,
   searchSessionFiles,
   sessionFileContentUrl,
-  streamChat,
-  streamChatBatch,
-  streamResume,
   submitDecision,
   uploadSessionFiles,
 } from "../../api";
@@ -27,9 +24,8 @@ import Composer, { type ComposerActionMode, type SettingsSelectKey } from "./Com
 import type { FileMentionChange, FileMentionEditorHandle } from "./FileMentionEditor";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import { latestTodoList } from "./todoPanel";
-import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "../../app/runtimeDetailProjection";
+import { messagesBeforeRewind, projectTurnPath } from "../../app/runtimeDetailProjection";
 import { leafNodes } from "../../app/runtimeNodeReducer";
-import { applyRunSegment } from "../../app/runSegmentReducer";
 import type { QueuedMessage } from "../../app/types";
 import { DEFAULT_RUNTIME_NODE_MODEL, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
 import type {
@@ -44,7 +40,6 @@ import type {
   ReasoningEffort,
   RuntimeNodeModel,
   RuntimeStateNode,
-  StreamMessage,
 } from "../../types";
 
 interface Props {
@@ -73,9 +68,10 @@ interface Props {
 interface RewindResult {
   content: string;
   sessionId: string;
+  threadId?: string;
+  turnId?: string;
   sourceNodeId?: string;
-  sourceNodeSessionId?: string;
-  branch?: boolean;
+  rewindTurnId?: string;
 }
 
 /** One file being uploaded or already stored in the session uploads. */
@@ -95,6 +91,8 @@ interface PendingUpload {
 interface ChatRunRequest {
   conversationId: string;
   sessionId: string;
+  threadId?: string;
+  turnId?: string;
   prompt: string | null;
   resume: boolean;
   mode: ChatMode;
@@ -103,10 +101,9 @@ interface ChatRunRequest {
   providerName?: string;
   model?: RuntimeNodeModel;
   sourceNodeId?: string;
-  sourceNodeSessionId?: string;
-  branch?: boolean;
+  rewindTurnId?: string;
   references?: FileReference[];
-  batchMessages?: Array<{ content: string; references?: FileReference[] }>;
+  queuedTurns?: Array<{ content: string; references?: FileReference[] }>;
   ragMode?: RagMode;
 }
 
@@ -137,12 +134,10 @@ export default function ChatPage({
   onQueuedMessagesChange = () => undefined,
 }: Props) {
   const mode = selectedMode ?? "agent";
-  const enhancedChatOptions = selectedMode !== undefined;
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false && (typeof window === "undefined" || window.innerWidth < 768);
   const [input, setInput] = useState("");
-  const [localBusy, setLocalBusy] = useState(false);
-  const [batchSubmitting, setBatchSubmitting] = useState(false);
+  const [queueSubmitting, setQueueSubmitting] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("read_only");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
   const ragMode: RagMode = ragEnabled ? "tool" : "off";
@@ -166,42 +161,33 @@ export default function ChatPage({
   const fileSearchTimerRef = useRef<number | null>(null);
   const latestFileTriggerRef = useRef<FileTrigger | null>(null);
   const fileMenuDismissedPromptRef = useRef<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const activeStreamRef = useRef<{
-    controller: AbortController;
-    jobId?: string;
-    stopRequested: boolean;
-    cancelIssued: boolean;
-    cancelTimer?: number;
-  } | null>(null);
   const pendingRewindRef = useRef<{
     conversationId: string;
     sessionId: string;
     sourceNodeId?: string;
-    sourceNodeSessionId?: string;
-    branch: boolean;
+    rewindTurnId?: string;
   } | null>(null);
   const editorRef = useRef<FileMentionEditorHandle>(null);
   const editRef = useRef<TextAreaRef>(null);
   const fullAccessConfirmRef = useRef<{ destroy: () => void } | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const discardedUploadUidsRef = useRef(new Set<string>());
-  const batchFlushRef = useRef(false);
-  // IDs captured when a batch request starts.  Items added while that batch
-  // is running belong to the next FIFO batch and must never be removed when
+  const queueFlushRef = useRef(false);
+  // IDs captured when a queue flush starts. Items added while that flush
+  // is running belong to the next FIFO pass and must never be removed when
   // the submitted user frames are acknowledged.
-  const batchInFlightIdsRef = useRef<Set<string> | null>(null);
-  const batchSourceKeyRef = useRef<string | null>(null);
-  const batchExpectedUserCountRef = useRef(0);
-  const batchKnownUserKeysRef = useRef<Set<string>>(new Set());
+  const queueInFlightIdsRef = useRef<Set<string> | null>(null);
+  const queueSourceKeyRef = useRef<string | null>(null);
+  const queueExpectedUserCountRef = useRef(0);
+  const queueKnownUserKeysRef = useRef<Set<string>>(new Set());
   const canonicalRunningRef = useRef(false);
 
   const messages = conversation?.messages ?? [];
-  // A batch has no optimistic assistant message by design.  Keep the
-  // composer in its running interaction mode from the moment the batch
+  // A queue flush has no optimistic assistant message by design. Keep the
+  // composer in its running interaction mode from the moment the flush
   // request is sent until its SSE cleanup, including the tiny interval
-  // between the user frames and the assistant node.create frame.
-  const busy = (runningProp ?? localBusy) || batchSubmitting;
+  // between the optimistic user bubble and the first turn.create frame.
+  const busy = Boolean(runningProp) || queueSubmitting;
   const todo = useMemo(() => latestTodoList(messages), [messages]);
   const filteredCommands = commandSuggestions(input);
   const commandMenuVisible = !busy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
@@ -211,7 +197,13 @@ export default function ChatPage({
   const display = configuredDisplayMode ?? "medium";
 
   const activeRuntimeNode = (() => {
-    const nodes = conversation?.runtimeNodes ?? [];
+    const nodes = (conversation?.runtimeNodes ?? []).filter(
+      (node) => !conversation?.threadId || node.thread_id === conversation.threadId,
+    );
+    if (conversation?.activeTurnId) {
+      const persisted = nodes.find((node) => node.id === conversation.activeTurnId);
+      if (persisted) return persisted;
+    }
     const sessionLeaves = leafNodes(nodes, conversation?.sessionId);
     if (!sessionLeaves.length) return undefined;
     if (conversation?.lastNodeId) {
@@ -223,15 +215,15 @@ export default function ChatPage({
     const sorted = [...sessionLeaves].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
     return sorted[sorted.length - 1];
   })();
-  const recoveryMode = !busy && activeRuntimeNode?.status === "cancel";
+  const recoveryMode = !busy && activeRuntimeNode?.status === "paused";
   const hasDraft = Boolean(input.trim() || references.length > 0 || pendingUploads.some((upload) => upload.status === "done"));
   const actionMode: ComposerActionMode = ((activeRuntimeNode?.status === "running" && !hasDraft) || (!activeRuntimeNode && busy && !hasDraft))
     ? "pause"
     : activeRuntimeNode?.status === "running" || (!activeRuntimeNode && busy)
       ? "send"
-      : activeRuntimeNode?.status === "cancel" && !input.trim() && references.length === 0 && pendingUploads.every((upload) => upload.status !== "done")
+      : activeRuntimeNode?.status === "paused" && !input.trim() && references.length === 0 && pendingUploads.every((upload) => upload.status !== "done")
         ? "resume"
-        : activeRuntimeNode?.status === "cancel"
+        : activeRuntimeNode?.status === "paused"
           ? "send"
           : "send";
   const projectUnavailable = conversation?.projectId !== undefined && conversation.projectAvailable === false;
@@ -240,55 +232,50 @@ export default function ChatPage({
   useEffect(() => {
     const node = activeRuntimeNode;
     const status = node?.status;
-    if (batchFlushRef.current && batchExpectedUserCountRef.current > 0) {
-      const known = batchKnownUserKeysRef.current;
+    if (queueFlushRef.current && queueExpectedUserCountRef.current > 0) {
+      const known = queueKnownUserKeysRef.current;
       const submittedUserCount = (conversation?.runtimeNodes ?? []).filter((candidate) => {
-        const message = candidate.data.type === "message"
-          ? candidate.data.message as { role?: unknown } | undefined
-          : undefined;
-        return message?.role === "user"
+        return candidate.data[candidate.current_data_idx]?.[0]?.role === "user"
           && candidate.status === "success"
           && !known.has(`${candidate.session_id}:${candidate.id}`);
       }).length;
-      if (submittedUserCount >= batchExpectedUserCountRef.current) {
-        const submitted = batchInFlightIdsRef.current;
+      if (submittedUserCount >= queueExpectedUserCountRef.current) {
+        const submitted = queueInFlightIdsRef.current;
         if (submitted && submitted.size > 0) {
           onQueuedMessagesChange(conversation?.id ?? "", (items) => items.filter((item) => !submitted.has(item.id)));
         }
-        batchInFlightIdsRef.current = null;
-        batchExpectedUserCountRef.current = 0;
-        batchKnownUserKeysRef.current = new Set();
-        batchSourceKeyRef.current = null;
+        queueInFlightIdsRef.current = null;
+        queueExpectedUserCountRef.current = 0;
+        queueKnownUserKeysRef.current = new Set();
+        queueSourceKeyRef.current = null;
       }
     }
     if (status === "running") {
       canonicalRunningRef.current = true;
       if (
-        batchFlushRef.current
+        queueFlushRef.current
         && node
-        && node.data.type === "message"
-        && (node.data.message as { role?: unknown } | undefined)?.role === "assistant"
-        && `${node.session_id}:${node.id}` !== batchSourceKeyRef.current
+        && `${node.session_id}:${node.id}` !== queueSourceKeyRef.current
       ) {
-        const submitted = batchInFlightIdsRef.current;
+        const submitted = queueInFlightIdsRef.current;
         if (submitted && submitted.size > 0) {
           onQueuedMessagesChange(conversation?.id ?? "", (items) => items.filter((item) => !submitted.has(item.id)));
-          batchInFlightIdsRef.current = null;
-          batchSourceKeyRef.current = null;
+          queueInFlightIdsRef.current = null;
+          queueSourceKeyRef.current = null;
         }
       }
       return;
     }
     if (
       canonicalRunningRef.current
-      && !batchFlushRef.current
+      && !queueFlushRef.current
       && queuedMessages.length > 0
       && conversation?.id
-      && (status === "success" || status === "cancel" || status === "abort")
+      && (status === "success" || status === "paused" || status === "failed")
     ) {
       canonicalRunningRef.current = false;
-      batchFlushRef.current = true;
-      setBatchSubmitting(true);
+      queueFlushRef.current = true;
+      setQueueSubmitting(true);
       void flushQueuedMessages();
     }
   }, [activeRuntimeNode?.id, activeRuntimeNode?.status, busy, queuedMessages.length, conversation?.id]);
@@ -299,7 +286,7 @@ export default function ChatPage({
     const model = normalizeRuntimeNodeModel(node.model);
     setProviderName(node.provider_name || "unknown");
     setRuntimeModel(model);
-    setPermissionMode(node.permission_mode === "approval_for_me" ? "read_only" : (node.permission_mode || "read_only"));
+    setPermissionMode(node.permission_mode || "read_only");
     setReasoningEffort(model.reasoning_effort);
     if (node.running_mode && node.running_mode !== mode) onModeChange(node.running_mode);
   }, [activeRuntimeNode?.id, activeRuntimeNode?.provider_name, activeRuntimeNode?.model, activeRuntimeNode?.permission_mode, activeRuntimeNode?.running_mode]);
@@ -389,8 +376,6 @@ export default function ChatPage({
     requestModel?.output_length,
   ]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
-
   useEffect(() => () => {
     // Static antd confirmations are mounted outside ChatPage.  Tie the
     // confirmation lifetime back to this page so a conversation switch or
@@ -432,7 +417,6 @@ export default function ChatPage({
     const preserveDismissedMenu = dismissedPrompt === value;
     if (!preserveDismissedMenu && dismissedPrompt !== null) fileMenuDismissedPromptRef.current = null;
     setInput(value);
-    if (value !== input) pendingRewindRef.current = null;
     setReferences(inlineReferences);
     setCommandMenuDismissedFor(null);
     setActiveCommandIndex(0);
@@ -567,21 +551,12 @@ export default function ChatPage({
     });
   }
 
-  function appendDelta(content: string, conversationId?: string) {
-    updateLast((message) => ({ ...message, content: message.content + content }), conversationId);
-  }
-
   function setLast(fields: Partial<ChatMessage>, conversationId?: string) {
     updateLast((message) => ({ ...message, ...fields }), conversationId);
   }
 
   function defaultSourceNodeId(): string | undefined {
-    return conversation?.lastNodeId ?? conversation?.forkAnchorNodeId;
-  }
-
-  function defaultSourceNodeSessionId(): string | undefined {
-    if (conversation?.forkAnchorNodeId) return conversation.forkAnchorSessionId;
-    return [...messages].reverse().find((message) => message.role === "assistant")?.nodeSessionId;
+    return conversation?.lastNodeId;
   }
 
   async function ensureSession(): Promise<{ conversationId: string; sessionId: string }> {
@@ -600,224 +575,18 @@ export default function ChatPage({
     onUpdate(conversationId, (current) => ({ ...current, messages: [...current.messages, message] }));
   }
 
-  async function runStream(
-    conversationId: string,
-    sessionId: string,
-    prompt: string | null,
-    resume = false,
-    sourceNodeId?: string | null,
-    sourceNodeSessionId?: string | null,
-    references?: FileReference[],
-    branch = false,
-    batchMessages?: QueuedMessage[],
-  ) {
-    const controller = new AbortController();
-    abortRef.current = controller;
-    const activeStream: NonNullable<typeof activeStreamRef.current> = { controller, stopRequested: false, cancelIssued: false };
-    activeStreamRef.current = activeStream;
-    setLocalBusy(true);
-    try {
-      let nodeProtocol = false;
-      let sawDone = false;
-      let finalNode: import("../../types").RuntimeStateNode | undefined;
-      const cancelStreamJob = (jobId: string) => {
-        if (activeStream.cancelIssued) return;
-        activeStream.cancelIssued = true;
-        // Keep the reader alive until the backend emits the canonical
-        // terminal node.delete frame for status=cancel.
-        void cancelJob(jobId).catch(() => undefined);
-      };
-      const onMessage = (message: StreamMessage) => {
-        if (message.type === "job" && message.job_id) {
-          activeStream.jobId = message.job_id;
-          if (activeStream.cancelTimer !== undefined && !activeStream.stopRequested) {
-            window.clearTimeout(activeStream.cancelTimer);
-            activeStream.cancelTimer = undefined;
-          }
-          if (activeStream.stopRequested) cancelStreamJob(message.job_id);
-          return;
-        }
-        if (message.type === "run_segment") {
-          if (activeStream.stopRequested || controller.signal.aborted) return;
-          if (message.segment) updateLast((item) => applyRunSegment(item, message.segment!), conversationId);
-          const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
-          if (runId) setLast({ runId }, conversationId);
-        } else if (message.type === "event") {
-          if (activeStream.stopRequested || controller.signal.aborted) return;
-          const kind = message.kind ?? "";
-          if (kind === "response_delta" && !nodeProtocol) {
-            const content = (message.data?.content as string | undefined) ?? message.message ?? "";
-            if (content) appendDelta(content, conversationId);
-          } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result" || kind === "tool_failed") {
-            updateLast((item) => appendLegacyRuntimeEvent(item, {
-              kind,
-              message: message.message ?? "",
-              data: message.data,
-            }), conversationId);
-          } else if (kind === "decision_requested" && message.data) {
-            setLast({ decision: { ...message.data, message: message.message } as DecisionRequest }, conversationId);
-          } else if (kind === "run_finished") {
-            setLast({ status: message.message }, conversationId);
-          }
-          const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
-          if (runId) setLast({ runId }, conversationId);
-        } else if (message.type === "done") {
-          if (activeStream.stopRequested || controller.signal.aborted) return;
-          sawDone = true;
-          setLast({
-            content: message.final_answer ?? "",
-            status: message.status === "cancelled" ? "cancel" : message.status,
-            metrics: message.metrics,
-            ...(message.status === "completed" || message.status === "success" ? { error: undefined } : {}),
-            running: false,
-            decision: undefined,
-            ...(message.run_id ? { runId: message.run_id } : {}),
-          }, conversationId);
-          if (message.mode) onModeChange(message.mode);
-          if (message.session_id && message.session_id !== sessionId) {
-            void onSelectSession(message.session_id);
-          }
-          void onRefresh();
-        } else if ((message.type === "node.create" || message.type === "node.update" || message.type === "node.delete") && message.node) {
-          nodeProtocol = true;
-          const frame = { type: message.type, node: message.node } as const;
-          onUpdate(conversationId, (current) => integrateRuntimeNodeFrame(current, frame));
-          if (message.type === "node.delete") {
-            finalNode = message.node;
-          }
-        } else if (message.type === "error") {
-          if (activeStream.stopRequested || controller.signal.aborted) return;
-          setLast({ error: message.error ?? message.message ?? "发生错误", running: false, decision: undefined }, conversationId);
-        }
-      };
-      if (resume) {
-        const resumeSourceNodeId = sourceNodeId === undefined ? defaultSourceNodeId() : sourceNodeId ?? undefined;
-        const result = resumeSourceNodeId
-          ? await streamResume(
-              sessionId,
-              onMessage,
-              controller.signal,
-              permissionMode,
-              reasoningEffort,
-              resumeSourceNodeId,
-              requestProviderName,
-              requestModel,
-              mode,
-              ragMode,
-              permissionMode === "full_access",
-              sourceNodeSessionId ?? undefined,
-            )
-          : await streamResume(
-              sessionId,
-              onMessage,
-              controller.signal,
-              permissionMode,
-              reasoningEffort,
-              undefined,
-              requestProviderName,
-              requestModel,
-              mode,
-              ragMode,
-              permissionMode === "full_access",
-              sourceNodeSessionId ?? undefined,
-            );
-        if (result === "aborted") setLast({
-          running: false,
-          status: "cancel",
-          error: undefined,
-          decision: undefined,
-        }, conversationId);
-        else if (!sawDone && finalNode) {
-          const projection = projectRuntimeNode(finalNode);
-          const content = projection?.content ?? "";
-          setLast({
-            content: content || "",
-            status: finalNode.status,
-            error: projection?.error,
-            running: false,
-            decision: undefined,
-          }, conversationId);
-          void onRefresh();
-        }
-      } else {
-        // Keep the historical positional session-id call for an empty tree.
-        // Once a node exists, use the object form so the optimistic source
-        // node travels with the request and the backend can validate it.
-        const chatSourceNodeId = sourceNodeId === undefined ? defaultSourceNodeId() : sourceNodeId ?? undefined;
-        const options = chatSourceNodeId
-          ? (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, providerName: requestProviderName, model: requestModel, sourceNodeId: chatSourceNodeId, sourceNodeSessionId: sourceNodeSessionId ?? undefined, branch, references, ragMode }
-            : { sessionId, sourceNodeId: chatSourceNodeId, sourceNodeSessionId: sourceNodeSessionId ?? undefined, branch, providerName: requestProviderName, model: requestModel, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, references, ragMode })
-          // An empty tree has no dynamic runtime configuration to submit. Keep
-          // the stable positional call for clients embedding ChatPage while
-          // all established sessions use the explicit v0.3 config object.
-          : (enhancedChatOptions
-            ? { sessionId, mode, permissionMode, fullAccessAcknowledged: permissionMode === "full_access", reasoningEffort, providerName: requestProviderName, model: requestModel, references, ragMode }
-            : (ragMode !== "off" ? { sessionId, ragMode } : sessionId));
-        const result = batchMessages
-          ? await streamChatBatch(batchMessages, onMessage, controller.signal, {
-              sessionId,
-              sourceNodeId: chatSourceNodeId,
-              sourceNodeSessionId: sourceNodeSessionId ?? undefined,
-              branch,
-              providerName: requestProviderName,
-              model: requestModel,
-              mode,
-              permissionMode,
-              reasoningEffort,
-              fullAccessAcknowledged: permissionMode === "full_access",
-              ragMode,
-            })
-          : await streamChat(
-              prompt ?? "",
-              onMessage,
-              controller.signal,
-              options,
-            );
-        if (result === "aborted") setLast({
-          running: false,
-          status: "cancel",
-          error: undefined,
-          decision: undefined,
-        }, conversationId);
-        else if (!sawDone && finalNode) {
-          const projection = projectRuntimeNode(finalNode);
-          const content = projection?.content ?? "";
-          setLast({
-            content: content || "",
-            status: finalNode.status,
-            error: projection?.error,
-            running: false,
-            decision: undefined,
-          }, conversationId);
-          void onRefresh();
-        }
-      }
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        setLast({ error: String((error as Error).message ?? error), running: false, decision: undefined }, conversationId);
-      }
-    } finally {
-      if (activeStream.cancelTimer !== undefined) window.clearTimeout(activeStream.cancelTimer);
-      if (activeStreamRef.current === activeStream) activeStreamRef.current = null;
-      setLocalBusy(false);
-      abortRef.current = null;
-    }
-  }
-
   async function dispatchRun(
     conversationId: string,
     sessionId: string,
     prompt: string | null,
     resume = false,
     sourceNodeId: string | null = defaultSourceNodeId() ?? null,
-    sourceNodeSessionId: string | null = defaultSourceNodeSessionId() ?? null,
     references?: FileReference[],
-    branch = false,
-    batchMessages?: QueuedMessage[],
+    queuedTurns?: QueuedMessage[],
+    rewindTurnId?: string,
   ) {
-    if (onRun) {
-      await onRun({
+    if (!onRun) throw new Error("ChatPage requires the Turn run controller.");
+    await onRun({
         conversationId,
         sessionId,
         prompt,
@@ -828,15 +597,13 @@ export default function ChatPage({
         providerName: requestProviderName,
         model: requestModel,
         sourceNodeId: sourceNodeId ?? undefined,
-        sourceNodeSessionId: sourceNodeSessionId ?? undefined,
-        branch,
+        threadId: conversation?.threadId ?? sessionId,
+        turnId: crypto.randomUUID(),
         references,
-        batchMessages,
+        queuedTurns,
+        rewindTurnId,
         ragMode,
-      });
-      return;
-    }
-    await runStream(conversationId, sessionId, prompt, resume, sourceNodeId, sourceNodeSessionId, references, branch, batchMessages);
+    });
   }
 
   function updateQueue(updater: (items: QueuedMessage[]) => QueuedMessage[]) {
@@ -856,7 +623,7 @@ export default function ChatPage({
     // The uploaded files are already represented by references on this queue
     // item.  Detach them from the composer so a subsequent queued message
     // cannot accidentally inherit the same upload; keep the server-side files
-    // because the queue item still needs them when its batch is flushed.
+    // because the queue item still needs them when its Turn is sent.
     setPendingUploads([]);
   }
 
@@ -890,11 +657,11 @@ export default function ChatPage({
   }
 
   function sendQueuedMessage() {
-    if (!conversation?.sessionId || busy || batchFlushRef.current || queuedMessages.length === 0) return;
-    batchFlushRef.current = true;
-    batchInFlightIdsRef.current = new Set(queuedMessages.map((item) => item.id));
-    batchSourceKeyRef.current = activeRuntimeNode ? `${activeRuntimeNode.session_id}:${activeRuntimeNode.id}` : null;
-    setBatchSubmitting(true);
+    if (!conversation?.sessionId || busy || queueFlushRef.current || queuedMessages.length === 0) return;
+    queueFlushRef.current = true;
+    queueInFlightIdsRef.current = new Set(queuedMessages.map((item) => item.id));
+    queueSourceKeyRef.current = activeRuntimeNode ? `${activeRuntimeNode.session_id}:${activeRuntimeNode.id}` : null;
+    setQueueSubmitting(true);
     void flushQueuedMessages();
   }
 
@@ -904,24 +671,24 @@ export default function ChatPage({
     // next run.
     const items = queuedMessages.slice();
     if (!conversation?.sessionId || items.length === 0) {
-      batchFlushRef.current = false;
-      batchInFlightIdsRef.current = null;
-      batchExpectedUserCountRef.current = 0;
-      batchKnownUserKeysRef.current = new Set();
-      setBatchSubmitting(false);
+      queueFlushRef.current = false;
+      queueInFlightIdsRef.current = null;
+      queueExpectedUserCountRef.current = 0;
+      queueKnownUserKeysRef.current = new Set();
+      setQueueSubmitting(false);
       return;
     }
-    if (!batchInFlightIdsRef.current) batchInFlightIdsRef.current = new Set(items.map((item) => item.id));
-    batchExpectedUserCountRef.current = items.length;
-    batchKnownUserKeysRef.current = new Set(
+    if (!queueInFlightIdsRef.current) queueInFlightIdsRef.current = new Set(items.map((item) => item.id));
+    queueExpectedUserCountRef.current = items.length;
+    queueKnownUserKeysRef.current = new Set(
       (conversation.runtimeNodes ?? [])
-        .filter((node) => node.data.type === "message" && (node.data.message as { role?: unknown } | undefined)?.role === "user")
+        .filter((node) => node.data[node.current_data_idx]?.[0]?.role === "user")
         .map((node) => `${node.session_id}:${node.id}`),
     );
     try {
       const source = activeRuntimeNode;
-      if (batchSourceKeyRef.current === null && source) {
-        batchSourceKeyRef.current = `${source.session_id}:${source.id}`;
+      if (queueSourceKeyRef.current === null && source) {
+        queueSourceKeyRef.current = `${source.session_id}:${source.id}`;
       }
       await dispatchRun(
         conversation.id,
@@ -929,48 +696,52 @@ export default function ChatPage({
         null,
         false,
         source?.id ?? null,
-        source?.session_id ?? null,
         undefined,
-        false,
         items,
       );
     } catch (error) {
-      // A rejected batch leaves its in-memory items untouched.  Surface the
+      // A rejected Turn leaves its in-memory queue items untouched. Surface the
       // failure on the current assistant projection without converting the
       // queued content into optimistic canonical messages.
       setLast({ error: String((error as Error).message ?? error), running: false, decision: undefined });
     } finally {
-      batchFlushRef.current = false;
-      setBatchSubmitting(false);
+      queueFlushRef.current = false;
+      setQueueSubmitting(false);
     }
   }
 
   async function runPrompt(
     prompt: string,
-    target?: { conversationId: string; sessionId: string; sourceNodeId?: string; sourceNodeSessionId?: string; branch?: boolean },
+    target?: { conversationId: string; sessionId: string; sourceNodeId?: string; rewindTurnId?: string },
     references?: FileReference[],
   ) {
     const { conversationId, sessionId } = target ?? await ensureSession();
     const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [], references };
     const assistantMessage: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", events: [], running: true };
-    onUpdate(conversationId, (current) => ({
-      ...current,
-      title: current.title === "新对话" ? prompt.slice(0, 18) + (prompt.length > 18 ? "…" : "") : current.title,
-      messageCount:
-        (current.messages.length > 0
-          ? current.messages.filter((message) => message.role === "user" || message.role === "assistant").length
-          : current.messageCount ?? 0) + 2,
-      messages: [...current.messages, userMessage, assistantMessage],
-    }));
+    onUpdate(conversationId, (current) => {
+      let visibleMessages = current.messages;
+      if (target?.rewindTurnId) {
+        visibleMessages = messagesBeforeRewind(current.messages, target.rewindTurnId);
+      }
+      const messages = [...visibleMessages, userMessage, assistantMessage];
+      return {
+        ...current,
+        title: current.title === "新对话" ? prompt.slice(0, 18) + (prompt.length > 18 ? "…" : "") : current.title,
+        messageCount: messages.filter((message) => message.role === "user" || message.role === "assistant").length,
+        messages,
+        activeTurnId: target?.rewindTurnId ?? current.activeTurnId,
+        lastNodeId: target?.rewindTurnId ?? current.lastNodeId,
+      };
+    });
     await dispatchRun(
       conversationId,
       sessionId,
       prompt,
       false,
       target ? target.sourceNodeId ?? null : defaultSourceNodeId() ?? null,
-      target ? target.sourceNodeSessionId ?? null : defaultSourceNodeSessionId() ?? null,
       references,
-      target?.branch ?? false,
+      undefined,
+      target?.rewindTurnId,
     );
   }
 
@@ -1000,11 +771,10 @@ export default function ChatPage({
       return;
     }
     if (name === "/compact") {
-      if (!conversation) return;
+      if (!conversation || !activeRuntimeNode) return;
       try {
-        const { sessionId } = await ensureSession();
-        const result = await compactSession(sessionId);
-        await insert(result.compacted ? `上下文已压缩：${result.previous_messages} → ${result.remaining_messages} 条消息。` : "没有可压缩的旧上下文。");
+        await compactTurn(activeRuntimeNode.id);
+        await insert("上下文已压缩。");
         await onReload(conversation.id);
       } catch (error) {
         await insert(`⚠️ 压缩失败：${String((error as Error).message ?? error)}`);
@@ -1025,9 +795,7 @@ export default function ChatPage({
         null,
         true,
         activeRuntimeNode.id,
-        activeRuntimeNode.session_id,
         undefined,
-        false,
       );
       return;
     }
@@ -1069,32 +837,7 @@ export default function ChatPage({
   function stop() {
     if (conversation && onStopRun) {
       onStopRun(conversation.id);
-      return;
     }
-    const activeStream = activeStreamRef.current;
-    if (activeStream) {
-      activeStream.stopRequested = true;
-      if (activeStream.jobId && !activeStream.cancelIssued) {
-        // Do not abort immediately: the final node.delete frame is the
-        // durable cancel commit and must still reach the projection layer.
-        void cancelJob(activeStream.jobId).catch(() => undefined);
-        activeStream.cancelIssued = true;
-      } else if (!activeStream.jobId && activeStream.cancelTimer === undefined) {
-        activeStream.cancelTimer = window.setTimeout(() => activeStream.controller.abort(), 2000);
-      }
-    } else {
-      abortRef.current?.abort();
-    }
-    // Stop is an explicit user action: switch the composer out of the busy
-    // state immediately while the transport cancellation finishes in the
-    // background.
-    setLocalBusy(false);
-    setLast({
-      running: false,
-      status: "cancel",
-      error: undefined,
-      decision: undefined,
-    });
   }
 
   async function rewindMessage(messageId: string) {
@@ -1107,13 +850,12 @@ export default function ChatPage({
       const content = typeof result === "string" ? result : result.content;
       editorRef.current?.restore(content, message?.references ?? []);
       pendingRewindRef.current = typeof result === "string"
-        ? { conversationId: conversation.id, sessionId: conversation.sessionId ?? conversation.id, branch: false }
+        ? { conversationId: conversation.id, sessionId: conversation.sessionId ?? conversation.id }
         : {
           conversationId: conversation.id,
           sessionId: result.sessionId,
           sourceNodeId: result.sourceNodeId,
-          sourceNodeSessionId: result.sourceNodeSessionId,
-          branch: Boolean(result.branch),
+          rewindTurnId: result.rewindTurnId ?? message?.nodeId,
         };
       setInput(content);
       setReferences(message?.references ?? []);
@@ -1155,9 +897,7 @@ export default function ChatPage({
         {
           conversationId: conversation.id,
           sessionId,
-          sourceNodeId: typeof result === "string" ? undefined : result.sourceNodeId,
-          sourceNodeSessionId: typeof result === "string" ? undefined : result.sourceNodeSessionId,
-          branch: typeof result === "string" ? false : Boolean(result.branch),
+          rewindTurnId: typeof result === "string" ? message.nodeId : result.rewindTurnId ?? message.nodeId,
         },
         message.references,
       );
@@ -1189,6 +929,30 @@ export default function ChatPage({
   function forkMessage(messageId: string) {
     if (!conversation || !onFork || busy) return;
     void onFork(conversation.id, messageId);
+  }
+
+  async function changeMessageVersion(message: ChatMessage, direction: -1 | 1) {
+    if (!conversation || !message.nodeId || busy) return;
+    const turn = conversation.runtimeNodes?.find((item) => item.id === message.nodeId);
+    if (!turn) return;
+    const nextIndex = turn.current_data_idx + direction;
+    if (nextIndex < 0 || nextIndex >= turn.data.length) return;
+    try {
+      const updated = await patchTurnCurrentData(turn.id, nextIndex);
+      onUpdate(conversation.id, (current) => {
+        const map = new Map((current.runtimeNodes ?? []).map((item) => [`${item.session_id}:${item.id}`, item] as const));
+        map.set(`${updated.session_id}:${updated.id}`, updated);
+        const activeTurnId = current.activeTurnId ?? activeRuntimeNode?.id ?? updated.id;
+        return { ...current, runtimeNodes: [...map.values()], messages: projectTurnPath(map, activeTurnId) };
+      });
+    } catch (error) {
+      setLast({ error: String((error as Error).message ?? error) });
+    }
+  }
+
+  function messageVersion(message: ChatMessage) {
+    const turn = conversation?.runtimeNodes?.find((item) => item.id === message.nodeId);
+    return turn ? { index: turn.current_data_idx, total: turn.data.length } : undefined;
   }
 
   function scrollToBottom() {
@@ -1272,12 +1036,35 @@ export default function ChatPage({
                       </div>
                     )}
                     {editingMessageId !== message.id ? (
-                      <MessageActions
-                        msg={message}
-                        busy={busy}
-                        onRewind={onRewind ? () => void rewindMessage(message.id) : undefined}
-                        onEdit={onRewind ? () => beginEdit(message) : undefined}
-                      />
+                      <>
+                        <MessageActions
+                          msg={message}
+                          busy={busy}
+                          onRewind={onRewind ? () => void rewindMessage(message.id) : undefined}
+                          onEdit={onRewind ? () => beginEdit(message) : undefined}
+                        />
+                        {messageVersion(message) ? (
+                          <div className="message-version-controls" aria-label="消息版本切换">
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<LeftOutlined />}
+                              aria-label="上一个消息版本"
+                              disabled={busy || messageVersion(message)!.index === 0}
+                              onClick={() => void changeMessageVersion(message, -1)}
+                            />
+                            <span aria-live="polite">{messageVersion(message)!.index + 1} / {messageVersion(message)!.total}</span>
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<RightOutlined />}
+                              aria-label="下一个消息版本"
+                              disabled={busy || messageVersion(message)!.index >= messageVersion(message)!.total - 1}
+                              onClick={() => void changeMessageVersion(message, 1)}
+                            />
+                          </div>
+                        ) : null}
+                      </>
                     ) : null}
                   </div>
                 </div>
@@ -1319,7 +1106,7 @@ export default function ChatPage({
         onActiveCommandChange={setActiveCommandIndex}
         onModeChange={(value) => { onModeChange(value); if (canPatchRuntimeConfig) void updateRuntimeConfig({ running_mode: value }); setOpenSettingsSelect(null); }}
         onPermissionChange={async (value) => {
-          const next = value === "approval_for_me" ? "read_only" : value;
+          const next = value;
           if (next === "full_access" && permissionMode !== "full_access") {
             const confirmed = await new Promise<boolean>((resolve) => {
               fullAccessConfirmRef.current = Modal.confirm({

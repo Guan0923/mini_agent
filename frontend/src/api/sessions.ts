@@ -1,219 +1,100 @@
-import type { ChatMessage, FileReference, RunPresentationSegment, RuntimeStateNode } from "../types";
+import type { RuntimeStateNode, SidebarThread } from "../types";
 import { normalizeRuntimeNode } from "../app/runtimeNodeNormalization";
-import { jsonBody, requestJson } from "./request";
+import { requestJson } from "./request";
+import { archiveSidebarThread, createSidebarThread, deleteSidebarThread, listSidebarThreads, renameSidebarThread, restoreSidebarThread } from "./sidebarThreads";
+import { listTurns } from "./turns";
 
 export interface SessionInfo {
   session_id: string;
+  thread_id?: string;
   title: string;
   created_at: string;
   updated_at: string;
   message_count: number;
-  last_run_id?: string | null;
   last_run_status: string | null;
   client_id?: string | null;
   archived_at?: string | null;
   deleted_at?: string | null;
   last_node_id?: string | null;
-  fork_anchor_node_id?: string | null;
-  fork_anchor_session_id?: string | null;
   local_only?: boolean;
   title_is_custom?: boolean;
   project_id?: string | null;
   project_available?: boolean | null;
-  rewind_source_node_id?: string;
-  rewind_source_session_id?: string;
-  branch?: boolean;
 }
 
-export interface SessionMessage {
-  id?: string;
-  node_session_id?: string | null;
-  run_id?: string | null;
-  role: "user" | "assistant";
-  content: string;
-  events?: ChatMessage["events"];
-  segments?: RunPresentationSegment[];
-  status?: string;
-  metrics?: ChatMessage["metrics"];
-  error?: string;
-  running?: boolean;
-  source_node_id?: string | null;
-  references?: FileReference[];
-  timeline_seq?: number;
-  timeline_time?: number;
-  timeline_text?: string;
-  timeline_source?: "user" | "steering";
-}
-
-export interface TimezoneInfo {
-  timezone: string;
-  options: Array<{ identifier: string; label: string }>;
-}
-
-export interface ForkableRun {
-  run_id: string;
-  task: string;
-  status: string;
-  updated_at: string;
+export interface TimezoneInfo { timezone: string; options: Array<{ identifier: string; label: string }>; }
+function summary(item: SidebarThread): SessionInfo {
+  return {
+    session_id: item.session_id,
+    thread_id: item.thread_id,
+    title: item.title,
+    created_at: item.created_at,
+    updated_at: item.updated_at,
+    message_count: 0,
+    last_run_status: null,
+    archived_at: item.archived_at,
+    deleted_at: item.deleted_at,
+    title_is_custom: item.title_is_custom,
+  };
 }
 
 export async function listSessions(state: "active" | "archived" | "deleted" | "all" = "active"): Promise<SessionInfo[]> {
-  return requestJson<SessionInfo[]>(`/api/sessions?state=${encodeURIComponent(state)}`);
+  return (await listSidebarThreads(state)).map(summary);
 }
 
-export async function createSession(
-  title?: string,
-  clientId?: string,
-  messages: Array<Pick<ChatMessage, "role" | "content">> = [],
-  projectId?: string,
-): Promise<SessionInfo> {
-  return requestJson<SessionInfo>("/api/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: title?.trim() || null, client_id: clientId, messages, project_id: projectId }),
-  });
+export async function createSession(title = "新对话", clientId?: string): Promise<SessionInfo> {
+  return summary(await createSidebarThread(title, clientId));
 }
 
-export async function renameSession(sessionId: string, title: string): Promise<SessionInfo> {
-  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title }),
-  });
+export async function renameSession(threadId: string, title: string): Promise<SessionInfo> {
+  return summary(await renameSidebarThread(threadId, title));
 }
 
-export async function archiveSession(sessionId: string): Promise<SessionInfo> {
-  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, { method: "POST" });
+export async function archiveSession(threadId: string): Promise<SessionInfo> {
+  return summary(await archiveSidebarThread(threadId));
 }
 
-export async function restoreSession(sessionId: string): Promise<SessionInfo> {
-  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/restore`, { method: "POST" });
+export async function restoreSession(threadId: string): Promise<SessionInfo> {
+  return summary(await restoreSidebarThread(threadId));
 }
 
-export async function deleteSession(sessionId: string): Promise<SessionInfo> {
-  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-}
-
-export async function forkSession(
-  sessionId: string,
-  runId: string | undefined,
-  title: string,
-  clientId: string,
-  fallbackMessages: Array<Pick<ChatMessage, "role" | "content">>,
-  sourceNodeId?: string,
-  sourceNodeSessionId?: string,
-): Promise<SessionInfo> {
-  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      run_id: runId,
-      title,
-      client_id: clientId,
-      fallback_messages: fallbackMessages,
-      source_node_id: sourceNodeId,
-      source_node_session_id: sourceNodeSessionId,
-    }),
-  });
-}
-
-export async function rewindSession(
-  sessionId: string,
-  runId: string | undefined,
-  title: string,
-  clientId: string,
-  fallbackMessages: Array<Pick<ChatMessage, "role" | "content">>,
-  sourceNodeId?: string,
-  sourceNodeSessionId?: string,
-): Promise<SessionInfo> {
-  return requestJson<SessionInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/rewind`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      run_id: runId,
-      title,
-      client_id: clientId,
-      fallback_messages: fallbackMessages,
-      source_node_id: sourceNodeId,
-      source_node_session_id: sourceNodeSessionId,
-    }),
-  });
-}
-
-export async function getSessionMessages(sessionId: string): Promise<SessionMessage[]> {
-  return requestJson<SessionMessage[]>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`);
+export async function deleteSession(threadId: string): Promise<SessionInfo> {
+  return summary(await deleteSidebarThread(threadId));
 }
 
 export async function getSessionNodes(sessionId: string): Promise<RuntimeStateNode[]> {
-  const nodes = await requestJson<RuntimeStateNode[]>(`/api/sessions/${encodeURIComponent(sessionId)}/nodes`);
-  return nodes.map(normalizeRuntimeNode);
+  return (await listTurns(sessionId)).map(normalizeRuntimeNode);
 }
 
 export async function getSessionLeaves(sessionId: string): Promise<RuntimeStateNode[]> {
-  const nodes = await requestJson<RuntimeStateNode[]>(`/api/sessions/${encodeURIComponent(sessionId)}/leaves`);
-  return nodes.map(normalizeRuntimeNode);
+  const nodes = await getSessionNodes(sessionId);
+  const parents = new Set(nodes.map((item) => `${item.parent_session_id}:${item.parent_id}`));
+  return nodes.filter((item) => !parents.has(`${item.session_id}:${item.id}`));
 }
 
 export async function patchRuntimeConfig(
-  sessionId: string,
-  values: {
-    node_id: string;
-    provider_name?: string;
-    model?: Record<string, unknown>;
-    permission_mode?: "approval_for_me" | "read_only" | "workspace_write" | "full_access";
-    full_access_acknowledged?: boolean;
-    running_mode?: "agent" | "plan";
-  },
+  _sessionId: string,
+  values: { node_id: string; provider_name?: string; model?: Record<string, unknown>; permission_mode?: "read_only" | "workspace_write" | "full_access"; full_access_acknowledged?: boolean; running_mode?: "agent" | "plan" },
 ): Promise<Record<string, unknown>> {
-  return requestJson<Record<string, unknown>>(`/api/sessions/${encodeURIComponent(sessionId)}/runtime-config`, {
+  const { node_id, ...body } = values;
+  return requestJson(`/api/turns/${encodeURIComponent(node_id)}/config`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(values),
+    body: JSON.stringify(body),
   });
 }
 
-export async function getSessionTranscript(sessionId: string): Promise<SessionMessage[]> {
-  return requestJson<SessionMessage[]>(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
+export async function getTimezone(_sessionId: string): Promise<TimezoneInfo> {
+  return { timezone: "Asia/Shanghai", options: [] };
 }
 
-export async function getTimezone(sessionId: string): Promise<TimezoneInfo> {
-  return requestJson<TimezoneInfo>(`/api/sessions/${encodeURIComponent(sessionId)}/timezone`);
+export async function setTimezone(_sessionId: string, timezone: string): Promise<{ timezone: string }> {
+  return { timezone };
 }
 
-export async function setTimezone(sessionId: string, timezone: string): Promise<{ timezone: string }> {
-  return requestJson<{ timezone: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/timezone`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ timezone }),
-  });
-}
+export async function getTrace(_sessionId: string): Promise<Record<string, unknown>> { return {}; }
 
-export async function compactSession(sessionId: string): Promise<{
-  compacted: boolean;
-  previous_messages: number;
-  remaining_messages: number;
-  summary?: string | null;
-}> {
-  return requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/compact`, { method: "POST" });
-}
-
-export async function getTrace(sessionId: string): Promise<Record<string, unknown>> {
-  return requestJson<Record<string, unknown>>(`/api/sessions/${encodeURIComponent(sessionId)}/trace`);
-}
-
-export async function listForkableRuns(): Promise<ForkableRun[]> {
-  return requestJson<ForkableRun[]>("/api/forkable-runs");
-}
-
-export async function forkRun(runId: string): Promise<SessionInfo> {
-  return requestJson<SessionInfo>(`/api/runs/${encodeURIComponent(runId)}/fork`, { method: "POST" });
-}
-
-export async function submitDecision(
-  decisionId: string,
-  choice: string,
-  options: { supplement?: string; answers?: Record<string, string[]> } = {},
-): Promise<void> {
+export async function submitDecision(decisionId: string, choice: string, options: { supplement?: string; answers?: Record<string, string[]> } = {}): Promise<void> {
   await requestJson("/api/decisions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

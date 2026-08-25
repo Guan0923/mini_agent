@@ -1,0 +1,135 @@
+"""Local deterministic backend used by the Playwright Turn protocol flow."""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+from time import monotonic, sleep
+
+import uvicorn
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from backend.api.app import create_app  # noqa: E402
+from backend.api.chat import routes as chat_routes  # noqa: E402
+from backend.api.state import WebAppState  # noqa: E402
+from backend.domain import AssistantMessage, ToolMessage  # noqa: E402
+from backend.planning import RuleBasedPlanner  # noqa: E402
+from backend.runtime import build_application  # noqa: E402
+from backend.storage.auth import LocalAuthStore  # noqa: E402
+from backend.tools import Tool, ToolRegistry  # noqa: E402
+
+_temporary_root = tempfile.TemporaryDirectory(prefix="mini-agent-turn-e2e-")
+_root = Path(_temporary_root.name)
+state = WebAppState(_root / "web", auth_repository=LocalAuthStore(_root / "client.db"))
+state.model_config_for_user = lambda _user_id: None
+
+
+class CooperativePausePlanner(RuleBasedPlanner):
+    """Hold one deterministic request until the browser asks to pause it."""
+
+    def decide(self, runtime):
+        if runtime.run.task.strip() == "approval presentation":
+            if runtime.run.model_turns == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="web_search",
+                            call_id="approval_search",
+                            arguments={"query": "local approval"},
+                        )
+                    ]
+                )
+            return AssistantMessage(content="Approval flow complete.")
+        if runtime.run.task.strip() == "ordered items":
+            model_turn = runtime.run.model_turns
+            if model_turn == 1:
+                if runtime.exchange.on_reasoning is not None:
+                    runtime.exchange.on_reasoning("Inspect the first tool.")
+                sleep(1.0)
+                return AssistantMessage(
+                    reasoning="Inspect the first tool.",
+                    tool_messages=[
+                        ToolMessage(name="read_file", call_id="ordered_read", arguments={"path": "README.md"})
+                    ],
+                )
+            if model_turn == 2:
+                if runtime.exchange.on_content is not None:
+                    runtime.exchange.on_content("The first tool completed. ")
+                return AssistantMessage(
+                    content="The first tool completed. ",
+                    tool_messages=[ToolMessage(name="glob", call_id="ordered_glob", arguments={"pattern": "*.md"})],
+                )
+            if runtime.exchange.on_reasoning is not None:
+                runtime.exchange.on_reasoning("Combine both tool results.")
+            if runtime.exchange.on_content is not None:
+                runtime.exchange.on_content("Ordered flow complete.")
+            return AssistantMessage(
+                reasoning="Combine both tool results.",
+                content="Ordered flow complete.",
+            )
+        if runtime.run.task.strip() != "pause and resume":
+            return super().decide(runtime)
+        if runtime.run.provenance.attempt > 1:
+            return AssistantMessage(content="Resumed the same Turn successfully.")
+        deadline = monotonic() + 15
+        while monotonic() < deadline:
+            stop_requested = runtime.services.suspend_requested or runtime.services.cancel_requested
+            if stop_requested is not None and stop_requested():
+                return AssistantMessage(content="")
+            sleep(0.02)
+        return AssistantMessage(content="Pause request timed out.")
+
+
+def local_application(_state, user_id: str, *, session_id: str, workspace=None, **_kwargs):
+    resolved_workspace = Path(workspace or state.session_workspace(user_id, session_id))
+    resolved_workspace.mkdir(parents=True, exist_ok=True)
+    (resolved_workspace / "README.md").write_text(
+        "Mini-Agent is a local-first Agent application.\n",
+        encoding="utf-8",
+    )
+    application = build_application(
+        resolved_workspace,
+        planner_name="rule",
+        paths=state.user_paths(user_id),
+    )
+    application.runner.planner = CooperativePausePlanner()
+    application.runner.tools = ToolRegistry(
+        [
+            Tool(
+                "read_file",
+                "Read a deterministic workspace file.",
+                lambda path: (resolved_workspace / path).read_text(encoding="utf-8"),
+            ),
+            Tool(
+                "glob",
+                "List deterministic workspace files.",
+                lambda pattern: "\n".join(
+                    str(path.relative_to(resolved_workspace)) for path in resolved_workspace.glob(pattern)
+                ),
+            ),
+            Tool(
+                "web_search",
+                "Return a deterministic local search result.",
+                lambda query: f"Deterministic search result for {query}.",
+                requires_confirmation=True,
+            ),
+        ]
+    )
+    return application
+
+
+chat_routes.build_user_application = local_application
+app = create_app(state)
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=int(os.environ.get("MINI_AGENT_E2E_PORT", "18080")),
+        log_level="warning",
+    )

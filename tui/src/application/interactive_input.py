@@ -104,14 +104,19 @@ def _begin_permission_review(
         "Choose how tools that require confirmation are handled.",
         (
             ChoiceItem(
-                "approval_for_me",
-                "Approval for me",
-                "Ask before tools that require confirmation.",
+                "read_only",
+                "Read only",
+                "Allow reads and ask before writes or dangerous tools.",
+            ),
+            ChoiceItem(
+                "workspace_write",
+                "Workspace write",
+                "Allow workspace writes while keeping dangerous approvals manual.",
             ),
             ChoiceItem(
                 "full_access",
                 "Full access",
-                "Automatically approve tool calls.",
+                "Use unsandboxed access after explicit confirmation.",
             ),
             ChoiceItem("cancel", "Cancel"),
         ),

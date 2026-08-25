@@ -7,4 +7,6 @@ export * from "./files";
 export * from "./sync";
 export * from "./projects";
 export * from "./jobs";
+export * from "./turns";
+export * from "./sidebarThreads";
 export * from "./rag";

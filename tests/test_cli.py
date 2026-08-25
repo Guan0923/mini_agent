@@ -217,13 +217,13 @@ def test_display_command_updates_view_and_status() -> None:
     callback("minimal", None)
     assert app._display_mode == "minimal"
     assert view.levels == ["minimal"]
-    assert view.ui_states[-1] == ("AGENT | IDLE | DISPLAY: MINIMAL | PERMISSION: APPROVAL FOR ME", False)
+    assert view.ui_states[-1] == ("AGENT | IDLE | DISPLAY: MINIMAL | PERMISSION: READ ONLY", False)
 
     assert cli.TerminalApp._split_input("/display verbose") == [("command", "display", "verbose")]
     assert app._handle_command("display", "verbose") is True
     assert app._display_mode == "verbose"
     assert view.levels == ["minimal", "verbose"]
-    assert view.ui_states[-1] == ("AGENT | IDLE | DISPLAY: VERBOSE | PERMISSION: APPROVAL FOR ME", False)
+    assert view.ui_states[-1] == ("AGENT | IDLE | DISPLAY: VERBOSE | PERMISSION: READ ONLY", False)
     assert view.system[-1] == ("Display mode set to verbose.", "\n")
     assert "DISPLAY: VERBOSE" in app._status_with_permission("AGENT | IDLE")
 

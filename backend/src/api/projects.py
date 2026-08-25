@@ -18,7 +18,9 @@ from backend.storage.projects import Project, ProjectStore
 
 from .auth.dependencies import require_user
 from .auth.types import UserIdentity
-from .sessions.routes import _mutation_error, _store, _summary_for_user
+from .session_store import mutation_error as _mutation_error
+from .session_store import session_store as _store
+from .session_store import summary_payload as _summary_for_user
 
 router = APIRouter(prefix="/api")
 _picker_lock = threading.Lock()
@@ -155,6 +157,12 @@ def create_project(request: Request, identity: UserIdentity = Depends(require_us
         project = store.create(selected)
         try:
             session = session_store.create_session("新对话", client_id=None, local_only=True)
+            session_store.create_sidebar_thread(
+                session_id=session.session_id,
+                thread_id=session.session_id,
+                title=session.title,
+                title_is_custom=session.title_is_custom,
+            )
             store.create_session(project.project_id, session.session_id)
         except Exception:
             if session is not None:
@@ -195,6 +203,12 @@ def create_project_session(
         if not project.available:
             raise RuntimeError("项目 cwd 不可访问，请恢复文件夹后重试。")
         session = session_store.create_session(body.title, client_id=body.client_id, local_only=True)
+        session_store.create_sidebar_thread(
+            session_id=session.session_id,
+            thread_id=session.session_id,
+            title=session.title,
+            title_is_custom=session.title_is_custom,
+        )
         try:
             projects.create_session(project_id, session.session_id)
         except Exception:

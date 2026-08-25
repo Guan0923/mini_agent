@@ -71,7 +71,7 @@ def create_app(
         auth_service=CloudAuthService(auth, resolved_mailer),
         mailer=resolved_mailer,
     )
-    app = FastAPI(title="Mini-Agent Cloud", version="0.3.0")
+    app = FastAPI(title="Mini-Agent Cloud", version="0.0.1")
     app.state.cloud = state
     app.include_router(build_router())
 

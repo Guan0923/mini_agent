@@ -1,9 +1,7 @@
-import { streamChat, streamChatBatch, streamResume } from "../api";
-import { cancelJob } from "../api";
+import { pauseTurn, streamChat, streamQueuedTurns, streamResume, streamRewind } from "../api";
 import type { ChatMessage, RuntimeNodeFrame, StreamMessage } from "../types";
 import type { ActiveRun, ChatRunRequest } from "./types";
-import { appendLegacyRuntimeEvent, integrateRuntimeNodeFrame, projectRuntimeNode } from "./runtimeDetailProjection";
-import { applyRunSegment } from "./runSegmentReducer";
+import { integrateRuntimeNodeFrame, projectRuntimeNode } from "./runtimeDetailProjection";
 
 export interface RunControllerCallbacks {
   activeRuns: Map<string, ActiveRun>;
@@ -14,105 +12,41 @@ export interface RunControllerCallbacks {
   updateConversation?: (conversationId: string, updater: (conversation: import("../types").Conversation) => import("../types").Conversation) => void;
 }
 
-/** Build the streaming runner while keeping transport concerns outside the UI. */
 export function createRunController(callbacks: RunControllerCallbacks) {
   async function runConversation(request: ChatRunRequest): Promise<void> {
-    if (callbacks.activeRuns.has(request.conversationId)) {
-      callbacks.updateLastMessage(request.conversationId, (item) => ({
-        ...item,
-        running: false,
-        error: "上一运行仍在停止，请稍后再试。",
-        decision: undefined,
-      }));
-      return;
-    }
+    if (callbacks.activeRuns.has(request.conversationId)) return;
     const controller = new AbortController();
-    callbacks.activeRuns.set(request.conversationId, { controller, sessionId: request.sessionId });
-    let nodeProtocol = false;
-    let sawDone = false;
-    let finalNode: RuntimeNodeFrame["node"] | undefined;
+    const active: ActiveRun = { controller, sessionId: request.sessionId, turnId: request.turnId };
+    callbacks.activeRuns.set(request.conversationId, active);
+    let finalTurn: StreamMessage["turn"] | undefined;
 
     const onMessage = (message: StreamMessage) => {
-      const active = callbacks.activeRuns.get(request.conversationId);
-      if (active?.controller !== controller) return;
-      if (message.type === "job" && message.job_id) {
-        active.jobId = message.job_id;
-        if (active.cancelTimer && !active.stopRequested) {
-          clearTimeout(active.cancelTimer);
-          active.cancelTimer = undefined;
-        }
-        if (active.stopRequested && !active.cancelIssued) {
-          active.cancelIssued = true;
-          // Keep the SSE reader alive after asking the worker to stop.  The
-          // worker's final node.delete frame is the canonical cancel commit;
-          // aborting the transport here races that frame and loses the
-          // durable partial assistant node.  The no-job path still has its
-          // bounded fallback timer below.
-          void cancelJob(message.job_id).catch(() => undefined);
-        }
-        return;
-      } else if ((message.type === "node.create" || message.type === "node.update" || message.type === "node.delete") && message.node) {
-        if ((active.stopRequested || controller.signal.aborted) && message.type !== "node.delete") return;
-        nodeProtocol = true;
-        const frame: RuntimeNodeFrame = { type: message.type, node: message.node };
-        callbacks.applyRuntimeNodeFrame?.(frame);
-        callbacks.updateConversation?.(request.conversationId, (conversation) => integrateRuntimeNodeFrame(conversation, frame));
-        if (message.type === "node.delete") finalNode = message.node;
-      } else if (message.type === "run_segment") {
-        if (active.stopRequested || controller.signal.aborted) return;
-        const segment = message.segment;
-        if (segment) callbacks.updateLastMessage(request.conversationId, (item) => applyRunSegment(item, segment));
-        const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
-        if (runId) callbacks.updateLastMessage(request.conversationId, (item) => ({ ...item, runId }));
-      } else if (message.type === "event") {
-        if (active.stopRequested || controller.signal.aborted) return;
-        const kind = message.kind ?? "";
-        if (kind === "response_delta" && !nodeProtocol) {
-          const content = (message.data?.content as string | undefined) ?? message.message ?? "";
-          if (content) callbacks.updateLastMessage(request.conversationId, (item) => ({ ...item, content: item.content + content }));
-        } else if (kind.startsWith("thinking_") || kind === "tool_call" || kind === "tool_result" || kind === "tool_failed") {
-          callbacks.updateLastMessage(request.conversationId, (item) => appendLegacyRuntimeEvent(item, {
-            kind,
-            message: message.message ?? "",
-            data: message.data,
-          }));
-        } else if (kind === "decision_requested" && message.data) {
-          callbacks.updateLastMessage(request.conversationId, (item) => ({
-            ...item,
-            decision: { ...message.data, message: message.message } as ChatMessage["decision"],
-          }));
-        } else if (kind === "run_finished") {
-          callbacks.updateLastMessage(request.conversationId, (item) => ({ ...item, status: message.message }));
-        }
-        const runId = message.run_id ?? (typeof message.data?.run_id === "string" ? message.data.run_id : undefined);
-        if (runId) callbacks.updateLastMessage(request.conversationId, (item) => ({ ...item, runId }));
-      } else if (message.type === "done") {
-        if (active.stopRequested || controller.signal.aborted) return;
-        sawDone = true;
-        callbacks.updateLastMessage(request.conversationId, (item) => ({
-          ...item,
-          content: message.final_answer ?? "",
-          status: message.status === "cancelled" ? "cancel" : message.status,
-          metrics: message.metrics,
-          ...(message.status === "completed" || message.status === "success" ? { error: undefined } : {}),
-          running: false,
-          decision: undefined,
-          runId: message.run_id ?? item.runId,
-        }));
-        if (message.session_id && message.session_id !== request.sessionId) {
-          void callbacks.rebindRunSession(request.conversationId, message.session_id);
-        }
-        void callbacks.refreshSessions().catch(() => undefined);
-      } else if (message.type === "error") {
-        if (active.stopRequested || controller.signal.aborted) return;
-        callbacks.updateLastMessage(request.conversationId, (item) => ({
-          ...item,
-          error: message.error ?? message.message ?? "发生错误",
-          running: false,
-          decision: undefined,
-        }));
+      if (callbacks.activeRuns.get(request.conversationId)?.controller !== controller) return;
+      const frame: RuntimeNodeFrame = { type: message.type, turn: message.turn };
+      active.turnId = message.turn.id;
+      finalTurn = message.turn;
+      callbacks.applyRuntimeNodeFrame?.(frame);
+      callbacks.updateConversation?.(request.conversationId, (conversation) => integrateRuntimeNodeFrame(conversation, frame));
+      if (active.stopRequested && !active.cancelIssued) {
+        active.cancelIssued = true;
+        void pauseTurn(message.turn.id).catch(() => undefined);
       }
     };
+
+    const options = {
+      sessionId: request.sessionId,
+      threadId: request.threadId ?? request.sessionId,
+      turnId: request.turnId,
+      sourceNodeId: request.sourceNodeId,
+      mode: request.mode,
+      permissionMode: request.permissionMode,
+      fullAccessAcknowledged: request.permissionMode === "full_access",
+      reasoningEffort: request.reasoningEffort,
+      providerName: request.providerName,
+      model: request.model,
+      references: request.references,
+      ragMode: request.ragMode,
+    } as const;
 
     try {
       const result = request.resume
@@ -126,72 +60,38 @@ export function createRunController(callbacks: RunControllerCallbacks) {
             request.providerName,
             request.model,
             request.mode,
-            request.ragMode ?? "off",
+            request.ragMode,
             request.permissionMode === "full_access",
-            request.sourceNodeSessionId,
           )
-        : request.batchMessages
-          ? await streamChatBatch(request.batchMessages, onMessage, controller.signal, {
-              sessionId: request.sessionId,
-              sourceNodeId: request.sourceNodeId,
-              sourceNodeSessionId: request.sourceNodeSessionId,
-              branch: request.branch,
-              mode: request.mode,
-              permissionMode: request.permissionMode,
-              reasoningEffort: request.reasoningEffort,
-              fullAccessAcknowledged: request.permissionMode === "full_access",
-              providerName: request.providerName,
-              model: request.model,
-              ragMode: request.ragMode,
-            })
-          : await streamChat(request.prompt ?? "", onMessage, controller.signal, {
-              sessionId: request.sessionId,
-              sourceNodeId: request.sourceNodeId,
-              sourceNodeSessionId: request.sourceNodeSessionId,
-              branch: request.branch,
-              mode: request.mode,
-              permissionMode: request.permissionMode,
-              reasoningEffort: request.reasoningEffort,
-              providerName: request.providerName,
-              model: request.model,
-              ragMode: request.ragMode,
-              references: request.references,
-            });
-      if (result === "aborted") {
+        : request.rewindTurnId
+          ? await streamRewind(request.rewindTurnId, request.prompt ?? "", onMessage, controller.signal, options)
+          : request.queuedTurns
+            ? await streamQueuedTurns(request.queuedTurns, onMessage, controller.signal, options)
+            : await streamChat(request.prompt ?? "", onMessage, controller.signal, options);
+      if (result === "aborted") return;
+      if (finalTurn) {
+        const projection = projectRuntimeNode(finalTurn);
         callbacks.updateLastMessage(request.conversationId, (item) => ({
           ...item,
-          running: false,
-          status: "cancel",
-          error: undefined,
-          decision: undefined,
-        }));
-      } else if (!sawDone && finalNode) {
-        const terminalNode = finalNode;
-        const projection = projectRuntimeNode(terminalNode);
-        const content = projection?.content ?? "";
-        callbacks.updateLastMessage(request.conversationId, (item) => ({
-          ...item,
-          status: terminalNode.status,
-          content: content || item.content,
-          error: projection?.error,
+          content: projection.content || item.content,
+          error: projection.error,
+          status: finalTurn?.status,
           running: false,
           decision: undefined,
         }));
-        void callbacks.refreshSessions().catch(() => undefined);
       }
+      await callbacks.refreshSessions().catch(() => undefined);
     } catch (error) {
       if (!controller.signal.aborted) {
         callbacks.updateLastMessage(request.conversationId, (item) => ({
           ...item,
           error: String((error as Error).message ?? error),
-          running: false,
+          running: finalTurn?.status === "running",
           decision: undefined,
         }));
       }
     } finally {
-      const active = callbacks.activeRuns.get(request.conversationId);
-      if (active?.controller === controller) {
-        if (active.cancelTimer) clearTimeout(active.cancelTimer);
+      if (callbacks.activeRuns.get(request.conversationId)?.controller === controller) {
         callbacks.activeRuns.delete(request.conversationId);
       }
     }
@@ -199,22 +99,11 @@ export function createRunController(callbacks: RunControllerCallbacks) {
 
   function stopConversation(id: string): void {
     const active = callbacks.activeRuns.get(id);
-    if (!active) return;
+    if (!active || active.stopRequested) return;
     active.stopRequested = true;
-    callbacks.updateLastMessage(id, (item) => ({
-      ...item,
-      running: false,
-      status: "cancel",
-      error: undefined,
-      decision: undefined,
-    }));
-    if (active.jobId && !active.cancelIssued) {
+    if (active.turnId) {
       active.cancelIssued = true;
-      // Do not abort the stream immediately: apply the terminal node.delete
-      // emitted after the backend records status=cancel.
-      void cancelJob(active.jobId).catch(() => undefined);
-    } else if (!active.jobId && !active.cancelTimer) {
-      active.cancelTimer = setTimeout(() => active.controller.abort(), 2000);
+      void pauseTurn(active.turnId).catch(() => undefined);
     }
   }
 

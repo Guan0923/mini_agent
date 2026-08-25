@@ -60,7 +60,7 @@ describe("conversation recovery", () => {
     expect(loadConversations("mini-agent-conversations")[0]?.messageCount).toBe(2);
   });
 
-  it("repairs cached runtime nodes that predate the v0.3 model fields", () => {
+  it("rejects cached runtime nodes from the removed protocol", () => {
     localStorage.setItem(
       "mini-agent-conversations",
       JSON.stringify([{
@@ -79,9 +79,7 @@ describe("conversation recovery", () => {
       }]),
     );
 
-    const cached = loadConversations("mini-agent-conversations")[0]?.runtimeNodes?.[0];
-    expect(cached?.model.reasoning_effort).toBe("medium");
-    expect(cached?.usage.total_tokens).toBeNull();
+    expect(loadConversations("mini-agent-conversations")).toEqual([]);
   });
 
   it("clears pre-RuntimeState browser history once", () => {

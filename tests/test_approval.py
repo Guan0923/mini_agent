@@ -88,14 +88,15 @@ def test_terminal_approval_switches_permission_modes(monkeypatch, capsys) -> Non
 
     assert approval.permission_mode == "full_access"
     output = capsys.readouterr().out
-    assert "Current: Approval for me" in output
-    assert "Choose 1 or 2." in output
-    assert "PERMISSION SET — Full access" in output
+    assert "Current: Read Only" in output
+    assert "Choose 1, 2, or 3." in output
+    assert "PERMISSION SET — Full Access" in output
 
 
-def test_full_access_auto_approves_tools_but_not_plan_review(monkeypatch, capsys) -> None:
+def test_full_access_keeps_dangerous_tool_and_plan_review_manual(monkeypatch, capsys) -> None:
     approval = TerminalApproval("full_access")
-    monkeypatch.setattr("builtins.input", lambda _prompt: "3")
+    answers = iter(["1", "3"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     tool_decision = approval(
         InterruptRequest("tool", "Call tool run_command?", {"tool": "run_command", "arguments": {}})
@@ -105,7 +106,7 @@ def test_full_access_auto_approves_tools_but_not_plan_review(monkeypatch, capsys
     assert tool_decision.choice == "continue"
     assert plan_decision.choice == "cancel"
     output = capsys.readouterr().out
-    assert "TOOL REVIEW" not in output
+    assert "TOOL REVIEW" in output
     assert "PLAN REVIEW\n1. Write the file." in output
 
 

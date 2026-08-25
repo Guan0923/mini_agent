@@ -4,6 +4,8 @@ import type { RagMode } from "../api/chat";
 export interface ChatRunRequest {
   conversationId: string;
   sessionId: string;
+  threadId?: string;
+  turnId?: string;
   prompt: string | null;
   resume: boolean;
   mode: ChatMode;
@@ -12,17 +14,16 @@ export interface ChatRunRequest {
   providerName?: string;
   model?: RuntimeConfigModel;
   sourceNodeId?: string;
-  sourceNodeSessionId?: string;
-  branch?: boolean;
+  rewindTurnId?: string;
   references?: FileReference[];
-  batchMessages?: Array<{ content: string; references?: FileReference[] }>;
+  queuedTurns?: Array<{ content: string; references?: FileReference[] }>;
   ragMode?: RagMode;
 }
 
 export interface ActiveRun {
   controller: AbortController;
   sessionId: string;
-  jobId?: string;
+  turnId?: string;
   stopRequested?: boolean;
   cancelIssued?: boolean;
   cancelTimer?: ReturnType<typeof setTimeout>;

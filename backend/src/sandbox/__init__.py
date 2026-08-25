@@ -49,7 +49,6 @@ from .policy import (
     SandboxPolicy,
     TerminalKind,
     ensure_disk_reserve,
-    migrate_legacy_permission_mode,
     normalize_permission_mode,
     resolve_network_rules,
 )
@@ -113,7 +112,6 @@ __all__ = [
     "UserAccountPools",
     "authorization_hash",
     "normalize_permission_mode",
-    "migrate_legacy_permission_mode",
     "resolve_network_rules",
     "ensure_disk_reserve",
 ]

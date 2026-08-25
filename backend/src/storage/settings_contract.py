@@ -16,7 +16,6 @@ from backend.sandbox import (
     NetworkRule,
     PermissionMode,
     SandboxLimits,
-    migrate_legacy_permission_mode,
     normalize_permission_mode,
 )
 
@@ -79,9 +78,7 @@ def normalize_sandbox_config(
     if isinstance(current, Mapping):
         current_values = dict(current)
         if current_values.get("policy_version") != 2:
-            legacy_mode = current_values.get("file_mode", current_values.get("permission_mode"))
-            current_values["file_mode"] = migrate_legacy_permission_mode(legacy_mode).value
-            current_values["network_mode"] = NetworkMode.NO_NETWORK.value
+            raise ValueError("Unsupported sandbox policy version.")
         result.update(current_values)
     if isinstance(values, Mapping):
         result.update(values)

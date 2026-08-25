@@ -123,23 +123,16 @@ class AgentExecutor:
         callback = operation or self.dependencies.provider or self.dependencies.planner
         if callback is None:
             raise RuntimeError("AgentExecutor requires a provider, planner, or operation callback.")
-        node = self.writer.create(
-            session_id=source.session_id,
-            parent=source,
-            user=source.user,
-            provider_name=source.provider_name,
-            model=source.model,
-            permission_mode=source.permission_mode,
-            running_mode=source.running_mode,
-            cwd=source.cwd,
-            first_kept_entry_id=source.firstKeptEntryId,
-            compaction_idx=source.compactionIdx,
-        )
+        if source.status != "running":
+            raise ValueError("AgentExecutor requires the active running Turn.")
+        node = self.writer.current(source.session_id, source.id)
         try:
             result = callback(context, **kwargs)
-            data = result.to_dict().get("data") if isinstance(result, RuntimeState) else dict(result)
+            data = result.to_dict().get("data") if isinstance(result, RuntimeState) else dict(result).get("data")
+            if data is None:
+                raise ValueError("AgentExecutor operations must return complete Turn data.")
             self.writer.update_data(node, data)
-            return self.writer.delete(node.session_id, node.id, status=status_on_success)
+            return self.writer.finalize(node, status_on_success)
         except Exception:
             self.writer.fail(node.session_id, node.id)
             raise

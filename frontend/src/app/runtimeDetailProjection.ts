@@ -1,262 +1,239 @@
-import type { ChatMessage, Conversation, FileReference, RuntimeNodeFrame, RuntimeStateNode, ToolEvent } from "../types";
+import type { ChatMessage, Conversation, DecisionRequest, FileReference, RuntimeNodeFrame, RuntimeStateNode, ToolEvent, TurnItem } from "../types";
 import { applyRuntimeNodeFrame } from "./runtimeNodeReducer";
 import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
-function nodeKey(node: RuntimeStateNode): string {
-  return `${node.session_id}:${node.id}`;
-}
+const keyOf = (turn: RuntimeStateNode) => `${turn.session_id}:${turn.id}`;
 
-function messageData(node: RuntimeStateNode): Record<string, unknown> | null {
-  const message = node.data.message;
-  return message && typeof message === "object" && !Array.isArray(message)
-    ? message as Record<string, unknown>
-    : null;
-}
-
-function contentBlocks(message: Record<string, unknown>): Array<Record<string, unknown>> {
-  return Array.isArray(message.content)
-    ? message.content.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
-    : [];
-}
-
-function textValue(value: unknown): string {
+function text(value: unknown): string {
   if (typeof value === "string") return value;
   if (value == null) return "";
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
+  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
-function lastIndex<T>(values: readonly T[], predicate: (value: T) => boolean): number {
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    if (predicate(values[index])) return index;
+function references(item: TurnItem): FileReference[] | undefined {
+  const raw = item.references;
+  if (!Array.isArray(raw)) return undefined;
+  const result = raw.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const record = value as Record<string, unknown>;
+    return (record.source === "project" || record.source === "upload") && typeof record.path === "string"
+      ? [{ source: record.source, path: record.path } as FileReference]
+      : [];
+  });
+  return result.length ? result : undefined;
+}
+
+function visibleAssistantItems(turn: RuntimeStateNode): TurnItem[] {
+  const selected = turn.data[turn.current_data_idx];
+  const items = selected?.[1]?.content ?? [];
+  if (items[0]?.type !== "compaction") return items;
+  const kept = Number(items[0].kept_item_count ?? 0);
+  return items.slice(1 + Math.max(0, kept));
+}
+
+function isToolApproval(item: TurnItem): boolean {
+  return item.type === "approval" && typeof item.tool === "string" && item.tool.length > 0;
+}
+
+function displayAssistantItems(turn: RuntimeStateNode, items: TurnItem[]): TurnItem[] {
+  const toolResults = new Map<string, TurnItem>();
+  for (const item of items) {
+    if (item.type === "tool_result" && typeof item.call_id === "string") toolResults.set(item.call_id, item);
   }
-  return -1;
+
+  const displayed: TurnItem[] = [];
+  for (let index = 0; index < items.length;) {
+    const item = items[index];
+    if (item.type === "skill_snapshot") {
+      index += 1;
+      continue;
+    }
+    if (!isToolApproval(item)) {
+      displayed.push({ ...item });
+      index += 1;
+      continue;
+    }
+
+    const tool = String(item.tool);
+    const approvals: TurnItem[] = [];
+    while (index < items.length && isToolApproval(items[index]) && String(items[index].tool) === tool) {
+      approvals.push(items[index]);
+      index += 1;
+    }
+    const decision = [...approvals].reverse().find(
+      (approval) => approval.event === "decision_requested" && typeof approval.decision_id === "string",
+    );
+    const callId = approvals.find((approval) => typeof approval.call_id === "string")?.call_id;
+    const result = typeof callId === "string" ? toolResults.get(callId) : undefined;
+    const granted = approvals.some((approval) => approval.event === "approval_granted");
+
+    if (result || granted) {
+      displayed.push({
+        ...(decision ?? approvals[0]),
+        type: "approval",
+        event: "approval_resolved",
+        approval_status: result?.failure_code === "user_denied" ? "denied" : "allowed",
+        call_id: callId,
+        tool,
+        text: "",
+      });
+    } else if (turn.status === "running" && decision) {
+      displayed.push({ ...decision, call_id: callId, tool });
+    }
+  }
+  return displayed;
+}
+
+function itemEvents(turn: RuntimeStateNode, items: TurnItem[]): ToolEvent[] {
+  const events: ToolEvent[] = [];
+  if (turn.data[turn.current_data_idx]?.[1]?.content?.[0]?.type === "compaction") {
+    events.push({ kind: "compaction", message: "上下文已压缩" });
+  }
+  for (const item of items) {
+    if (item.type === "reasoning") {
+      events.push({ kind: "thinking", message: text(item.text), data: { completed: turn.status !== "running" } });
+    } else if (item.type === "tool_call") {
+      events.push({ kind: "tool_call", message: String(item.name ?? "工具"), data: { ...item } });
+    } else if (item.type === "tool_result") {
+      events.push({ kind: item.status === "failed" ? "tool_failed" : "tool_result", message: text(item.content), data: { ...item } });
+    } else if (["approval", "question", "plan", "subagent", "skill_snapshot"].includes(item.type)) {
+      events.push({ kind: item.type, message: text(item.text), data: { ...item } });
+    }
+  }
+  return events;
+}
+
+function pendingDecision(items: TurnItem[], status: RuntimeStateNode["status"]): DecisionRequest | undefined {
+  if (status !== "running") return undefined;
+  const decisionItems = items.filter((item) => item.type === "approval" || item.type === "question");
+  const latest = decisionItems[decisionItems.length - 1];
+  if (!latest || latest.event !== "decision_requested" || typeof latest.decision_id !== "string") return undefined;
+  const kind = latest.kind;
+  if (!["tool", "plan", "question", "resume", "skill"].includes(String(kind))) return undefined;
+  return {
+    decision_id: latest.decision_id,
+    kind: kind as DecisionRequest["kind"],
+    message: typeof latest.text === "string" ? latest.text : undefined,
+    tool: typeof latest.tool === "string" ? latest.tool : undefined,
+    arguments: latest.arguments as DecisionRequest["arguments"],
+    plan: typeof latest.plan === "string" ? latest.plan : undefined,
+    goal: typeof latest.goal === "string" ? latest.goal : undefined,
+    steps: Array.isArray(latest.steps) ? latest.steps.map(String) : undefined,
+    details: typeof latest.details === "string" ? latest.details : undefined,
+    questions: Array.isArray(latest.questions) ? latest.questions as DecisionRequest["questions"] : undefined,
+    skill: typeof latest.skill === "string" ? latest.skill : undefined,
+    description: typeof latest.description === "string" ? latest.description : undefined,
+    project_id: typeof latest.project_id === "string" ? latest.project_id : undefined,
+    workspace_sha256: typeof latest.workspace_sha256 === "string" ? latest.workspace_sha256 : undefined,
+    tree_sha256: typeof latest.tree_sha256 === "string" ? latest.tree_sha256 : undefined,
+    path: typeof latest.path === "string" ? latest.path : undefined,
+  };
 }
 
 export interface ProjectedNodeDetails {
   role: string;
   content: string;
   events: ToolEvent[];
-  runId?: string;
+  items: TurnItem[];
+  compactionNotice: boolean;
   error?: string;
   references?: FileReference[];
   status?: RuntimeStateNode["status"];
+  decision?: DecisionRequest;
 }
 
-function projectedReferences(message: Record<string, unknown>): FileReference[] | undefined {
-  const raw = message.references;
-  if (!Array.isArray(raw)) return undefined;
-  const references: FileReference[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const record = item as Record<string, unknown>;
-    const source = record.source;
-    const path = record.path;
-    if ((source === "project" || source === "upload") && typeof path === "string" && path) {
-      references.push({ source, path });
-    }
-  }
-  return references.length > 0 ? references : undefined;
-}
-
-function terminalError(message: Record<string, unknown>): string | undefined {
-  const raw = message.error;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
-  const error = raw as Record<string, unknown>;
-  const summary = typeof error.message === "string" ? error.message.trim() : "";
-  const detail = typeof error.detail === "string" ? error.detail.trim() : "";
-  if (!summary) return undefined;
-  return detail ? `${summary}\n\nDetails: ${detail}` : summary;
-}
-
-function terminalNodeError(
-  node: RuntimeStateNode,
-  message?: Record<string, unknown> | null,
-  terminal = true,
-): string | undefined {
-  if (!terminal) return undefined;
-  if (node.status !== "abort") return undefined;
-  const embedded = message ? terminalError(message) : undefined;
-  if (embedded) return embedded;
-  if (node.status === "abort") return "The run was aborted for an unknown reason.";
-  return undefined;
-}
-
-export function projectRuntimeNode(node: RuntimeStateNode, terminal = true): ProjectedNodeDetails | null {
-  const message = messageData(node);
-  if (!message) {
-    const error = terminalNodeError(node, null, terminal);
-    return error ? { role: "assistant", content: error, events: [], error } : null;
-  }
-  const role = String(message.role ?? "");
-  const key = nodeKey(node);
-  const events: ToolEvent[] = [];
-  const answers: string[] = [];
-  const reasoning: string[] = [];
-  let containsRecoverableToolFailure = false;
-
-  for (const block of contentBlocks(message)) {
-    const kind = String(block.type ?? "");
-    if (kind === "reasoning") {
-      reasoning.push(textValue(block.text));
-    } else if (kind === "text" || kind === "bash") {
-      answers.push(textValue(block.text));
-    } else if (kind === "tool_call") {
-      const tool = String(block.name ?? block.tool ?? "工具");
-      events.push({
-        kind: "tool_call",
-        message: tool,
-        data: {
-          ...block,
-          tool,
-          call_id: String(block.call_id ?? ""),
-          arguments: block.arguments ?? {},
-          node_key: key,
-        },
-      });
-    } else if (kind === "tool_result") {
-      const failed = block.status === "failed";
-      const denied = failed && block.failure_code === "user_denied";
-      containsRecoverableToolFailure ||= failed;
-      if (failed && !denied) continue;
-      events.push({
-        kind: failed ? "tool_failed" : "tool_result",
-        message: textValue(block.content),
-        data: {
-          ...block,
-          tool: String(block.tool ?? "工具"),
-          call_id: String(block.call_id ?? ""),
-          result: block.content,
-          node_key: key,
-        },
-      });
-    }
-  }
-  if (reasoning.some(Boolean)) {
-    events.unshift({
-      kind: "thinking",
-      message: reasoning.join(""),
-      data: { node_key: key, completed: terminal && node.status !== "abort" },
-    });
-  }
+export function projectRuntimeNode(turn: RuntimeStateNode): ProjectedNodeDetails {
+  const sourceItems = visibleAssistantItems(turn);
+  const items = displayAssistantItems(turn, sourceItems);
+  const errorItem = [...items].reverse().find((item) => item.type === "error");
   return {
-    role,
-    content: answers.join(""),
-    events,
-    runId: typeof message.run_id === "string" ? message.run_id : undefined,
-    error: terminalNodeError(node, message, terminal && !containsRecoverableToolFailure),
-    references: role === "user" ? projectedReferences(message) : undefined,
-    status: node.status,
+    role: "assistant",
+    content: items.filter((item) => item.type === "text" || item.type === "bash").map((item) => text(item.text)).join(""),
+    events: itemEvents(turn, sourceItems),
+    items,
+    compactionNotice: turn.data[turn.current_data_idx]?.[1]?.content?.[0]?.type === "compaction",
+    error: errorItem ? text(errorItem.message) : undefined,
+    status: turn.status,
+    decision: pendingDecision(items, turn.status),
   };
 }
 
-function projectMessageNodes(
-  message: ChatMessage,
-  nodes: Map<string, RuntimeStateNode>,
-  activeNodeKey?: string,
-): ChatMessage {
-  const projections = (message.runtimeNodeIds ?? [])
-    .map((key) => ({ key, node: nodes.get(key) }))
-    .filter((item): item is { key: string; node: RuntimeStateNode } => Boolean(item.node))
-    .map(({ key, node }) => projectRuntimeNode(node, key !== activeNodeKey))
-    .filter((item): item is ProjectedNodeDetails => Boolean(item));
-  if (projections.length === 0) return message;
-  const projectedEvents = projections.flatMap((item) => item.events);
-  const hasAssistantProjection = projections.some((item) => item.role === "assistant");
-  const projectedError = [...projections].reverse().find((item) => item.error)?.error;
-  const withoutPreviousError = { ...message };
-  delete withoutPreviousError.error;
-  return {
-    ...withoutPreviousError,
-    content: hasAssistantProjection ? projections.map((item) => item.content).join("") : message.content,
-    events: hasAssistantProjection ? projectedEvents : message.events,
-    runId: [...projections].reverse().find((item) => item.runId)?.runId ?? message.runId,
-    status: projections[projections.length - 1]?.status,
-    running: projections[projections.length - 1]?.status === "running",
-    ...(projectedError ? { error: projectedError } : {}),
-  };
+function ancestry(nodes: Map<string, RuntimeStateNode>, active: RuntimeStateNode): RuntimeStateNode[] {
+  const path: RuntimeStateNode[] = [];
+  const seen = new Set<string>();
+  let current: RuntimeStateNode | undefined = active;
+  while (current) {
+    const key = keyOf(current);
+    if (seen.has(key)) throw new Error("Turn ancestry contains a cycle");
+    seen.add(key);
+    path.push(current);
+    if (!current.parent_id) break;
+    current = nodes.get(`${current.parent_session_id}:${current.parent_id}`);
+    if (!current) throw new Error("Turn ancestry is incomplete");
+  }
+  return path.reverse();
+}
+
+export function projectTurnPath(nodes: Map<string, RuntimeStateNode>, activeTurnId: string): ChatMessage[] {
+  const active = [...nodes.values()].find((turn) => turn.id === activeTurnId);
+  if (!active) return [];
+  return ancestry(nodes, active).flatMap((turn) => {
+    const selected = turn.data[turn.current_data_idx];
+    if (!selected) return [];
+    const compact = selected[1].content[0]?.type === "compaction";
+    const userItem = selected[0].content[0];
+    const assistant = projectRuntimeNode(turn);
+    const result: ChatMessage[] = [];
+    if (!compact) {
+      result.push({
+        id: `${turn.id}:user`,
+        role: "user",
+        content: text(userItem?.text),
+        events: [],
+        nodeId: turn.id,
+        sourceNodeId: turn.parent_id || undefined,
+        references: userItem ? references(userItem) : undefined,
+      });
+    }
+    if (compact || assistant.content || assistant.events.length || assistant.error || turn.status === "running") {
+      result.push({
+        id: `${turn.id}:assistant`,
+        role: "assistant",
+        content: assistant.content,
+        events: assistant.events,
+        items: assistant.items,
+        itemVersion: turn.current_data_idx,
+        compactionNotice: assistant.compactionNotice,
+        status: turn.status,
+        error: assistant.error,
+        running: turn.status === "running",
+        decision: assistant.decision,
+        sourceNodeId: turn.id,
+        runtimeNodeIds: [keyOf(turn)],
+      });
+    }
+    return result;
+  });
+}
+
+export function messagesBeforeRewind(messages: ChatMessage[], turnId: string): ChatMessage[] {
+  const rewindIndex = messages.findIndex((message) => message.nodeId === turnId);
+  return rewindIndex >= 0 ? messages.slice(0, rewindIndex) : messages;
 }
 
 export function integrateRuntimeNodeFrame(conversation: Conversation, frame: RuntimeNodeFrame): Conversation {
-  const current = new Map<string, RuntimeStateNode>(
-    (conversation.runtimeNodes ?? []).map((node) => {
-      const normalized = normalizeRuntimeNode(node);
-      return [nodeKey(normalized), normalized] as const;
-    }),
-  );
+  const current = new Map((conversation.runtimeNodes ?? []).map((node) => {
+    const normalized = normalizeRuntimeNode(node);
+    return [keyOf(normalized), normalized] as const;
+  }));
   const next = applyRuntimeNodeFrame(current, frame);
-  const projection = projectRuntimeNode(frame.node, frame.type === "node.delete");
-  const messages = [...conversation.messages];
-  const key = nodeKey(frame.node);
-
-  if (projection?.role === "user") {
-    const existingIndex = messages.findIndex((message) => message.nodeId === frame.node.id && message.nodeSessionId === frame.node.session_id);
-    const optimisticIndex = messages.findIndex((message) => message.role === "user" && !message.nodeId);
-    const index = existingIndex >= 0 ? existingIndex : optimisticIndex;
-    const projected = {
-      id: index >= 0 ? messages[index].id : `${frame.node.session_id}:${frame.node.id}`,
-      role: "user" as const,
-      content: projection.content,
-      events: index >= 0 ? messages[index].events : [],
-      nodeId: frame.node.id,
-      nodeSessionId: frame.node.session_id,
-      sourceNodeId: frame.node.parent_id || undefined,
-      references: projection.references,
-    };
-    if (index >= 0) messages[index] = { ...messages[index], ...projected };
-    else messages.push(projected);
-  } else if (projection?.role === "assistant" || projection?.role === "tool_result") {
-    const existingIndex = messages.findIndex((message) => message.role === "assistant" && message.runtimeNodeIds?.includes(key));
-    const optimisticIndex = messages.findIndex((message) => message.role === "assistant" && !message.runtimeNodeIds && message.running);
-    const index = existingIndex >= 0 ? existingIndex : optimisticIndex;
-    const base = index >= 0
-      ? messages[index]
-      : { id: `${frame.node.session_id}:${frame.node.id}:assistant`, role: "assistant" as const, content: "", events: [] };
-    const runtimeNodeIds = base.runtimeNodeIds?.includes(key) ? base.runtimeNodeIds : [...(base.runtimeNodeIds ?? []), key];
-    const projected = projectMessageNodes(
-      { ...base, runtimeNodeIds, nodeSessionId: frame.node.session_id, sourceNodeId: frame.node.id },
-      next,
-      frame.type === "node.delete" ? undefined : key,
-    );
-    if (index >= 0) messages[index] = projected;
-    else messages.push(projected);
-  }
-
+  const activeTurnId = frame.turn.id;
   return {
     ...conversation,
-    messages,
     runtimeNodes: [...next.values()],
-    lastNodeId: frame.node.id,
-    forkAnchorNodeId: undefined,
-    forkAnchorSessionId: undefined,
+    messages: projectTurnPath(next, activeTurnId),
+    activeTurnId,
+    lastNodeId: activeTurnId,
+    threadId: frame.turn.thread_id,
   };
-}
-
-export function appendLegacyRuntimeEvent(message: ChatMessage, event: ToolEvent): ChatMessage {
-  if (event.kind === "thinking_start") {
-    return {
-      ...message,
-      events: [...message.events, { kind: "thinking", message: "", data: { streaming: true } }],
-    };
-  }
-  if (event.kind === "thinking_delta") {
-    const events = [...message.events];
-    const index = lastIndex(events, (item) => item.kind === "thinking" && item.data?.streaming === true);
-    if (index >= 0) events[index] = { ...events[index], message: events[index].message + event.message };
-    else events.push({ kind: "thinking", message: event.message, data: { streaming: true } });
-    return { ...message, events };
-  }
-  if (event.kind === "thinking_end") {
-    const events = [...message.events];
-    const index = lastIndex(events, (item) => item.kind === "thinking" && item.data?.streaming === true);
-    if (index >= 0) events[index] = { ...events[index], data: { ...events[index].data, streaming: false } };
-    return { ...message, events };
-  }
-  if (["tool_call", "tool_result", "tool_failed"].includes(event.kind)) {
-    return { ...message, events: [...message.events, event] };
-  }
-  return message;
 }

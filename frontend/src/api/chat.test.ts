@@ -1,0 +1,94 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { streamChat } from "./chat";
+import type { RuntimeStateNode, StreamMessage } from "../types";
+
+function turn(status: RuntimeStateNode["status"] = "running"): RuntimeStateNode {
+  return {
+    thread_id: "session_1",
+    parent_thread_id: "",
+    session_id: "session_1",
+    parent_session_id: "",
+    id: "turn_1",
+    parent_id: "",
+    version: "0.0.1",
+    firstKeptItemSize: 8,
+    compactionId: "turn_1",
+    user: "user_1",
+    provider_name: "local",
+    model: {
+      reasoning_effort: "medium",
+      current_model: "deterministic",
+      context_length: 128000,
+      output_length: 8192,
+      thinking: "enable",
+      temperature: 1,
+    },
+    permission_mode: "read_only",
+    running_mode: "agent",
+    usage: {
+      input_tokens: 0,
+      cached_tokens: 0,
+      output_tokens: 0,
+      reasoning_tokens: 0,
+      total_tokens: 0,
+    },
+    cwd: "C:\\workspace",
+    timestamp: "2026-08-25T00:00:00Z",
+    status,
+    current_data_idx: 0,
+    data: [[
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+      { role: "assistant", content: [] },
+    ]],
+  };
+}
+
+function response(lines: string[]): Response {
+  return new Response(lines.map((line) => `data: ${line}\n\n`).join(""), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("Turn SSE contract", () => {
+  it("accepts only full Turn snapshots followed by the matching success terminal", async () => {
+    const frames: StreamMessage[] = [];
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([
+      JSON.stringify({ type: "turn.create", turn: turn() }),
+      JSON.stringify({ type: "turn.update", turn: turn("success") }),
+      '<SSE id="turn_1" type="success"></SSE>',
+    ])));
+
+    await expect(streamChat("hello", (frame) => frames.push(frame), new AbortController().signal, {
+      sessionId: "session_1",
+      threadId: "session_1",
+      turnId: "turn_1",
+    })).resolves.toBe("completed");
+    expect(frames.map((frame) => frame.type)).toEqual(["turn.create", "turn.update"]);
+  });
+
+  it("rejects a stream that ends without a terminal envelope", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([
+      JSON.stringify({ type: "turn.create", turn: turn() }),
+    ])));
+
+    await expect(streamChat("hello", () => undefined, new AbortController().signal, {
+      sessionId: "session_1",
+      turnId: "turn_1",
+    })).rejects.toThrow("unexpectedly ended");
+  });
+
+  it("requires network terminals to carry the original frontend Turn id", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([
+      '<SSE id="network" type="network"></SSE>',
+    ])));
+
+    await expect(streamChat("hello", () => undefined, new AbortController().signal, {
+      sessionId: "session_1",
+      turnId: "turn_1",
+    })).rejects.toThrow("terminal id does not match");
+  });
+});

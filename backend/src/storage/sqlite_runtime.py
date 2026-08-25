@@ -4,10 +4,21 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 
 from backend.domain import RunProvenance, RunStatus, RuntimeMessage
-from backend.domain.runtime_state import RuntimeState as TreeRuntimeState
-from backend.domain.runtime_state import session_root_id
+from backend.domain.runtime_state import (
+    RuntimeState as TreeRuntimeState,
+)
+from backend.domain.runtime_state import (
+    RuntimeStateTree,
+    RuntimeStateValidationError,
+    message_payload,
+    new_node_id,
+    new_thread_id,
+    terminal_error_payload,
+    utc_iso,
+)
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState
 
@@ -18,34 +29,35 @@ class SQLiteRuntimeMixin:
     """Persist all runtime business values as JSON objects and events."""
 
     def create_node(self, node: TreeRuntimeState) -> None:
-        if node.data_type == "root":
-            raise ValueError("Root nodes are created only with session metadata.")
         if node.status != "running":
-            raise ValueError("A runtime node must be created with status='running'.")
-        if node.parent_id and self.get_node(node.parent_session_id, node.parent_id) is None:
-            raise ValueError("A runtime node parent must be present in the store.")
+            raise ValueError("A Turn must be created with status='running'.")
+        if node.parent_id:
+            parent = self.get_node(node.parent_session_id, node.parent_id)
+            if parent is None:
+                raise ValueError("A runtime node parent must be present in the store.")
+            if node.parent_session_id != node.session_id:
+                raise ValueError("A Turn cannot continue across Sessions.")
+            if node.parent_thread_id != parent.thread_id:
+                raise ValueError("parent_thread_id does not match the parent Turn.")
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
             self._session_document(connection, node.session_id)
             nodes = self._objects(connection, node.session_id, "runtime_node")
-            if node.parent_id:
-                parent = next(
-                    (item for item in nodes if item.id == node.parent_id and item.session_id == node.parent_session_id),
-                    None,
-                )
-                if parent is not None and parent.status == "running":
-                    raise ValueError("A running node cannot have a running child.")
-            if any(
-                item.status == "running"
-                and not any(
-                    child.parent_session_id == item.session_id and child.parent_id == item.id for child in nodes
-                )
-                for item in nodes
-            ):
-                raise ValueError("A session may have only one running leaf.")
+            if any(item.status == "running" and item.thread_id == node.thread_id for item in nodes):
+                raise ValueError("A thread may have only one running Turn.")
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
             self._touch_session(connection, node.session_id, node.timestamp)
-            self._append_event(connection, node.session_id, kind="node_upserted", payload={"node": node.to_dict()})
+            self._append_event(connection, node.session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
+
+    def update_node(self, node: TreeRuntimeState) -> None:
+        with self._connection(node.session_id) as connection:
+            self._assert_writable(connection)
+            existing = self._json_object(connection, node.session_id, "runtime_node", node.id)
+            if existing is None:
+                raise KeyError(node.id)
+            self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+            self._touch_session(connection, node.session_id, utc_now())
+            self._append_event(connection, node.session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
 
     def create_finalized_nodes(self, nodes: list[TreeRuntimeState] | tuple[TreeRuntimeState, ...]) -> None:
         """Atomically append an ordered batch of terminal canonical nodes."""
@@ -62,22 +74,23 @@ class SQLiteRuntimeMixin:
             by_key = {(node.session_id, node.id): node for node in existing}
             staged = dict(by_key)
             for node in nodes:
-                if node.status not in {"success", "cancel", "abort"}:
+                if node.status not in {"success", "paused", "failed"}:
                     raise ValueError("A finalized node batch must contain terminal nodes.")
                 if node.key in staged:
                     raise ValueError(f"Runtime node already exists: {node.session_id}/{node.id}")
-                if node.parent_id and (node.parent_session_id, node.parent_id) not in staged:
-                    # Branch sessions may continue from an ancestor stored in
-                    # another session database.  The local transaction cannot
-                    # stage that external row, but it must still exist before
-                    # the child batch is accepted.
-                    if node.parent_session_id == session_id or self.get_node(node.parent_session_id, node.parent_id) is None:
+                if node.parent_id:
+                    parent = staged.get((node.parent_session_id, node.parent_id))
+                    if parent is None:
                         raise ValueError("A finalized node parent must be present in the store.")
+                    if node.parent_session_id != session_id:
+                        raise ValueError("A Turn cannot continue across Sessions.")
+                    if node.parent_thread_id != parent.thread_id:
+                        raise ValueError("parent_thread_id does not match the parent Turn.")
                 staged[node.key] = node
             timestamp = nodes[-1].timestamp
             for node in nodes:
                 self._put_json_object(connection, session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
-                self._append_event(connection, session_id, kind="node_finalized", payload={"node": node.to_dict()})
+                self._append_event(connection, session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
             self._touch_session(connection, session_id, timestamp)
 
     def get_node(self, session_id: str, node_id: str) -> TreeRuntimeState | None:
@@ -87,8 +100,15 @@ class SQLiteRuntimeMixin:
             value = self._json_object(connection, session_id, "runtime_node", node_id)
         return TreeRuntimeState.from_dict(value) if value is not None else None
 
-    def get_session_root(self, session_id: str) -> TreeRuntimeState | None:
-        return self.get_node(session_id, session_root_id(session_id))
+    def find_node(self, node_id: str) -> TreeRuntimeState | None:
+        matches: list[TreeRuntimeState] = []
+        for summary in self.list_sessions(state="all"):
+            node = self.get_node(summary.session_id, node_id)
+            if node is not None:
+                matches.append(node)
+        if len(matches) > 1:
+            raise ValueError("Turn id is not globally unique.")
+        return matches[0] if matches else None
 
     def list_children(self, parent_session_id: str, parent_id: str) -> list[TreeRuntimeState]:
         result: list[TreeRuntimeState] = []
@@ -104,26 +124,9 @@ class SQLiteRuntimeMixin:
             return []
         with self._connection(session_id) as connection:
             nodes = self._objects(connection, session_id, "runtime_node")
-        result = {node.key: node for node in nodes}
-        pending = list(result.values())
-        while pending:
-            node = pending.pop()
-            if not node.parent_id:
-                continue
-            key = (node.parent_session_id, node.parent_id)
-            if key in result or not self.paths.session_db(node.parent_session_id).exists():
-                continue
-            parent = self.get_node(*key)
-            if parent is not None:
-                result[key] = parent
-                pending.append(parent)
-        return sorted(result.values(), key=lambda item: (item.timestamp, item.id))
+        return sorted(nodes, key=lambda item: (item.timestamp, item.id))
 
     def finalize_node(self, node: TreeRuntimeState) -> None:
-        if node.data_type == "root":
-            raise ValueError("Root nodes are immutable.")
-        if self.list_children(node.session_id, node.id):
-            raise ValueError("Only a leaf runtime node can be finalized.")
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
             existing = self._json_object(connection, node.session_id, "runtime_node", node.id)
@@ -131,11 +134,123 @@ class SQLiteRuntimeMixin:
                 raise ValueError(f"Unknown runtime node: {node.session_id}/{node.id}")
             if str(existing.get("status")) != "running":
                 raise ValueError("Sealed runtime nodes are read-only.")
-            if node.status not in {"success", "cancel", "abort"}:
-                raise ValueError("A runtime node can only be finalized as success, cancel, or abort.")
+            if node.status not in {"success", "paused", "failed"}:
+                raise ValueError("A Turn can only be finalized as success, paused, or failed.")
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
             self._touch_session(connection, node.session_id, node.timestamp)
-            self._append_event(connection, node.session_id, kind="node_finalized", payload={"node": node.to_dict()})
+            self._append_event(connection, node.session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
+
+    def append_turn_version(self, turn_id: str, user_item: Mapping[str, object]) -> TreeRuntimeState:
+        """Atomically rewind one Turn by appending a new selected version."""
+
+        node = self.find_node(turn_id)
+        if node is None:
+            raise KeyError(turn_id)
+        if node.status == "running":
+            raise ValueError("A running Turn cannot be rewound.")
+        user = message_payload("user", [dict(user_item)])
+        assistant = message_payload("assistant", [])
+        with self._connection(node.session_id) as connection:
+            self._assert_writable(connection)
+            current = self._json_object(connection, node.session_id, "runtime_node", node.id)
+            if current is None:
+                raise KeyError(turn_id)
+            stored = TreeRuntimeState.from_dict(current)
+            running = [
+                item
+                for item in self._objects(connection, node.session_id, "runtime_node")
+                if item.thread_id == stored.thread_id and item.status == "running" and item.id != stored.id
+            ]
+            if running:
+                raise ValueError("A thread may have only one running Turn.")
+            stored.data.append([user, assistant])
+            stored.current_data_idx = len(stored.data) - 1
+            stored.status = "running"
+            stored.timestamp = utc_iso()
+            stored = TreeRuntimeState.from_dict(stored.to_dict())
+            self._put_json_object(
+                connection, stored.session_id, "runtime_node", stored.id, stored.to_dict(), stored.timestamp
+            )
+            self._touch_session(connection, stored.session_id, stored.timestamp)
+            self._append_event(connection, stored.session_id, kind="turn_upserted", payload={"turn": stored.to_dict()})
+        return stored
+
+    def set_turn_current_data(self, turn_id: str, current_data_idx: int) -> TreeRuntimeState:
+        node = self.find_node(turn_id)
+        if node is None:
+            raise KeyError(turn_id)
+        if isinstance(current_data_idx, bool) or not isinstance(current_data_idx, int):
+            raise RuntimeStateValidationError("current_data_idx must be an integer.")
+        if not 0 <= current_data_idx < len(node.data):
+            raise RuntimeStateValidationError("current_data_idx is out of range.")
+        node.current_data_idx = current_data_idx
+        node = TreeRuntimeState.from_dict(node.to_dict())
+        self.update_node(node)
+        return node
+
+    def pause_turn(self, turn_id: str, message: str = "Paused by user.") -> TreeRuntimeState:
+        node = self.find_node(turn_id)
+        if node is None:
+            raise KeyError(turn_id)
+        if node.status != "running":
+            raise ValueError("Only a running Turn can be paused.")
+        node.data[node.current_data_idx][1]["content"].append(terminal_error_payload("user", message, retryable=True))
+        node.status = "paused"
+        node = TreeRuntimeState.from_dict(node.to_dict())
+        self.finalize_node(node)
+        return node
+
+    def resume_turn_node(self, turn_id: str) -> TreeRuntimeState:
+        """Re-open a paused Turn in place and continue its selected version."""
+
+        node = self.find_node(turn_id)
+        if node is None:
+            raise KeyError(turn_id)
+        if node.status != "paused":
+            raise ValueError("Only a paused Turn can be resumed.")
+        with self._connection(node.session_id) as connection:
+            self._assert_writable(connection)
+            if any(
+                item.thread_id == node.thread_id and item.status == "running" and item.id != node.id
+                for item in self._objects(connection, node.session_id, "runtime_node")
+            ):
+                raise ValueError("A thread may have only one running Turn.")
+            content = node.data[node.current_data_idx][1]["content"]
+            if content and content[-1].get("type") == "error" and bool(content[-1].get("retryable")):
+                content.pop()
+            node.status = "running"
+            node = TreeRuntimeState.from_dict(node.to_dict())
+            self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), utc_iso())
+            self._touch_session(connection, node.session_id, utc_iso())
+            self._append_event(connection, node.session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
+        return node
+
+    def fork_turn_node(
+        self, turn_id: str, *, new_turn_id: str | None = None, thread_id: str | None = None
+    ) -> TreeRuntimeState:
+        source = self.find_node(turn_id)
+        if source is None:
+            raise KeyError(turn_id)
+        if source.status == "running":
+            raise ValueError("A running Turn cannot be forked.")
+        nodes = self.load_nodes(source.session_id)
+        forked = RuntimeStateTree(nodes).fork(
+            source, id=new_turn_id or new_node_id(), thread_id=thread_id or new_thread_id()
+        )
+        self.create_finalized_nodes([forked])
+        return forked
+
+    def create_compact_turn(self, turn_id: str, summary: str, *, new_turn_id: str | None = None) -> TreeRuntimeState:
+        source = self.find_node(turn_id)
+        if source is None:
+            raise KeyError(turn_id)
+        if source.status != "success":
+            raise ValueError("Only a successful Turn can be compacted.")
+        compacted = RuntimeStateTree(self.load_nodes(source.session_id)).compact(
+            source, summary, id=new_turn_id or new_node_id()
+        )
+        self.create_node(compacted)
+        return compacted
 
     def runtime_state_document(self, session_id: str) -> dict[str, object]:
         session = self.get_session(session_id)
@@ -159,7 +274,7 @@ class SQLiteRuntimeMixin:
         with self._connection(session_id) as connection:
             self._assert_writable(connection)
             document = self._session_document(connection, session_id)
-            if not bool(document.get("title_is_custom")) and not self._chain_has_user_message(connection, session_id):
+            if not bool(document.get("title_is_custom")) and not self._session_has_turn(connection):
                 document["title"] = normalize_session_title(task)
             run = {
                 "run_id": run_id,
@@ -196,38 +311,19 @@ class SQLiteRuntimeMixin:
                 },
             )
 
-    def _chain_has_user_message(self, connection: sqlite3.Connection, session_id: str) -> bool:
-        visited: set[str] = set()
-        current = session_id
-        while current and current not in visited:
-            visited.add(current)
-            if current == session_id:
-                found, parent = self._chain_query(connection, current)
-            elif self.paths.session_db(current).exists():
-                with self._connection(current) as ancestor:
-                    found, parent = self._chain_query(ancestor, current)
-            else:
-                return False
-            if found:
-                return True
-            current = parent or ""
-        return False
-
     @staticmethod
-    def _chain_query(connection: sqlite3.Connection, session_id: str) -> tuple[bool, str | None]:
-        found = connection.execute(
-            "SELECT 1 FROM json_objects WHERE namespace='runtime_node' AND json_extract(payload_json,'$.data.type')='message' AND json_extract(payload_json,'$.data.message.role')='user' LIMIT 1"
-        ).fetchone()
-        if found is not None:
-            return True, None
-        root = connection.execute(
-            "SELECT payload_json FROM json_objects WHERE namespace='runtime_node' AND object_id=?",
-            (session_root_id(session_id),),
-        ).fetchone()
-        if root is None:
-            return False, None
-        payload = json.loads(str(root[0]))
-        return False, str(payload.get("parent_session_id") or "") or None
+    def _session_has_turn(connection: sqlite3.Connection) -> bool:
+        """Return whether the Session already contains a real Turn."""
+
+        return (
+            connection.execute(
+                "SELECT 1 FROM json_objects "
+                "WHERE namespace='runtime_node' "
+                "AND json_extract(payload_json,'$.data[0][0].role')='user' "
+                "LIMIT 1"
+            ).fetchone()
+            is not None
+        )
 
     def append_turn_input(self, session_id: str, run_id: str, content: str) -> None:
         with self._connection(session_id) as connection:

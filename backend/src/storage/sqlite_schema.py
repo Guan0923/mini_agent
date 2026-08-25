@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
+UNSUPPORTED_SCHEMA_MESSAGE = "Unsupported state.db schema v9; Mini-Agent requires v10 and left the database untouched."
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS store_metadata (
@@ -79,7 +80,7 @@ CREATE INDEX IF NOT EXISTS sandbox_approvals_session_idx
 
 
 class SQLiteSchemaMixin:
-    """Reject every pre-v9 database before executing schema DDL."""
+    """Reject every pre-v10 database before executing schema DDL."""
 
     @staticmethod
     def _assert_supported_schema(connection: sqlite3.Connection) -> None:
@@ -92,27 +93,19 @@ class SQLiteSchemaMixin:
             return
         allowed = {"store_metadata", "json_objects", "json_events", "workspace_files", "sandbox_approvals"}
         if not tables.issubset(allowed):
-            raise RuntimeError(
-                "Unsupported legacy state.db schema; remove the old state.db before using JSON event storage."
-            )
+            raise RuntimeError(UNSUPPORTED_SCHEMA_MESSAGE)
         if "store_metadata" not in tables:
-            raise RuntimeError(
-                "Unsupported legacy state.db schema; remove the old state.db before using JSON event storage."
-            )
+            raise RuntimeError(UNSUPPORTED_SCHEMA_MESSAGE)
         columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(store_metadata)")}
         if not {"session_id", "schema_version", "local_revision", "remote_revision"}.issubset(columns):
-            raise RuntimeError(
-                "Unsupported legacy state.db schema; remove the old state.db before using JSON event storage."
-            )
+            raise RuntimeError(UNSUPPORTED_SCHEMA_MESSAGE)
         row = connection.execute("SELECT schema_version FROM store_metadata LIMIT 1").fetchone()
         if row is not None and int(row[0]) != SCHEMA_VERSION:
-            raise RuntimeError(
-                "Unsupported legacy state.db schema; remove the old state.db before using JSON event storage."
-            )
+            raise RuntimeError(UNSUPPORTED_SCHEMA_MESSAGE)
 
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection) -> None:
-        """Validate v9; intentionally perform no migration or backfill."""
+        """Validate v10; intentionally perform no migration or backfill."""
 
         SQLiteSchemaMixin._assert_supported_schema(connection)
 

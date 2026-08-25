@@ -1,6 +1,6 @@
 export type Page = "chat" | "trash" | "benchmark";
 export type ChatMode = "agent" | "plan";
-export type PermissionMode = "approval_for_me" | "read_only" | "workspace_write" | "full_access";
+export type PermissionMode = "read_only" | "workspace_write" | "full_access";
 export type DisplayMode = "minimal" | "medium" | "verbose" | "developer";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -40,30 +40,6 @@ export interface ToolEvent {
   data?: Record<string, unknown>;
 }
 
-export type RunSegmentType = "thinking" | "response" | "tool_batch";
-export type RunSegmentStatus = "streaming" | "completed" | "failed";
-export type RunPresentationToolStatus = "pending" | "succeeded" | "failed";
-
-export interface RunPresentationTool {
-  call_id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-  status: RunPresentationToolStatus;
-  result?: string;
-  error?: string;
-  failure_code?: string;
-}
-
-export interface RunPresentationSegment {
-  sequence: number;
-  segment_id: string;
-  segment_type: RunSegmentType;
-  status: RunSegmentStatus;
-  text?: string;
-  final?: boolean;
-  tools?: RunPresentationTool[];
-}
-
 export type TodoStatus = "pending" | "in_progress" | "completed";
 
 export interface TodoItem {
@@ -71,8 +47,7 @@ export interface TodoItem {
   status: TodoStatus;
 }
 
-export type RuntimeNodeStatus = "running" | "success" | "cancel" | "abort";
-export type RuntimeNodeDataType = "message" | "compaction" | "root";
+export type RuntimeNodeStatus = "running" | "success" | "paused" | "failed";
 export type ThinkingMode = "enable" | "disable";
 export interface RuntimeNodeModel {
   reasoning_effort: ReasoningEffort;
@@ -90,15 +65,29 @@ export interface RuntimeNodeUsage {
   total_tokens: number | null;
 }
 
+export interface TurnItem {
+  type: string;
+  text?: string;
+  [key: string]: unknown;
+}
+
+export interface TurnMessage {
+  role: "user" | "assistant";
+  content: TurnItem[];
+  [key: string]: unknown;
+}
+
 /** Canonical persisted node shared by API, TUI and the web reducer. */
 export interface RuntimeStateNode {
+  thread_id: string;
+  parent_thread_id: string;
   session_id: string;
   parent_session_id: string;
   id: string;
   parent_id: string;
   version: string;
-  firstKeptEntryId: string;
-  compactionIdx: string;
+  firstKeptItemSize: number;
+  compactionId: string;
   user: string;
   provider_name: string;
   model: RuntimeNodeModel;
@@ -108,14 +97,26 @@ export interface RuntimeStateNode {
   cwd: string;
   timestamp: string;
   status: RuntimeNodeStatus;
-  data: Record<string, unknown> & { type?: RuntimeNodeDataType };
+  current_data_idx: number;
+  data: TurnMessage[][];
 }
 
-export type NodeFrameType = "node.create" | "node.update" | "node.delete";
+export type NodeFrameType = "turn.create" | "turn.update";
 
 export interface RuntimeNodeFrame {
   type: NodeFrameType;
-  node: RuntimeStateNode;
+  turn: RuntimeStateNode;
+}
+
+export interface SidebarThread {
+  thread_id: string;
+  session_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string | null;
+  deleted_at?: string | null;
+  title_is_custom: boolean;
 }
 
 export interface Metrics {
@@ -130,7 +131,9 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   events: ToolEvent[];
-  segments?: RunPresentationSegment[];
+  items?: TurnItem[];
+  itemVersion?: number;
+  compactionNotice?: boolean;
   status?: string;
   metrics?: Metrics;
   error?: string;
@@ -138,10 +141,7 @@ export interface ChatMessage {
   runId?: string;
   /** Durable runtime node id for rewind targets. */
   nodeId?: string;
-  /** Session that owns nodeId; needed for cross-session fork ancestors. */
-  nodeSessionId?: string;
   sourceNodeId?: string;
-  sourceNodeSessionId?: string;
   runtimeNodeIds?: string[];
   decision?: DecisionRequest;
   /** Structured file references attached to a user message. */
@@ -166,10 +166,9 @@ export interface Conversation {
   deletedAt?: string;
   messagesLoaded?: boolean;
   lastNodeId?: string;
-  /** Anchor returned by fork for the first continuation on the new branch. */
-  forkAnchorNodeId?: string;
-  forkAnchorSessionId?: string;
   runtimeNodes?: RuntimeStateNode[];
+  threadId?: string;
+  activeTurnId?: string;
   projectId?: string;
   localOnly?: boolean;
   projectAvailable?: boolean;
@@ -273,7 +272,7 @@ export interface SkillInfo {
 }
 
 export interface StreamMessage {
-  type: "event" | "done" | "error" | "job" | "run_segment" | NodeFrameType;
+  type: NodeFrameType;
   kind?: string;
   message?: string;
   data?: Record<string, unknown>;
@@ -284,7 +283,5 @@ export interface StreamMessage {
   session_id?: string;
   run_id?: string;
   mode?: ChatMode;
-  node?: RuntimeStateNode;
-  job_id?: string;
-  segment?: RunPresentationSegment;
+  turn: RuntimeStateNode;
 }

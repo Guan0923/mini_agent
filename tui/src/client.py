@@ -11,16 +11,10 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
-from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import keyring
-
-from .runtime_nodes import RuntimeNodeReducer
-
-EventSink = Callable[[dict], None]
-DecisionResponder = Callable[[dict], dict]
 
 DEFAULT_SERVER = "http://127.0.0.1:8000"
 
@@ -61,7 +55,6 @@ class MiniAgentClient:
         self.base_url = _normalize_server_url(base_url)
         self.timeout = timeout
         self._token = token
-        self.runtime_nodes = RuntimeNodeReducer()
 
     @property
     def _keyring_key(self) -> str:
@@ -188,126 +181,10 @@ class MiniAgentClient:
         self.ensure_authenticated()
         return self._request("GET", "/api/skills")
 
-    def list_sessions(self) -> list[dict]:
+    def list_sidebar_threads(self) -> list[dict]:
         self.ensure_authenticated()
-        return self._request("GET", "/api/sessions")
+        return self._request("GET", "/api/sidebar-threads")
 
     def post_decision(self, decision_id: str, decision: dict) -> None:
         self.ensure_authenticated()
         self._request("POST", "/api/decisions", {**decision, "decision_id": decision_id})
-
-    def run_task(
-        self,
-        prompt: str,
-        *,
-        on_event: EventSink,
-        on_decision_requested: DecisionResponder | None = None,
-        interactive: bool = False,
-        session_id: str | None = None,
-        source_node_id: str | None = None,
-        timeout: float = 600.0,
-    ) -> dict:
-        """Stream one agent run over node lifecycle SSE frames.
-
-        ``on_decision_requested`` (if interactive) returns the decision dict to
-        post back, e.g. ``{"choice": "continue"}``.  The returned object is
-        the final ``node.delete`` frame for compatibility with callers that
-        need the terminal node.
-        """
-        self.ensure_authenticated()
-        body = json.dumps(
-            {
-                "prompt": prompt,
-                "interactive": interactive,
-                "session_id": session_id,
-                "source_node_id": source_node_id,
-            }
-        ).encode()
-        headers = {"Content-Type": "application/json"}
-        token = self._load_token()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        request = urllib.request.Request(
-            self.base_url + "/api/chat",
-            data=body,
-            headers=headers,
-            method="POST",
-        )
-        try:
-            response = urllib.request.urlopen(request, timeout=timeout)
-        except urllib.error.HTTPError as exc:
-            if exc.code == 401:
-                self._forget_token()
-            raise ApiError(f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')}", exc.code) from exc
-        except urllib.error.URLError as exc:
-            raise ApiError(f"无法连接后端 {self.base_url}: {exc.reason}") from exc
-
-        done: dict = {}
-        buffer = ""
-        try:
-            for raw in response:
-                buffer += raw.decode("utf-8", "replace")
-                while "\n\n" in buffer:
-                    block, buffer = buffer.split("\n\n", 1)
-                    for line in block.splitlines():
-                        if not line.startswith("data: "):
-                            continue
-                        try:
-                            message = json.loads(line[6:])
-                        except ValueError:
-                            continue
-                        kind = message.get("type")
-                        if kind in {"node.create", "node.update", "node.delete"}:
-                            # A node frame is already presentation-neutral;
-                            # hand the complete replacement to the reducer.
-                            self.runtime_nodes.apply(message)
-                            on_event(message)
-                            if kind == "node.delete":
-                                node = message.get("node")
-                                done = self._completion_from_node(node)
-                        elif kind == "event":
-                            if message.get("kind") == "decision_requested" and on_decision_requested is not None:
-                                decision = on_decision_requested(message.get("data", {}))
-                                if decision:
-                                    self.post_decision(message["data"]["decision_id"], decision)
-                            on_event(message)
-                        elif kind == "done":
-                            done = message
-                        elif kind == "error":
-                            raise ApiError(message.get("message", "未知错误"))
-        finally:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
-        return done
-
-    @staticmethod
-    def _completion_from_node(node: Any) -> dict:
-        """Project the terminal node into the small CLI result shape.
-
-        The node lifecycle stream intentionally has no SSE-level ``done``
-        frame.  Keep the network client's historical return value useful for
-        callers such as ``mini-agent-net`` by deriving status and final text
-        from the last deleted assistant node.
-        """
-
-        if not isinstance(node, dict):
-            return {"type": "node.delete", "node": node}
-        data = node.get("data")
-        final_answer = ""
-        if isinstance(data, dict) and data.get("type") == "message":
-            message = data.get("message")
-            blocks = message.get("content", []) if isinstance(message, dict) else []
-            if isinstance(blocks, list):
-                final_answer = "".join(
-                    str(block.get("text") or "")
-                    for block in blocks
-                    if isinstance(block, dict) and block.get("type") == "text"
-                )
-        return {
-            "type": "node.delete",
-            "node": node,
-            "status": node.get("status", "failed"),
-            "final_answer": final_answer,
-            "session_id": node.get("session_id"),
-        }

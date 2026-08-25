@@ -243,8 +243,21 @@
   gap: 4px;
 }
 
-.runtime-collapse.runtime-details {
-  margin-bottom: 12px;
+.runtime-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.runtime-item-response,
+.runtime-business-item {
+  margin: 4px 0 8px;
+}
+
+.runtime-compaction-notice {
+  margin-bottom: 6px;
+  color: #a8a9aa;
+  font-size: 12.5px;
 }
 
 .runtime-collapse.ant-collapse,
@@ -313,9 +326,21 @@
 }
 
 .shimmer-text.is-active {
-  color: #a8a9aa;
-  background: none;
-  animation: none;
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    #a8a9aa 0%,
+    #a8a9aa 34%,
+    #ffffff 50%,
+    #a8a9aa 66%,
+    #a8a9aa 100%
+  );
+  background-position: 100% 0;
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: runtime-summary-shimmer 1.6s linear infinite;
 }
 
 @keyframes runtime-summary-shimmer {
@@ -326,7 +351,9 @@
 @media (prefers-reduced-motion: reduce) {
   .shimmer-text.is-active {
     animation: none;
-    background-position: 50% 0;
+    color: #a8a9aa;
+    background: none;
+    -webkit-text-fill-color: currentColor;
   }
 }
 
@@ -353,6 +380,10 @@
 .tool-line.is-active {
   color: var(--accent);
   border-color: rgba(79, 107, 255, 0.3);
+}
+
+.runtime-approval-status {
+  margin: 2px 0;
 }
 
 .tool-call-id {
@@ -587,6 +618,15 @@ pre.tool-result {
 
 .message.user .message-actions {
   justify-content: flex-end;
+}
+
+.message-version-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 .message.assistant .message-actions {

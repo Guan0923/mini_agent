@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from .sqlite_approvals import SQLiteApprovalMixin
 from .sqlite_base import SQLiteBaseMixin
-from .sqlite_fork import SQLiteForkMixin
 from .sqlite_runtime import SQLiteRuntimeMixin
 from .sqlite_schema import SQLiteSchemaMixin
 from .sqlite_sessions import SQLiteSessionMixin
+from .sqlite_sidebar_threads import SQLiteSidebarThreadMixin
 from .sqlite_sync import SQLiteSyncMixin
 
 
@@ -19,8 +19,8 @@ class SQLiteSessionStore(
     SQLiteBaseMixin,
     SQLiteApprovalMixin,
     SQLiteSessionMixin,
+    SQLiteSidebarThreadMixin,
     SQLiteRuntimeMixin,
-    SQLiteForkMixin,
     SQLiteSyncMixin,
     SQLiteSchemaMixin,
 ):

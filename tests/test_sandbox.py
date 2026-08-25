@@ -37,17 +37,15 @@ from backend.sandbox import (
     WindowsBrokerService,
     WindowsDpapiProvider,
     WindowsNamedPipeServer,
-    migrate_legacy_permission_mode,
     normalize_permission_mode,
     resolve_network_rules,
 )
 
 
-def test_legacy_permission_modes_migrate_to_read_only(tmp_path: Path) -> None:
-    assert normalize_permission_mode("approval_for_me") is PermissionMode.READ_ONLY
+def test_permission_modes_use_only_the_three_level_contract(tmp_path: Path) -> None:
+    assert {mode.value for mode in PermissionMode} == {"read_only", "workspace_write", "full_access"}
     assert normalize_permission_mode("full_access") is PermissionMode.FULL_ACCESS
     assert normalize_permission_mode(None) is PermissionMode.READ_ONLY
-    assert migrate_legacy_permission_mode("full_access") is PermissionMode.READ_ONLY
     assert PermissionMode is FileAccessMode
     assert SandboxLimits is ResourceLimits
     assert SandboxJobContext("user-1", SandboxPolicy(tmp_path, "session", "job")).job_kind == "command"

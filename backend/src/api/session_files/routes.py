@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, Response
 
 from ..auth.dependencies import require_user
 from ..auth.types import UserIdentity
-from ..sessions.routes import _require_active, _store
+from ..session_store import require_active_session, session_store
 from ..state import WebAppState
 from .store import SessionFileError, SessionFileStore
 
@@ -25,8 +25,8 @@ _CONTENT_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp",
 def _store_for(state: WebAppState, identity: UserIdentity, session_id: str) -> SessionFileStore:
     """Build the session file store with the validated project root."""
 
-    store = _store(state, identity.id)
-    _require_active(store, session_id)
+    store = session_store(state, identity.id)
+    require_active_session(store, session_id)
     paths = state.user_paths(identity.id)
     paths.ensure_session(session_id)
     project_root = None

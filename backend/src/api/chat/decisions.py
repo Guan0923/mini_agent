@@ -11,8 +11,7 @@ from ..auth.dependencies import require_user
 from ..auth.types import UserIdentity
 from .interrupts import registry
 
-# Included under the chat router's /api prefix, so it carries no prefix itself.
-router = APIRouter()
+router = APIRouter(prefix="/api")
 
 
 class DecisionBody(BaseModel):

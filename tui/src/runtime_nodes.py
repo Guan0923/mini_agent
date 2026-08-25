@@ -5,34 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-NodeFrameType = Literal["node.create", "node.update", "node.delete"]
+NodeFrameType = Literal["turn.create", "turn.update"]
 USAGE_FIELDS = ("input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "total_tokens")
-
-
-def _default_model() -> dict[str, Any]:
-    return {
-        "reasoning_effort": "medium",
-        "current_model": "unknown",
-        "context_length": 128000,
-        "output_length": 8192,
-        "thinking": "enable",
-        "temperature": 1.0,
-    }
-
-
-def _default_usage() -> dict[str, int | None]:
-    return {name: None for name in USAGE_FIELDS}
 
 
 @dataclass
 class RuntimeNodeView:
+    thread_id: str
+    parent_thread_id: str
     session_id: str
     parent_session_id: str
     id: str
     parent_id: str
     version: str
-    firstKeptEntryId: str
-    compactionIdx: str
+    firstKeptItemSize: int
+    compactionId: str
     user: str
     provider_name: str
     model: dict[str, Any]
@@ -42,28 +29,75 @@ class RuntimeNodeView:
     cwd: str
     timestamp: str
     status: str
-    data: dict[str, Any] = field(default_factory=dict)
+    current_data_idx: int
+    data: list[list[dict[str, Any]]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> RuntimeNodeView:
+        required = {
+            "thread_id",
+            "parent_thread_id",
+            "session_id",
+            "parent_session_id",
+            "id",
+            "parent_id",
+            "version",
+            "firstKeptItemSize",
+            "compactionId",
+            "user",
+            "provider_name",
+            "model",
+            "permission_mode",
+            "running_mode",
+            "usage",
+            "cwd",
+            "timestamp",
+            "status",
+            "current_data_idx",
+            "data",
+        }
+        missing = required.difference(value)
+        if missing:
+            raise ValueError(f"Turn is missing required fields: {', '.join(sorted(missing))}")
+        if value["version"] != "0.0.1":
+            raise ValueError("Unsupported Turn version.")
+        if value["permission_mode"] not in {"read_only", "workspace_write", "full_access"}:
+            raise ValueError("Invalid permission_mode.")
+        if value["running_mode"] not in {"agent", "plan"}:
+            raise ValueError("Invalid running_mode.")
+        if value["status"] not in {"running", "success", "paused", "failed"}:
+            raise ValueError("Invalid Turn status.")
+        model = value["model"]
+        usage = value["usage"]
+        data = value["data"]
+        if not isinstance(model, dict) or not isinstance(usage, dict) or not isinstance(data, list) or not data:
+            raise ValueError("Invalid Turn model, usage, or data.")
+        if set(USAGE_FIELDS).difference(usage):
+            raise ValueError("Turn usage is incomplete.")
+        index = value["current_data_idx"]
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(data):
+            raise ValueError("current_data_idx is out of range.")
         return cls(
-            session_id=str(value.get("session_id", "")),
-            parent_session_id=str(value.get("parent_session_id", "")),
-            id=str(value.get("id", "")),
-            parent_id=str(value.get("parent_id", "")),
-            version=str(value.get("version", "")),
-            firstKeptEntryId=str(value.get("firstKeptEntryId", "")),
-            compactionIdx=str(value.get("compactionIdx", "")),
-            user=str(value.get("user", "")),
-            provider_name=str(value.get("provider_name", "")),
-            model={**_default_model(), **dict(value.get("model") or {})},
-            permission_mode=str(value.get("permission_mode", "approval_for_me")),
-            running_mode=str(value.get("running_mode", "agent")),
-            usage={**_default_usage(), **dict(value.get("usage") or {})},
-            cwd=str(value.get("cwd", "")),
-            timestamp=str(value.get("timestamp", "")),
-            status=str(value.get("status", "failed")),
-            data=dict(value.get("data") or {}),
+            thread_id=str(value["thread_id"]),
+            parent_thread_id=str(value["parent_thread_id"]),
+            session_id=str(value["session_id"]),
+            parent_session_id=str(value["parent_session_id"]),
+            id=str(value["id"]),
+            parent_id=str(value["parent_id"]),
+            version=str(value["version"]),
+            firstKeptItemSize=int(value["firstKeptItemSize"]),
+            compactionId=str(value["compactionId"]),
+            user=str(value["user"]),
+            provider_name=str(value["provider_name"]),
+            model=dict(model),
+            permission_mode=str(value["permission_mode"]),
+            running_mode=str(value["running_mode"]),
+            usage=dict(usage),
+            cwd=str(value["cwd"]),
+            timestamp=str(value["timestamp"]),
+            status=str(value["status"]),
+            current_data_idx=index,
+            data=list(data),
         )
 
 
@@ -75,9 +109,9 @@ class RuntimeNodeReducer:
 
     def apply(self, frame: dict[str, Any]) -> RuntimeNodeView | None:
         frame_type = frame.get("type")
-        if frame_type not in {"node.create", "node.update", "node.delete"}:
+        if frame_type not in {"turn.create", "turn.update"}:
             return None
-        raw = frame.get("node")
+        raw = frame.get("turn")
         if not isinstance(raw, dict):
             return None
         node = RuntimeNodeView.from_dict(raw)

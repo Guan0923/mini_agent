@@ -1,7 +1,7 @@
 import { Alert, BorderBeam, Collapse, App as AntApp, message as staticMessage } from "antd";
 import { BranchesOutlined, CopyOutlined, EditOutlined, FileTextOutlined, RollbackOutlined, ToolOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
-import type { ChatMessage, DecisionRequest, DisplayMode, FileReference, RunPresentationSegment, RunPresentationTool, ToolEvent } from "../../types";
+import type { ChatMessage, DecisionRequest, DisplayMode, FileReference, ToolEvent, TurnItem } from "../../types";
 import { effectiveDisplayMode } from "../../app/displayMode";
 import { fileReferenceAvailable, sessionFileContentUrl } from "../../api";
 import DecisionCard from "../../components/DecisionCard";
@@ -138,13 +138,8 @@ function isUserDenied(value: { failure_code?: unknown }): boolean {
   return value.failure_code === "user_denied";
 }
 
-function isHiddenRecoverableToolFailure(value: { failure_code?: unknown }): boolean {
-  return value.failure_code === "user_denied_batch";
-}
-
 export function ToolLine({ ev, display, active = false }: { ev: ToolEvent; display: DisplayMode; active?: boolean }) {
   const denied = ev.kind === "tool_failed" && isUserDenied(ev.data ?? {});
-  if (display === "minimal" && !denied) return null;
   if (denied) {
     const tool = String(ev.data?.tool ?? "工具");
     return (
@@ -153,6 +148,19 @@ export function ToolLine({ ev, display, active = false }: { ev: ToolEvent; displ
         <b>{tool}</b>
         <span className="tool-status failed">已拒绝</span>
         {display === "developer" && callId(ev) ? <span className="tool-call-id">call ID: {callId(ev)}</span> : null}
+      </div>
+    );
+  }
+  if (ev.kind === "tool_failed") {
+    const tool = String(ev.data?.tool ?? "工具");
+    return (
+      <div className="tool-line failed">
+        <ToolOutlined aria-hidden="true" />
+        <b>{tool}</b>
+        <span className="tool-status failed">失败</span>
+        {display === "developer" && callId(ev) ? <span className="tool-call-id">call ID: {callId(ev)}</span> : null}
+        {display !== "minimal" ? <pre className="tool-result error-text">{jsonText(ev.data?.result ?? ev.message)}</pre> : null}
+        {display === "developer" ? <pre className="tool-payload">{jsonText(ev.data)}</pre> : null}
       </div>
     );
   }
@@ -169,12 +177,12 @@ export function ToolLine({ ev, display, active = false }: { ev: ToolEvent; displ
     );
   }
   if (ev.kind === "tool_result") {
-    const result = (ev.data?.result as string | undefined) ?? ev.message;
+    const result = ev.data?.result ?? ev.message;
     return (
       <div className="tool-result">
         <div className="tool-result-label"><FileTextOutlined /> {ev.data?.tool ? String(ev.data.tool) : "工具"} 结果</div>
         {display === "developer" && callId(ev) ? <div className="tool-call-id">call ID: {callId(ev)}</div> : null}
-        <pre>{jsonText(result)}</pre>
+        {display === "minimal" ? null : <pre>{jsonText(result)}</pre>}
         {display === "developer" ? <pre className="tool-payload">{jsonText(ev.data)}</pre> : null}
       </div>
     );
@@ -182,162 +190,127 @@ export function ToolLine({ ev, display, active = false }: { ev: ToolEvent; displ
   return null;
 }
 
-function RuntimeDetails({ msg, configuredDisplay }: { msg: ChatMessage; configuredDisplay: DisplayMode }) {
-  const display = effectiveDisplayMode(configuredDisplay);
-  const [activeKey, setActiveKey] = useState<string[]>(msg.running ? ["details"] : []);
-  const previousRunning = useRef(Boolean(msg.running));
-  const thinking = msg.events.filter((event) => event.kind === "thinking").map((event) => event.message).filter(Boolean).join("\n\n");
-  const toolEvents = msg.events.filter((event) => ["tool_call", "tool_result", "tool_failed"].includes(event.kind));
-  const finishedCallIds = new Set(toolEvents.filter((event) => event.kind !== "tool_call").map(callId).filter(Boolean));
-  const activeCalls = toolEvents.filter((event) => event.kind === "tool_call" && (!callId(event) || !finishedCallIds.has(callId(event))));
-  const showAllTools = display === "verbose" || display === "developer";
-  const shownTools = display === "developer"
-    ? toolEvents
-    : msg.running
-      ? activeCalls
-      : showAllTools
-        ? toolEvents
-        : toolEvents.filter((event) => event.kind === "tool_failed" && isUserDenied(event.data ?? {}));
-  const hasDetails = Boolean(thinking || shownTools.length > 0 || msg.running);
+function runtimeItemLabel(item: TurnItem): string {
+  if (item.type === "reasoning") return "思考";
+  if (item.type === "tool_call") return `调用 ${String(item.name ?? "工具")}`;
+  return `${String(item.tool ?? "工具")} 结果`;
+}
+
+function runtimeItemBody(item: TurnItem, display: DisplayMode, active: boolean) {
+  if (item.type === "reasoning") {
+    const raw = String(item.text ?? "");
+    const thought = display === "minimal" ? summarizeThinking(raw) : raw;
+    return (
+      <div className="thinking-content">
+        {display === "minimal" ? thought || "正在思考…" : <MarkdownContent text={thought || "正在思考…"} />}
+      </div>
+    );
+  }
+  const failed = item.type === "tool_result" && item.status === "failed";
+  const event: ToolEvent = item.type === "tool_call"
+    ? { kind: "tool_call", message: String(item.name ?? "工具"), data: { ...item, tool: item.name } }
+    : { kind: failed ? "tool_failed" : "tool_result", message: jsonText(item.content), data: { ...item, result: item.content } };
+  return <ToolLine ev={event} display={display} active={active && item.type === "tool_call"} />;
+}
+
+function RuntimeItemCollapse({
+  item,
+  itemKey,
+  display,
+  active,
+}: {
+  item: TurnItem;
+  itemKey: string;
+  display: DisplayMode;
+  active: boolean;
+}) {
+  const [expanded, setExpanded] = useState(active);
+  const previousActive = useRef(active);
 
   useEffect(() => {
-    if (msg.running && !previousRunning.current) setActiveKey(["details"]);
-    if (!msg.running && previousRunning.current) setActiveKey([]);
-    previousRunning.current = Boolean(msg.running);
-  }, [msg.running]);
+    if (previousActive.current === active) return;
+    setExpanded(active);
+    previousActive.current = active;
+  }, [active]);
 
-  if (!hasDetails) return null;
-  const thought = display === "minimal" ? summarizeThinking(thinking) : thinking;
-  const thoughtContent = thought || (msg.running ? "正在思考…" : "未返回思考内容");
-
+  const label = runtimeItemLabel(item);
   return (
     <Collapse
-      className="runtime-collapse runtime-details"
+      className={`runtime-collapse runtime-item-collapse runtime-${item.type.replace("_", "-")}`}
+      data-item-type={item.type}
       ghost
       size="small"
-      activeKey={activeKey}
-      onChange={(key) => setActiveKey(Array.isArray(key) ? key.map(String) : [String(key)])}
+      activeKey={expanded ? [itemKey] : []}
+      onChange={(keys) => setExpanded(Array.isArray(keys) ? keys.map(String).includes(itemKey) : String(keys) === itemKey)}
       items={[{
-        key: "details",
-        label: msg.running ? "运行中" : "运行详情",
-        children: (
-          <div className="runtime-details-body">
-            <div className="thinking-content">
-              {display === "minimal"
-                ? <ShimmerText active={Boolean(msg.running)}>{thoughtContent}</ShimmerText>
-                : <MarkdownContent text={thoughtContent} />}
-            </div>
-            {shownTools.length > 0 ? (
-              <div className="event-list">
-                {shownTools.map((event, index) => (
-                  <ToolLine
-                    key={`${event.kind}-${callId(event) || index}`}
-                    ev={event}
-                    display={display}
-                    active={msg.running && event.kind === "tool_call" && activeCalls.includes(event)}
-                  />
-                ))}
-              </div>
-            ) : null}
-          </div>
-        ),
+        key: itemKey,
+        label: <ShimmerText active={active}>{label}</ShimmerText>,
+        children: runtimeItemBody(item, display, active),
       }]}
     />
   );
 }
 
-function presentationToolBody(tool: RunPresentationTool, display: DisplayMode) {
-  const denied = isUserDenied(tool);
-  const status = denied ? "已拒绝" : tool.status === "pending" ? "等待执行" : tool.status === "succeeded" ? "已完成" : "失败";
-  const developerDetails = denied ? { ...tool, result: undefined, error: undefined } : tool;
-  return (
-    <div className="runtime-tool-body">
-      <div className="tool-line">
-        <ToolOutlined aria-hidden="true" /> <b>{tool.name}</b> <span className={`tool-status ${tool.status}`}>{status}</span>
-        {display === "developer" ? <span className="tool-call-id">call ID: {tool.call_id}</span> : null}
-      </div>
-      {display === "verbose" || display === "developer" ? <pre className="tool-payload">{jsonText(tool.arguments)}</pre> : null}
-      {tool.result && display !== "minimal" ? <pre className="tool-result">{jsonText(tool.result)}</pre> : null}
-      {tool.error && !denied ? <pre className="tool-result error-text">{tool.error}</pre> : null}
-      {display === "developer" ? <pre className="tool-payload">{jsonText(developerDetails)}</pre> : null}
-    </div>
-  );
+const HIDDEN_ASSISTANT_ITEM_TYPES = new Set(["skill_snapshot"]);
+
+function visibleAssistantItems(items: TurnItem[] | undefined): TurnItem[] {
+  return (items ?? []).filter((item) => !HIDDEN_ASSISTANT_ITEM_TYPES.has(item.type));
 }
 
-function RunSegments({ msg, configuredDisplay }: { msg: ChatMessage; configuredDisplay: DisplayMode }) {
+function OrderedAssistantItems({
+  msg,
+  items,
+  configuredDisplay,
+  onDecision,
+}: {
+  msg: ChatMessage;
+  items: TurnItem[];
+  configuredDisplay: DisplayMode;
+  onDecision: (request: DecisionRequest, choice: string, options?: { supplement?: string; answers?: Record<string, string[]> }) => Promise<void>;
+}) {
   const display = effectiveDisplayMode(configuredDisplay);
-  const segments = msg.segments ?? [];
-  const [activeKeys, setActiveKeys] = useState<string[]>(() =>
-    segments.filter((segment) => msg.running && (segment.segment_type === "thinking" || segment.segment_type === "tool_batch"))
-      .map((segment) => segment.segment_id),
-  );
-
-  useEffect(() => {
-    const streaming = segments
-      .filter((segment) => segment.status === "streaming" && (segment.segment_type === "thinking" || segment.segment_type === "tool_batch"))
-      .map((segment) => segment.segment_id);
-    if (streaming.length) setActiveKeys((current) => [...new Set([...current, ...streaming])]);
-  }, [segments]);
-
-  function toggle(key: string, keys: string | string[]) {
-    const next = Array.isArray(keys) ? keys.map(String) : [String(keys)];
-    setActiveKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...new Set([...current, ...next])]);
-  }
-
-  function renderToolBatch(segment: RunPresentationSegment) {
-    const tools = (segment.tools ?? []).filter((tool) => !isHiddenRecoverableToolFailure(tool));
-    if (!tools.length) return null;
-    if (tools.length === 1) {
-      const tool = tools[0];
-      const label = isUserDenied(tool) ? `${tool.name} · 已拒绝` : `调用 ${tool.name}`;
-      return (
-        <Collapse
-          key={segment.segment_id}
-          className="runtime-collapse runtime-tool-batch"
-          ghost
-          size="small"
-          activeKey={activeKeys.includes(segment.segment_id) ? [segment.segment_id] : []}
-          onChange={(keys) => toggle(segment.segment_id, keys)}
-          items={[{ key: segment.segment_id, label, children: presentationToolBody(tool, display) }]}
-        />
-      );
-    }
-    return (
-      <Collapse
-        key={segment.segment_id}
-        className="runtime-collapse runtime-tool-batch"
-        ghost
-        size="small"
-        activeKey={activeKeys.includes(segment.segment_id) ? [segment.segment_id] : []}
-        onChange={(keys) => toggle(segment.segment_id, keys)}
-        items={[{
-          key: segment.segment_id,
-          label: "并行工具调用",
-          children: <Collapse className="runtime-collapse" ghost size="small" items={tools.map((tool) => ({ key: tool.call_id, label: `${tool.name} · ${isUserDenied(tool) ? "已拒绝" : tool.status}`, children: presentationToolBody(tool, display) }))} />,
-        }]}
-      />
-    );
-  }
-
+  const version = msg.itemVersion ?? 0;
   return (
-    <div className="runtime-segments">
-      {segments.map((segment) => {
-        if (segment.segment_type === "response") {
-          return segment.text ? <div className="runtime-segment-response" key={segment.segment_id}><MarkdownContent text={segment.text} /></div> : null;
+    <div className="runtime-items">
+      {msg.compactionNotice ? <div className="runtime-compaction-notice">上下文已压缩</div> : null}
+      {items.map((item, index) => {
+        const identity = `${msg.id}:${version}:${index}`;
+        const active = Boolean(msg.running && index === items.length - 1);
+        if (["reasoning", "tool_call", "tool_result"].includes(item.type)) {
+          return <RuntimeItemCollapse key={identity} item={item} itemKey={identity} display={display} active={active} />;
         }
-        if (segment.segment_type === "tool_batch") return renderToolBatch(segment);
-        const thought = display === "minimal" ? summarizeThinking(segment.text ?? "") : segment.text ?? "";
-        return (
-          <Collapse
-            key={segment.segment_id}
-            className="runtime-collapse runtime-thinking-segment"
-            ghost
-            size="small"
-            activeKey={activeKeys.includes(segment.segment_id) ? [segment.segment_id] : []}
-            onChange={(keys) => toggle(segment.segment_id, keys)}
-            items={[{ key: segment.segment_id, label: "思考", children: display === "minimal" ? <ShimmerText active={segment.status === "streaming"}>{thought || "正在思考…"}</ShimmerText> : <MarkdownContent text={thought || "正在思考…"} /> }]}
-          />
-        );
+        if (item.type === "text" || item.type === "bash") {
+          const value = String(item.text ?? "");
+          return value ? <div className="runtime-item-response" data-item-type={item.type} key={identity}><MarkdownContent text={value} /></div> : null;
+        }
+        if (item.type === "error") {
+          return <Alert key={identity} className="error-text" type="error" showIcon title={`⚠️ ${String(item.message ?? "Execution failed.")}`} />;
+        }
+        const decision = msg.decision;
+        if (decision && (item.type === "approval" || item.type === "question") && decision.decision_id === item.decision_id) {
+          return (
+            <div data-item-type={item.type} key={identity}>
+              <DecisionCard request={decision} onSubmit={(choice, options) => onDecision(decision, choice, options)} />
+            </div>
+          );
+        }
+        if (item.type === "approval") {
+          if (item.event !== "approval_resolved" || !["allowed", "denied"].includes(String(item.approval_status))) return null;
+          const denied = item.approval_status === "denied";
+          const tool = String(item.tool ?? "工具");
+          return (
+            <div
+              className={`tool-line runtime-approval-status${denied ? " failed" : ""}`}
+              data-item-type="approval"
+              key={identity}
+            >
+              <ToolOutlined aria-hidden="true" />
+              <span>{`${denied ? "已拒绝" : "已允许"} ${tool}`}</span>
+            </div>
+          );
+        }
+        const value = String(item.text ?? "");
+        return value ? <div className="runtime-business-item" data-item-type={item.type} key={identity}><MarkdownContent text={value} /></div> : null;
       })}
     </div>
   );
@@ -356,13 +329,17 @@ export function AssistantMessage({
   busy: boolean;
   onFork?: () => void;
 }) {
+  const hasItems = msg.items !== undefined;
+  const visibleItems = visibleAssistantItems(msg.items);
+  const hasDecisionItem = Boolean(msg.decision && visibleItems.some((item) => item.decision_id === msg.decision?.decision_id));
+  const hasErrorItem = visibleItems.some((item) => item.type === "error");
   const frame = (
     <div className={msg.running ? "assistant-run-frame is-running" : "assistant-run-frame"}>
-      {msg.segments?.length ? <RunSegments msg={msg} configuredDisplay={display} /> : <RuntimeDetails msg={msg} configuredDisplay={display} />}
-      {msg.decision ? <DecisionCard request={msg.decision} onSubmit={(choice, options) => onDecision(msg.decision!, choice, options)} /> : null}
-      {msg.error ? <Alert className="error-text" type="error" showIcon title={`⚠️ ${msg.error}`} /> : null}
-      {!msg.segments?.length && msg.content ? <MarkdownContent text={msg.content} /> : null}
-      {!msg.error && !msg.content && msg.running && !msg.decision ? <div className="thinking" role="status" aria-label="思考中" data-state="thinking" aria-live="polite"><span className="dot" /><span className="dot" /><span className="dot" /></div> : null}
+      {hasItems ? <OrderedAssistantItems msg={msg} items={visibleItems} configuredDisplay={display} onDecision={onDecision} /> : null}
+      {!hasDecisionItem && msg.decision ? <DecisionCard request={msg.decision} onSubmit={(choice, options) => onDecision(msg.decision!, choice, options)} /> : null}
+      {!hasErrorItem && msg.error ? <Alert className="error-text" type="error" showIcon title={`⚠️ ${msg.error}`} /> : null}
+      {!hasItems && msg.content ? <MarkdownContent text={msg.content} /> : null}
+      {!msg.error && (!hasItems || visibleItems.length === 0) && !msg.content && msg.running && !msg.decision ? <div className="thinking" role="status" aria-label="思考中" data-state="thinking" aria-live="polite"><span className="dot" /><span className="dot" /><span className="dot" /></div> : null}
       {display !== "minimal" && (msg.status || (msg.metrics && msg.metrics.duration_ms != null)) ? <div className="meta">{msg.status ?? ""}{msg.status && msg.metrics && msg.metrics.duration_ms != null ? " · " : ""}{msg.metrics && msg.metrics.duration_ms != null ? `${(msg.metrics.duration_ms / 1000).toFixed(1)}s · ${msg.metrics.model_calls ?? 0} 次模型调用 · ${msg.metrics.tool_calls ?? 0} 次工具调用` : null}</div> : null}
       <MessageActions msg={msg} busy={busy} onFork={onFork} />
     </div>

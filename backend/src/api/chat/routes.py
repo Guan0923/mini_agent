@@ -1,47 +1,38 @@
-"""SSE chat endpoint that drives the real agent against a persistent workspace.
-
-Supports two modes:
-- default: auto-approve every tool call (used by the web frontend);
-- ``interactive=True``: pauses on approvals and asks the client to decide via
-  ``POST /api/decisions`` (used by the TUI client).
-"""
+"""Turn execution stream used by the Turn-centered API."""
 
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import queue
 import threading
 from collections.abc import Callable
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from fastapi import HTTPException
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from backend.domain import DEFAULT_TIME_ZONE, FAILED_TERMINAL_MESSAGE, terminal_error_text
+from backend.domain import FAILED_TERMINAL_MESSAGE, terminal_error_text
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
 from backend.providers import ModelConfig, ModelConfigurationError
-from backend.runtime import RunnerSettings, build_application
-from backend.runtime.core.events import RuntimeEvent
-from backend.runtime.job_events import RuntimeJobEventBridge
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.sandbox import ApprovalStore
 from backend.storage.auth.crypto import SecretDecryptionError
 
-from ..auth.dependencies import require_user
 from ..auth.types import UserIdentity
-from ..sessions.routes import _require_active, _store
+from ..session_store import session_store as _store
 from ..shared.runtime import build_user_application
 from ..state import WebAppState
-from .decisions import router as decisions_router
-from .interrupts import auto_approve, make_interactive_interrupt
-
-router = APIRouter(prefix="/api")
-router.include_router(decisions_router)
+from .interrupts import make_interactive_interrupt
 
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
-_HIDDEN_RECOVERABLE_EVENTS = frozenset({"tool_failed", "tool_recovery", "model_repair", "model_retry"})
+
+
+def _terminal_type_for_status(status: str, category: str | None) -> Literal["success", "failed"]:
+    if status == "success" or (status == "paused" and category == "user"):
+        return "success"
+    return "failed"
 
 
 class RuntimeModelRequest(BaseModel):
@@ -60,136 +51,6 @@ class RuntimeModelRequest(BaseModel):
     def validate_limits(self) -> RuntimeModelRequest:
         if self.context_length <= self.output_length:
             raise ValueError("model.context_length must be greater than model.output_length")
-        return self
-
-
-class FileReference(BaseModel):
-    """One structured file reference attached to a user message.
-
-    ``source`` distinguishes the session's project root (the effective cwd,
-    which may be an external project folder) from the session's own upload
-    directory.  ``path`` is always workspace-relative and confined.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    source: Literal["project", "upload"]
-    path: str = Field(min_length=1, max_length=2_000)
-
-
-class ChatRequest(BaseModel):
-    prompt: str
-    interactive: bool = False
-    session_id: str | None = None
-    mode: Literal["agent", "plan"] = "agent"
-    running_mode: Literal["agent", "plan"] | None = None
-    permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None
-    full_access_acknowledged: StrictBool = False
-    reasoning_effort: ReasoningEffort = "medium"
-    provider_name: str | None = Field(default=None, min_length=1, max_length=80)
-    model: RuntimeModelRequest | None = None
-    source_node_id: str | None = None
-    source_node_session_id: str | None = None
-    branch: bool = False
-    references: list[FileReference] = Field(default_factory=list, max_length=50)
-    rag_mode: Literal["off", "tool", "forced"] = "off"
-
-    @model_validator(mode="after")
-    def normalize_running_mode(self) -> ChatRequest:
-        if self.running_mode is None:
-            # ``mode`` is the pre-v0.3 spelling.  Normalize it at the API
-            # boundary so old clients remain readable while new clients send
-            # both explicit keys.
-            # Keep ``running_mode`` unset, however.  The route must be able
-            # to distinguish a legacy/default ``mode`` from an explicit
-            # v0.3 ``running_mode`` when an existing message tree is resumed.
-            # ``mode`` remains the effective value for the runtime below.
-            return self
-        elif self.mode != "agent" and self.mode != self.running_mode:
-            raise ValueError("mode and running_mode must match")
-        self.mode = self.running_mode
-        return self
-
-    @model_validator(mode="after")
-    def require_full_access_acknowledgement(self) -> ChatRequest:
-        if self.permission_mode == "full_access" and not self.full_access_acknowledged:
-            raise ValueError("full_access requires explicit joint file and network confirmation")
-        return self
-
-
-class BatchMessage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    content: str = Field(min_length=1, max_length=100_000)
-    references: list[FileReference] = Field(default_factory=list, max_length=50)
-
-    @model_validator(mode="after")
-    def require_content(self) -> BatchMessage:
-        self.content = self.content.strip()
-        if not self.content:
-            raise ValueError("batch message content must not be empty")
-        return self
-
-
-class BatchChatRequest(BaseModel):
-    messages: list[BatchMessage] = Field(min_length=1, max_length=100)
-    interactive: bool = False
-    session_id: str
-    mode: Literal["agent", "plan"] = "agent"
-    running_mode: Literal["agent", "plan"] | None = None
-    permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None
-    full_access_acknowledged: StrictBool = False
-    reasoning_effort: ReasoningEffort = "medium"
-    provider_name: str | None = Field(default=None, min_length=1, max_length=80)
-    model: RuntimeModelRequest | None = None
-    source_node_id: str | None = None
-    source_node_session_id: str | None = None
-    branch: bool = False
-    rag_mode: Literal["off", "tool", "forced"] = "off"
-
-    @model_validator(mode="after")
-    def normalize_running_mode(self) -> BatchChatRequest:
-        if self.running_mode is not None:
-            if self.mode != "agent" and self.mode != self.running_mode:
-                raise ValueError("mode and running_mode must match")
-            self.mode = self.running_mode
-        return self
-
-    @model_validator(mode="after")
-    def require_full_access_acknowledgement(self) -> BatchChatRequest:
-        if self.permission_mode == "full_access" and not self.full_access_acknowledged:
-            raise ValueError("full_access requires explicit joint file and network confirmation")
-        return self
-
-
-class ResumeRequest(BaseModel):
-    permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None
-    full_access_acknowledged: StrictBool = False
-    reasoning_effort: ReasoningEffort = "medium"
-    source_node_id: str | None = None
-    source_node_session_id: str | None = None
-    mode: Literal["agent", "plan"] = "agent"
-    running_mode: Literal["agent", "plan"] | None = None
-    provider_name: str | None = Field(default=None, min_length=1, max_length=80)
-    model: RuntimeModelRequest | None = None
-    rag_mode: Literal["off", "tool", "forced"] = "off"
-
-    @model_validator(mode="after")
-    def normalize_running_mode(self) -> ResumeRequest:
-        if self.running_mode is None:
-            # Do not materialize the compatibility ``mode`` default into the
-            # v0.3 field: the endpoint needs to reject resumed requests that
-            # did not explicitly submit ``running_mode``.
-            return self
-        elif self.mode != "agent" and self.mode != self.running_mode:
-            raise ValueError("mode and running_mode must match")
-        self.mode = self.running_mode
-        return self
-
-    @model_validator(mode="after")
-    def require_full_access_acknowledgement(self) -> ResumeRequest:
-        if self.permission_mode == "full_access" and not self.full_access_acknowledged:
-            raise ValueError("full_access requires explicit joint file and network confirmation")
         return self
 
 
@@ -216,99 +77,6 @@ def _model_request_parameters(model: RuntimeModelRequest | None, fallback: Reaso
     }
 
 
-def _require_explicit_runtime_config(
-    *,
-    provider_name: str | None,
-    model: RuntimeModelRequest | None,
-    permission_mode: str | None,
-    running_mode: str | None,
-    permission_mode_explicit: bool = True,
-    running_mode_explicit: bool = True,
-    resume: bool = False,
-) -> None:
-    """Reject an established/resumed request that cannot define its boundary.
-
-    A brand-new empty chat can still be initialized from the user's active
-    provider settings.  Once a message-tree exists, however, the request must
-    carry the complete runtime selection so a worker never silently combines
-    stale browser state with a new node.
-    """
-
-    missing: list[str] = []
-    if not provider_name:
-        missing.append("provider_name")
-    if model is None:
-        missing.append("model")
-    if permission_mode is None or not permission_mode_explicit:
-        missing.append("permission_mode")
-    if running_mode is None or not running_mode_explicit:
-        missing.append("running_mode")
-    if missing:
-        kind = "Resume" if resume else "Chat"
-        raise HTTPException(
-            status_code=422,
-            detail=f"{kind} 请求必须显式提交完整运行配置：{', '.join(missing)}",
-        )
-
-
-def _truncate(value: str, limit: int) -> str:
-    if len(value) <= limit:
-        return value
-    return f"{value[:limit]}… ({len(value) - limit} chars omitted)"
-
-
-def _event_payload(event: RuntimeEvent) -> dict:
-    """A small, JSON-safe slice of an event's data, mirroring the TUI presenter."""
-    data = event.data
-    identifiers = {key: data[key] for key in ("session_id", "run_id") if data.get(key) is not None}
-    if event.kind == "tool_call":
-        return {
-            **identifiers,
-            "tool": data.get("tool") or data.get("name"),
-            "call_id": data.get("call_id"),
-            "arguments": data.get("arguments", {}),
-        }
-    if event.kind == "tool_result":
-        return {
-            **identifiers,
-            "tool": data.get("tool"),
-            "call_id": data.get("call_id"),
-            "result": data.get("result", event.message),
-        }
-    if event.kind == "tool_failed":
-        return {
-            **identifiers,
-            "tool": data.get("tool"),
-            "call_id": data.get("call_id"),
-            "result": data.get("error", data.get("result", event.message)),
-        }
-    if event.kind in {"plan", "run_suspended", "run_resumed", "error"}:
-        details = {key: data[key] for key in ("plan", "goal", "steps", "status", "reason") if key in data}
-        return {**identifiers, **details}
-    if event.kind == "run_finished":
-        return {
-            **identifiers,
-            "status": event.message,
-            "final_answer": _truncate(data.get("final_answer", ""), 6000),
-            "duration_ms": data.get("duration_ms"),
-            "model_calls": data.get("model_calls"),
-            "tool_calls": data.get("tool_calls"),
-            "active_skills": data.get("active_skills", []),
-        }
-    if event.kind in {"response_delta", "response_start", "thinking_delta"}:
-        return {**identifiers, "content": event.message}
-    if event.kind.startswith("job_"):
-        return {
-            **identifiers,
-            "job_id": data.get("job_id"),
-            "job_kind": data.get("job_kind"),
-            "state": data.get("state"),
-            "cancel_requested": data.get("cancel_requested", False),
-            "error": data.get("error"),
-        }
-    return identifiers
-
-
 def _model_config_snapshot(state: WebAppState, user_id: str) -> ModelConfig:
     try:
         return state.model_config_for_user(user_id)
@@ -321,125 +89,26 @@ def _model_config_snapshot(state: WebAppState, user_id: str) -> ModelConfig:
         raise HTTPException(status_code=422, detail=f"模型未配置：{exc}") from exc
 
 
-def _validate_source_node(
-    store,
-    session_id: str,
-    source_node_id: str | None,
-    *,
-    source_node_session_id: str | None = None,
-    resume: bool = False,
-    allow_branch: bool = False,
-    require_leaf: bool = False,
-) -> None:
-    """Validate the optimistic-concurrency source before opening an SSE stream."""
-
-    if not source_node_id or not callable(getattr(store, "get_node", None)):
-        return
-    source_session_id = source_node_session_id or session_id
-    source = store.get_node(source_session_id, source_node_id)
-    if source is None:
-        raise HTTPException(status_code=400, detail="source_node_id 不属于当前会话祖先树")
-    if source_session_id != session_id:
-        loaded = getattr(store, "load_nodes", lambda _sid: [])(session_id)
-        if source.key not in {getattr(item, "key", None) for item in loaded}:
-            raise HTTPException(status_code=409, detail="source_node_id 不属于当前会话祖先树")
-    if require_leaf and not allow_branch and callable(getattr(store, "list_children", None)):
-        children = [child for child in store.list_children(source.session_id, source.id) if getattr(child, "data_type", None) != "root"]
-        if children:
-            raise HTTPException(status_code=409, detail="批量对话的 source_node_id 必须是当前叶子节点")
-    if resume and source.status not in {"running", "cancel", "abort"}:
-        raise HTTPException(status_code=409, detail="只能从 running、cancel 或 abort 节点恢复")
-
-
-def _session_has_active_execution(state: WebAppState, user_id: str, session_id: str) -> bool:
-    """Check both the node bridge and job registry for a live session run."""
-
-    key = (user_id, session_id)
-    bridge = getattr(state, "active_runtime_bridges", {}).get(key)
-    if bridge is not None and not bool(getattr(bridge, "closed", False)):
-        return True
-    registry = getattr(state, "job_registry", None)
-    if registry is not None:
-        try:
-            from backend.jobs import JobState
-
-            return any(
-                info.info.state in {JobState.PENDING, JobState.RUNNING}
-                for info in registry.list_for_user(user_id, session_id=session_id)
-            )
-        except (AttributeError, TypeError):
-            return False
-    return False
-
-
-def _has_conversation_nodes(nodes: list[object]) -> bool:
-    """Treat a session root as an anchor, not as conversation history."""
-
-    return any(getattr(node, "data_type", None) != "root" for node in nodes)
-
-
-def _validate_references(
-    state: WebAppState,
-    identity: UserIdentity,
-    session_id: str,
-    references: list[FileReference],
-) -> list[dict[str, str]]:
-    """Resolve every structured reference against this session's roots.
-
-    Each ``project`` reference must be a real regular file below the session's
-    effective cwd, and each ``upload`` reference must live in this session's
-    canonical upload directory.  A missing, forged, or cross-session reference
-    is rejected here so history never silently re-resolves to another file.
-    """
-
-    if not references:
-        return []
-    from backend.api.session_files.store import SessionFileError, SessionFileStore
-
-    paths = state.user_paths(identity.id)
-    paths.ensure_session(session_id)
-    try:
-        project_root = state.session_workspace(identity.id, session_id)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    store = SessionFileStore(paths, session_id, project_root=project_root)
-    normalized: list[dict[str, str]] = []
-    for reference in references:
-        try:
-            resolved = store.resolve(reference.source, reference.path)
-        except SessionFileError as exc:
-            raise HTTPException(status_code=422, detail=f"引用文件无效：{reference.path}（{exc}）") from exc
-        # Keep the client-supplied relative path as the durable reference;
-        # ``resolve`` already proved confinement and existence.
-        normalized.append({"source": reference.source, "path": reference.path})
-        del resolved
-    return normalized
-
-
 def _stream(
     state: WebAppState,
     prompt: str,
-    interactive: bool = False,
     *,
-    identity: UserIdentity | None = None,
-    session_id: str | None = None,
+    identity: UserIdentity,
+    session_id: str,
+    turn_id: str,
+    thread_id: str,
+    adopt_existing: bool = False,
     source_node_id: str | None = None,
-    source_node_session_id: str | None = None,
-    branch: bool = False,
     mode: Literal["agent", "plan"] = "agent",
-    permission_mode: Literal["approval_for_me", "read_only", "workspace_write", "full_access"] | None = None,
+    permission_mode: Literal["read_only", "workspace_write", "full_access"] | None = None,
     reasoning_effort: ReasoningEffort = "medium",
     provider_name: str | None = None,
     model_snapshot: dict[str, object] | None = None,
     user_preferences: str = "",
-    default_timezone: str = DEFAULT_TIME_ZONE,
     model_config: ModelConfig | None = None,
-    runtime_config: dict[str, object] | None = None,
     request_model: RuntimeModelRequest | None = None,
     references: list[dict[str, str]] | None = None,
-    batch_messages: list[dict[str, object]] | None = None,
     operation: Callable[..., object] | None = None,
-    rag_mode: Literal["off", "tool", "forced"] = "off",
 ):
     # ``WebAppState`` owns these process-local registries in production, but
     # callers such as focused SSE tests may provide a small state double.  A
@@ -465,29 +134,34 @@ def _stream(
     ):
         stream_locks = {"__lock__": threading.RLock(), "keys": set()}
         setattr(state, "active_runtime_stream_locks", stream_locks)
-    stream_key = (identity.id if identity is not None else "", session_id or "")
+    stream_key = (identity.id, thread_id)
     reserved_stream_keys: set[tuple[str, str]] = {stream_key}
     stream_lock = stream_locks["__lock__"]
     with stream_lock:
-        if session_id and stream_key in stream_locks["keys"]:
-            raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
-        if session_id:
-            stream_locks["keys"].add(stream_key)
+        if stream_key in stream_locks["keys"]:
+            raise HTTPException(status_code=409, detail="当前 Thread 已有 running Turn。")
+        stream_locks["keys"].add(stream_key)
 
-    owner_id = identity.id if identity is not None else ""
+    owner_id = identity.id
 
-    def registry_key(active_session_id: str) -> tuple[str, str]:
+    def registry_key(active_thread_id: str) -> tuple[str, str]:
         # Session ids are scoped to the authenticated user.  Include the
         # owner in the process-local controller key to prevent cross-user
         # mutation if two stores ever contain the same session id.
-        return owner_id, active_session_id
+        return owner_id, active_thread_id
 
     q: queue.Queue = queue.Queue()
     done = threading.Event()
     cancel_requested = threading.Event()
+    pause_requested = threading.Event()
+    active_turn_cancellations = getattr(state, "active_turn_cancellations", None)
+    if not isinstance(active_turn_cancellations, dict):
+        active_turn_cancellations = {}
+        setattr(state, "active_turn_cancellations", active_turn_cancellations)
+    cancellation_key = (identity.id, turn_id)
+    active_turn_cancellations[cancellation_key] = pause_requested.set
     job_registry = getattr(state, "job_registry", None)
     job_holder: dict[str, ThreadJob | None] = {"job": None}
-    finished: dict = {}
     bridge_ref: dict[str, RuntimeEventNodeBridge | None] = {"bridge": None}
 
     def cancellation_requested() -> bool:
@@ -496,24 +170,16 @@ def _stream(
             cancel_requested.set()
         return cancel_requested.is_set()
 
+    def suspension_requested() -> bool:
+        return pause_requested.is_set()
+
     def sink(item) -> None:
         if cancellation_requested():
-            return
-        if not isinstance(item, dict) and getattr(item, "kind", "") == "run_segment":
-            payload = dict(item.data)
-            payload.setdefault("session_id", session_id)
-            # Keep the segment both as a convenient typed envelope and as
-            # top-level fields matching the public SSE presentation contract.
-            q.put({"type": "run_segment", "segment": payload, **payload})
             return
         bridge = bridge_ref["bridge"]
         if isinstance(item, dict):
             if bridge is not None:
                 bridge.handle_input(item)
-            # Decision requests remain an input-channel envelope: the node
-            # update carries the durable approval/question block, while this
-            # small request lets the client submit its response immediately.
-            q.put(item)
             return
         if bridge is not None:
             # A PATCH updates the dynamic node immediately, but its runtime
@@ -531,7 +197,7 @@ def _stream(
             }
             if getattr(item, "kind", "") in boundary_kinds:
                 locks = getattr(state, "active_runtime_config_locks", None)
-                key = registry_key(bridge.session_id)
+                key = registry_key(bridge.thread_id)
                 lock = locks.setdefault(key, threading.RLock()) if isinstance(locks, dict) else None
                 if lock is None:
                     pending = active_runtime_configs.get(key)
@@ -549,133 +215,62 @@ def _stream(
             # handoff.  Re-key the controller immediately so the new active
             # leaf remains PATCH-addressable while the same stream continues.
             for old_key, value in list(active_runtime_bridges.items()):
-                if value is bridge and old_key != registry_key(bridge.session_id):
+                if value is bridge and old_key != registry_key(bridge.thread_id):
                     active_runtime_bridges.pop(old_key, None)
                     active_runtime_configs.pop(old_key, None)
-            active_runtime_bridges[registry_key(bridge.session_id)] = bridge
-            new_stream_key = registry_key(bridge.session_id)
+            active_runtime_bridges[registry_key(bridge.thread_id)] = bridge
+            new_stream_key = registry_key(bridge.thread_id)
             if new_stream_key not in reserved_stream_keys:
                 with stream_lock:
                     stream_locks["keys"].add(new_stream_key)
                 reserved_stream_keys.add(new_stream_key)
-            return
-        if getattr(item, "kind", "") in _HIDDEN_RECOVERABLE_EVENTS:
-            return
-        payload = _event_payload(item)
-        if item.kind == "run_finished":
-            finished.update(payload)
-        q.put({"type": "event", "kind": item.kind, "message": item.message, "data": payload})
 
-    def enqueue_terminal(item: dict) -> None:
-        if not cancellation_requested():
-            q.put(item)
+    def enqueue_terminal(terminal_type: str, terminal_id: str, message: str = "") -> None:
+        q.put({"type": "terminal", "terminal_type": terminal_type, "terminal_id": terminal_id, "message": message})
 
-    owner_id = identity.id if identity is not None else None
-    approval_store = ApprovalStore(_store(state, identity.id)) if identity is not None and session_id else None
-    interactive_interrupt = make_interactive_interrupt(
+    approval_store = ApprovalStore(_store(state, identity.id))
+    interrupt = make_interactive_interrupt(
         sink,
         cancel_requested=cancellation_requested,
-        owner_id=owner_id,
-        approval_store=approval_store,
-    )
-    full_access_interrupt = make_interactive_interrupt(
-        sink,
-        cancel_requested=cancellation_requested,
-        auto_approve_tools=True,
         owner_id=owner_id,
         approval_store=approval_store,
     )
 
     effective_reasoning = request_model.reasoning_effort if request_model is not None else reasoning_effort
-    if permission_mode == "full_access":
-        interrupt = full_access_interrupt
-    elif interactive or permission_mode == "approval_for_me":
-        interrupt = interactive_interrupt
-    else:
-        interrupt = auto_approve
-
-    # The original interrupt closure is kept for non-tool questions, but tool
-    # approval is selected from the bridge's latest permission at each call.
-    # This makes a running approval/full-access switch effective immediately
-    # without changing an already-approved invocation.
-    base_interrupt = interrupt
-
-    def live_interrupt(request):
-        if request.kind == "tool":
-            bridge = bridge_ref["bridge"]
-            if bridge is not None:
-                if getattr(bridge, "permission_mode", "approval_for_me") == "full_access":
-                    return full_access_interrupt(request)
-                return interactive_interrupt(request)
-        return base_interrupt(request)
-
-    interrupt = live_interrupt
 
     def worker() -> None:
         app = None
         try:
             outer_job = job_holder["job"]
             job_parent_id = outer_job.info().id if outer_job is not None else None
-            workspace = (
-                state.session_workspace(identity.id, session_id)
-                if identity is not None and session_id is not None
-                else state.chat_workspace
-            )
-            bound_project = (
-                state.projects(identity.id).session_project(session_id, include_removed=False)
-                if identity is not None and session_id is not None
-                else None
-            )
+            workspace = state.session_workspace(identity.id, session_id)
+            bound_project = state.projects(identity.id).session_project(session_id, include_removed=False)
             if bound_project is not None and not bound_project.available:
                 raise RuntimeError("项目 cwd 不可访问，请恢复文件夹后重试。")
-            path_options = {"paths": state.user_paths(identity.id)} if identity is not None else {}
             selected_model_config = model_config
-            if identity is not None:
-                if provider_name:
-                    try:
-                        selected_model_config = state.model_config_for_provider_name(identity.id, provider_name)
-                    except (SecretDecryptionError, ModelConfigurationError) as exc:
-                        raise ModelConfigurationError(str(exc)) from exc
-                app = build_user_application(
-                    state,
-                    identity.id,
-                    session_id=session_id,
-                    user_preferences=user_preferences,
-                    model_config=selected_model_config,
-                    load_model_config=False,
-                    workspace=workspace,
-                    project_id=bound_project.project_id if bound_project is not None else None,
-                    job_registry=job_registry,
-                    job_parent_id=job_parent_id,
-                    rag_mode=rag_mode,
-                )
-            else:
-                app = build_application(
-                    workspace,
-                    planner_name="llm",
-                    settings=RunnerSettings(log_full_messages=True),
-                    user_preferences=user_preferences,
-                    model_config=model_config,
-                    config_override=runtime_config,
-                    default_timezone=default_timezone,
-                    job_registry=job_registry,
-                    job_parent_id=job_parent_id,
-                    **path_options,
-                )
-            conversation = app.open_conversation(session_id) if session_id else app.open_conversation()
+            if provider_name:
+                try:
+                    selected_model_config = state.model_config_for_provider_name(identity.id, provider_name)
+                except (SecretDecryptionError, ModelConfigurationError) as exc:
+                    raise ModelConfigurationError(str(exc)) from exc
+            app = build_user_application(
+                state,
+                identity.id,
+                session_id=session_id,
+                user_preferences=user_preferences,
+                model_config=selected_model_config,
+                load_model_config=False,
+                workspace=workspace,
+                project_id=bound_project.project_id if bound_project is not None else None,
+                job_registry=job_registry,
+                job_parent_id=job_parent_id,
+                rag_mode="off",
+            )
+            conversation = app.open_conversation(session_id)
             # The node id is the optimistic-concurrency boundary for the new
             # tree protocol.  Legacy conversations do not expose nodes yet,
             # so validation is delegated to the node store when available.
             node_store = getattr(app, "session_store", None) or getattr(app, "store", None)
-            if source_node_id and node_store is not None and session_id:
-                _validate_source_node(
-                    node_store,
-                    session_id,
-                    source_node_id,
-                    source_node_session_id=source_node_session_id,
-                    allow_branch=branch,
-                    require_leaf=bool(batch_messages),
-                )
             if callable(getattr(node_store, "create_node", None)):
                 if getattr(conversation, "active_session", None) is None:
                     conversation.ensure_session(prompt or None)
@@ -685,10 +280,11 @@ def _stream(
                         node_store,
                         session_id=active_session.session_id,
                         prompt=prompt,
+                        turn_id=turn_id,
+                        thread_id=thread_id or active_session.session_id,
                         source_node_id=source_node_id,
-                        source_node_session_id=source_node_session_id,
-                        allow_branch=branch,
-                        user=identity.id if identity is not None else "",
+                        adopt_existing=adopt_existing,
+                        user=identity.id,
                         provider=getattr(selected_model_config, "provider", "unknown")
                         if selected_model_config
                         else "unknown",
@@ -724,10 +320,6 @@ def _stream(
                         running_mode=mode,
                         cwd=str(workspace),
                         references=references,
-                        batch_messages=batch_messages,
-                        # A cancellation request must not suppress the final
-                        # node.delete frame: that frame is the canonical
-                        # status=cancel commit consumed by the client.
                         emit=lambda frame: q.put(frame.to_dict()),
                     )
                     bridge_ref["bridge"].apply_runtime_config(
@@ -753,22 +345,18 @@ def _stream(
                         # external so ConversationService reuses it without
                         # creating a second placeholder/dynamic pair.
                         attach_bridge(bridge_ref["bridge"], events_external=True)
-                    active_runtime_bridges[registry_key(active_session.session_id)] = bridge_ref["bridge"]
+                    active_runtime_bridges[registry_key(bridge_ref["bridge"].thread_id)] = bridge_ref["bridge"]
             if operation is None:
                 request_parameters = _model_request_parameters(request_model, effective_reasoning)
-                if rag_mode == "forced" and identity is not None:
-                    rag = state.settings.rag_config_for_user(identity.id)
-                    if bool(rag.get("enabled")):
-                        request_parameters["required_tool_name"] = "search_knowledge_base"
                 run_state = conversation.run_task(
                     prompt,
                     mode=mode,
                     on_event=sink,
                     interrupt=interrupt,
                     cancel_requested=cancellation_requested,
+                    suspend_requested=suspension_requested,
                     request_parameters=request_parameters,
                     references=references or [],
-                    batch_messages=batch_messages,
                 )
             else:
                 run_state = operation(
@@ -776,11 +364,10 @@ def _stream(
                     interrupt,
                     sink,
                     cancellation_requested,
+                    suspension_requested,
                     _model_request_parameters(request_model, effective_reasoning),
                 )
             active_session = getattr(conversation, "active_session", None)
-            runtime = getattr(conversation, "runtime", None)
-            current_run = runtime.state.current_run if runtime is not None else None
             bridge = bridge_ref["bridge"]
             if bridge is not None:
                 old_status = str(run_state.status if run_state is not None else "abort")
@@ -789,87 +376,45 @@ def _stream(
                     requested_status = "success"
                     category = None
                 elif old_status == "cancelled":
-                    requested_status = "cancel"
-                    category = None
+                    requested_status = "paused"
+                    category = "user"
                 elif bridge.abort_category is not None:
-                    requested_status = "abort"
+                    requested_status = (
+                        "paused" if bridge.abort_category == "network" and bridge.produced_item else "failed"
+                    )
                     category = bridge.abort_category
                 else:
-                    requested_status = "abort"
+                    requested_status = "failed"
                     category = bridge.abort_category or "agent"
                 final_answer = (run_state.final_answer if run_state is not None else "") or ""
-                final_node = bridge.finish(
-                    requested_status,
-                    final_answer,
-                    category=category,
-                    code=stop_reason or bridge.abort_code,
-                )
-                terminal_status = (
-                    final_node.status
-                    if final_node is not None
-                    else "abort"
-                    if getattr(bridge, "persistence_failed", False)
-                    else requested_status
-                )
+                if category == "network" and not bridge.produced_item:
+                    final_node = bridge._current()
+                    bridge.closed = True
+                    enqueue_terminal("network", turn_id or bridge.turn_id or "unknown")
+                    requested_status = "running"
+                else:
+                    final_node = bridge.finish(
+                        requested_status,
+                        final_answer,
+                        category=category,
+                        code=stop_reason or bridge.abort_code,
+                    )
+                terminal_status = final_node.status if final_node is not None else "failed"
+                terminal_id = turn_id or (final_node.id if final_node is not None else bridge.turn_id or "unknown")
                 terminal_error = bridge.terminal_error
                 rendered_error = terminal_error_text(terminal_error) if terminal_error is not None else ""
-                runtime_finish = next(
-                    (
-                        item
-                        for item in reversed(getattr(run_state, "runtime_messages", []) or [])
-                        if getattr(item, "kind", "") == "run_finished"
-                    ),
-                    None,
-                )
-                finish_data = getattr(runtime_finish, "data", {}) if runtime_finish is not None else {}
-                if not isinstance(finish_data, dict):
-                    finish_data = {}
-                # RuntimeState frames carry the detailed projection, but the
-                # stream still needs the normal top-level terminal envelope so
-                # clients can apply one consistent lifecycle transition.  The
-                # delete frame is intentionally queued first by ``finish``.
-                terminal_is_error = terminal_status == "abort"
-                enqueue_terminal(
-                    {
-                        "type": "error" if terminal_is_error else "done",
-                        "status": terminal_status,
-                        "final_answer": rendered_error if terminal_is_error else final_answer,
-                        "session_id": active_session.session_id if active_session is not None else session_id,
-                        "run_id": run_state.run_id
-                        if run_state is not None
-                        else (current_run.run_id if current_run else None),
-                        "mode": getattr(run_state, "mode", None)
-                        or (current_run.mode if current_run is not None else mode),
-                        "metrics": {
-                            "duration_ms": finished.get("duration_ms", finish_data.get("duration_ms")),
-                            "model_calls": finished.get("model_calls", finish_data.get("model_calls")),
-                            "tool_calls": finished.get("tool_calls", finish_data.get("tool_calls")),
-                            "active_skills": finished.get("active_skills", finish_data.get("active_skills", [])),
-                        },
-                        **({"error": rendered_error or FAILED_TERMINAL_MESSAGE} if terminal_is_error else {}),
-                    }
-                )
+                if requested_status == "running":
+                    pass
+                else:
+                    terminal_type = _terminal_type_for_status(terminal_status, category)
+                    enqueue_terminal(
+                        terminal_type,
+                        terminal_id,
+                        "" if terminal_type == "success" else rendered_error or FAILED_TERMINAL_MESSAGE,
+                    )
             else:
-                enqueue_terminal(
-                    {
-                        "type": "done",
-                        "status": run_state.status if run_state is not None else "idle",
-                        "final_answer": (run_state.final_answer if run_state is not None else "") or "",
-                        "session_id": active_session.session_id if active_session is not None else session_id,
-                        "run_id": run_state.run_id
-                        if run_state is not None
-                        else (current_run.run_id if current_run else None),
-                        "mode": getattr(run_state, "mode", None)
-                        or (current_run.mode if current_run is not None else mode),
-                        "metrics": {
-                            "duration_ms": finished.get("duration_ms"),
-                            "model_calls": finished.get("model_calls"),
-                            "tool_calls": finished.get("tool_calls"),
-                            "active_skills": finished.get("active_skills", []),
-                        },
-                    }
-                )
-            if identity is not None and state.event_sync_manager is not None:
+                enqueue_terminal("failed", turn_id or "unknown", "Turn persistence is unavailable.")
+            if state.event_sync_manager is not None:
                 # Project conversations are local-only.  Their runtime writes
                 # are already excluded from the outbox; do not let the
                 # Generic end-of-run hook marks the account event stream dirty.
@@ -888,49 +433,23 @@ def _stream(
         except ModelConfigurationError as exc:
             if bridge_ref["bridge"] is not None:
                 error_message = f"模型未配置：{exc}"
-                bridge_ref["bridge"].finish("abort", error_message, category="agent", code="model_configuration_error")
+                bridge_ref["bridge"].finish("failed", error_message, category="agent", code="model_configuration_error")
                 rendered_error = terminal_error_text(bridge_ref["bridge"].terminal_error or {})
-                enqueue_terminal(
-                    {"type": "error", "status": "abort", "error": rendered_error, "message": rendered_error}
-                )
+                enqueue_terminal("failed", turn_id or bridge_ref["bridge"].turn_id or "unknown", rendered_error)
             else:
-                enqueue_terminal({"type": "error", "message": f"模型未配置：{exc}"})
+                enqueue_terminal("failed", turn_id or "unknown", f"模型未配置：{exc}")
         except Exception as exc:
             bridge = bridge_ref["bridge"]
             if bridge is not None:
-                batch_user_phase_failed = bool(
-                    getattr(bridge, "batch_messages", None)
-                    and bridge.assistant is None
-                    and not bridge.started
-                )
                 final_node = bridge.finish_exception(exc)
-                # ``finish_exception`` intentionally leaves the canonical
-                # tree untouched when the atomic user batch itself failed.
-                # The old source node is returned only as a context marker and
-                # must not make the SSE error look like a successful run.
-                terminal_status = "abort" if batch_user_phase_failed else final_node.status if final_node is not None else "abort"
                 rendered_error = terminal_error_text(bridge.terminal_error or {}) if bridge.terminal_error else ""
-                if terminal_status == "abort":
-                    rendered_error = (
-                        rendered_error or "The run was aborted because an internal error interrupted execution."
-                    )
-                enqueue_terminal(
-                    {
-                        "type": "error",
-                        "status": terminal_status,
-                        "error": rendered_error,
-                        "message": rendered_error,
-                    }
-                )
+                terminal_id = turn_id or (final_node.id if final_node is not None else bridge.turn_id or "unknown")
+                if bridge.abort_category == "network" and not bridge.produced_item:
+                    enqueue_terminal("network", terminal_id)
+                else:
+                    enqueue_terminal("failed", terminal_id, rendered_error or str(exc))
             else:
-                enqueue_terminal(
-                    {
-                        "type": "error",
-                        "status": "abort",
-                        "error": "The run was aborted because an internal error interrupted execution.",
-                        "message": "The run was aborted because an internal error interrupted execution.",
-                    }
-                )
+                enqueue_terminal("failed", turn_id or "unknown", str(exc) or FAILED_TERMINAL_MESSAGE)
         finally:
             bridge = bridge_ref["bridge"]
             if bridge is not None:
@@ -950,6 +469,7 @@ def _stream(
             if reserved_stream_keys:
                 with stream_lock:
                     stream_locks["keys"].difference_update(reserved_stream_keys)
+            active_turn_cancellations.pop(cancellation_key, None)
             done.set()
 
     if job_registry is not None:
@@ -961,8 +481,6 @@ def _stream(
         )
         job = ThreadJob(job_registry.new_job_id(), worker)
         job_holder["job"] = job
-        job.add_listener(RuntimeJobEventBridge(sink))
-        q.put({"type": "job", "job_id": job.info().id, "state": "pending"})
         job_registry.submit(job, scope=user_scope, lane=JobLane.FOREGROUND, admission=AdmissionPolicy())
     else:
         # Focused embedding tests may use a minimal state double.  Preserve a
@@ -981,7 +499,13 @@ def _stream(
                     continue
                 if item is None:
                     break
-                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                if item.get("type") == "terminal":
+                    terminal_id = html.escape(str(item.get("terminal_id") or "unknown"), quote=True)
+                    terminal_type = html.escape(str(item.get("terminal_type") or "failed"), quote=True)
+                    message = html.escape(str(item.get("message") or ""), quote=False)
+                    yield f'data: <SSE id="{terminal_id}" type="{terminal_type}">{message}</SSE>\n\n'
+                elif item.get("type") in {"turn.create", "turn.update"}:
+                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
         finally:
             # A closed browser/TUI response is the cancellation signal for the
             # associated runtime.  Normal completion is harmlessly idempotent.
@@ -997,231 +521,3 @@ def _stream(
                     stream_locks["keys"].difference_update(reserved_stream_keys)
 
     return generator()
-
-
-@router.post("/chat")
-async def chat(
-    body: ChatRequest, request: Request, identity: UserIdentity = Depends(require_user)
-) -> StreamingResponse:
-    state: WebAppState = request.app.state.web
-    if not body.prompt.strip():
-        raise HTTPException(status_code=400, detail="prompt 不能为空")
-    store = _store(state, identity.id)
-    resolved_session_id = body.session_id
-    if resolved_session_id:
-        _require_active(store, resolved_session_id)
-        try:
-            state.session_workspace(identity.id, resolved_session_id)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if _session_has_active_execution(state, identity.id, resolved_session_id):
-            raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
-        # A persisted ``running`` leaf can be an orphan after a process crash;
-        # only a real in-process SSE/Job blocks a new request.
-        nodes = getattr(store, "load_nodes", lambda _session_id: [])(resolved_session_id)
-        has_history = _has_conversation_nodes(nodes)
-        if has_history:
-            _require_explicit_runtime_config(
-                provider_name=body.provider_name,
-                model=body.model,
-                permission_mode=body.permission_mode,
-                running_mode=body.running_mode,
-                permission_mode_explicit="permission_mode" in body.model_fields_set,
-                running_mode_explicit="running_mode" in body.model_fields_set,
-            )
-        if has_history and not body.source_node_id:
-            raise HTTPException(status_code=409, detail="续聊请求必须提交当前最后节点 ID。")
-        _validate_source_node(
-            store,
-            resolved_session_id,
-            body.source_node_id,
-            source_node_session_id=body.source_node_session_id,
-            allow_branch=body.branch,
-        )
-    else:
-        # A project conversation must always be created through the scoped
-        # project endpoint.  The chat endpoint's implicit session is only for
-        # ordinary, isolated conversations and is therefore safe to sync.
-        resolved_session_id = store.create_session().session_id
-    state.user_paths(identity.id).ensure_session(resolved_session_id)
-    references = _validate_references(state, identity, resolved_session_id, body.references)
-    return StreamingResponse(
-        _stream(
-            state,
-            body.prompt.strip(),
-            identity=identity,
-            session_id=resolved_session_id,
-            source_node_id=body.source_node_id,
-            source_node_session_id=body.source_node_session_id,
-            branch=body.branch,
-            mode=body.mode,
-            interactive=body.interactive,
-            permission_mode=body.permission_mode,
-            reasoning_effort=body.reasoning_effort,
-            provider_name=body.provider_name,
-            model_snapshot=body.model.model_dump() if body.model is not None else None,
-            request_model=body.model,
-            user_preferences=state.agent_preferences_for_user(identity.id),
-            default_timezone=str(state.agent_config_for_user(identity.id).get("timezone", DEFAULT_TIME_ZONE)),
-            model_config=_model_config_snapshot(state, identity.id),
-            runtime_config=state.runtime_config_for_user(identity.id),
-            references=references,
-            rag_mode=body.rag_mode,
-        ),
-        media_type="text/event-stream",
-    )
-
-
-@router.post("/chat/batch")
-async def chat_batch(
-    body: BatchChatRequest, request: Request, identity: UserIdentity = Depends(require_user)
-) -> StreamingResponse:
-    """Create a FIFO user-message batch and run one assistant turn."""
-
-    state: WebAppState = request.app.state.web
-    store = _store(state, identity.id)
-    session_id = body.session_id
-    _require_active(store, session_id)
-    try:
-        state.session_workspace(identity.id, session_id)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if _session_has_active_execution(state, identity.id, session_id):
-        raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
-    nodes = getattr(store, "load_nodes", lambda _session_id: [])(session_id)
-    has_history = _has_conversation_nodes(nodes)
-    if has_history:
-        _require_explicit_runtime_config(
-            provider_name=body.provider_name,
-            model=body.model,
-            permission_mode=body.permission_mode,
-            running_mode=body.running_mode,
-            permission_mode_explicit="permission_mode" in body.model_fields_set,
-            running_mode_explicit="running_mode" in body.model_fields_set,
-        )
-        if not body.source_node_id:
-            raise HTTPException(status_code=409, detail="批量续聊请求必须提交当前最后节点 ID。")
-    _validate_source_node(
-        store,
-        session_id,
-        body.source_node_id,
-        source_node_session_id=body.source_node_session_id,
-        allow_branch=body.branch,
-        require_leaf=True,
-    )
-    batch_messages: list[dict[str, object]] = []
-    flattened_references: list[dict[str, str]] = []
-    for item in body.messages:
-        refs = _validate_references(
-            state,
-            identity,
-            session_id,
-            item.references,
-        )
-        batch_messages.append({"content": item.content.strip(), "references": refs})
-        flattened_references.extend(refs)
-    prompt = "\n\n".join(str(item["content"]) for item in batch_messages)
-    return StreamingResponse(
-        _stream(
-            state,
-            prompt,
-            identity=identity,
-            session_id=session_id,
-            source_node_id=body.source_node_id,
-            source_node_session_id=body.source_node_session_id,
-            branch=body.branch,
-            mode=body.mode,
-            interactive=body.interactive,
-            permission_mode=body.permission_mode,
-            reasoning_effort=body.reasoning_effort,
-            provider_name=body.provider_name,
-            model_snapshot=body.model.model_dump() if body.model is not None else None,
-            request_model=body.model,
-            user_preferences=state.agent_preferences_for_user(identity.id),
-            default_timezone=str(state.agent_config_for_user(identity.id).get("timezone", DEFAULT_TIME_ZONE)),
-            model_config=_model_config_snapshot(state, identity.id),
-            runtime_config=state.runtime_config_for_user(identity.id),
-            references=flattened_references,
-            batch_messages=batch_messages,
-            rag_mode=body.rag_mode,
-        ),
-        media_type="text/event-stream",
-    )
-
-
-@router.post("/sessions/{session_id}/resume")
-async def resume(
-    session_id: str,
-    body: ResumeRequest,
-    request: Request,
-    identity: UserIdentity = Depends(require_user),
-) -> StreamingResponse:
-    """Resume a durable workflow through the same SSE contract as chat."""
-
-    state: WebAppState = request.app.state.web
-
-    store = _store(state, identity.id)
-    _require_active(store, session_id)
-    try:
-        state.session_workspace(identity.id, session_id)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if _session_has_active_execution(state, identity.id, session_id):
-        raise HTTPException(status_code=409, detail="会话已有正在运行的任务，请先停止。")
-    nodes = getattr(store, "load_nodes", lambda _session_id: [])(session_id)
-    if not _has_conversation_nodes(nodes):
-        raise HTTPException(status_code=409, detail="当前会话没有可恢复的运行节点。")
-    _require_explicit_runtime_config(
-        provider_name=body.provider_name,
-        model=body.model,
-        permission_mode=body.permission_mode,
-        running_mode=body.running_mode,
-        permission_mode_explicit="permission_mode" in body.model_fields_set,
-        running_mode_explicit="running_mode" in body.model_fields_set,
-        resume=True,
-    )
-    if not body.source_node_id:
-        raise HTTPException(status_code=409, detail="恢复请求必须提交当前节点 ID。")
-    _validate_source_node(
-        store,
-        session_id,
-        body.source_node_id,
-        source_node_session_id=body.source_node_session_id,
-        resume=True,
-    )
-
-    def operation(conversation, interrupt, sink, cancel_requested, request_parameters):
-        if body.rag_mode == "forced" and bool(state.settings.rag_config_for_user(identity.id).get("enabled")):
-            request_parameters["required_tool_name"] = "search_knowledge_base"
-        return conversation.resume_session(
-            session_id,
-            on_event=sink,
-            interrupt=interrupt,
-            cancel_requested=cancel_requested,
-            request_parameters=request_parameters,
-        )
-
-    return StreamingResponse(
-        _stream(
-            state,
-            "",
-            identity=identity,
-            session_id=session_id,
-            source_node_id=body.source_node_id,
-            source_node_session_id=body.source_node_session_id,
-            mode=body.mode,
-            interactive=True,
-            permission_mode=body.permission_mode,
-            reasoning_effort=body.reasoning_effort,
-            provider_name=body.provider_name,
-            model_snapshot=body.model.model_dump() if body.model is not None else None,
-            request_model=body.model,
-            user_preferences=state.agent_preferences_for_user(identity.id),
-            model_config=_model_config_snapshot(state, identity.id),
-            runtime_config=state.runtime_config_for_user(identity.id),
-            default_timezone=str(state.agent_config_for_user(identity.id).get("timezone", DEFAULT_TIME_ZONE)),
-            operation=operation,
-            rag_mode=body.rag_mode,
-        ),
-        media_type="text/event-stream",
-    )

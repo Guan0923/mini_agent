@@ -220,42 +220,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_network_task(args) -> int:
-    """Run as a pure network client: stream a task from the backend server."""
-    import json
-
+    """Retain logout only; Turn streaming is a Web-only client feature."""
     from .client import ApiError, MiniAgentClient
 
     client = MiniAgentClient(args.server)
 
-    def render(message: dict) -> None:
-        kind = message.get("kind")
-        data = message.get("data", {})
-        if kind == "thinking_delta":
-            print(message.get("message", ""), end="", flush=True)
-        elif kind == "tool_call":
-            print(f"\nCALL  {message.get('message', '')} {json.dumps(data.get('arguments', {}), ensure_ascii=False)}")
-        elif kind == "tool_result":
-            print(f"RESULT\n{str(message.get('message', ''))[:200]}")
-        elif kind == "tool_failed":
-            print(f"TOOL FAILED  {message.get('message', '')}")
-        elif kind == "response_delta":
-            print(message.get("message", ""), end="", flush=True)
-
-    def decide(request_data: dict) -> dict:
-        print(f"\nAPPROVAL REQUIRED - {request_data.get('message', '')}")
-        if request_data.get("kind") == "question":
-            answers: dict[str, list[str]] = {}
-            for question in request_data.get("questions", []):
-                value = input(f"  {question.get('question')}: ").strip()
-                answers[str(question.get("id"))] = [value] if value else [""]
-            return {"choice": "answer", "answers": answers}
-        print(
-            f"  tool: {request_data.get('tool')}  args: {json.dumps(request_data.get('arguments', {}), ensure_ascii=False)}"
-        )
-        choice = input("  Approve and continue? [y/N] ").strip().lower()
-        return {"choice": "continue" if choice in {"y", "yes"} else "cancel"}
-
-    task = " ".join(args.task) if args.task else None
     if args.logout:
         try:
             client.logout()
@@ -264,22 +233,5 @@ def _run_network_task(args) -> int:
         except ApiError as exc:
             print(f"[client] error: {exc}")
             return 1
-    if task is None:
-        print('Network mode needs a task: mini-agent --server URL "task"')
-        return 1
-    try:
-        print(f"[client] connecting to {client.base_url}...")
-        done = client.run_task(task, on_event=render, on_decision_requested=decide, interactive=True)
-        print()
-        answer = done.get("final_answer") or ""
-        if answer:
-            print(f"\n{answer}\n")
-        metrics = done.get("metrics", {})
-        print(
-            f"status: {done.get('status')} | duration: {metrics.get('duration_ms')}ms | "
-            f"model_calls: {metrics.get('model_calls')} | tool_calls: {metrics.get('tool_calls')}"
-        )
-        return 0 if done.get("status") == "completed" else 1
-    except ApiError as exc:
-        print(f"[client] error: {exc}")
-        return 1
+    print("[client] 网络 TUI 任务执行已移除；请使用 Web 客户端创建和运行 Turn。")
+    return 1

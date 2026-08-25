@@ -1,11 +1,11 @@
-import type { SessionInfo, SessionMessage } from "../api";
+import type { SessionInfo } from "../api";
 import type { ChatMessage, Conversation } from "../types";
 import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
 export const STORAGE_KEY = "mini-agent-conversations";
 export const ARCHIVE_READ_KEY = "mini-agent-archive-read";
 export const BROWSER_STATE_VERSION_KEY = "mini-agent-browser-state-version";
-export const BROWSER_STATE_VERSION = "runtime-state-tree-5";
+export const BROWSER_STATE_VERSION = "turn-protocol-v10";
 export type ArchiveReadState = Record<string, string>;
 
 const LEGACY_BROWSER_PREFIXES = [STORAGE_KEY, ARCHIVE_READ_KEY, "mini-agent-session-modes"];
@@ -32,7 +32,6 @@ export function resetLegacyBrowserState(storage?: Storage): void {
   for (const key of keysToRemove) target.removeItem(key);
   target.setItem(BROWSER_STATE_VERSION_KEY, BROWSER_STATE_VERSION);
 }
-
 export function loadConversations(key: string): Conversation[] {
   try {
     const raw = localStorage.getItem(key);
@@ -97,7 +96,7 @@ export function countUnreadArchived(conversations: Conversation[], state: Archiv
 
 export function summaryToConversation(summary: SessionInfo, existing?: Conversation): Conversation {
   return {
-    id: existing?.id ?? summary.client_id ?? summary.session_id,
+    id: summary.thread_id ?? existing?.id ?? summary.session_id,
     title: summary.title || existing?.title || "新对话",
     messages: existing?.messages ?? [],
     messageCount:
@@ -107,17 +106,12 @@ export function summaryToConversation(summary: SessionInfo, existing?: Conversat
         : existing?.messageCount ?? 0),
     updatedAt: summary.updated_at ?? existing?.updatedAt,
     sessionId: summary.session_id,
+    threadId: summary.thread_id ?? existing?.threadId ?? summary.session_id,
     clientId: summary.client_id ?? existing?.clientId ?? existing?.id ?? summary.session_id,
     archivedAt: summary.archived_at ?? undefined,
     deletedAt: summary.deleted_at ?? undefined,
     messagesLoaded: existing?.messagesLoaded ?? false,
     lastNodeId: summary.last_node_id !== undefined ? summary.last_node_id ?? undefined : existing?.lastNodeId,
-    forkAnchorNodeId: summary.fork_anchor_node_id !== undefined
-      ? summary.fork_anchor_node_id ?? undefined
-      : existing?.forkAnchorNodeId,
-    forkAnchorSessionId: summary.fork_anchor_session_id !== undefined
-      ? summary.fork_anchor_session_id ?? undefined
-      : existing?.forkAnchorSessionId,
     runtimeNodes: existing?.runtimeNodes,
     // When the API explicitly returns null, it is authoritative: clear a
     // stale browser-only project binding instead of hiding an ordinary
@@ -128,39 +122,4 @@ export function summaryToConversation(summary: SessionInfo, existing?: Conversat
     projectAvailable: summary.project_available !== undefined ? summary.project_available ?? undefined : existing?.projectAvailable,
     titleIsCustom: summary.title_is_custom !== undefined ? summary.title_is_custom : existing?.titleIsCustom,
   };
-}
-
-export function transcriptToMessages(transcript: SessionMessage[]): ChatMessage[] {
-  return transcript.map((message, index) => ({
-    id: message.id ?? `transcript-${index}`,
-    role: message.role,
-    content: message.content,
-    events: message.events ?? [],
-    segments: message.segments,
-    status: message.status,
-    metrics: message.metrics,
-    error: message.error,
-    running: message.running ? false : undefined,
-    runId: message.run_id ?? undefined,
-    nodeId: message.node_session_id && message.id?.startsWith(`${message.node_session_id}:`)
-      ? message.id.slice(message.node_session_id.length + 1).replace(/:assistant$/, "")
-      : message.id?.includes(":")
-        ? message.id.slice(message.id.indexOf(":") + 1).replace(/:assistant$/, "")
-        : undefined,
-    nodeSessionId: message.node_session_id ?? (message.id?.includes(":")
-      ? message.id.slice(0, message.id.indexOf(":"))
-      : undefined),
-    sourceNodeId: message.source_node_id ?? undefined,
-    references: message.references,
-    timelineSeq: message.timeline_seq,
-    timelineTime: message.timeline_time,
-    timelineText: message.timeline_text,
-    timelineSource: message.timeline_source,
-  }));
-}
-
-export function importableMessages(messages: ChatMessage[]): Array<Pick<ChatMessage, "role" | "content">> {
-  return messages
-    .filter((message) => message.content.trim() || message.role === "user")
-    .map(({ role, content }) => ({ role, content }));
 }

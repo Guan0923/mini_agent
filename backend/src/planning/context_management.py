@@ -69,7 +69,7 @@ class ContextManager:
     ) -> ContextCompactionResult:
         """Manually summarize all persisted, already-finished conversation history."""
 
-        canonical_nodes = [node for node in runtime.model_nodes() if node.data.get("type") != "root"]
+        canonical_nodes = runtime.model_nodes()
         original = runtime.model_messages() if canonical_nodes else list(runtime.state.messages)
         if not original:
             return ContextCompactionResult(False, 0, 0)

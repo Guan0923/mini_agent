@@ -6,10 +6,8 @@ type RuntimeMessageBlock = {
 };
 
 function messageFromNode(node: RuntimeStateNode): Record<string, unknown> | null {
-  if (node.data.type !== "message") return null;
-  const message = node.data.message;
-  if (!message || typeof message !== "object" || Array.isArray(message)) return null;
-  return message as Record<string, unknown>;
+  const message = node.data[node.current_data_idx]?.[1];
+  return message ? message as Record<string, unknown> : null;
 }
 
 /** Return the cumulative assistant text carried by a RuntimeState message node. */

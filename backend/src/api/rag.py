@@ -21,7 +21,7 @@ from backend.rag import (
 from .auth.dependencies import require_user
 from .auth.types import UserIdentity
 from .session_files.store import MAX_FILE_BYTES, SessionFileError, SessionFileStore
-from .sessions.routes import _require_active, _store
+from .session_store import require_active_session, session_store
 from .user_data import user_paths
 
 router = APIRouter(prefix="/api/rag", tags=["rag"])
@@ -93,8 +93,8 @@ def import_document(
     request: Request, body: RagImportRequest, identity: UserIdentity = Depends(require_user)
 ) -> dict[str, object]:
     state = request.app.state.web
-    store = _store(state, identity.id)
-    _require_active(store, body.session_id)
+    store = session_store(state, identity.id)
+    require_active_session(store, body.session_id)
     paths = state.user_paths(identity.id)
     paths.ensure_session(body.session_id)
     project_root = state.session_workspace(identity.id, body.session_id)

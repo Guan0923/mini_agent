@@ -10,14 +10,12 @@ const api = vi.hoisted(() => ({
   archiveSession: vi.fn(),
   createSession: vi.fn(),
   deleteSession: vi.fn(),
-  forkSession: vi.fn(),
+  forkTurn: vi.fn(),
   getSettings: vi.fn(),
   getSessionNodes: vi.fn(),
-  getSessionTranscript: vi.fn(),
   listSessions: vi.fn(),
   renameSession: vi.fn(),
   restoreSession: vi.fn(),
-  rewindSession: vi.fn(),
   updateProfile: vi.fn(),
 }));
 
@@ -94,7 +92,6 @@ async function expectKnownEmptySession(sessionId: string): Promise<void> {
     runtimeNodes: [],
   });
   await act(async () => Promise.resolve());
-  expect(api.getSessionTranscript).not.toHaveBeenCalled();
   expect(api.getSessionNodes).not.toHaveBeenCalled();
 }
 
@@ -105,7 +102,6 @@ describe("AgentApp new conversation initialization", () => {
     shell.props = null;
     api.getSettings.mockRejectedValue(new Error("settings unavailable"));
     api.getSessionNodes.mockResolvedValue([]);
-    api.getSessionTranscript.mockResolvedValue([]);
     api.listSessions.mockResolvedValue([]);
     projectsApi.listProjects.mockResolvedValue([]);
   });

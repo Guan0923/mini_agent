@@ -839,7 +839,7 @@ wheels = [
 
 [[package]]
 name = "mini-agent-backend"
-version = "0.3.0"
+version = "0.0.1"
 source = { editable = "backend" }
 dependencies = [
     { name = "cryptography" },
@@ -891,7 +891,7 @@ provides-extras = ["web", "sync"]
 
 [[package]]
 name = "mini-agent-cloud"
-version = "0.3.0"
+version = "0.0.1"
 source = { editable = "cloud" }
 dependencies = [
     { name = "cryptography" },
@@ -923,7 +923,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "mini-agent-tui"
-version = "0.3.0"
+version = "0.0.1"
 source = { editable = "tui" }
 dependencies = [
     { name = "keyring" },

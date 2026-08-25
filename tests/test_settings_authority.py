@@ -200,28 +200,6 @@ def test_legacy_preferences_fill_an_empty_database_field_without_overwriting_nam
     assert reopened.profile_for_user(user_id) == {"display_name": "自定义名", "agent_preferences": "旧偏好"}
 
 
-def test_legacy_sandbox_full_access_migrates_to_read_only(tmp_path: Path) -> None:
-    user_id = str(uuid4())
-    root = tmp_path / user_id
-    config = UserConfigStore(root / "config.toml")
-    config.update(
-        {
-            "sandbox": {
-                "enabled": True,
-                "file_mode": "full_access",
-                "network_mode": "full_network",
-            }
-        }
-    )
-
-    store = UserSettingsStore(root / "user.db")
-    migrated = store.sandbox_config_for_user(user_id)
-    assert migrated["file_mode"] == "read_only"
-    assert migrated["network_mode"] == "no_network"
-    assert migrated["policy_version"] == 2
-    assert UserConfigStore(root / "config.toml").read()["sandbox"]["policy_version"] == 2
-
-
 def test_provider_names_are_case_insensitive_unique_and_renamable(tmp_path) -> None:
     user_id = str(uuid4())
     store = UserSettingsStore(tmp_path / user_id / "user.db")

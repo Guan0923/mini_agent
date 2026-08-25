@@ -3,14 +3,12 @@ import {
   archiveSession,
   createSession,
   deleteSession,
-  forkSession,
+  forkTurn,
   getSettings,
   getSessionNodes,
-  getSessionTranscript,
   listSessions,
   renameSession,
   restoreSession,
-  rewindSession,
   updateProfile,
   type ProviderConfig,
   type RagConfig,
@@ -19,19 +17,43 @@ import {
 import { changeProjectPath, createProject, createProjectSession, listProjects, removeProject, renameProject, restoreProject, revokeProjectSkillTrust, type ProjectInfo } from "../api/projects";
 import { useAuth } from "../auth/AuthProvider";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
-import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnreadArchived, summaryToConversation, transcriptToMessages, importableMessages, STORAGE_KEY, ARCHIVE_READ_KEY } from "./storage";
+import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnreadArchived, summaryToConversation, STORAGE_KEY, ARCHIVE_READ_KEY } from "./storage";
 import type { ArchiveReadState } from "./storage";
 import AgentShell from "./AgentShell";
 import { createRunController } from "./runController";
 import type { QueuedMessage } from "./types";
 import { effectiveDisplayMode } from "./displayMode";
+import { projectTurnPath } from "./runtimeDetailProjection";
 import type {
   ChatMessage,
   ChatMode,
   Conversation,
   Page,
   DisplayMode,
+  RuntimeStateNode,
 } from "../types";
+
+function withLoadedTurns(conversation: Conversation, nodes: RuntimeStateNode[]): Conversation {
+  const threadId = conversation.threadId ?? conversation.sessionId;
+  const threadNodes = nodes.filter((node) => node.thread_id === threadId);
+  const selected = threadNodes.find((node) => node.id === conversation.activeTurnId);
+  const parentIds = new Set(threadNodes.map((node) => node.parent_id).filter(Boolean));
+  const leaves = threadNodes
+    .filter((node) => !parentIds.has(node.id))
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  const fallback = leaves[leaves.length - 1];
+  const activeTurnId = selected?.id ?? fallback?.id;
+  const map = new Map(nodes.map((node) => [`${node.session_id}:${node.id}`, node] as const));
+  return {
+    ...conversation,
+    runtimeNodes: nodes,
+    activeTurnId,
+    lastNodeId: activeTurnId,
+    messages: activeTurnId ? projectTurnPath(map, activeTurnId) : [],
+    messagesLoaded: true,
+  };
+}
+
 function AgentApp() {
   const { user, setUser, signOut } = useAuth();
   const [page, setPage] = useState<Page>("chat");
@@ -148,9 +170,9 @@ function AgentApp() {
       const deletedByClient = new Map<string, SessionInfo>();
       const deletedBySession = new Map<string, SessionInfo>();
       for (const summary of summaries) {
-        bySession.set(summary.session_id, summary);
+        bySession.set(summary.thread_id ?? summary.session_id, summary);
         if (summary.deleted_at) {
-          deletedBySession.set(summary.session_id, summary);
+          deletedBySession.set(summary.thread_id ?? summary.session_id, summary);
           if (summary.client_id) deletedByClient.set(summary.client_id, summary);
         } else {
           if (summary.client_id) byClient.set(summary.client_id, summary);
@@ -159,15 +181,15 @@ function AgentApp() {
 
       const merged: Conversation[] = [];
       for (const conversation of local) {
-        const exactDeleted = conversation.sessionId ? deletedBySession.get(conversation.sessionId) : undefined;
+        const exactDeleted = deletedBySession.get(conversation.threadId ?? conversation.sessionId ?? conversation.id);
         if (exactDeleted) continue;
         const summary =
-          (conversation.sessionId ? bySession.get(conversation.sessionId) : undefined) ??
+          bySession.get(conversation.threadId ?? conversation.sessionId ?? conversation.id) ??
           byClient.get(conversation.clientId ?? conversation.id);
         if (summary) {
           if (summary.deleted_at) continue;
           merged.push(summaryToConversation(summary, conversation));
-          bySession.delete(summary.session_id);
+          bySession.delete(summary.thread_id ?? summary.session_id);
           continue;
         }
 
@@ -181,13 +203,9 @@ function AgentApp() {
 
         if (conversation.messages.length > 0) {
           try {
-            const imported = await createSession(
-              conversation.title,
-              conversation.clientId ?? conversation.id,
-              importableMessages(conversation.messages),
-            );
+            const imported = await createSession(conversation.title, conversation.clientId ?? conversation.id);
             merged.push(summaryToConversation(imported, conversation));
-            bySession.delete(imported.session_id);
+            bySession.delete(imported.thread_id ?? imported.session_id);
             continue;
           } catch {
             // Preserve the legacy conversation and retry on the next operation.
@@ -240,18 +258,10 @@ function AgentApp() {
   useEffect(() => {
     if (current && current.sessionId && (!current.messagesLoaded || !current.runtimeNodes)) {
       let disposed = false;
-      void Promise.all([
-        getSessionTranscript(current.sessionId),
-        getSessionNodes(current.sessionId).catch(() => []),
-      ])
-        .then(([transcript, nodes]) => {
+      void getSessionNodes(current.sessionId)
+        .then((nodes) => {
           if (disposed) return;
-          updateConversation(current.id, (conversation) => ({
-            ...conversation,
-            messages: transcriptToMessages(transcript),
-            runtimeNodes: nodes,
-            messagesLoaded: true,
-          }));
+          updateConversation(current.id, (conversation) => withLoadedTurns(conversation, nodes));
         })
         .catch((error) => {
           if (!disposed) setActionError(String((error as Error).message ?? error));
@@ -309,24 +319,12 @@ function AgentApp() {
     if (!conversation) throw new Error("会话不存在");
     if (conversation.sessionId) {
       if (!conversation.messagesLoaded) {
-        const [transcript, nodes] = await Promise.all([
-          getSessionTranscript(conversation.sessionId),
-          getSessionNodes(conversation.sessionId).catch(() => []),
-        ]);
-        updateConversation(id, (currentConversation) => ({
-          ...currentConversation,
-          messages: transcriptToMessages(transcript),
-          runtimeNodes: nodes,
-          messagesLoaded: true,
-        }));
+        const nodes = await getSessionNodes(conversation.sessionId);
+        updateConversation(id, (currentConversation) => withLoadedTurns(currentConversation, nodes));
       }
       return conversation.sessionId;
     }
-    const summary = await createSession(
-      conversation.title,
-      conversation.clientId ?? conversation.id,
-      importableMessages(conversation.messages),
-    );
+    const summary = await createSession(conversation.title, conversation.clientId ?? conversation.id);
     updateConversation(id, (currentConversation) => summaryToConversation(summary, currentConversation));
     return summary.session_id;
   }
@@ -483,8 +481,9 @@ function AgentApp() {
   async function renameConversation(id: string, title: string) {
     setActionError(null);
     try {
+      const conversation = conversations.find((item) => item.id === id);
       const sessionId = await ensureSession(id);
-      const summary = await renameSession(sessionId, title);
+      const summary = await renameSession(conversation?.threadId ?? sessionId, title);
       updateConversation(id, (conversation) => summaryToConversation(summary, conversation));
     } catch (error) {
       setActionError(String((error as Error).message ?? error));
@@ -495,8 +494,9 @@ function AgentApp() {
   async function archiveConversation(id: string) {
     setActionError(null);
     try {
+      const conversation = conversations.find((item) => item.id === id);
       const sessionId = await ensureSession(id);
-      const summary = await archiveSession(sessionId);
+      const summary = await archiveSession(conversation?.threadId ?? sessionId);
       updateConversation(id, (conversation) => summaryToConversation(summary, conversation));
       if (currentId === id) setCurrentId(activeConversations.find((conversation) => conversation.id !== id)?.id ?? null);
     } catch (error) {
@@ -507,8 +507,9 @@ function AgentApp() {
   async function deleteConversation(id: string) {
     setActionError(null);
     try {
+      const conversation = conversations.find((item) => item.id === id);
       const sessionId = await ensureSession(id);
-      await deleteSession(sessionId);
+      await deleteSession(conversation?.threadId ?? sessionId);
       setConversations((previous) => previous.filter((conversation) => conversation.id !== id));
       if (currentId === id) setCurrentId(null);
     } catch (error) {
@@ -522,7 +523,7 @@ function AgentApp() {
       const conversation = conversations.find((item) => item.id === id);
       if (!conversation) return;
       const sessionId = await ensureSession(id);
-      const summary = await restoreSession(sessionId);
+      const summary = await restoreSession(conversation.threadId ?? sessionId);
       updateConversation(id, (currentConversation) => summaryToConversation(summary, currentConversation));
       if (!currentId) setCurrentId(conversation.id);
     } catch (error) {
@@ -537,30 +538,22 @@ function AgentApp() {
     const index = source.messages.findIndex((message) => message.id === messageId);
     if (index < 0 || source.messages[index].role !== "assistant") return;
     try {
-      const sessionId = await ensureSession(id);
-      const branchId = crypto.randomUUID();
-      const prefix = source.messages.slice(0, index + 1).map((message) => ({
-        ...message,
-        id: crypto.randomUUID(),
-        running: false,
-      }));
-      const summary = await forkSession(
-        sessionId,
-        source.messages[index].runId,
-        `${source.title || "新对话"}（分支）`,
-        branchId,
-        importableMessages(prefix),
-        source.messages[index].sourceNodeId,
-        source.messages[index].nodeSessionId,
-      );
-      const branch = summaryToConversation(summary, {
-        id: branchId,
-        clientId: branchId,
-        title: summary.title,
-        messages: prefix,
-        messagesLoaded: true,
-      });
-      branch.runtimeNodes = undefined;
+      await ensureSession(id);
+      const sourceTurnId = source.messages[index].sourceNodeId;
+      if (!sourceTurnId) throw new Error("fork requires an assistant Turn");
+      const forked = await forkTurn(sourceTurnId, `${source.title || "新对话"}（分支）`);
+      const sidebar = forked.sidebar_thread;
+      const branch = withLoadedTurns({
+        id: sidebar.thread_id,
+        clientId: sidebar.thread_id,
+        sessionId: sidebar.session_id,
+        threadId: sidebar.thread_id,
+        activeTurnId: forked.turn.id,
+        title: sidebar.title,
+        messages: [],
+        messagesLoaded: false,
+        updatedAt: sidebar.updated_at,
+      }, await getSessionNodes(sidebar.session_id));
       setConversations((previous) => [branch, ...previous]);
       setCurrentId(branch.id);
       setPage("chat");
@@ -569,7 +562,7 @@ function AgentApp() {
     }
   }
 
-  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string; sourceNodeId?: string; sourceNodeSessionId?: string; branch?: boolean } | undefined> {
+  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string; sourceNodeId?: string; rewindTurnId?: string } | undefined> {
     setActionError(null);
     const source = conversations.find((conversation) => conversation.id === id);
     if (!source) return undefined;
@@ -577,28 +570,15 @@ function AgentApp() {
     if (index < 0 || source.messages[index].role !== "user") return undefined;
     try {
       const sessionId = await ensureSession(id);
-      const summary = await rewindSession(
-        sessionId,
-        undefined,
-        source.title,
-        source.clientId ?? source.id,
-        [],
-        source.messages[index].nodeId ?? source.messages[index].sourceNodeId,
-        source.messages[index].nodeSessionId,
-      );
-      updateConversation(id, (conversation) => ({
-        ...summaryToConversation(summary, conversation),
-        messages: conversation.messages.slice(0, index),
-        messagesLoaded: true,
-      }));
+      const turnId = source.messages[index].nodeId;
+      if (!turnId) throw new Error("rewind requires a user Turn");
       setCurrentId(id);
       setPage("chat");
       return {
         content: source.messages[index].content,
-        sessionId: summary.session_id,
-        sourceNodeId: summary.rewind_source_node_id,
-        sourceNodeSessionId: summary.rewind_source_session_id,
-        branch: Boolean(summary.branch),
+        sessionId,
+        sourceNodeId: turnId,
+        rewindTurnId: turnId,
       };
     } catch (error) {
       setActionError(String((error as Error).message ?? error));
@@ -609,16 +589,8 @@ function AgentApp() {
     const conversation = conversations.find((item) => item.id === id);
     if (!conversation) throw new Error("会话不存在");
     const sessionId = await ensureSession(id);
-    const [transcript, nodes] = await Promise.all([
-      getSessionTranscript(sessionId),
-      getSessionNodes(sessionId).catch(() => []),
-    ]);
-    updateConversation(id, (currentConversation) => ({
-      ...currentConversation,
-      messages: transcriptToMessages(transcript),
-      runtimeNodes: nodes,
-      messagesLoaded: true,
-    }));
+    const nodes = await getSessionNodes(sessionId);
+    updateConversation(id, (currentConversation) => withLoadedTurns(currentConversation, nodes));
   }
 
   async function refreshSessions(): Promise<void> {
@@ -626,7 +598,10 @@ function AgentApp() {
     setConversations((previous) => {
       const next = [...previous];
       for (const summary of summaries) {
-        const index = next.findIndex((item) => item.sessionId === summary.session_id || item.clientId === summary.client_id);
+        const index = next.findIndex((item) =>
+          item.threadId === (summary.thread_id ?? summary.session_id)
+          || Boolean(summary.client_id && item.clientId === summary.client_id),
+        );
         if (index >= 0) next[index] = summaryToConversation(summary, next[index]);
         else next.push(summaryToConversation(summary));
       }
@@ -635,10 +610,10 @@ function AgentApp() {
   }
 
   async function useSession(sessionId: string): Promise<string> {
-    let target = conversations.find((item) => item.sessionId === sessionId);
+    let target = conversations.find((item) => item.threadId === sessionId || item.sessionId === sessionId);
     if (!target) {
       const summaries = await listSessions("active");
-      const summary = summaries.find((item) => item.session_id === sessionId);
+      const summary = summaries.find((item) => item.thread_id === sessionId || item.session_id === sessionId);
       if (!summary) throw new Error(`未知会话：${sessionId}`);
       target = summaryToConversation(summary);
       setConversations((previous) => [target!, ...previous]);
@@ -646,13 +621,9 @@ function AgentApp() {
     setCurrentId(target.id);
     setPage("chat");
     if (!target.messagesLoaded) {
-      const [transcript, nodes] = await Promise.all([
-        getSessionTranscript(sessionId),
-        getSessionNodes(sessionId).catch(() => []),
-      ]);
-      const messages = transcriptToMessages(transcript);
+      const nodes = await getSessionNodes(target.sessionId ?? sessionId);
       setConversations((previous) => previous.map((item) => (
-        item.id === target!.id ? { ...item, messages, runtimeNodes: nodes, messagesLoaded: true } : item
+        item.id === target!.id ? withLoadedTurns(item, nodes) : item
       )));
     }
     return target.id;

@@ -1,14 +1,15 @@
 import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, RuntimeConfigModel, StreamMessage } from "../types";
 import { apiUrl } from "./base";
 import { ApiError, errorFrom, notifyUnauthorized } from "./request";
+import { requestJson } from "./request";
 
 export type RagMode = "off" | "tool" | "forced";
 
 export interface StreamOptions {
-  sessionId?: string;
+  sessionId: string;
+  threadId?: string;
+  turnId?: string;
   sourceNodeId?: string;
-  sourceNodeSessionId?: string;
-  branch?: boolean;
   mode?: ChatMode;
   permissionMode?: PermissionMode;
   fullAccessAcknowledged?: boolean;
@@ -19,82 +20,89 @@ export interface StreamOptions {
   ragMode?: RagMode;
 }
 
-export interface BatchChatMessage {
+export interface QueuedTurnMessage {
   content: string;
   references?: FileReference[];
+}
+
+const terminalPattern = /^<SSE id="([^"]+)" type="(success|network|failed)">([\s\S]*)<\/SSE>$/;
+
+function executionConfig(options: StreamOptions): Record<string, unknown> {
+  return {
+    permission_mode: options.permissionMode ?? "read_only",
+    full_access_acknowledged: Boolean(options.fullAccessAcknowledged),
+    running_mode: options.mode ?? "agent",
+    provider_name: options.providerName,
+    model: options.model,
+  };
 }
 
 async function streamEndpoint(
   url: string,
   body: Record<string, unknown>,
+  expectedTurnId: string,
   onMessage: (message: StreamMessage) => void,
   signal: AbortSignal,
 ): Promise<"completed" | "aborted"> {
-  let res: Response;
+  let response: Response;
   try {
-    res = await fetch(apiUrl(url), {
+    response = await fetch(apiUrl(url), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal,
       credentials: "include",
     });
-  } catch (err) {
-    if ((err as Error).name === "AbortError" || signal.aborted) return "aborted";
-    throw new Error(String((err as Error).message ?? err));
+  } catch (error) {
+    if ((error as Error).name === "AbortError" || signal.aborted) return "aborted";
+    throw error;
   }
-  if (!res.ok || !res.body) {
-    if (res.status === 401) notifyUnauthorized();
-    throw new ApiError(res.status, await errorFrom(res));
+  if (!response.ok || !response.body) {
+    if (response.status === 401) notifyUnauthorized();
+    throw new ApiError(response.status, await errorFrom(response));
   }
-  const reader = res.body.getReader();
+  const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let terminal = false;
-  let sawAssistantDelete = false;
+  let terminal: RegExpMatchArray | null = null;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let index: number;
-      while ((index = buffer.indexOf("\n\n")) !== -1) {
-        const block = buffer.slice(0, index);
-        buffer = buffer.slice(index + 2);
+      const next = await reader.read();
+      if (next.done) break;
+      buffer += decoder.decode(next.value, { stream: true }).replace(/\r\n/g, "\n");
+      let boundary: number;
+      while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
         for (const line of block.split("\n")) {
           if (!line.startsWith("data: ")) continue;
-          try {
-            const message = JSON.parse(line.slice(6)) as StreamMessage;
-            if (message.type === "done" || message.type === "error") terminal = true;
-            if (message.type === "node.delete") {
-              const raw = message.node?.data?.message;
-              if (raw && typeof raw === "object" && !Array.isArray(raw) && (raw as { role?: unknown }).role === "assistant") {
-                const blocks = (raw as { content?: unknown }).content;
-                const content = Array.isArray(blocks) ? blocks : [];
-                const hasToolCall = content.some(
-                  (block) => Boolean(block && typeof block === "object" && !Array.isArray(block) && (block as { type?: unknown }).type === "tool_call"),
-                );
-                const hasAnswer = content.some(
-                  (block) => Boolean(block && typeof block === "object" && !Array.isArray(block) && ["text", "bash"].includes(String((block as { type?: unknown }).type))),
-                );
-                sawAssistantDelete = sawAssistantDelete || (hasAnswer && !hasToolCall);
-              }
-            }
-            onMessage(message);
-          } catch {
-            /* ignore malformed frames */
+          const payload = line.slice(6);
+          const matched = payload.match(terminalPattern);
+          if (matched) {
+            terminal = matched;
+            continue;
           }
+          const frame = JSON.parse(payload) as StreamMessage;
+          if (frame.type !== "turn.create" && frame.type !== "turn.update") {
+            throw new Error(`Unsupported SSE frame: ${String((frame as { type?: unknown }).type)}`);
+          }
+          onMessage(frame);
         }
       }
     }
-  } catch (err) {
-    if ((err as Error).name === "AbortError" || signal.aborted) return "aborted";
-    throw new Error(String((err as Error).message ?? err));
+  } catch (error) {
+    if ((error as Error).name === "AbortError" || signal.aborted) return "aborted";
+    throw error;
   } finally {
     reader.releaseLock();
   }
   if (signal.aborted) return "aborted";
-  if (!terminal && !sawAssistantDelete) throw new Error("SSE stream unexpectedly ended before completion");
+  if (!terminal) throw new Error("SSE stream unexpectedly ended before completion");
+  if (terminal[1] !== expectedTurnId) {
+    throw new Error("SSE terminal id does not match the active Turn");
+  }
+  if (terminal[2] === "network") throw new Error("network");
+  if (terminal[2] === "failed") throw new Error(terminal[3] || "Turn failed");
   return "completed";
 }
 
@@ -102,28 +110,39 @@ export async function streamChat(
   prompt: string,
   onMessage: (message: StreamMessage) => void,
   signal: AbortSignal,
-  options: StreamOptions | string = {},
+  options: StreamOptions,
 ): Promise<"completed" | "aborted"> {
-  const normalized = typeof options === "string" ? { sessionId: options } : options;
+  const turnId = options.turnId ?? crypto.randomUUID();
   return streamEndpoint(
-    "/api/chat",
+    "/api/turns",
     {
-      prompt,
-      session_id: normalized.sessionId,
-      source_node_id: normalized.sourceNodeId,
-      source_node_session_id: normalized.sourceNodeSessionId,
-      ...(normalized.branch ? { branch: true } : {}),
-      mode: normalized.mode ?? "agent",
-      ...(normalized.mode ? { running_mode: normalized.mode } : {}),
-      permission_mode: normalized.permissionMode,
-      ...(normalized.fullAccessAcknowledged ? { full_access_acknowledged: true } : {}),
-      reasoning_effort: normalized.reasoningEffort,
-      provider_name: normalized.providerName,
-      model: normalized.model,
-      references: normalized.references,
-      interactive: normalized.permissionMode != null,
-      ...(normalized.ragMode && normalized.ragMode !== "off" ? { rag_mode: normalized.ragMode } : {}),
+      id: turnId,
+      session_id: options.sessionId,
+      thread_id: options.threadId ?? options.sessionId,
+      parent_id: options.sourceNodeId ?? "",
+      message: { role: "user", content: [{ type: "text", text: prompt, ...(options.references?.length ? { references: options.references } : {}) }] },
+      ...executionConfig(options),
     },
+    turnId,
+    onMessage,
+    signal,
+  );
+}
+
+export async function streamRewind(
+  turnId: string,
+  prompt: string,
+  onMessage: (message: StreamMessage) => void,
+  signal: AbortSignal,
+  options: StreamOptions,
+): Promise<"completed" | "aborted"> {
+  return streamEndpoint(
+    `/api/turns/${encodeURIComponent(turnId)}/rewind`,
+    {
+      message: { role: "user", content: [{ type: "text", text: prompt, ...(options.references?.length ? { references: options.references } : {}) }] },
+      ...executionConfig(options),
+    },
+    turnId,
     onMessage,
     signal,
   );
@@ -134,63 +153,48 @@ export async function streamResume(
   onMessage: (message: StreamMessage) => void,
   signal: AbortSignal,
   permissionMode: PermissionMode,
-  reasoningEffort: ReasoningEffort = "medium",
+  _reasoningEffort: ReasoningEffort = "medium",
   sourceNodeId?: string,
   providerName?: string,
   model?: RuntimeConfigModel,
-  mode?: ChatMode,
-  ragMode: RagMode = "off",
+  mode: ChatMode = "agent",
+  _ragMode: RagMode = "off",
   fullAccessAcknowledged = false,
-  sourceNodeSessionId?: string,
 ): Promise<"completed" | "aborted"> {
+  if (!sourceNodeId) throw new Error("resume requires a Turn id");
   return streamEndpoint(
-    `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
+    `/api/turns/${encodeURIComponent(sourceNodeId)}/resume`,
     {
       permission_mode: permissionMode,
-      ...(fullAccessAcknowledged ? { full_access_acknowledged: true } : {}),
-      reasoning_effort: reasoningEffort,
-      source_node_id: sourceNodeId,
-      source_node_session_id: sourceNodeSessionId,
+      full_access_acknowledged: fullAccessAcknowledged,
+      running_mode: mode,
       provider_name: providerName,
-      model,
-      ...(mode ? { mode } : {}),
-      ...(mode ? { running_mode: mode } : {}),
-      ...(ragMode !== "off" ? { rag_mode: ragMode } : {}),
+      ...(model ? { model } : {}),
     },
+    sourceNodeId,
     onMessage,
     signal,
   );
 }
 
-export async function streamChatBatch(
-  messages: BatchChatMessage[],
+export async function streamQueuedTurns(
+  messages: QueuedTurnMessage[],
   onMessage: (message: StreamMessage) => void,
   signal: AbortSignal,
-  options: StreamOptions & { sessionId: string },
+  options: StreamOptions,
 ): Promise<"completed" | "aborted"> {
-  const normalized = options;
-  return streamEndpoint(
-    "/api/chat/batch",
-    {
-      session_id: normalized.sessionId,
-      messages: messages.map((message) => ({
-        content: message.content,
-        references: message.references,
-      })),
-      source_node_id: normalized.sourceNodeId,
-      source_node_session_id: normalized.sourceNodeSessionId,
-      ...(normalized.branch ? { branch: true } : {}),
-      mode: normalized.mode ?? "agent",
-      ...(normalized.mode ? { running_mode: normalized.mode } : {}),
-      permission_mode: normalized.permissionMode,
-      ...(normalized.fullAccessAcknowledged ? { full_access_acknowledged: true } : {}),
-      reasoning_effort: normalized.reasoningEffort,
-      provider_name: normalized.providerName,
-      model: normalized.model,
-      interactive: normalized.permissionMode != null,
-      ...(normalized.ragMode && normalized.ragMode !== "off" ? { rag_mode: normalized.ragMode } : {}),
-    },
-    onMessage,
-    signal,
-  );
+  let parent = options.sourceNodeId;
+  for (const message of messages) {
+    const turnId = crypto.randomUUID();
+    const result = await streamChat(message.content, (frame) => {
+      parent = frame.turn.id;
+      onMessage(frame);
+    }, signal, { ...options, turnId, sourceNodeId: parent, references: message.references });
+    if (result === "aborted") return result;
+  }
+  return "completed";
+}
+
+export async function pauseTurn(turnId: string): Promise<void> {
+  await requestJson(`/api/turns/${encodeURIComponent(turnId)}/pause`, { method: "POST" });
 }

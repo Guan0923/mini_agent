@@ -11,7 +11,7 @@ from backend.runtime.core.contracts import InterruptDecision, InterruptRequest, 
 
 from .tool_review import format_tool_review
 
-PermissionMode = Literal["approval_for_me", "full_access"]
+PermissionMode = Literal["read_only", "workspace_write", "full_access"]
 
 
 def _console_write(text: str, end: str = "\n") -> None:
@@ -23,7 +23,7 @@ class TerminalApproval:
 
     def __init__(
         self,
-        permission_mode: PermissionMode = "approval_for_me",
+        permission_mode: PermissionMode = "read_only",
         write: Callable[[str, str], None] | None = None,
     ) -> None:
         self._permission_mode = permission_mode
@@ -41,25 +41,30 @@ class TerminalApproval:
 
         while True:
             self.render_permission()
-            choice = input("Choose 1 or 2: ").strip().lower()
+            choice = input("Choose 1, 2, or 3: ").strip().lower()
             mode = self.parse_permission(choice)
             if mode is not None:
                 self.set_permission(mode)
                 return
-            self._write("Choose 1 or 2.")
+            self._write("Choose 1, 2, or 3.")
 
     def render_permission(self) -> None:
         self._write("\nPERMISSION")
         self._write(f"Current: {self._permission_label(self._permission_mode)}")
-        self._write("[1] Approval for me — Ask before every tool that requires confirmation.")
-        self._write("[2] Full access — Auto-approve tools; PLAN REVIEW always remains manual.")
+        self._write("[1] Read only — Permit reads; ask before writes or dangerous tools.")
+        self._write("[2] Workspace write — Permit workspace writes; keep dangerous approvals manual.")
+        self._write(
+            "[3] Full access — Unsandboxed access after explicit confirmation; dangerous approvals remain manual."
+        )
 
     @staticmethod
     def parse_permission(value: str) -> PermissionMode | None:
         choice = value.strip().lower()
-        if choice in {"1", "approval", "approval for me", "approval_for_me"}:
-            return "approval_for_me"
-        if choice in {"2", "full", "full access", "full_access"}:
+        if choice in {"1", "read", "read only", "read_only"}:
+            return "read_only"
+        if choice in {"2", "write", "workspace write", "workspace_write"}:
+            return "workspace_write"
+        if choice in {"3", "full", "full access", "full_access"}:
             return "full_access"
         return None
 
@@ -82,8 +87,6 @@ class TerminalApproval:
             return self._read_decision(request)
 
     def automatic_decision(self, request: InterruptRequest) -> InterruptDecision | None:
-        if request.kind == "tool" and self._permission_mode == "full_access":
-            return InterruptDecision("continue")
         return None
 
     def render_request(self, request: InterruptRequest) -> None:
@@ -200,7 +203,7 @@ class TerminalApproval:
 
     @staticmethod
     def _permission_label(mode: PermissionMode) -> str:
-        return "Full access" if mode == "full_access" else "Approval for me"
+        return mode.replace("_", " ").title()
 
     @staticmethod
     def _read_plan_decision() -> InterruptDecision:

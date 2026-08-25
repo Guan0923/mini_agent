@@ -8,8 +8,6 @@ from backend.domain import (
     AssistantMessage,
     RunStopReason,
     UserMessage,
-    terminal_error_payload,
-    terminal_error_text,
 )
 
 from ...core.context import AgentRuntime
@@ -75,8 +73,8 @@ def cancel_run(
     message: str = "Run cancelled by user",
 ) -> None:
     run = runtime.run
-    detail = message if message not in {"Run cancelled by user", "Run paused by user"} else None
-    reason = terminal_error_text(terminal_error_payload("abort", "user", code=stop_reason, detail=detail))
+    detail = message if message not in {"Run cancelled by user", "Run paused by user"} else ""
+    reason = detail or ("The run was paused at the user's request." if stop_reason == "user_paused" else message)
     boundary = min(max(run.turn_start_index, 0), len(runtime.state.messages))
     assistant = next(
         (item for item in reversed(runtime.state.messages[boundary:]) if isinstance(item, AssistantMessage)),

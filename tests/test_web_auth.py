@@ -201,10 +201,13 @@ def test_production_cookie_and_cors_are_scoped_to_the_frontend_origin(tmp_path: 
 def test_web_routes_keep_the_stable_local_contract(tmp_path: Path) -> None:
     state = _state(tmp_path)
     routes = set(create_app(state).openapi()["paths"])
-    assert "/api/chat" in routes
-    assert "/api/sessions" in routes
-    assert "/api/sync/snapshots" in routes
+    assert "/api/turns" in routes
+    assert "/api/sidebar-threads" in routes
+    assert "/api/sync/status" in routes
     assert "/api/ready" in routes
+    assert "/api/chat" not in routes
+    assert "/api/chat/batch" not in routes
+    assert "/api/sessions" not in routes
 
 
 def test_runtime_config_defaults_validates_and_persists_per_user(tmp_path: Path) -> None:

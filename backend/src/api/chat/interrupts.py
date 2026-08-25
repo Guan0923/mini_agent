@@ -136,6 +136,7 @@ def make_interactive_interrupt(
                 "data": {
                     "decision_id": decision_id,
                     "kind": request.kind,
+                    "call_id": request.data.get("call_id"),
                     "tool": request.data.get("tool"),
                     "arguments": request.data.get("arguments", {}),
                     "questions": questions,

@@ -3,6 +3,8 @@ import react from "@vitejs/plugin-react";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 import { resolve } from "node:path";
 
+const backendUrl = process.env.MINI_AGENT_BACKEND_URL ?? "http://127.0.0.1:8000";
+
 export default defineConfig({
   resolve: {
     // markdown-it-texmath has a CommonJS fallback require("katex") even when
@@ -29,8 +31,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": "http://127.0.0.1:8000",
-      "/benchmark": "http://127.0.0.1:8000",
+      "/api": backendUrl,
+      "/benchmark": backendUrl,
     },
   },
 });

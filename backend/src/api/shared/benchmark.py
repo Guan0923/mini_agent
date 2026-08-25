@@ -104,7 +104,7 @@ def run_all_benchmark(body: RunAllRequest, request: Request) -> list[dict]:
 
 
 def create_benchmark_app(web_state: WebAppState) -> FastAPI:
-    app = FastAPI(title="Mini-Agent Benchmark", version="0.3.0", dependencies=[Depends(require_user)])
+    app = FastAPI(title="Mini-Agent Benchmark", version="0.0.1", dependencies=[Depends(require_user)])
     app.state.web = web_state
     app.include_router(router)
     return app

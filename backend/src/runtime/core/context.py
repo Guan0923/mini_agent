@@ -161,11 +161,7 @@ class RuntimeState:
                 else str(data.get("provider_name") or data.get("provider") or "unknown")
             ),
             model_snapshot=dict(data.get("model_snapshot") or {}),
-            permission_mode=(
-                "read_only"
-                if data.get("permission_mode") in {None, "", "approval_for_me"}
-                else str(data["permission_mode"])
-            ),
+            permission_mode=str(data.get("permission_mode") or "read_only"),
             running_mode=str(data.get("running_mode") or "agent"),
             request_parameters=dict(data.get("request_parameters") or {}),
             runner_settings=RunnerSettings(**settings),
@@ -252,130 +248,59 @@ def new_exchange_id() -> str:
 
 
 def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMessage]:
-    """Project canonical message-tree nodes into the legacy planner port."""
+    """Project each selected Turn version into the existing planner port."""
 
     result: list[ChatMessage] = []
-    tool_calls: dict[str, tuple[AssistantMessage, int]] = {}
-    completed_results: dict[str, tuple[str, str, str, bool | None, str | None]] = {}
-
-    def block_text(block: Mapping[str, Any]) -> str:
-        value = block.get("text")
-        return value if isinstance(value, str) else str(value or "")
-
     for node in nodes:
-        data = node.data
-        if not isinstance(data, Mapping):
-            continue
-        if data.get("type") == "compaction":
-            summary = data.get("summary")
-            if isinstance(summary, str) and summary:
-                result.append(UserMessage(content=f"[compaction]\n{summary}"))
-            continue
-        if data.get("type") != "message":
-            continue
-        raw_message = data.get("message")
-        if not isinstance(raw_message, Mapping):
-            continue
-        role = str(raw_message.get("role") or "")
-        blocks = raw_message.get("content")
-        blocks = [item for item in blocks if isinstance(item, Mapping)] if isinstance(blocks, list) else []
-        if role == "user":
-            text = "".join(block_text(item) for item in blocks if item.get("type") in {"text", "bash"})
-            result.append(UserMessage(content=text))
-            continue
-        if role == "bash":
-            text = "".join(block_text(item) for item in blocks)
-            result.append(UserMessage(content=text))
-            continue
-        if role == "tool_result":
-            for block in blocks:
-                if block.get("type") != "tool_result":
-                    continue
-                call_id = str(block.get("call_id") or "")
-                target = tool_calls.get(call_id)
-                content = block.get("content")
-                text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
-                status = "failed" if block.get("status") == "failed" else "succeeded"
-                retryable = block.get("retryable") if isinstance(block.get("retryable"), bool) else None
-                failure_code = block.get("failure_code") if isinstance(block.get("failure_code"), str) else None
-                if target is not None:
-                    assistant, index = target
-                    assistant.tool_messages[index].content = text
-                    assistant.tool_messages[index].status = status  # type: ignore[assignment]
-                    assistant.tool_messages[index].retryable = retryable
-                    assistant.tool_messages[index].failure_code = failure_code
-                elif call_id:
-                    # A result can precede the assistant that declared the
-                    # call after recovery or a split tool batch.  Hold it
-                    # until the call is encountered on this path.
-                    completed_results[call_id] = (
-                        str(block.get("tool") or "unknown"),
-                        text,
-                        status,
-                        retryable,
-                        failure_code,
-                    )
-            continue
-        if role != "assistant":
-            continue
-        text_parts = [block_text(item) for item in blocks if item.get("type") in {"text", "bash"}]
-        reasoning_parts = [block_text(item) for item in blocks if item.get("type") == "reasoning"]
-        tools: list[ToolMessage] = []
-        for block in blocks:
-            if block.get("type") != "tool_call":
-                continue
-            call_id = str(block.get("call_id") or "")
-            if not call_id:
-                continue
-            # A split canonical batch can repeat a call on a later assistant
-            # node. Keep the first declaration and merge results by call_id.
-            if call_id in tool_calls:
-                continue
-            completed = completed_results.pop(call_id, None)
-            tool = ToolMessage(
-                name=str(block.get("name") or block.get("tool") or "unknown"),
-                call_id=call_id,
-                arguments=dict(block.get("arguments") or {}) if isinstance(block.get("arguments"), Mapping) else {},
-                content=completed[1] if completed is not None else None,
-                status=completed[2] if completed is not None else "pending",  # type: ignore[arg-type]
-                retryable=completed[3] if completed is not None else None,
-                failure_code=completed[4] if completed is not None else None,
-            )
-            tools.append(tool)
+        messages = node.selected_messages
+        user = messages[0]
+        assistant_raw = messages[1]
+        user_blocks = [item for item in user.get("content", []) if isinstance(item, Mapping)]
+        user_text = "".join(
+            str(item.get("text") or item.get("summary") or "")
+            for item in user_blocks
+            if item.get("type") in {"text", "bash", "compaction"}
+        )
+        if user_text:
+            result.append(UserMessage(content=user_text))
+
+        blocks = [item for item in assistant_raw.get("content", []) if isinstance(item, Mapping)]
+        summary = next((str(item.get("summary") or "") for item in blocks if item.get("type") == "compaction"), "")
+        if summary:
+            result.append(UserMessage(content=f"[compaction]\n{summary}"))
+        text_parts = [str(item.get("text") or "") for item in blocks if item.get("type") in {"text", "bash"}]
+        reasoning_parts = [str(item.get("text") or "") for item in blocks if item.get("type") == "reasoning"]
+        calls: dict[str, ToolMessage] = {}
+        for item in blocks:
+            kind = item.get("type")
+            call_id = str(item.get("call_id") or "")
+            if kind == "tool_call" and call_id:
+                calls[call_id] = ToolMessage(
+                    name=str(item.get("name") or "unknown"),
+                    call_id=call_id,
+                    arguments=dict(item.get("arguments") or {}) if isinstance(item.get("arguments"), Mapping) else {},
+                )
+            elif kind == "tool_result" and call_id:
+                tool = calls.get(call_id)
+                if tool is None:
+                    tool = ToolMessage(name=str(item.get("tool") or "unknown"), call_id=call_id, arguments={})
+                    calls[call_id] = tool
+                content = item.get("content")
+                tool.content = (
+                    content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+                )
+                tool.status = "failed" if item.get("status") == "failed" else "succeeded"
+                tool.retryable = item.get("retryable") if isinstance(item.get("retryable"), bool) else None
+                tool.failure_code = item.get("failure_code") if isinstance(item.get("failure_code"), str) else None
+            elif kind == "error":
+                text_parts.append(str(item.get("message") or "Execution failed."))
         assistant = AssistantMessage(
             content="".join(text_parts) or None,
             reasoning="".join(reasoning_parts) or None,
-            tool_messages=tools,
+            tool_messages=list(calls.values()),
         )
-        if assistant.content or assistant.reasoning or tools:
+        if assistant.content or assistant.reasoning or assistant.tool_messages:
             result.append(assistant)
-            for index, tool in enumerate(tools):
-                tool_calls[tool.call_id] = (assistant, index)
-                completed = completed_results.pop(tool.call_id, None)
-                if completed is not None:
-                    tool.content = completed[1]
-                    tool.status = completed[2]  # type: ignore[assignment]
-                    tool.retryable = completed[3]
-                    tool.failure_code = completed[4]
-    # Preserve genuinely orphaned results as evidence, but do not duplicate a
-    # result matched to an assistant call above.
-    for call_id, (tool_name, text, status, retryable, failure_code) in completed_results.items():
-        result.append(
-            AssistantMessage(
-                content=None,
-                tool_messages=[
-                    ToolMessage(
-                        name=tool_name,
-                        call_id=call_id,
-                        arguments={},
-                        content=text,
-                        status=status,  # type: ignore[arg-type]
-                        retryable=retryable,
-                        failure_code=failure_code,
-                    )
-                ],
-            )
-        )
     return result
 
 
@@ -467,14 +392,14 @@ class AgentRuntime:
 
         ``RuntimeState`` intentionally stores provider-neutral content blocks,
         while the existing planner/provider ports use ``ChatMessage`` objects.
-        This adapter is the only compatibility seam between those contracts.
+        This adapter is the only conversion boundary between those contracts.
         Tool calls remain on their assistant message; independent
         ``tool_result`` nodes are merged back by ``call_id`` so all three wire
         protocols receive the same logical conversation.
         """
 
         nodes = self.model_nodes()
-        if not nodes or all(node.data.get("type") == "root" for node in nodes):
+        if not nodes:
             messages = list(self.state.messages)
         else:
             messages = _chat_messages_from_nodes(nodes)

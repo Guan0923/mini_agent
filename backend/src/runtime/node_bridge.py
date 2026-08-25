@@ -1,19 +1,13 @@
-"""Bridge the legacy execution callbacks into RuntimeState node frames.
-
-This is a migration seam: the runner may still report internal callbacks while
-clients only receive the canonical create/update/delete protocol.  No legacy
-event object is persisted or sent over SSE.
-"""
+"""Project internal RuntimeEvents into one durable Turn per interaction."""
 
 from __future__ import annotations
 
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Literal
+from typing import Any
 
 from backend.domain.runtime_state import (
-    DEFAULT_COMPACTION_RETENTION,
     NodeFrame,
     NodeStatus,
     NodeWriter,
@@ -22,10 +16,7 @@ from backend.domain.runtime_state import (
     RuntimeStateTree,
     RuntimeStateValidationError,
     TerminalErrorCategory,
-    compaction_payload,
-    message_payload,
     terminal_error_payload,
-    terminal_error_text,
 )
 from backend.providers.token_usage import normalize_provider_usage
 
@@ -41,21 +32,11 @@ _NETWORK_ERROR_TYPES = frozenset(
     }
 )
 _TOOL_ERROR_TYPES = frozenset({"ToolError", "ConfirmationRequired", "TaskPreparationError"})
-_AGENT_ERROR_TYPES = frozenset(
-    {
-        "PlanningError",
-        "ModelOutputError",
-        "ProviderOutputError",
-        "ModelRequestError",
-        "ModelConfigurationError",
-        "HookError",
-    }
-)
-_HIDDEN_RECOVERABLE_EVENTS = frozenset({"tool_failed", "tool_recovery", "model_repair", "model_retry"})
+_HIDDEN_RECOVERABLE_EVENTS = frozenset({"tool_recovery", "model_repair", "model_retry"})
 
 
 class RuntimeEventNodeBridge:
-    """Project execution events into durable canonical message nodes."""
+    """Keep the canonical Turn synchronized with an in-process AgentRuntime."""
 
     def __init__(
         self,
@@ -63,9 +44,10 @@ class RuntimeEventNodeBridge:
         *,
         session_id: str,
         prompt: str,
+        turn_id: str | None = None,
+        thread_id: str | None = None,
         source_node_id: str | None = None,
-        source_node_session_id: str | None = None,
-        allow_branch: bool = False,
+        adopt_existing: bool = False,
         user: str = "",
         provider: str = "unknown",
         provider_name: str | None = None,
@@ -76,21 +58,18 @@ class RuntimeEventNodeBridge:
         cwd: str = "",
         thinking_level: str = "medium",
         references: Sequence[Mapping[str, str]] | None = None,
-        batch_messages: Sequence[Mapping[str, Any]] | None = None,
         emit: Callable[[NodeFrame], None],
     ) -> None:
         self.store = store
         self.session_id = session_id
+        self.thread_id = thread_id or session_id
+        self.turn_id = turn_id
         self.prompt = prompt
         self.source_node_id = source_node_id
-        self.source_node_session_id = source_node_session_id or session_id
-        self.allow_branch = allow_branch
+        self.adopt_existing = adopt_existing
         self.user = user
-        # ``provider_name`` is the user-owned configuration identity.  Keep
-        # the internal adapter kind in ``provider`` so a named configuration
-        # such as ``work-openai`` never masquerades as a protocol provider.
-        self.provider_name = provider_name or provider or "unknown"
         self.provider = provider or "unknown"
+        self.provider_name = provider_name or self.provider
         self.model = model or "unknown"
         snapshot = dict(model_config or {})
         snapshot.setdefault("current_model", self.model)
@@ -103,38 +82,27 @@ class RuntimeEventNodeBridge:
         self.permission_mode = permission_mode
         self.running_mode = running_mode
         self.cwd = cwd
-        self.thinking_level = thinking_level or "medium"
-        # Structured file references travel as user-message metadata on the
-        # canonical user node.  They are deliberately never injected into the
-        # prompt text; the agent reads referenced files through its tools.
         self.references = [dict(item) for item in references or []]
-        self.batch_messages = [dict(item) for item in batch_messages or []]
         self.writer = NodeWriter(store, emit=emit)
         self.parent: RuntimeState | None = None
         self.assistant: RuntimeState | None = None
         self.last_node: RuntimeState | None = None
         self.assistant_blocks: list[dict[str, Any]] = []
-        # Call IDs declared by the current assistant response. Per-tool
-        # lifecycle events may arrive after the first result seals the
-        # dynamic assistant, so this set keeps the whole batch together.
-        self.batch_call_ids: set[str] = set()
-        self.response_text = ""
+        self._stream_item_index: int | None = None
+        self._stream_item_type: str | None = None
+        self._stream_text = ""
+        self.protected_item_count = 0
         self.run_id = ""
         self.abort_category: TerminalErrorCategory | None = None
         self.abort_code = ""
-        self.terminal_error: dict[str, str] | None = None
-        # ``True`` means the dynamic copy could not be atomically sealed.  The
-        # durable running placeholder is intentionally left untouched so a
-        # subsequent resume can recover the turn without pretending that the
-        # streamed contents were durably committed.
+        self.terminal_error: dict[str, Any] | None = None
         self.persistence_failed = False
+        self.produced_item = False
         self.started = False
         self.closed = False
-        self.runtime = None
+        self.runtime: Any = None
 
     def bind_runtime(self, runtime: Any) -> None:
-        """Connect the node bridge to the ephemeral AgentRuntime sidecar."""
-
         self.runtime = runtime
         runtime.state.provider_name = self.provider_name
         runtime.state.provider = self.provider
@@ -143,237 +111,77 @@ class RuntimeEventNodeBridge:
         runtime.state.permission_mode = self.permission_mode
         runtime.state.running_mode = self.running_mode
         runtime.services.runtime_node_event = self.handle
-        # Model requests must read the canonical path, not the legacy
-        # RuntimeState.messages transcript.  The callback is intentionally
-        # lazy: the dynamic assistant sidecar changes while a response/tool
-        # call is in flight and every subsequent boundary must observe it.
         runtime.services.runtime_node_context = self.model_context
 
     def model_context(self) -> list[RuntimeState]:
-        """Return durable ancestors plus the authoritative dynamic leaf."""
-
-        current = self._dynamic_current() or self.last_node
+        current = self._current()
         if current is None:
             return []
-        path = self._ancestor_path(current)
-        dynamic = self._dynamic_current() or self.last_node
-        if dynamic is not None:
-            for index, item in enumerate(path):
-                if item.key == dynamic.key:
-                    path[index] = dynamic.clone()
-                    break
-            else:
-                path.append(dynamic.clone())
-        # The same identity can occur as a persisted running placeholder and a
-        # dynamic sidecar.  Keep one entry and let the sidecar win.
-        unique: dict[tuple[str, str], RuntimeState] = {}
-        for item in path:
-            unique[item.key] = item
-        # Reuse the domain compaction/window algorithm so an automatic or
-        # manual summary node supersedes older raw ancestors consistently for
-        # every provider protocol.
-        values = list(unique.values())
         try:
-            context = RuntimeStateTree(values).model_input(dynamic)
+            return RuntimeStateTree(self.store.load_nodes(current.session_id)).model_input(current)
         except (KeyError, RuntimeError, ValueError):
-            context = values
-        result: list[RuntimeState] = []
-        for item in context:
-            if not item.data:
-                continue
-            # The assistant placeholder exists so a running PATCH has a
-            # dynamic target, but an empty assistant message is not a model
-            # turn and must not be serialized into the next request.
-            if item.data.get("type") == "message":
-                message = item.data.get("message")
-                if (
-                    isinstance(message, Mapping)
-                    and message.get("role") == "assistant"
-                    and not message.get("content")
-                    and not message.get("error")
-                ):
-                    continue
-            result.append(item)
-        return result
+            return [current]
 
-    def _dynamic_current(self) -> RuntimeState | None:
-        """Read the mutable assistant sidecar after a writer update."""
-
-        if self.assistant is None:
+    def _current(self) -> RuntimeState | None:
+        target = self.assistant or self.last_node
+        if target is None:
             return None
         try:
-            return self.writer.current(self.assistant.session_id, self.assistant.id)
+            return self.writer.current(target.session_id, target.id)
         except KeyError:
-            return self.assistant.clone()
+            return target.clone()
 
-    @staticmethod
-    def _usage_snapshot(raw: Mapping[str, Any]) -> dict[str, int | None]:
-        """Map provider-specific usage keys to the five node fields."""
-        return normalize_provider_usage(raw)
-
-    def _apply_usage(self, raw: Any) -> None:
-        if not isinstance(raw, Mapping):
-            return
-        target = self.assistant
-        if target is None:
-            return
-        # A provider may report usage in more than one event (for example a
-        # streamed response followed by a final response envelope).  Merge
-        # only fields that are actually known so a later partial payload never
-        # erases an earlier authoritative value with null.
-        normalized = self._usage_snapshot(raw)
-        current = self.writer.current(target.session_id, target.id).usage
-        merged = {key: (value if value is not None else current.get(key)) for key, value in normalized.items()}
-        self.writer.update_config(target, usage=merged)
-
-    def apply_runtime_config(self, config: Mapping[str, Any]) -> RuntimeState | None:
-        """Apply the latest user-selected config at a safe event boundary."""
-
-        # Stage and validate the whole candidate before mutating either the
-        # bridge or the dynamic node.  A malformed partial PATCH must be
-        # atomic: it cannot poison the bridge's next-boundary configuration.
-        raw_provider = config.get("provider_name")
-        if raw_provider is not None and (not isinstance(raw_provider, str) or not raw_provider.strip()):
-            raise RuntimeStateValidationError("provider_name must be a non-empty string.")
-        candidate_provider_name = self.provider_name if raw_provider is None else str(raw_provider).strip()
-        provider_changed = candidate_provider_name.casefold() != self.provider_name.casefold()
-        candidate_model = dict(self.model_config)
-        if provider_changed:
-            # A provider name identifies a complete saved configuration.  Do
-            # not carry model limits or thinking settings across a switch,
-            # even for an embedding caller without an authenticated resolver.
-            candidate_model = {
-                "reasoning_effort": "medium",
-                "current_model": "unknown",
-                "context_length": 128000,
-                "output_length": 8192,
-                "thinking": "enable",
-                "temperature": 1.0,
-            }
-            resolver = getattr(getattr(self.runtime, "services", None), "provider_config_resolver", None)
-            if callable(resolver):
-                resolved = resolver(candidate_provider_name)
-                candidate_model.update(
-                    {
-                        "current_model": getattr(resolved, "model", None) or "unknown",
-                        "context_length": int(getattr(resolved, "context_size", None) or 128000),
-                        "output_length": int(getattr(resolved, "max_tokens", None) or 8192),
-                    }
-                )
-        if isinstance(config.get("model"), Mapping):
-            candidate_model.update(dict(config["model"]))
-        candidate_permission = (
-            self.permission_mode if config.get("permission_mode") is None else str(config["permission_mode"])
-        )
-        candidate_running = self.running_mode if config.get("running_mode") is None else str(config["running_mode"])
-        if candidate_permission not in {"approval_for_me", "read_only", "workspace_write", "full_access"}:
-            raise RuntimeStateValidationError("permission_mode must be read_only, workspace_write, or full_access.")
-        if candidate_running not in {"agent", "plan"}:
-            raise RuntimeStateValidationError("running_mode must be agent or plan.")
-        updated: RuntimeState | None = self.last_node
-        if self.assistant is not None:
-            updated = self.writer.update_config(
-                self.assistant,
-                provider_name=candidate_provider_name,
-                model=candidate_model,
-                permission_mode=candidate_permission,
-                running_mode=candidate_running,
-            )
-        else:
-            # Before ``start`` there is no dynamic leaf to update.  Construct a
-            # throwaway domain node solely to apply the same protocol checks.
-            RuntimeState.create(
-                session_id=self.session_id,
-                provider_name=candidate_provider_name,
-                model=candidate_model,
-                permission_mode=candidate_permission,
-                running_mode=candidate_running,
-            )
-        self.provider_name = candidate_provider_name
-        # Keep a detached, fully validated snapshot on the bridge.  A caller
-        # may mutate the PATCH dictionary after this method returns.
-        self.model_config = dict(updated.model) if updated is not None else dict(candidate_model)
-        self.model = str(candidate_model.get("current_model") or self.model)
-        self.permission_mode = candidate_permission
-        self.running_mode = candidate_running
-        if self.runtime is not None:
-            # PATCH requests carry partial fields.  Keep a merged pending
-            # snapshot so two quick updates (for example reasoning followed by
-            # permission) cannot cause the first update to disappear before
-            # the next model/tool boundary consumes it.
-            pending = dict(self.runtime.services.pending_runtime_config or {})
-            pending_model = pending.get("model")
-            incoming_model = config.get("model")
-            if isinstance(pending_model, Mapping) or isinstance(incoming_model, Mapping):
-                pending["model"] = {
-                    **(dict(pending_model) if isinstance(pending_model, Mapping) else {}),
-                    **(dict(incoming_model) if isinstance(incoming_model, Mapping) else {}),
-                }
-            pending.update({key: value for key, value in config.items() if key != "model"})
-            self.runtime.services.pending_runtime_config = pending
-        return updated
+    def _latest_parent(self) -> RuntimeState | None:
+        nodes = [node for node in self.store.load_nodes(self.session_id) if node.thread_id == self.thread_id]
+        if not nodes:
+            return None
+        parent_keys = {(node.parent_session_id, node.parent_id) for node in nodes if node.parent_id}
+        leaves = [node for node in nodes if node.key not in parent_keys]
+        return max(leaves or nodes, key=lambda node: (node.timestamp, node.id))
 
     def start(self) -> RuntimeState:
         if self.started:
-            if self.last_node is None:
-                raise RuntimeError("Node bridge has no starting node.")
-            return self.last_node
-        if self.batch_messages:
-            self._start_batch_users()
-            self._ensure_assistant()
-            return self.last_node  # type: ignore[return-value]
+            current = self._current()
+            if current is None:
+                raise RuntimeError("Turn bridge has no active Turn.")
+            return current
         if self.source_node_id:
-            self.parent = self.store.get_node(self.source_node_session_id, self.source_node_id)
-            if self.parent is None:
-                raise ValueError("source_node_id does not belong to the active session.")
-            if not self.prompt and self.parent.status not in {"running", "cancel", "abort"}:
-                raise ValueError("A resume source must be running, cancel, or abort.")
-        elif self.parent is None:
-            load_nodes = getattr(self.store, "load_nodes", None)
-            if callable(load_nodes):
-                existing = list(load_nodes(self.session_id))
-                if existing:
-                    parent_keys = {(item.parent_session_id, item.parent_id) for item in existing if item.parent_id}
-                    leaves = [item for item in existing if (item.session_id, item.id) not in parent_keys]
-                    if leaves:
-                        self.parent = max(leaves, key=lambda item: (item.timestamp, item.id))
-        if self.parent is None and self.source_node_id is None:
-            # Configuration is part of the user node now; no synthetic change
-            # nodes are written into the history.
-            self.parent = None
-        if self.parent is not None and not self.prompt and self.parent.status == "running":
-            # A process restart may leave the authoritative assistant leaf in
-            # ``running``. Re-open that exact identity instead of creating a
-            # second leaf; only its parent path is used for model context.
-            self.assistant = self.writer.resume(self.parent)
-            self.last_node = self.parent
-            self.started = True
-            self.assistant_blocks = [dict(block) for block in self.assistant.content]
-            self.response_text = "".join(str(block.get("text", "")) for block in self.assistant_blocks)
-            return self.last_node
-        if self.parent is not None and not self.prompt:
-            if self.parent.status == "abort" and self.parent.parent_id:
-                parent = self.store.get_node(self.parent.parent_session_id, self.parent.parent_id)
-                if parent is not None:
-                    self.parent = parent
-            # ``/resume`` has no new user text.  Continue directly from the
-            # paused/cancelled or aborted leaf instead of persisting an empty
-            # user message.
-            # Resume configuration is represented by the next assistant node;
-            # avoid mutating a sealed historical parent.
-            self.last_node = self.parent
-            self.started = True
-            self._ensure_assistant()
-            return self.last_node
-        user_node = self.writer.create(
+            source = self.store.get_node(self.session_id, self.source_node_id)
+            if source is None:
+                raise ValueError("Unknown source Turn.")
+            if source.session_id != self.session_id:
+                raise ValueError("A Turn cannot continue across Sessions.")
+            if self.adopt_existing or not self.prompt:
+                if source.status == "paused":
+                    resume = getattr(self.store, "resume_turn_node", None)
+                    if not callable(resume):
+                        raise RuntimeError("The Turn store does not support resume.")
+                    source = resume(source.id)
+                elif source.status != "running":
+                    raise ValueError("Only a paused or running Turn can resume in place.")
+                self.assistant = source
+                self.last_node = source
+                self.thread_id = source.thread_id
+                self.turn_id = source.id
+                self.assistant_blocks = source.assistant_items
+                if self.assistant_blocks and self.assistant_blocks[0].get("type") == "compaction":
+                    self.protected_item_count = 1 + int(self.assistant_blocks[0].get("kept_item_count") or 0)
+                self.started = True
+                return source
+            self.parent = source
+            if self.thread_id == self.session_id:
+                self.thread_id = source.thread_id
+        else:
+            self.parent = self._latest_parent()
+        user_item: dict[str, Any] = {"type": "text", "text": self.prompt}
+        if self.references:
+            user_item["references"] = self.references
+        node = RuntimeState.create(
             session_id=self.session_id,
+            thread_id=self.thread_id,
+            id=self.turn_id,
             parent=self.parent,
-            data=message_payload(
-                "user",
-                self.prompt,
-                source="user",
-                **({"references": self.references} if self.references else {}),
-            ),
+            user_content=[user_item],
             user=self.user,
             provider_name=self.provider_name,
             model=self.model_config,
@@ -381,196 +189,27 @@ class RuntimeEventNodeBridge:
             running_mode=self.running_mode,
             cwd=self.cwd,
         )
-        self.last_node = self.writer.delete(user_node.session_id, user_node.id)
+        node = self.writer.create(node)
+        self.assistant = node
+        self.last_node = node
+        self.turn_id = node.id
         self.started = True
-        self.batch_call_ids = set()
-        # Create the assistant sidecar before the first provider boundary so
-        # runtime-config updates always target a dynamic leaf.  Its durable
-        # placeholder is filtered from model context until it has content.
-        self._ensure_assistant()
-        return self.last_node
-
-    def _start_batch_users(self) -> None:
-        """Atomically append terminal user nodes for one queued batch."""
-
-        if self.source_node_id:
-            self.parent = self.store.get_node(self.source_node_session_id, self.source_node_id)
-            if self.parent is None:
-                raise ValueError("source_node_id does not belong to the active session.")
-        elif self.parent is None:
-            loader = getattr(self.store, "load_nodes", None)
-            if callable(loader):
-                existing = list(loader(self.session_id))
-                parent_keys = {(item.parent_session_id, item.parent_id) for item in existing if item.parent_id}
-                leaves = [item for item in existing if (item.session_id, item.id) not in parent_keys]
-                if leaves:
-                    self.parent = max(leaves, key=lambda item: (item.timestamp, item.id))
-        if self.parent is not None and self.parent.status == "running":
-            raise ValueError("A queued batch cannot start from a running node.")
-        if self.parent is not None and not self.allow_branch:
-            # A fork session has an immutable local root whose parent is the
-            # cross-session anchor.  That root is an ancestry marker, not a
-            # conversation child, so it must not make the anchor look
-            # non-leaf to the first batch submitted in the fork.
-            children = [
-                child
-                for child in self.store.list_children(self.parent.session_id, self.parent.id)
-                if child.data_type != "root"
-            ]
-            if children:
-                raise ValueError("A queued batch source must identify a leaf node.")
-        create_batch = getattr(self.store, "create_finalized_nodes", None)
-        if not callable(create_batch):
-            raise RuntimeError("The runtime store does not support atomic finalized node batches.")
-        nodes: list[RuntimeState] = []
-        parent = self.parent
-        for item in self.batch_messages:
-            content = str(item.get("content") or "")
-            if not content.strip():
-                raise ValueError("Queued messages must not be empty.")
-            raw_refs = item.get("references")
-            refs = [dict(ref) for ref in raw_refs] if isinstance(raw_refs, Sequence) and not isinstance(raw_refs, (str, bytes)) else []
-            node = RuntimeState.create(
-                session_id=self.session_id,
-                parent=parent,
-                user=self.user,
-                provider_name=self.provider_name,
-                model=self.model_config,
-                permission_mode=self.permission_mode,
-                running_mode=self.running_mode,
-                cwd=self.cwd,
-                timestamp=self.writer._next_timestamp(parent),
-                status="success",
-                data=message_payload("user", content, source="user", **({"references": refs} if refs else {})),
-            )
-            nodes.append(node)
-            parent = node
-        create_batch(nodes)
-        for node in nodes:
-            self.writer.emit(NodeFrame("node.create", node.clone()))
-            self.writer.emit(NodeFrame("node.delete", node.clone()))
-        self.parent = parent
-        self.last_node = parent
-        self.started = True
+        return node
 
     def start_for_compaction(self) -> RuntimeState | None:
-        """Bind an idle bridge to the current durable leaf without creating a run node."""
-
-        if self.started:
-            return self.last_node
-        if self.source_node_id:
-            self.parent = self.store.get_node(self.source_node_session_id, self.source_node_id)
-            if self.parent is None:
-                raise ValueError("source_node_id does not belong to the active session.")
-        else:
-            load_nodes = getattr(self.store, "load_nodes", None)
-            if callable(load_nodes):
-                existing = list(load_nodes(self.session_id))
-                parent_keys = {(item.parent_session_id, item.parent_id) for item in existing if item.parent_id}
-                leaves = [item for item in existing if (item.session_id, item.id) not in parent_keys]
-                if leaves:
-                    self.parent = max(leaves, key=lambda item: (item.timestamp, item.id))
-        self.last_node = self.parent
-        self.started = True
+        if not self.started:
+            self.parent = (
+                self.store.get_node(self.session_id, self.source_node_id)
+                if self.source_node_id
+                else self._latest_parent()
+            )
+            self.last_node = self.parent
+            self.assistant = self.parent if self.parent and self.parent.status == "running" else None
+            self.started = True
         return self.last_node
-
-    def _ensure_assistant(self) -> RuntimeState:
-        if self.assistant is None:
-            self.assistant = self.writer.create(
-                session_id=self.session_id,
-                parent=self.last_node,
-                data=message_payload("assistant", [], **({"run_id": self.run_id} if self.run_id else {})),
-                user=self.user,
-                provider_name=self.provider_name,
-                model=self.model_config,
-                permission_mode=self.permission_mode,
-                running_mode=self.running_mode,
-                cwd=self.cwd,
-            )
-            self.assistant_blocks = []
-            self.response_text = ""
-        return self.assistant
-
-    def _update_assistant(self) -> None:
-        if self.assistant is not None:
-            metadata: dict[str, Any] = {}
-            if self.run_id:
-                metadata["run_id"] = self.run_id
-            if self.terminal_error is not None:
-                metadata["error"] = self.terminal_error
-            self.writer.update_data(
-                self.assistant,
-                message_payload("assistant", self.assistant_blocks, **metadata),
-            )
-
-    def _remember_abort(
-        self,
-        category: TerminalErrorCategory,
-        *,
-        code: str = "",
-    ) -> None:
-        """Retain the strongest structured cause until the run terminates."""
-
-        self.abort_category = category
-        self.abort_code = code
-
-    @staticmethod
-    def _model_error_category(data: Mapping[str, Any]) -> TerminalErrorCategory:
-        error_type = str(data.get("error_type") or "")
-        if error_type in _NETWORK_ERROR_TYPES or any(
-            token in error_type.lower() for token in ("connection", "network", "timeout", "transport")
-        ):
-            return "network"
-        if error_type in _TOOL_ERROR_TYPES or "tool" in error_type.lower():
-            return "tool"
-        return "agent"
-
-    @classmethod
-    def _exception_category(cls, error: BaseException) -> TerminalErrorCategory | None:
-        """Map a known runtime exception to an abort category.
-
-        Provider transport errors and tool/preparation failures are
-        safe to classify because their exception types are part of the local
-        runtime contract.
-        """
-
-        error_type = error.__class__.__name__
-        if error_type in _NETWORK_ERROR_TYPES or any(
-            token in error_type.lower() for token in ("connection", "network", "timeout", "transport")
-        ):
-            return "network"
-        if error_type in _TOOL_ERROR_TYPES or "tool" in error_type.lower():
-            return "tool"
-        if error_type in _AGENT_ERROR_TYPES:
-            return "agent"
-        return None
-
-    @classmethod
-    def _data_category(cls, data: Mapping[str, Any]) -> TerminalErrorCategory | None:
-        error_type = str(data.get("error_type") or "")
-        if not error_type:
-            return None
-        if error_type in _NETWORK_ERROR_TYPES or any(
-            token in error_type.lower() for token in ("connection", "network", "timeout", "transport")
-        ):
-            return "network"
-        if error_type in _TOOL_ERROR_TYPES or "tool" in error_type.lower():
-            return "tool"
-        if error_type in _AGENT_ERROR_TYPES:
-            return "agent"
-        return None
 
     @staticmethod
     def _json_value(value: Any) -> Any:
-        """Detach an event payload without allowing runtime-only objects into nodes.
-
-        RuntimeEvent is still an internal migration callback and a few older
-        producers pass dataclass instances in ``data``.  The node protocol is
-        deliberately JSON-only, so preserve ordinary values and render the
-        exceptional ones as bounded strings instead of failing a whole run
-        while trying to publish its diagnostic state.
-        """
-
         if value is None or isinstance(value, (str, bool, int)):
             return value
         if isinstance(value, float):
@@ -585,454 +224,280 @@ class RuntimeEventNodeBridge:
             return str(value)
         return value
 
-    def _append_event_block(
-        self,
-        block_type: str,
-        kind: str,
-        message: str,
-        data: Mapping[str, Any],
-    ) -> None:
-        """Append one presentation-neutral control block to the dynamic node."""
+    def _begin_stream_item(self, item_type: str) -> None:
+        if item_type not in {"reasoning", "text"}:
+            raise ValueError("Only reasoning and text Items can stream.")
+        if self._stream_item_type == item_type:
+            return
+        self._finish_stream_item()
+        self._stream_item_type = item_type
+        self._stream_item_index = None
+        self._stream_text = ""
 
-        self._ensure_assistant()
-        block = {str(key): self._json_value(value) for key, value in data.items()}
-        # ``type`` is the discriminant; an old event payload must not be able
-        # to overwrite it and make the message invalid.
-        block["type"] = block_type
-        block["event"] = kind
-        if message and not isinstance(block.get("text"), str):
-            block["text"] = message
-        self.assistant_blocks.append(block)
-        self._update_assistant()
+    def _update_stream_item(self, item_type: str, chunk: str) -> None:
+        if not chunk:
+            return
+        if self._stream_item_type != item_type:
+            self._begin_stream_item(item_type)
+        if self._stream_item_index is None:
+            self._stream_item_index = len(self.assistant_blocks)
+            self.assistant_blocks.append({"type": item_type, "text": ""})
+        self._stream_text += chunk
+        self.assistant_blocks[self._stream_item_index] = {"type": item_type, "text": self._stream_text}
+        self._save_blocks(persist=False)
 
-    def _persist_steering(self, data: Mapping[str, Any]) -> None:
-        """Persist one steering input as a first-class user message node.
+    def _finish_stream_item(self, item_type: str | None = None) -> None:
+        if self._stream_item_type is None:
+            return
+        if item_type is not None and self._stream_item_type != item_type:
+            return
+        if self._stream_item_index is not None:
+            self._save_blocks(persist=True)
+        self._stream_item_index = None
+        self._stream_item_type = None
+        self._stream_text = ""
 
-        Steering is a genuine user turn: it must appear in the canonical node
-        projection in conversation order, not as a control block inside the
-        previous assistant message.  An empty assistant placeholder that has
-        not yet received any blocks is discarded instead of being sealed, so
-        it cannot produce an empty assistant node ahead of the user message.
-        """
+    def _save_blocks(self, *, persist: bool) -> RuntimeState:
+        if self.assistant is None:
+            raise RuntimeError("No active Turn.")
+        current = self.writer.current(self.assistant.session_id, self.assistant.id)
+        current.data[current.current_data_idx][1]["content"] = [dict(item) for item in self.assistant_blocks]
+        updated = self.writer.update_data(current, current.data, persist=persist)
+        self.assistant = updated
+        self.last_node = updated
+        if persist and self.assistant_blocks:
+            self.produced_item = True
+        return updated
 
-        if self.assistant is not None:
-            # An assistant with real text or tool results is preserved as a
-            # node.  A placeholder that only carries unexecuted tool calls is
-            # discarded like the in-memory message: the steering input
-            # supersedes it, and sealing it would project an empty assistant
-            # ahead of the user message.
-            if any(block.get("type") in {"text", "tool_result"} for block in self.assistant_blocks):
-                self._seal_assistant("success")
-            else:
-                self.assistant = None
-        content = str(data.get("content") or "")
-        node = self.writer.create(
-            session_id=self.session_id,
-            parent=self.last_node,
-            data=message_payload(
-                "user",
-                content,
-                source="steering",
-                **({"run_id": self.run_id} if self.run_id else {}),
-            ),
-            provider_name=self.provider_name,
-            model=self.model_config,
-            permission_mode=self.permission_mode,
-            running_mode=self.running_mode,
-            cwd=self.cwd,
+    def _append_item(self, item: Mapping[str, Any], *, persist: bool = True) -> RuntimeState:
+        self._finish_stream_item()
+        self.assistant_blocks.append({str(key): self._json_value(value) for key, value in item.items()})
+        return self._save_blocks(persist=persist)
+
+    def _append_items(self, items: Sequence[Mapping[str, Any]]) -> RuntimeState | None:
+        self._finish_stream_item()
+        if not items:
+            return self.assistant
+        self.assistant_blocks.extend(
+            {str(key): self._json_value(value) for key, value in item.items()} for item in items
         )
-        self.last_node = self.writer.delete(node.session_id, node.id, status="success")
+        return self._save_blocks(persist=True)
 
-    def _seal_assistant(self, status: NodeStatus = "success") -> None:
-        if self.assistant is not None:
-            self.last_node = self.writer.delete(self.session_id, self.assistant.id, status=status)
-            self.assistant = None
+    def _apply_usage(self, raw: Any) -> None:
+        if not isinstance(raw, Mapping) or self.assistant is None:
+            return
+        normalized = normalize_provider_usage(raw)
+        current = self.writer.current(self.assistant.session_id, self.assistant.id)
+        merged = {key: value if value is not None else current.usage.get(key) for key, value in normalized.items()}
+        self.assistant = self.writer.update_config(current, usage=merged)
+        self.last_node = self.assistant
 
-    def _tool_call_in_context(self, call_id: str) -> bool:
-        """Return whether a tool call was already declared on this path."""
+    def apply_runtime_config(self, config: Mapping[str, Any]) -> RuntimeState | None:
+        provider_name = str(config.get("provider_name") or self.provider_name)
+        if not provider_name.strip():
+            raise RuntimeStateValidationError("provider_name must be a non-empty string.")
+        model = dict(self.model_config)
+        if isinstance(config.get("model"), Mapping):
+            model.update(dict(config["model"]))
+        permission = str(config.get("permission_mode") or self.permission_mode)
+        running = str(config.get("running_mode") or self.running_mode)
+        if permission not in {"read_only", "workspace_write", "full_access"}:
+            raise RuntimeStateValidationError("permission_mode must be read_only, workspace_write, or full_access.")
+        if running not in {"agent", "plan"}:
+            raise RuntimeStateValidationError("running_mode must be agent or plan.")
+        self.provider_name, self.model_config = provider_name, model
+        self.permission_mode, self.running_mode = permission, running
+        if self.assistant is None:
+            return self.last_node
+        self.assistant = self.writer.update_config(
+            self.assistant, provider_name=provider_name, model=model, permission_mode=permission, running_mode=running
+        )
+        self.last_node = self.assistant
+        if self.runtime is not None:
+            pending = dict(self.runtime.services.pending_runtime_config or {})
+            pending.update(dict(config))
+            self.runtime.services.pending_runtime_config = pending
+        return self.assistant
 
-        return bool(call_id and call_id in self.batch_call_ids)
+    @staticmethod
+    def _error_category(data: Mapping[str, Any]) -> TerminalErrorCategory:
+        error_type = str(data.get("error_type") or "")
+        lowered = error_type.lower()
+        if error_type in _NETWORK_ERROR_TYPES or any(
+            token in lowered for token in ("network", "timeout", "transport", "connection")
+        ):
+            return "network"
+        if error_type in _TOOL_ERROR_TYPES or "tool" in lowered:
+            return "tool"
+        return "agent"
 
-    def _persist_tool_result(
-        self,
-        message: str,
-        data: Mapping[str, Any],
-        *,
-        status: Literal["succeeded", "failed"],
-        emit: bool = True,
-    ) -> None:
-        """Persist one tool result without creating a duplicate assistant."""
+    @classmethod
+    def _exception_category(cls, error: BaseException) -> TerminalErrorCategory:
+        return cls._error_category({"error_type": error.__class__.__name__})
 
-        if self.assistant is not None:
-            self._seal_assistant("success")
-        tool_name = str(data.get("tool") or data.get("name") or "")
-        lowered = tool_name.lower()
-        replay_safe = data.get("replay_safe")
-        if replay_safe is None:
-            replay_safe = not any(token in lowered for token in ("bash", "shell", "command", "write", "mcp"))
-        result_value = data.get("result", data.get("error", message))
-        result_block: dict[str, Any] = {
+    def _event_item(self, item_type: str, kind: str, message: str, data: Mapping[str, Any]) -> None:
+        item = {str(key): self._json_value(value) for key, value in data.items()}
+        item.update({"type": item_type, "event": kind})
+        if message:
+            item.setdefault("text", message)
+        self._append_item(item)
+
+    def _tool_result(self, message: str, data: Mapping[str, Any], *, status: str) -> None:
+        tool = str(data.get("tool") or data.get("name") or "")
+        result = {
             "type": "tool_result",
             "call_id": str(data.get("call_id") or "call_unknown"),
-            "content": result_value,
+            "content": self._json_value(data.get("result", data.get("error", message))),
             "status": status,
-            "replay_safe": bool(replay_safe),
+            "replay_safe": bool(
+                data.get(
+                    "replay_safe", not any(x in tool.lower() for x in ("write", "bash", "shell", "command", "mcp"))
+                )
+            ),
         }
-        if tool_name:
-            result_block["tool"] = tool_name
-        if data.get("side_effect") is not None:
-            result_block["side_effect"] = bool(data["side_effect"])
-        if isinstance(data.get("retryable"), bool):
-            result_block["retryable"] = data["retryable"]
-        elif data.get("failure_code") in {"user_denied", "user_denied_batch"}:
-            result_block["retryable"] = False
+        if tool:
+            result["tool"] = tool
         if isinstance(data.get("failure_code"), str):
-            result_block["failure_code"] = data["failure_code"]
-        previous_emit = self.writer.emit
-        if not emit:
-            self.writer.emit = lambda _frame: None
-        try:
-            result = self.writer.create(
-                session_id=self.session_id,
-                parent=self.last_node,
-                data=message_payload("tool_result", result_block, **({"run_id": self.run_id} if self.run_id else {})),
-                provider_name=self.provider_name,
-                model=self.model_config,
-                permission_mode=self.permission_mode,
-                running_mode=self.running_mode,
-                cwd=self.cwd,
-            )
-            self.last_node = self.writer.delete(
-                result.session_id,
-                result.id,
-                status="success",
-            )
-        finally:
-            self.writer.emit = previous_emit
-
-    def _ancestor_path(self, source: RuntimeState | None) -> list[RuntimeState]:
-        """Load the current cross-session path when the store exposes it."""
-
-        if source is None:
-            return []
-        loader = getattr(self.store, "load_nodes", None)
-        if not callable(loader):
-            return [source]
-        by_key = {node.key: node for node in loader(source.session_id)}
-        current = by_key.get(source.key, source)
-        path = [current]
-        seen = {current.key}
-        while current.parent_id:
-            key = (current.parent_session_id, current.parent_id)
-            if key in seen:
-                break
-            parent = by_key.get(key)
-            if parent is None:
-                getter = getattr(self.store, "get_node", None)
-                parent = getter(*key) if callable(getter) else None
-            if parent is None:
-                break
-            path.append(parent)
-            seen.add(parent.key)
-            current = parent
-        path.reverse()
-        return path
-
-    def _switch_session(self, session_id: str, prompt: str) -> None:
-        """Start projecting into a handoff session without ending the stream.
-
-        A plan handoff can finish one run and immediately start a follow-up in
-        an isolated session while reusing the same event callback.  The node
-        writer is session-bound, so carry the transport emitter forward but
-        reset the mutable projection state before creating the new turn.
-        """
-
-        if session_id == self.session_id:
-            return
-        if self.assistant is not None:
-            self._seal_assistant("success")
-        emit = self.writer.emit
-        self.session_id = session_id
-        self.prompt = prompt
-        self.source_node_id = None
-        self.writer = NodeWriter(self.store, emit=emit)
-        self.parent = None
-        self.assistant = None
-        self.last_node = None
-        self.assistant_blocks = []
-        self.batch_call_ids = set()
-        self.response_text = ""
-        self.run_id = ""
-        self.abort_category = None
-        self.abort_code = ""
-        self.terminal_error = None
-        self.started = False
-        self.closed = False
-        self.start()
-
-    def begin_turn(
-        self,
-        session_id: str,
-        prompt: str,
-        *,
-        running_mode: str | None = None,
-    ) -> None:
-        """Start a fresh canonical turn after a workflow handoff.
-
-        A plan review and its Agent implementation may share one SSE bridge.
-        The normal ``response_start`` session-switch path is too late for a
-        same-session handoff and would otherwise append the implementation
-        answer to the plan assistant sidecar.  Seal the previous dynamic leaf
-        first, reset the per-turn projection, and create a new user/assistant
-        pair before the next execution boundary.
-        """
-
-        if self.closed:
-            raise RuntimeError("Cannot begin a turn on a closed node bridge.")
-        if running_mode is not None:
-            if running_mode not in {"agent", "plan"}:
-                raise RuntimeStateValidationError("running_mode must be agent or plan.")
-            self.running_mode = running_mode
-        if self.assistant is not None:
-            self._seal_assistant("success")
-        emit = self.writer.emit
-        same_session = session_id == self.session_id
-        if not same_session:
-            self.writer = NodeWriter(self.store, emit=emit)
-            self.parent = None
-        else:
-            # ``_seal_assistant`` leaves ``last_node`` as the new durable
-            # parent, which is exactly what a same-session continuation needs.
-            self.parent = self.last_node
-        self.session_id = session_id
-        self.prompt = prompt
-        self.source_node_id = None
-        self.assistant = None
-        self.last_node = self.parent if same_session else None
-        self.assistant_blocks = []
-        self.batch_call_ids = set()
-        self.response_text = ""
-        self.run_id = ""
-        self.abort_category = None
-        self.abort_code = ""
-        self.terminal_error = None
-        self.persistence_failed = False
-        self.started = False
-        self.closed = False
-        self.start()
+            result["failure_code"] = str(data["failure_code"])
+        if isinstance(data.get("retryable"), bool):
+            result["retryable"] = bool(data["retryable"])
+        self._append_item(result)
 
     def handle(self, event: Any) -> None:
         if self.closed or not self.started:
             return
-        kind = getattr(event, "kind", "")
+        kind = str(getattr(event, "kind", "") or "")
         message = str(getattr(event, "message", "") or "")
         data = getattr(event, "data", {})
         if not isinstance(data, Mapping):
             data = {}
         if kind in _HIDDEN_RECOVERABLE_EVENTS:
-            # Recoverable diagnostics stay out of user-facing nodes, but a
-            # terminal error arriving immediately afterwards still needs the
-            # most specific category for its visible terminal explanation.
-            if kind == "tool_failed":
-                if data.get("failure_code") not in {"user_denied", "user_denied_batch"}:
-                    self._remember_abort("tool", code="tool_failed")
-                self._persist_tool_result(message, data, status="failed", emit=False)
             return
-        event_session_id = data.get("session_id")
-        if isinstance(event_session_id, str) and event_session_id and event_session_id != self.session_id:
-            self._switch_session(event_session_id, str(data.get("task") or self.prompt))
-        if isinstance(data.get("run_id"), str) and data["run_id"]:
+        if isinstance(data.get("run_id"), str):
             self.run_id = str(data["run_id"])
-        # Runtime configuration events are intentionally top-level updates on
-        # the active dynamic node, never synthetic data.type nodes.
         config = data.get("runtime_config") or data.get("config")
         if isinstance(config, Mapping):
             self.apply_runtime_config(config)
-        # ``node_usage`` is the already reconciled five-field projection.  It
-        # is authoritative for the dynamic node (including tiktoken fallback
-        # totals when a provider omitted usage); raw ``usage`` remains useful
-        # for legacy event consumers and is used as a fallback.
         usage = data.get("node_usage") if isinstance(data.get("node_usage"), Mapping) else data.get("usage")
         if isinstance(usage, Mapping):
             self._apply_usage(usage)
-        if kind in {"model_request", "response_start", "thinking_start"}:
-            if kind in {"model_request", "response_start"}:
-                self.batch_call_ids = set()
-            self._ensure_assistant()
-        elif kind in {"response_delta", "response"} and message:
-            self._ensure_assistant()
-            self.response_text += message
-            self.assistant_blocks = [block for block in self.assistant_blocks if block.get("type") != "text"]
-            self.assistant_blocks.append({"type": "text", "text": self.response_text})
-            self._update_assistant()
-        elif kind == "thinking_delta" and message:
-            self._ensure_assistant()
-            self.assistant_blocks.append({"type": "reasoning", "text": message})
-            self._update_assistant()
-        elif kind == "assistant_message":
-            raw = data.get("message")
-            if isinstance(raw, Mapping):
-                blocks: list[dict[str, Any]] = []
-                batch_call_ids: set[str] = set()
-                if isinstance(raw.get("reasoning"), str) and raw["reasoning"]:
-                    blocks.append({"type": "reasoning", "text": raw["reasoning"]})
-                if isinstance(raw.get("content"), str) and raw["content"]:
-                    blocks.append({"type": "text", "text": raw["content"]})
-                for tool in raw.get("tool_messages", []) if isinstance(raw.get("tool_messages"), list) else []:
-                    if isinstance(tool, Mapping):
-                        call_id = str(tool.get("call_id") or "call_unknown")
-                        batch_call_ids.add(call_id)
-                        blocks.append(
-                            {
-                                "type": "tool_call",
-                                "call_id": call_id,
-                                "name": str(tool.get("name") or "unknown"),
-                                "arguments": dict(tool.get("arguments") or {}),
-                                "replay_safe": bool(tool.get("replay_safe", tool.get("retryable", True) is not False)),
-                            }
-                        )
-                self._ensure_assistant()
-                self.assistant_blocks = blocks
-                self.batch_call_ids = batch_call_ids
-                self.response_text = str(raw.get("content") or "")
-                self._update_assistant()
-                self._apply_usage(raw.get("node_usage") or raw.get("usage"))
+        if kind == "thinking_start":
+            self._begin_stream_item("reasoning")
+        elif kind == "thinking_delta":
+            self._update_stream_item("reasoning", message)
+        elif kind == "thinking_end":
+            self._finish_stream_item("reasoning")
+        elif kind == "response_start":
+            self._begin_stream_item("text")
+        elif kind == "response_delta":
+            self._update_stream_item("text", message)
+        elif kind == "response_end":
+            self._finish_stream_item("text")
+        elif kind == "assistant_message" and isinstance(data.get("message"), Mapping):
+            raw = data["message"]
+            items: list[dict[str, Any]] = []
+            if raw.get("reasoning") and not data.get("reasoning_streamed"):
+                items.append({"type": "reasoning", "text": str(raw["reasoning"])})
+            if raw.get("content") and not data.get("content_streamed"):
+                items.append({"type": "text", "text": str(raw["content"])})
+            for tool in raw.get("tool_messages", []) if isinstance(raw.get("tool_messages"), list) else []:
+                call_id = str(tool.get("call_id") or "call_unknown") if isinstance(tool, Mapping) else ""
+                if isinstance(tool, Mapping) and not any(
+                    item.get("type") == "tool_call" and item.get("call_id") == call_id for item in self.assistant_blocks
+                ):
+                    items.append(
+                        {
+                            "type": "tool_call",
+                            "call_id": call_id,
+                            "name": str(tool.get("name") or "unknown"),
+                            "arguments": dict(tool.get("arguments") or {}),
+                            "replay_safe": bool(tool.get("replay_safe", True)),
+                        }
+                    )
+            self._append_items(items)
         elif kind == "tool_call":
-            tool_name = str(data.get("tool") or data.get("name") or message or "unknown")
             call_id = str(data.get("call_id") or "call_unknown")
-            # The assistant_message event can already contain the entire
-            # batch. After the first result seals that assistant, subsequent
-            # per-tool events must not create a duplicate assistant node for
-            # a call that is already present in the current batch.
-            if self.assistant is None and self._tool_call_in_context(call_id):
-                return
-            if self.batch_call_ids and call_id not in self.batch_call_ids:
-                if self.assistant is not None:
-                    self._seal_assistant("success")
-                self.batch_call_ids = set()
-            self._ensure_assistant()
-            replay_safe = data.get("replay_safe")
-            if replay_safe is None:
-                lowered = tool_name.lower()
-                replay_safe = not any(token in lowered for token in ("bash", "shell", "command", "write", "mcp"))
             if not any(
-                block.get("type") == "tool_call" and str(block.get("call_id") or "") == call_id
-                for block in self.assistant_blocks
+                item.get("type") == "tool_call" and item.get("call_id") == call_id for item in self.assistant_blocks
             ):
-                self.assistant_blocks.append(
+                name = str(data.get("tool") or data.get("name") or message or "unknown")
+                self._append_item(
                     {
                         "type": "tool_call",
                         "call_id": call_id,
-                        "name": tool_name,
+                        "name": name,
                         "arguments": dict(data.get("arguments") or {}),
-                        "replay_safe": bool(replay_safe),
+                        "replay_safe": bool(
+                            data.get(
+                                "replay_safe",
+                                not any(x in name.lower() for x in ("write", "bash", "shell", "command", "mcp")),
+                            )
+                        ),
                     }
                 )
-            self._update_assistant()
         elif kind == "tool_result":
-            self._persist_tool_result(message, data, status="succeeded")
+            self._tool_result(message, data, status="succeeded")
+        elif kind == "tool_failed":
+            self.abort_category = "tool"
+            self._tool_result(message, data, status="failed")
         elif kind == "model_error":
-            self._remember_abort(self._model_error_category(data), code=str(data.get("error_type") or "model_error"))
-        elif kind == "error":
-            if data.get("unexpected"):
-                category = self.abort_category or self._data_category(data)
-                if category is None:
-                    self.finish("abort", message, category="agent", code="runtime_error")
-                else:
-                    self.finish(
-                        "abort",
-                        message,
-                        category=category,
-                        code=self.abort_code or str(data.get("error_type") or "runtime_error"),
-                    )
-            else:
-                self.finish(
-                    "abort",
-                    message,
-                    category=self.abort_category or "agent",
-                    code=self.abort_code or str(data.get("error_type") or "agent_error"),
-                )
-        elif kind in {"cancelled", "run_suspended"}:
-            self.finish("cancel", message)
+            self.abort_category = self._error_category(data)
+            self.abort_code = str(data.get("error_type") or "model_error")
         elif kind in {"approval_requested", "approval_granted"}:
-            self._append_event_block("approval", kind, message, data)
+            # Tool approval lifecycle events remain in the Runtime log.  The
+            # durable Turn stores only the interactive decision Item emitted
+            # by ``handle_input`` so one approval cannot become three
+            # identical assistant Items.
+            if not data.get("tool"):
+                self._event_item("approval", kind, message, data)
         elif kind in {"user_input_requested", "user_input_received"}:
-            self._append_event_block("question", kind, message, data)
-        elif kind == "steering_applied":
-            self._persist_steering(data)
-        elif kind in {
-            "plan",
-            "feedback_received",
-            "handoff_created",
-            "steering_received",
-            "model_repair",
-        }:
-            self._append_event_block("plan", kind, message, data)
+            self._event_item("question", kind, message, data)
+        elif kind in {"plan", "feedback_received", "handoff_created", "steering_received", "steering_applied"}:
+            self._event_item("plan", kind, message, data)
         elif kind == "skills_selected":
-            self._append_event_block("skill_snapshot", kind, message, data)
-        elif kind in {
-            "subagent_queued",
-            "subagent_started",
-            "subagent_write_requested",
-            "subagent_completed",
-            "subagent_failed",
-            "subagent_indeterminate",
-        }:
-            self._append_event_block("subagent", kind, message, data)
+            self._event_item("skill_snapshot", kind, message, data)
+        elif kind.startswith("subagent_"):
+            self._event_item("subagent", kind, message, data)
         elif kind == "context_compaction_completed":
-            # A compaction summary is a first-class node, not a mutable flag on
-            # the preceding assistant message.  Keep the original ancestors
-            # intact and advance the active parent to the summary node.
-            self._seal_assistant("success")
-            summary = str(data.get("summary") or message or "")
-            source_ids = data.get("source_ids", [])
-            if not isinstance(source_ids, list):
-                source_ids = []
-            path = self._ancestor_path(self.last_node)
-            if not source_ids:
-                old_compaction = self.last_node.compactionIdx if self.last_node is not None else ""
-                start = RuntimeStateTree._path_index(path, old_compaction) or 0
-                source_ids = [item.id for item in path[start:]]
-            first_kept = path[max(0, len(path) - DEFAULT_COMPACTION_RETENTION)].id if path else None
-            node = self.writer.create(
-                session_id=self.session_id,
-                parent=self.last_node,
-                data=compaction_payload(summary, source_ids=[str(item) for item in source_ids]),
-                provider_name=self.provider_name,
-                model=self.model_config,
-                permission_mode=self.permission_mode,
-                running_mode=self.running_mode,
-                cwd=self.cwd,
-                first_kept_entry_id=first_kept,
-                # An empty explicit value tells RuntimeState to point the
-                # compaction index at this newly created summary node.
-                compaction_idx="",
+            self._begin_compact_turn(str(data.get("summary") or message or ""))
+        elif kind in {"cancelled", "run_suspended"}:
+            self.finish("paused", message or "Paused by user.", category="user")
+        elif kind == "error":
+            self.finish(
+                "failed", message or "Execution failed.", category=self.abort_category or self._error_category(data)
             )
-            self.last_node = self.writer.delete(node.session_id, node.id, status="success")
-            if self.runtime is not None:
-                # ``RuntimeState.messages`` is only a compatibility cache.
-                # Re-project it after the canonical summary is sealed so
-                # automatic compaction and manual compaction expose the same
-                # transcript to legacy callers without becoming a second
-                # source of truth.
-                projected = self.runtime.model_messages()
-                self.runtime.state.messages = projected
-                if self.runtime.state.current_run is not None:
-                    self.runtime.state.current_run.history = self.runtime.state.messages
+
+    def _begin_compact_turn(self, summary: str) -> RuntimeState:
+        if self.assistant is None:
+            raise RuntimeError("Compaction requires an active Turn.")
+        source = self.writer.finalize(self.assistant, "success")
+        creator = getattr(self.store, "create_compact_turn", None)
+        if callable(creator):
+            compacted = creator(source.id, summary)
+            self.writer.emit(NodeFrame("turn.create", compacted.clone()))
+        else:
+            compacted = self.writer.create(
+                RuntimeStateTree(self.store.load_nodes(source.session_id)).compact(source, summary)
+            )
+        self.assistant = compacted
+        self.last_node = compacted
+        self.turn_id = compacted.id
+        self.assistant_blocks = compacted.assistant_items
+        self.protected_item_count = len(self.assistant_blocks)
+        self._stream_item_index = None
+        self._stream_item_type = None
+        self._stream_text = ""
+        self.produced_item = bool(self.assistant_blocks)
+        return compacted
 
     def handle_input(self, payload: Mapping[str, Any]) -> None:
-        """Store approval/question prompts as canonical content blocks."""
-
-        if self.closed:
-            return
         kind = str(payload.get("kind") or "approval")
-        block_type = "question" if kind == "question" else "approval"
-        block: dict[str, Any] = {"type": block_type, "event": "decision_requested", **dict(payload.get("data") or {})}
-        if isinstance(payload.get("message"), str):
-            block.setdefault("text", payload["message"])
-        self._ensure_assistant()
-        self.assistant_blocks.append(block)
-        self._update_assistant()
+        self._event_item(
+            "question" if kind == "question" else "approval",
+            "decision_requested",
+            str(payload.get("message") or ""),
+            dict(payload.get("data") or {}),
+        )
 
     def finish(
         self,
@@ -1044,112 +509,48 @@ class RuntimeEventNodeBridge:
     ) -> RuntimeState | None:
         if self.closed:
             return self.last_node
-        if status not in {"success", "cancel", "abort"}:
-            raise ValueError("A runtime bridge can only finish as success, cancel, or abort.")
-        if status == "abort":
+        if status not in {"success", "paused", "failed"}:
+            raise ValueError("A Turn can only finish as success, paused, or failed.")
+        if self.assistant is None:
+            self.start()
+        if (
+            final_answer
+            and status == "success"
+            and not any(item.get("type") == "text" for item in self.assistant_blocks)
+        ):
+            self._append_item({"type": "text", "text": final_answer})
+        if status in {"paused", "failed"}:
+            retryable = status == "paused"
             self.terminal_error = terminal_error_payload(
-                status,
-                category,
-                code=code or self.abort_code or None,
-                detail=final_answer,
+                category or ("user" if retryable else "agent"),
+                final_answer or "Execution did not complete.",
+                retryable=retryable,
             )
-            fallback = terminal_error_text(self.terminal_error)
-            # A caller-provided terminal answer (for example ``fail_run``'s
-            # exact message) is authoritative for the node text; the generic
-            # terminal template is only a fallback for empty answers and for
-            # answers that already equal the template (e.g. cancel wording).
-            if not final_answer or final_answer == fallback:
-                final_answer = fallback
-        # A user cancellation is a terminal state transition, not an
-        # assistant reply.  Keep any streamed/tool blocks exactly as they are
-        # and never turn the cancellation reason into a synthetic "已停止"
-        # message.  The canonical cancel node must have the same data shape as
-        # a successful assistant node while preserving partial output.
-        if self.assistant is None and (status != "success" or final_answer):
-            self._ensure_assistant()
-            self.assistant_blocks = (
-                [{"type": "text", "text": final_answer}]
-                if status != "cancel" and final_answer
-                else []
-            )
-            if status == "abort" and not self.assistant_blocks:
-                self.assistant_blocks = [{"type": "text", "text": "Execution did not complete."}]
-            self._update_assistant()
-        elif self.assistant is not None and final_answer and status != "cancel":
-            # A plan/control-only run may never emit response_delta or an
-            # assistant_message event.  The terminal run result is still the
-            # canonical assistant text and must not be lost merely because a
-            # dynamic node already contains approval/plan blocks.
-            has_text = any(block.get("type") == "text" for block in self.assistant_blocks)
-            if status != "abort" or not has_text:
-                self.assistant_blocks = [block for block in self.assistant_blocks if block.get("type") != "text"]
-                self.assistant_blocks.append({"type": "text", "text": final_answer})
-            self._update_assistant()
-        elif self.assistant is not None and status == "cancel" and not self.assistant.data:
-            # A user can cancel before the first response delta.  Materialize
-            # the empty assistant message so the cancelled terminal node has
-            # the same typed data shape as a successful node.
-            self._update_assistant()
-        if self.assistant is not None:
-            try:
-                self._seal_assistant(status)
-            except Exception:
-                # ``NodeWriter.delete`` performs the durable replacement in a
-                # transaction.  If that transaction or its final persistence
-                # hook fails, retain the original running placeholder;
-                # the stream still receives a deterministic terminal error.
-                self.persistence_failed = True
-                self.terminal_error = terminal_error_payload("abort", code="runtime_node_persistence_failed")
-                self.closed = True
-                return None
+            self._append_item(self.terminal_error)
+        try:
+            assert self.assistant is not None
+            self.last_node = self.writer.finalize(self.assistant, status)
+            self.assistant = self.last_node
+        except Exception:
+            self.persistence_failed = True
+            self.closed = True
+            return None
         self.closed = True
         return self.last_node
 
     def preserve_placeholder(self, *, code: str = "runtime_exception") -> RuntimeState | None:
-        """Close a stream by sealing its running marker as abort.
-
-        This is used for an uncaught/unknown worker exception. The running
-        leaf is sealed as ``abort`` so the tree never retains an unsealed
-        running marker or an unowned dynamic identity.
-        """
-
-        if self.assistant is None:
-            self.closed = True
-            return self.last_node
-        try:
-            return self.finish("abort", "", category="agent", code=code)
-        except Exception:
-            self.closed = True
-            return None
+        return self.finish("failed", "Execution failed.", category="agent", code=code)
 
     def finish_exception(self, error: BaseException) -> RuntimeState | None:
-        """Finish an uncaught worker exception without losing its category."""
-
-        # A batch can fail while atomically creating its finalized user
-        # messages (for example because one message is invalid or the store
-        # rejects the transaction).  In that phase no assistant turn exists
-        # and the whole user batch must remain out of the tree; creating an
-        # abort assistant here would make the failed batch look partially
-        # accepted and would also move the canonical leaf unexpectedly.
-        if self.batch_messages and self.assistant is None and not self.started:
-            self.abort_category = self.abort_category or self._exception_category(error) or "agent"
-            self.abort_code = self.abort_code or error.__class__.__name__
+        category = self.abort_category or self._exception_category(error)
+        if category == "network" and not self.produced_item:
             self.terminal_error = terminal_error_payload(
-                "abort",
-                self.abort_category,
-                code=self.abort_code,
-                detail=str(error),
+                "network", str(error) or "Network unavailable.", retryable=True
             )
             self.closed = True
-            return self.last_node
-
-        category = self.abort_category or self._exception_category(error) or "agent"
-        return self.finish(
-            "abort",
-            str(error),
-            category=category,
-            code=self.abort_code or error.__class__.__name__,
-        )
+            return self._current()
+        status: NodeStatus = "paused" if category == "network" and self.produced_item else "failed"
+        return self.finish(status, str(error) or "Execution failed.", category=category, code=error.__class__.__name__)
 
 
 __all__ = ["RuntimeEventNodeBridge"]

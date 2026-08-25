@@ -91,6 +91,7 @@ class UserSettingsStore(AuthSettingsMixin):
                 },
                 "runtime": {"log_full_messages": True, "max_tool_calls": 32, "terminal_type": "cmd"},
                 "sandbox": {
+                    "policy_version": 2,
                     "enabled": False,
                     "file_mode": "read_only",
                     "network_mode": "no_network",

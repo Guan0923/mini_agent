@@ -1,4 +1,4 @@
-"""Focused acceptance tests for the v9 local JSON event protocol."""
+"""Focused acceptance tests for the v10 Turn/SidebarThread event protocol."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ import pytest
 
 from backend.configuration import ClientPaths
 from backend.domain import RunState, RuntimeMessage, UserMessage
-from backend.domain.runtime_state import NodeWriter, message_payload
+from backend.domain.runtime_state import NodeWriter
+from backend.domain.runtime_state import RuntimeState as TurnState
 from backend.runtime.core.context import RuntimeState
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.sync.events import decrypt_event_batch, encrypt_event_batch
@@ -23,15 +24,20 @@ def test_local_store_uses_json_objects_and_small_immutable_events(tmp_path) -> N
     store = _store(tmp_path / "one", "device-a")
     session = store.create_session()
     writer = NodeWriter(store)
-    parent = store.get_session_root(session.session_id)
-    assert parent is not None
+    store.create_sidebar_thread(session_id=session.session_id, thread_id=session.session_id, title="main")
+    parent = None
     for index in range(4):
         node = writer.create(
-            session_id=session.session_id,
-            parent=parent,
-            data=message_payload("user", f"question {index}"),
+            TurnState.create(
+                session_id=session.session_id,
+                thread_id=session.session_id,
+                id=f"turn-{index}",
+                parent=parent,
+                user_content=[{"type": "text", "text": f"question {index}"}],
+            )
         )
-        parent = writer.delete(node.session_id, node.id)
+        node = writer.append_item(node, {"type": "text", "text": f"answer {index}"})
+        parent = writer.finalize(node, "success")
     store.save_runtime(RuntimeState(session_id=session.session_id, messages=[UserMessage(content="cached")]))
     store.start_turn(session.session_id, "run-1", "task")
     message = RuntimeMessage(1, "progress", "working", "2026-01-01T00:00:00Z", {})
@@ -43,7 +49,7 @@ def test_local_store_uses_json_objects_and_small_immutable_events(tmp_path) -> N
         assert "sync_outbox" not in tables
         assert "session_messages" not in tables
         events = connection.execute("SELECT kind,payload_json FROM json_events ORDER BY local_sequence").fetchall()
-    assert len(events) >= 2 + 2 * 4
+    assert len(events) >= 2 + 3 * 4
     state_events = [json.loads(payload) for kind, payload in events if kind == "runtime_state_saved"]
     assert state_events and "messages" not in state_events[-1]["state"]
     runtime_message_events = [json.loads(payload) for kind, payload in events if kind == "runtime_message_appended"]
@@ -51,8 +57,8 @@ def test_local_store_uses_json_objects_and_small_immutable_events(tmp_path) -> N
     assert max(len(payload) for _kind, payload in events) < 20_000
 
     restarted = _store(tmp_path / "one", "device-a")
-    assert restarted.load_conversation(session.session_id) == [
-        {"role": "user", "content": f"question {index}"} for index in range(4)
+    assert [node.user_message["content"][0]["text"] for node in restarted.load_nodes(session.session_id)] == [
+        f"question {index}" for index in range(4)
     ]
     assert restarted.load_runtime(session.session_id) is not None
 
@@ -61,10 +67,16 @@ def test_baseline_delta_replay_is_ordered_and_idempotent(tmp_path) -> None:
     source = _store(tmp_path / "source", "source-device")
     session = source.create_session("Sync me")
     writer = NodeWriter(source)
-    parent = source.get_session_root(session.session_id)
-    assert parent is not None
-    node = writer.create(session_id=session.session_id, parent=parent, data=message_payload("user", "hello"))
-    writer.delete(node.session_id, node.id)
+    source.create_sidebar_thread(session_id=session.session_id, thread_id=session.session_id, title="Sync me")
+    node = writer.create(
+        TurnState.create(
+            session_id=session.session_id,
+            thread_id=session.session_id,
+            id="turn-1",
+            user_content=[{"type": "text", "text": "hello"}],
+        )
+    )
+    writer.finalize(node, "success")
     first = source.pending_sync_operations()[0]
 
     target = _store(tmp_path / "target", "target-device")
@@ -78,7 +90,7 @@ def test_baseline_delta_replay_is_ordered_and_idempotent(tmp_path) -> None:
         },
         local_device_id="target-device",
     )
-    assert target.load_conversation(session.session_id) == [{"role": "user", "content": "hello"}]
+    assert target.load_nodes(session.session_id)[0].user_message["content"][0]["text"] == "hello"
     assert (
         target.apply_sync_events(
             {
@@ -96,8 +108,17 @@ def test_baseline_delta_replay_is_ordered_and_idempotent(tmp_path) -> None:
         [{"session_id": session.session_id, "event_ids": [item["event_id"] for item in first["events"]], "revision": 1}]
     )
     parent = max(source.load_nodes(session.session_id), key=lambda item: (item.timestamp, item.id))
-    node = writer.create(session_id=session.session_id, parent=parent, data=message_payload("assistant", "world"))
-    writer.delete(node.session_id, node.id)
+    node = writer.create(
+        TurnState.create(
+            session_id=session.session_id,
+            thread_id=session.session_id,
+            id="turn-2",
+            parent=parent,
+            user_content=[{"type": "text", "text": "next"}],
+        )
+    )
+    node = writer.append_item(node, {"type": "text", "text": "world"})
+    writer.finalize(node, "success")
     delta = source.pending_sync_operations()[0]
     target.apply_sync_events(
         {
@@ -109,7 +130,7 @@ def test_baseline_delta_replay_is_ordered_and_idempotent(tmp_path) -> None:
         },
         local_device_id="target-device",
     )
-    assert target.load_conversation(session.session_id)[-1] == {"role": "assistant", "content": "world"}
+    assert target.load_nodes(session.session_id)[-1].assistant_items[-1]["text"] == "world"
 
     bad = dict(delta["events"][0])
     bad["checksum"] = "0" * 64

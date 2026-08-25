@@ -36,7 +36,6 @@ class TerminalKind(StrEnum):
     GIT_BASH = "git_bash"
 
 
-LEGACY_PERMISSION_MODES = frozenset({"approval_for_me", "full_access"})
 SUPPORTED_TERMINALS = frozenset(item.value for item in TerminalKind)
 
 
@@ -45,28 +44,15 @@ PermissionMode = FileAccessMode
 
 
 def normalize_permission_mode(value: object, *, default: FileAccessMode = FileAccessMode.READ_ONLY) -> FileAccessMode:
-    """Map pre-sandbox permission values to the new three-level contract."""
+    """Validate the three-level permission contract."""
 
-    if value in {"approval_for_me", "read_only", None, ""}:
+    if value in {"read_only", None, ""}:
         return default if value in {None, ""} else FileAccessMode.READ_ONLY
     if value == "workspace_write":
         return FileAccessMode.WORKSPACE_WRITE
     if value == "full_access":
         return FileAccessMode.FULL_ACCESS
     raise SandboxPolicyError("permission_mode is invalid")
-
-
-def migrate_legacy_permission_mode(value: object) -> FileAccessMode:
-    """Migrate persisted pre-sandbox values before interpreting new input.
-
-    The old ``full_access`` switch did not carry the mandatory joint file and
-    network confirmation, so it is intentionally downgraded. New API input
-    should use :func:`normalize_permission_mode` after migration.
-    """
-
-    if value in {"approval_for_me", "full_access", None, ""}:
-        return FileAccessMode.READ_ONLY
-    return normalize_permission_mode(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,7 +420,6 @@ def resolve_network_rules(
 
 
 __all__ = [
-    "LEGACY_PERMISSION_MODES",
     "FileAccessMode",
     "NetworkMode",
     "NetworkRule",
@@ -446,7 +431,6 @@ __all__ = [
     "SandboxPolicy",
     "TerminalKind",
     "normalize_permission_mode",
-    "migrate_legacy_permission_mode",
     "remove_temp_dir",
     "resolve_network_rules",
     "ensure_disk_reserve",

@@ -9,7 +9,6 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 
 from backend.domain import Session, SessionSummary, message_from_dict, new_session_id
-from backend.domain.runtime_state import create_root_node
 from backend.domain.state import utc_now
 
 from .codec import is_default_session_title, normalize_session_title
@@ -23,7 +22,6 @@ class SQLiteSessionMixin:
         *,
         client_id: str | None = None,
         local_only: bool = False,
-        root_parent: tuple[str, str] | None = None,
         title_is_custom: bool | None = None,
     ) -> Session:
         cleaned = normalize_session_title(title)
@@ -42,7 +40,6 @@ class SQLiteSessionMixin:
         root_existed = root_path.exists()
         root = self.paths.ensure_session(session.session_id)
         document = self._session_payload(session, owner_device_id=self.device_id, read_only=False)
-        root_node = create_root_node(session.session_id, parent=root_parent, timestamp=timestamp)
         try:
             with self._connection(session.session_id) as connection:
                 connection.execute(
@@ -51,14 +48,6 @@ class SQLiteSessionMixin:
                 )
                 self._put_json_object(
                     connection, session.session_id, "session", session.session_id, document, timestamp
-                )
-                self._put_json_object(
-                    connection,
-                    session.session_id,
-                    "runtime_node",
-                    root_node.id,
-                    root_node.to_dict(),
-                    root_node.timestamp,
                 )
                 # The initial batch is the baseline.  Every later mutation is
                 # represented by a small immutable event.
@@ -74,12 +63,6 @@ class SQLiteSessionMixin:
                                 "object_id": session.session_id,
                                 "payload": document,
                                 "updated_at": timestamp,
-                            },
-                            {
-                                "namespace": "runtime_node",
-                                "object_id": root_node.id,
-                                "payload": root_node.to_dict(),
-                                "updated_at": root_node.timestamp,
                             },
                         ],
                     },
@@ -160,8 +143,7 @@ class SQLiteSessionMixin:
             return None
         nodes = [node for node in self.load_nodes(session_id) if node.session_id == session_id]
         messages = self._node_records(nodes)
-        meaningful = [node for node in nodes if getattr(node, "data_type", "") != "root"]
-        last_node = max(meaningful, key=lambda item: (item.timestamp, item.id), default=None)
+        last_node = max(nodes, key=lambda item: (item.timestamp, item.id), default=None)
         with self._connection(session_id) as connection:
             rows = connection.execute(
                 "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace='run' ORDER BY updated_at DESC,object_id DESC",
@@ -283,20 +265,37 @@ class SQLiteSessionMixin:
         )
         try:
             if parsed:
-                from backend.domain.runtime_state import NodeWriter, message_payload
+                from backend.domain.runtime_state import NodeWriter, RuntimeState
 
                 writer = NodeWriter(self)
-                parent = self.get_session_root(session.session_id)
-                if parent is None:
-                    raise RuntimeError("Session root was not created.")
-                for message in parsed:
-                    role = "assistant" if getattr(message, "role", "") == "assistant" else "user"
-                    node = writer.create(
+                parent = None
+                index = 0
+                while index < len(parsed):
+                    user_message = parsed[index]
+                    assistant_message = parsed[index + 1] if index + 1 < len(parsed) else None
+                    prompt = str(getattr(user_message, "content", "") or "")
+                    answer = str(getattr(assistant_message, "content", "") or "") if assistant_message else ""
+                    node = RuntimeState.create(
                         session_id=session.session_id,
+                        thread_id=session.session_id,
                         parent=parent,
-                        data=message_payload(role, str(getattr(message, "content", "") or "")),
+                        user_content=prompt,
+                        data=[
+                            [
+                                {
+                                    "role": "user",
+                                    "content": [{"type": "text", "text": prompt}],
+                                },
+                                {
+                                    "role": "assistant",
+                                    "content": ([{"type": "text", "text": answer}] if answer else []),
+                                },
+                            ]
+                        ],
                     )
-                    parent = writer.delete(node.session_id, node.id)
+                    writer.create(node)
+                    parent = writer.finalize(node, "success")
+                    index += 2
         except Exception:
             shutil.rmtree(self.paths.session_root(session.session_id), ignore_errors=True)
             raise
@@ -395,30 +394,34 @@ class SQLiteSessionMixin:
     def _node_records(cls, nodes: list) -> list[dict[str, str | int | None]]:
         result: list[dict[str, str | int | None]] = []
         for node in nodes:
-            data = getattr(node, "data", {})
-            if not isinstance(data, Mapping) or data.get("type") != "message":
+            data = getattr(node, "data", [])
+            index = getattr(node, "current_data_idx", -1)
+            if not isinstance(data, list) or not isinstance(index, int) or not 0 <= index < len(data):
                 continue
-            message = data.get("message")
-            if not isinstance(message, Mapping):
+            version = data[index]
+            if not isinstance(version, list):
                 continue
-            role = str(message.get("role") or "")
-            if role not in {"user", "assistant", "tool_result", "bash"}:
-                continue
-            content = message.get("content", [])
-            text = "".join(
-                str(block.get("text") or "")
-                for block in content
-                if isinstance(block, Mapping) and block.get("type") in {"text", "reasoning", "bash"}
-            )
-            result.append(
-                {
-                    "id": f"{node.session_id}:{node.id}",
-                    "run_id": None,
-                    "role": "assistant" if role == "tool_result" else role,
-                    "content": text,
-                    "created_at": node.timestamp,
-                }
-            )
+            for message in version:
+                if not isinstance(message, Mapping):
+                    continue
+                role = str(message.get("role") or "")
+                if role not in {"user", "assistant"}:
+                    continue
+                content = message.get("content", [])
+                text = "".join(
+                    str(block.get("text") or block.get("message") or "")
+                    for block in content
+                    if isinstance(block, Mapping) and block.get("type") in {"text", "reasoning", "bash", "error"}
+                )
+                result.append(
+                    {
+                        "id": f"{node.session_id}:{node.id}:{role}",
+                        "run_id": None,
+                        "role": role,
+                        "content": text,
+                        "created_at": node.timestamp,
+                    }
+                )
         return result
 
     def load_conversation_page(

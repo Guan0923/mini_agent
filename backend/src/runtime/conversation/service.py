@@ -107,9 +107,7 @@ class ConversationService(ConversationSessionController):
             self.runtime_node_bridge = None
             self._node_bridge_events_external = False
         if canonical_context and result.compacted:
-            # Keep the legacy transcript as a compatibility projection only;
-            # the durable message tree remains authoritative for subsequent
-            # model requests and API history reads.
+            # Refresh the in-process planner state from the durable Turn tree.
             projected = self.runtime.model_messages()
             self.runtime.state.messages = projected
             if self.runtime.state.current_run is not None:
@@ -123,7 +121,6 @@ class ConversationService(ConversationSessionController):
         self,
         prompt: str,
         references: list[Mapping[str, str]] | None = None,
-        batch_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> RuntimeEventNodeBridge | None:
         """Create a local bridge from the latest durable node configuration."""
 
@@ -140,7 +137,7 @@ class ConversationService(ConversationSessionController):
         latest = None
         loader = getattr(store, "load_nodes", None)
         if callable(loader):
-            nodes = [node for node in loader(session.session_id) if getattr(node, "data_type", None) != "root"]
+            nodes = list(loader(session.session_id))
             if nodes:
                 parent_keys = {(node.parent_session_id, node.parent_id) for node in nodes if node.parent_id}
                 leaves = [node for node in nodes if (node.session_id, node.id) not in parent_keys]
@@ -179,7 +176,6 @@ class ConversationService(ConversationSessionController):
             running_mode=running_mode,
             cwd=str(getattr(self.runtime.state, "workspace_root", "") or ""),
             references=references,
-            batch_messages=batch_messages,
             emit=lambda _frame: None,
         )
 
@@ -188,13 +184,12 @@ class ConversationService(ConversationSessionController):
         prompt: str,
         on_event: EventHandler | None,
         references: list[Mapping[str, str]] | None = None,
-        batch_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         """Bind a bridge to the runtime and compose its local event sink."""
 
         bridge = self.runtime_node_bridge
         if bridge is None or bridge.closed:
-            bridge = self._node_bridge_for_runtime(prompt, references, batch_messages)
+            bridge = self._node_bridge_for_runtime(prompt, references)
             self.runtime_node_bridge = bridge
             self._node_bridge_events_external = False
         if bridge is None or self.runtime is None:
@@ -228,10 +223,8 @@ class ConversationService(ConversationSessionController):
         trigger: RunTrigger = "embedding",
         request_parameters: Mapping[str, Any] | None = None,
         references: Sequence[Mapping[str, str]] = (),
-        batch_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> RunState:
-        batch = [dict(item) for item in batch_messages or []]
-        prepared = self._prepare(task, structured=bool(references or batch))
+        prepared = self._prepare(task, structured=bool(references))
         state = self._run_single_turn(
             prepared,
             mode=mode,
@@ -243,7 +236,6 @@ class ConversationService(ConversationSessionController):
             trigger=trigger,
             request_parameters=request_parameters,
             references=list(references),
-            batch_messages=batch or None,
         )
         handoff = state.handoff
         if handoff is None:
@@ -253,17 +245,11 @@ class ConversationService(ConversationSessionController):
         )
         if handoff.new_session:
             self._start_isolated_handoff_session(handoff)
-        # A bridge owned by the Web SSE transport spans the plan review and
-        # the implementation run.  Reset it explicitly at this boundary so
-        # same-session handoffs do not append to the plan assistant node and
-        # every new node records the handoff's effective running mode.
+        # A plan review and its implementation handoff belong to the same
+        # user interaction, so the bridge must keep appending to the same
+        # durable Turn across this runtime boundary.
         bridge = self.runtime_node_bridge
         if bridge is not None and not bridge.closed:
-            bridge.begin_turn(
-                self.active_session.session_id if self.active_session is not None else self.runtime.state.session_id,
-                handoff.task,
-                running_mode=handoff.mode,
-            )
             if self.runtime is not None:
                 bridge.bind_runtime(self.runtime)
         follow_up = self._run_single_turn(
@@ -365,7 +351,6 @@ class ConversationService(ConversationSessionController):
         source_run_id: str | None = None,
         request_parameters: Mapping[str, Any] | None = None,
         references: list[Mapping[str, str]] | None = None,
-        batch_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> RunState:
         provenance = RunProvenance(
             trigger=trigger,
@@ -385,7 +370,6 @@ class ConversationService(ConversationSessionController):
                 run_id,
                 prepared,
                 provenance,
-                append_user_message=not batch_messages,
             )
         else:
             if self.runtime is None:
@@ -396,11 +380,7 @@ class ConversationService(ConversationSessionController):
             run_id = new_run_id()
         assert self.runtime is not None
         turn_start_index = len(self.runtime.state.messages)
-        runtime_messages = [str(item.get("content") or "") for item in batch_messages or []]
-        if runtime_messages:
-            self.runtime.state.messages.extend(UserMessage(content=item) for item in runtime_messages)
-        else:
-            self.runtime.state.messages.append(UserMessage(content=prepared))
+        self.runtime.state.messages.append(UserMessage(content=prepared))
         self.runtime.state.current_run = RunState(
             task=prepared,
             mode=mode,
@@ -427,7 +407,7 @@ class ConversationService(ConversationSessionController):
         # embedding executions as well as Web SSE.  Web attaches a bridge
         # ahead of time so it can expose the active dynamic leaf to PATCH;
         # local callers get an equivalent bridge here.
-        self._bind_node_bridge(prepared, on_event, references, batch_messages)
+        self._bind_node_bridge(prepared, on_event, references)
         # ``mode`` is the initial runtime configuration for this turn.  The
         # runner refreshes ``RunState.mode`` from ``state.running_mode`` at
         # dispatch time and the bridge's ``bind_runtime`` derives it from the
@@ -445,15 +425,20 @@ class ConversationService(ConversationSessionController):
             self._record_unexpected_failure(exc)
             raise
         bridge = self.runtime_node_bridge
-        if bridge is not None and not self._node_bridge_events_external:
+        if bridge is not None and not self._node_bridge_events_external and state.handoff is None:
             if state.status in {"completed", "success"}:
                 bridge.finish("success", state.final_answer or "")
             elif state.status == "cancelled":
-                bridge.finish("cancel", state.final_answer or "")
+                bridge.finish("paused", state.final_answer or "", category="user")
             elif bridge.abort_category is not None:
-                bridge.finish("abort", state.final_answer or "", category=bridge.abort_category, code=bridge.abort_code)
+                bridge.finish(
+                    "paused" if bridge.abort_category == "network" else "failed",
+                    state.final_answer or "",
+                    category=bridge.abort_category,
+                    code=bridge.abort_code,
+                )
             else:
-                bridge.finish("abort", state.final_answer or "", category="agent", code="runtime_failed")
+                bridge.finish("failed", state.final_answer or "", category="agent", code="runtime_failed")
         if self.session_store is not None and self.active_session is not None:
             self.session_store.finish_turn(
                 self.active_session.session_id,

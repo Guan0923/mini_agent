@@ -281,10 +281,10 @@ class SQLiteSyncMixin:
                 (session_id, SCHEMA_VERSION, utc_now(), utc_now()),
             )
             return
-        if kind in {"node_upserted", "node_finalized"}:
-            node = payload.get("node")
+        if kind == "turn_upserted":
+            node = payload.get("turn")
             if not isinstance(node, dict) or str(node.get("session_id") or session_id) != session_id:
-                raise ValueError("Node event payload is invalid.")
+                raise ValueError("Turn event payload is invalid.")
             self._put_json_object(
                 connection,
                 session_id,
@@ -292,6 +292,19 @@ class SQLiteSyncMixin:
                 str(node.get("id") or ""),
                 node,
                 str(node.get("timestamp") or utc_now()),
+            )
+            return
+        if kind == "sidebar_thread_upserted":
+            item = payload.get("sidebar_thread")
+            if not isinstance(item, dict) or str(item.get("session_id") or session_id) != session_id:
+                raise ValueError("SidebarThread event payload is invalid.")
+            self._put_json_object(
+                connection,
+                session_id,
+                "sidebar_thread",
+                str(item.get("thread_id") or ""),
+                item,
+                str(item.get("updated_at") or utc_now()),
             )
             return
         if kind == "run_upserted":

@@ -27,7 +27,7 @@ export const EMPTY_RUNTIME_NODE_USAGE: RuntimeNodeUsage = {
 
 const REASONING_EFFORTS = new Set<ReasoningEffort>(["low", "medium", "high", "xhigh", "max"]);
 const THINKING_MODES = new Set<ThinkingMode>(["enable", "disable"]);
-const PERMISSION_MODES = new Set<PermissionMode>(["approval_for_me", "read_only", "workspace_write", "full_access"]);
+const PERMISSION_MODES = new Set<PermissionMode>(["read_only", "workspace_write", "full_access"]);
 const RUNNING_MODES = new Set<ChatMode>(["agent", "plan"]);
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -45,11 +45,8 @@ function tokenCount(value: unknown): number | null {
 }
 
 /**
- * Repair browser/API nodes at the frontend trust boundary.
- *
- * The backend owns strict protocol validation. The browser can still contain
- * a cached pre-v0.3 node, or receive a partial frame while upgrading. A bad
- * historical node must not be able to unmount the entire React application.
+ * Validate the new protocol at the frontend trust boundary. Old cached node
+ * shapes are deliberately rejected instead of normalized.
  */
 export function normalizeRuntimeNodeModel(value: unknown): RuntimeNodeModel {
   const raw = objectValue(value);
@@ -75,21 +72,36 @@ export function normalizeRuntimeNodeModel(value: unknown): RuntimeNodeModel {
 }
 
 export function normalizeRuntimeNode(node: RuntimeStateNode): RuntimeStateNode {
+  if (!node || typeof node !== "object" || node.version !== "0.0.1") {
+    throw new Error("Unsupported Turn version");
+  }
+  for (const key of ["thread_id", "parent_thread_id", "session_id", "parent_session_id", "id", "parent_id", "user", "provider_name", "cwd", "timestamp"] as const) {
+    if (typeof node[key] !== "string") throw new Error(`Invalid Turn field: ${key}`);
+  }
+  if (!node.thread_id || !node.session_id || !node.id || !node.provider_name) throw new Error("Turn identifiers are required");
+  if (!Number.isInteger(node.firstKeptItemSize) || node.firstKeptItemSize < 0) throw new Error("Invalid firstKeptItemSize");
+  if (typeof node.compactionId !== "string" || !node.compactionId) throw new Error("Invalid compactionId");
+  if (!["running", "success", "paused", "failed"].includes(node.status)) throw new Error("Invalid Turn status");
+  if (!PERMISSION_MODES.has(node.permission_mode) || !RUNNING_MODES.has(node.running_mode)) throw new Error("Invalid Turn mode");
+  if (!Array.isArray(node.data) || !Number.isInteger(node.current_data_idx) || !node.data[node.current_data_idx]) {
+    throw new Error("Invalid Turn data/current_data_idx");
+  }
+  for (const version of node.data) {
+    if (!Array.isArray(version) || version.length !== 2 || version[0]?.role !== "user" || version[1]?.role !== "assistant") {
+      throw new Error("A Turn version must contain one user and one assistant Message");
+    }
+    if (!Array.isArray(version[0].content) || version[0].content.length !== 1 || !Array.isArray(version[1].content)) {
+      throw new Error("Invalid Turn Message content");
+    }
+  }
+  const model = objectValue(node.model);
+  const normalizedModel = normalizeRuntimeNodeModel(model);
+  if (Object.keys(normalizedModel).some((key) => model[key] !== normalizedModel[key as keyof RuntimeNodeModel])) {
+    throw new Error("Invalid Turn model");
+  }
   const usage = objectValue(node.usage);
-  return {
-    ...node,
-    provider_name: typeof node.provider_name === "string" ? node.provider_name : "unknown",
-    model: normalizeRuntimeNodeModel(node.model),
-    permission_mode: node.permission_mode === "approval_for_me"
-      ? "read_only"
-      : (PERMISSION_MODES.has(node.permission_mode) ? node.permission_mode : "read_only"),
-    running_mode: RUNNING_MODES.has(node.running_mode) ? node.running_mode : "agent",
-    usage: {
-      input_tokens: tokenCount(usage.input_tokens),
-      cached_tokens: tokenCount(usage.cached_tokens),
-      output_tokens: tokenCount(usage.output_tokens),
-      reasoning_tokens: tokenCount(usage.reasoning_tokens),
-      total_tokens: tokenCount(usage.total_tokens),
-    },
-  };
+  for (const key of ["input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "total_tokens"]) {
+    if (!(key in usage) || (usage[key] !== null && tokenCount(usage[key]) === null)) throw new Error("Invalid Turn usage");
+  }
+  return structuredClone(node);
 }

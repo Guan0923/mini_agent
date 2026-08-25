@@ -16,11 +16,9 @@ from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from backend.tools import ToolRegistry
 
 
-def test_runner_executes_calculation(tmp_path: Path) -> None:
+def test_runner_executes_command(tmp_path: Path) -> None:
     events = []
-    state = AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)).run(
-        "run command python -c 'print((18 + 6) * 4)'", lambda _: True, on_event=events.append
-    )
+    state = AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)).run("run command echo 96", lambda _: True, on_event=events.append)
 
     assert state.status == "completed"
     assert state.final_answer is not None and "96" in state.final_answer
