@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -40,6 +40,20 @@ def _startup_failure_message(error: Exception) -> str:
         detail = str(error).strip() or "Windows Sandbox Broker 无法初始化。"
         return f"Sandbox 初始化失败：{detail} Agent 已停止，未降级执行。"
     return str(error) or FAILED_TERMINAL_MESSAGE
+
+
+def _runtime_stream_lock_registry(state: object) -> dict[str, Any]:
+    """Return the process-local registry serializing work within one Thread."""
+
+    stream_locks = getattr(state, "active_runtime_stream_locks", None)
+    if (
+        not isinstance(stream_locks, dict)
+        or not isinstance(stream_locks.get("keys"), set)
+        or not hasattr(stream_locks.get("__lock__"), "__enter__")
+    ):
+        stream_locks = {"__lock__": threading.RLock(), "keys": set()}
+        setattr(state, "active_runtime_stream_locks", stream_locks)
+    return stream_locks
 
 
 class RuntimeModelRequest(BaseModel):
@@ -84,8 +98,15 @@ def _model_request_parameters(model: RuntimeModelRequest | None, fallback: Reaso
     }
 
 
-def _model_config_snapshot(state: WebAppState, user_id: str) -> ModelConfig:
+def _model_config_snapshot(
+    state: WebAppState,
+    user_id: str,
+    *,
+    provider_name: str | None = None,
+) -> ModelConfig:
     try:
+        if provider_name and provider_name != "unknown":
+            return state.model_config_for_provider_name(user_id, provider_name)
         return state.model_config_for_user(user_id)
     except SecretDecryptionError as exc:
         raise HTTPException(
@@ -133,14 +154,7 @@ def _stream(
     # Reserve the session before creating the Job object.  Endpoint-level
     # summary checks are advisory; this lock closes the two-window race where
     # both requests otherwise pass validation and create two running leaves.
-    stream_locks = getattr(state, "active_runtime_stream_locks", None)
-    if (
-        not isinstance(stream_locks, dict)
-        or not isinstance(stream_locks.get("keys"), set)
-        or not hasattr(stream_locks.get("__lock__"), "__enter__")
-    ):
-        stream_locks = {"__lock__": threading.RLock(), "keys": set()}
-        setattr(state, "active_runtime_stream_locks", stream_locks)
+    stream_locks = _runtime_stream_lock_registry(state)
     stream_key = (identity.id, thread_id)
     reserved_stream_keys: set[tuple[str, str]] = {stream_key}
     stream_lock = stream_locks["__lock__"]

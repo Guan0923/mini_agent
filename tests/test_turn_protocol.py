@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.api import turns as turn_routes
 from backend.api.active_turn_stream import ActiveTurnStream
 from backend.api.app import create_app
 from backend.api.chat import routes as chat_routes
@@ -14,7 +16,7 @@ from backend.api.chat.routes import _startup_failure_message, _terminal_type_for
 from backend.api.session_store import session_store
 from backend.api.state import WebAppState
 from backend.configuration import ClientPaths
-from backend.domain import AssistantMessage, ToolMessage
+from backend.domain import CHECKPOINT_PREAMBLE, AssistantMessage, PlanningError, ToolMessage
 from backend.domain.runtime_state import (
     APP_VERSION,
     InMemoryNodeStore,
@@ -24,7 +26,11 @@ from backend.domain.runtime_state import (
     RuntimeStateTree,
     RuntimeStateValidationError,
 )
-from backend.runtime import AgentRunner, ConversationService, build_application
+from backend.planning.llm import LLMPlanner
+from backend.planning.rule_based import RuleBasedPlanner
+from backend.providers import ModelConfig, ModelConfigurationError
+from backend.runtime import AgentApplication, AgentRunner, ConversationService, build_application
+from backend.runtime.core.context import AgentRuntime, PreparedResponse
 from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
@@ -736,6 +742,168 @@ def test_http_sse_surfaces_sandbox_failure_before_turn_baseline(tmp_path: Path, 
     assert payloads == [
         f'<SSE id="{turn_id}" type="failed">Sandbox 初始化失败：Windows Sandbox Broker 已安装，但健康检查未通过。 Agent 已停止，未降级执行。</SSE>'
     ]
+
+
+class HttpCompactionClient:
+    context_size = 100_000
+
+    def __init__(self, summary: str, *, failure: str = "") -> None:
+        self.summary = summary
+        self.failure = failure
+        self.operations: list[str | None] = []
+        self.transcripts: list[str] = []
+
+    def estimate_tokens(self, messages, tools, request_parameters) -> int:
+        return 100
+
+    def run(self, runtime: AgentRuntime) -> PreparedResponse:
+        self.operations.append(runtime.exchange.operation)
+        self.transcripts.extend(
+            message.content
+            for message in runtime.exchange.messages
+            if getattr(message, "role", "") == "user" and isinstance(message.content, str)
+        )
+        if self.failure:
+            raise PlanningError(self.failure)
+        return PreparedResponse(AssistantMessage(content=self.summary), {"total_tokens": 1})
+
+
+def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_path: Path, monkeypatch) -> None:
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    model_config = ModelConfig("secret", "https://example.test/v1", "checkpoint-model")
+    resolved_provider_names: list[str | None] = []
+
+    def resolve_provider(_user_id: str, provider_name: str | None):
+        resolved_provider_names.append(provider_name)
+        return model_config
+
+    state.model_config_for_user = lambda _user_id: model_config
+    state.model_config_for_provider_name = resolve_provider
+    summary = """## Primary Request and Intent
+- Preserve the HTTP request.
+
+## Key Technical Concepts
+- TestClient and SQLite
+
+## Files and Code
+- backend/src/api/turns.py: synchronous Compact endpoint
+
+## Errors and Fixes
+- (none)
+
+## Pending Jobs
+- (none)
+
+## Current Work
+- Creating a Compaction Turn.
+
+## Next Step
+- Reload the Turn tree.
+
+## Critical Context
+- The summary came from the LLM operation."""
+    llm_client = HttpCompactionClient(summary)
+
+    with TestClient(create_app(state)) as client:
+        assert client.post("/api/auth/guest").status_code == 200
+        identity = client.get("/api/auth/me").json()
+        sidebar = client.post("/api/sidebar-threads", json={}).json()
+        store = session_store(state, identity["id"])
+        seed_service = ConversationService(
+            AgentRunner(
+                RuleBasedPlanner(), ToolRegistry(state.session_workspace(identity["id"], sidebar["session_id"]))
+            ),
+            store,
+            session_id=sidebar["session_id"],
+        )
+        completed = seed_service.run_task("seed compact history", mode="agent")
+        assert completed.status == "completed"
+        source = store.load_nodes(sidebar["session_id"])[-1]
+        source = NodeWriter(store).update_config(source, provider_name="checkpoint-provider")
+        newer = seed_service.run_task("newer branch must not replace the requested source", mode="agent")
+        assert newer.status == "completed"
+
+        def compact_application(_state, user_id: str, **_kwargs):
+            return AgentApplication(
+                AgentRunner(
+                    LLMPlanner(llm_client, [], []), ToolRegistry(state.session_workspace(user_id, source.session_id))
+                ),
+                session_store(state, user_id),
+                None,
+            )
+
+        monkeypatch.setattr(turn_routes, "build_user_application", compact_application)
+        compact_operation = client.get("/openapi.json").json()["paths"]["/api/turns/{turn_id}/compact"]["post"]
+        assert "requestBody" not in compact_operation
+        response = client.post(
+            f"/api/turns/{source.id}/compact",
+            json={"summary": "caller-controlled summary must be ignored", "id": "caller-id"},
+        )
+
+        assert response.status_code == 201
+        compacted = response.json()
+        assert compacted["id"] != "caller-id"
+        assert compacted["parent_id"] == source.id
+        assert compacted["compactionId"] == compacted["id"]
+        assert compacted["status"] == "success"
+        assert compacted["data"][0][1]["content"][0]["summary"] == summary
+        assert CHECKPOINT_PREAMBLE not in compacted["data"][0][1]["content"][0]["summary"]
+        assert llm_client.operations == ["summarize"]
+        assert resolved_provider_names == ["checkpoint-provider"]
+        assert llm_client.transcripts and "seed compact history" in llm_client.transcripts[0]
+        assert "newer branch must not replace the requested source" not in llm_client.transcripts[0]
+
+        node_count = len(store.load_nodes(source.session_id))
+        failing_client = HttpCompactionClient("", failure="summary provider failed")
+
+        def failing_application(_state, user_id: str, **_kwargs):
+            return AgentApplication(
+                AgentRunner(
+                    LLMPlanner(failing_client, [], []),
+                    ToolRegistry(state.session_workspace(user_id, source.session_id)),
+                ),
+                session_store(state, user_id),
+                None,
+            )
+
+        monkeypatch.setattr(turn_routes, "build_user_application", failing_application)
+        failed = client.post(f"/api/turns/{compacted['id']}/compact")
+        assert failed.status_code == 502
+        assert failed.json()["detail"] == "上下文压缩失败，请稍后重试。"
+        assert len(store.load_nodes(source.session_id)) == node_count
+
+        state.active_runtime_stream_locks = {
+            "__lock__": threading.RLock(),
+            "keys": {(identity["id"], source.thread_id)},
+        }
+        conflict = client.post(f"/api/turns/{source.id}/compact")
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"] == "当前 Thread 已有 running Turn。"
+
+        state.active_runtime_stream_locks["keys"].clear()
+        node_count = len(store.load_nodes(source.session_id))
+
+        def missing_model(_user_id: str):
+            raise ModelConfigurationError("model is missing")
+
+        state.model_config_for_user = missing_model
+        state.model_config_for_provider_name = lambda _user_id, _provider_name: missing_model(_user_id)
+        missing = client.post(f"/api/turns/{source.id}/compact")
+        assert missing.status_code == 422
+        assert missing.json()["detail"] == "模型未配置：model is missing"
+        assert len(store.load_nodes(source.session_id)) == node_count
+
+        state.model_config_for_user = lambda _user_id: model_config
+        state.model_config_for_provider_name = resolve_provider
+
+        def sandbox_failure(*_args, **_kwargs):
+            raise SandboxInitializationError("Broker unavailable")
+
+        monkeypatch.setattr(turn_routes, "build_user_application", sandbox_failure)
+        unavailable = client.post(f"/api/turns/{source.id}/compact")
+        assert unavailable.status_code == 503
+        assert unavailable.json()["detail"] == ("Sandbox 初始化失败：Broker unavailable Agent 已停止，未降级执行。")
+        assert len(store.load_nodes(source.session_id)) == node_count
 
 
 def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_deltas(

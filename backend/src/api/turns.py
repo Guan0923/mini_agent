@@ -9,19 +9,28 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictBool, model_validator
 
+from backend.domain import PlanningError
 from backend.domain.runtime_state import (
     NodeFrame,
     RuntimeState,
-    RuntimeStateTree,
     RuntimeStateValidationError,
+    new_node_id,
     new_thread_id,
 )
+from backend.sandbox import SandboxInitializationError
 
 from .active_turn_stream import ActiveTurnStream
 from .auth.dependencies import require_user
 from .auth.types import UserIdentity
-from .chat.routes import RuntimeModelRequest, _model_config_snapshot, _stream
+from .chat.routes import (
+    RuntimeModelRequest,
+    _model_config_snapshot,
+    _runtime_stream_lock_registry,
+    _startup_failure_message,
+    _stream,
+)
 from .session_store import require_active_session, session_store
+from .shared.runtime import build_user_application
 from .state import WebAppState
 
 router = APIRouter(prefix="/api/turns", tags=["turns"])
@@ -72,11 +81,6 @@ class ForkTurnRequest(BaseModel):
     title: str | None = Field(default=None, max_length=120)
 
 
-class CompactTurnRequest(BaseModel):
-    summary: str | None = Field(default=None, min_length=1, max_length=200_000)
-    id: str | None = Field(default=None, min_length=1, max_length=200)
-
-
 def _turn(store, turn_id: str) -> RuntimeState:
     item = store.find_node(turn_id)
     if item is None:
@@ -109,23 +113,6 @@ def _references(item: Mapping[str, object]) -> list[dict[str, str]]:
             raise HTTPException(status_code=422, detail="文件引用 path 不能为空。")
         result.append({"source": str(value["source"]), "path": path})
     return result
-
-
-def _compaction_summary(store, source: RuntimeState) -> str:
-    path = RuntimeStateTree(store.load_nodes(source.session_id)).ancestors(source)
-    start = next((index for index, turn in enumerate(path) if turn.id == source.compaction_id), None)
-    if start is None:
-        raise RuntimeStateValidationError("compactionId is not an ancestor of the Turn.")
-    items = [item for turn in path[start:] for message in turn.selected_messages for item in message["content"]]
-    prefix = items[: max(0, len(items) - source.first_kept_item_size)]
-    lines: list[str] = []
-    for item in prefix:
-        kind = str(item.get("type") or "item")
-        value = item.get("text", item.get("content", item.get("summary", "")))
-        rendered = str(value).strip()
-        if rendered:
-            lines.append(f"[{kind}] {rendered[:2000]}")
-    return "\n".join(lines)[-50_000:] or "此前上下文不含可摘要文本。"
 
 
 def _stream_turn(
@@ -338,22 +325,65 @@ def fork_turn(
 
 @router.post("/{turn_id}/compact", status_code=201)
 def compact_turn(
-    turn_id: str, body: CompactTurnRequest, request: Request, identity: UserIdentity = Depends(require_user)
+    turn_id: str,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
-    store = session_store(request.app.state.web, identity.id)
+    state: WebAppState = request.app.state.web
+    store = session_store(state, identity.id)
+    source = _turn(store, turn_id)
+    if source.status != "success":
+        raise HTTPException(status_code=409, detail="只有 success Turn 可以压缩。")
+
+    stream_locks = _runtime_stream_lock_registry(state)
+    stream_lock = stream_locks["__lock__"]
+    stream_keys = stream_locks["keys"]
+    stream_key = (identity.id, source.thread_id)
+    with stream_lock:
+        if stream_key in stream_keys:
+            raise HTTPException(status_code=409, detail="当前 Thread 已有 running Turn。")
+        stream_keys.add(stream_key)
+
+    app = None
     try:
-        source = _turn(store, turn_id)
-        compacted = store.create_compact_turn(
-            turn_id,
-            body.summary or _compaction_summary(store, source),
-            new_turn_id=body.id,
+        workspace = state.session_workspace(identity.id, source.session_id)
+        bound_project = state.projects(identity.id).session_project(source.session_id, include_removed=False)
+        if bound_project is not None and not bound_project.available:
+            raise HTTPException(status_code=409, detail="项目 cwd 不可访问，请恢复文件夹后重试。")
+        model_config = _model_config_snapshot(
+            state,
+            identity.id,
+            provider_name=source.provider_name,
         )
-        compacted.status = "success"
-        compacted = RuntimeState.from_dict(compacted.to_dict())
-        store.finalize_node(compacted)
+        app = build_user_application(
+            state,
+            identity.id,
+            session_id=source.session_id,
+            user_preferences=state.agent_preferences_for_user(identity.id),
+            model_config=model_config,
+            load_model_config=False,
+            workspace=workspace,
+            project_id=bound_project.project_id if bound_project is not None else None,
+            job_registry=state.job_registry,
+        )
+        conversation = app.open_conversation(source.session_id)
+        compacted = conversation.compact_turn(source.id, new_node_id())
         return compacted.to_dict()
+    except HTTPException:
+        raise
+    except SandboxInitializationError as exc:
+        raise HTTPException(status_code=503, detail=_startup_failure_message(exc)) from exc
+    except PlanningError as exc:
+        raise HTTPException(status_code=502, detail="上下文压缩失败，请稍后重试。") from exc
     except (KeyError, ValueError, RuntimeStateValidationError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail="上下文压缩失败，请稍后重试。") from exc
+    finally:
+        if app is not None:
+            app.close()
+        with stream_lock:
+            stream_keys.discard(stream_key)
 
 
 @router.patch("/{turn_id}/current-data")

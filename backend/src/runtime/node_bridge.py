@@ -45,6 +45,7 @@ class RuntimeEventNodeBridge:
         session_id: str,
         prompt: str,
         turn_id: str | None = None,
+        compaction_turn_id: str | None = None,
         thread_id: str | None = None,
         source_node_id: str | None = None,
         adopt_existing: bool = False,
@@ -64,6 +65,7 @@ class RuntimeEventNodeBridge:
         self.session_id = session_id
         self.thread_id = thread_id or session_id
         self.turn_id = turn_id
+        self.compaction_turn_id = compaction_turn_id
         self.prompt = prompt
         self.source_node_id = source_node_id
         self.adopt_existing = adopt_existing
@@ -204,8 +206,13 @@ class RuntimeEventNodeBridge:
                 if self.source_node_id
                 else self._latest_parent()
             )
+            if self.parent is None:
+                raise ValueError("Unknown source Turn.")
+            if self.parent.status != "success":
+                raise ValueError("Only a successful Turn can be compacted.")
+            self.thread_id = self.parent.thread_id
             self.last_node = self.parent
-            self.assistant = self.parent if self.parent and self.parent.status == "running" else None
+            self.assistant = None
             self.started = True
         return self.last_node
 
@@ -485,16 +492,22 @@ class RuntimeEventNodeBridge:
             )
 
     def _begin_compact_turn(self, summary: str) -> RuntimeState:
-        if self.assistant is None:
+        source = self.assistant or self.last_node
+        if source is None:
             raise RuntimeError("Compaction requires an active Turn.")
-        source = self.writer.finalize(self.assistant, "success")
+        if source.status == "running":
+            source = self.writer.finalize(source, "success")
         creator = getattr(self.store, "create_compact_turn", None)
         if callable(creator):
-            compacted = creator(source.id, summary)
+            compacted = creator(source.id, summary, new_turn_id=self.compaction_turn_id)
             compacted = self.writer.snapshot(compacted)
         else:
             compacted = self.writer.create(
-                RuntimeStateTree(self.store.load_nodes(source.session_id)).compact(source, summary)
+                RuntimeStateTree(self.store.load_nodes(source.session_id)).compact(
+                    source,
+                    summary,
+                    id=self.compaction_turn_id,
+                )
             )
         self.assistant = compacted
         self.last_node = compacted

@@ -18,6 +18,7 @@ import { HELP_TEXT, parseCommand } from "../../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../../commands/completion";
 import { completionToken, fileKeyAction, toCandidates, type FileCandidate, type FileTrigger } from "../../commands/fileCompletion";
 import MarkdownContent from "../../components/MarkdownContent";
+import ShimmerText from "../../components/ShimmerText";
 import { AssistantMessage, MessageActions, MessageReferenceChip } from "./messageParts";
 import Composer, { type ComposerActionMode, type SettingsSelectKey } from "./Composer";
 import type { FileMentionChange, FileMentionEditorHandle } from "./FileMentionEditor";
@@ -55,7 +56,7 @@ interface Props {
   onFork?: (conversationId: string, messageId: string) => Promise<void>;
   onRewind?: (conversationId: string, messageId: string) => Promise<RewindResult | string | undefined>;
   onSelectSession?: (id: string) => Promise<string>;
-  onReload?: (id: string) => Promise<void>;
+  onReload?: (id: string, preferredActiveTurnId?: string) => Promise<void>;
   onRefresh?: () => Promise<void>;
   running?: boolean;
   onRun?: (request: ChatRunRequest) => Promise<void>;
@@ -136,6 +137,7 @@ export default function ChatPage({
   const isMobile = screens.md === false && (typeof window === "undefined" || window.innerWidth < 768);
   const [input, setInput] = useState("");
   const [queueSubmitting, setQueueSubmitting] = useState(false);
+  const [compactionPending, setCompactionPending] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("read_only");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
   const [providerName, setProviderName] = useState("unknown");
@@ -176,12 +178,13 @@ export default function ChatPage({
   // request is sent until its SSE cleanup, including the tiny interval
   // between the optimistic user bubble and the first turn.snapshot frame.
   const busy = Boolean(runningProp) || queueSubmitting;
+  const interactionBusy = busy || compactionPending;
   const todo = useMemo(() => latestTodoList(messages), [messages]);
   const filteredCommands = commandSuggestions(input);
-  const commandMenuVisible = !busy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
+  const commandMenuVisible = !interactionBusy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
   // The file menu is mutually exclusive with the slash-command menu and only
   // appears while the caret still sits inside an `@` trigger.
-  const fileMenuVisible = !busy && fileMenuDismissedFor !== input && fileTriggerState !== null && fileCandidates.length > 0;
+  const fileMenuVisible = !interactionBusy && fileMenuDismissedFor !== input && fileTriggerState !== null && fileCandidates.length > 0;
   const display = configuredDisplayMode ?? "medium";
 
   const activeRuntimeNode = (() => {
@@ -203,7 +206,7 @@ export default function ChatPage({
     const sorted = [...sessionLeaves].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
     return sorted[sorted.length - 1];
   })();
-  const recoveryMode = !busy && activeRuntimeNode?.status === "paused";
+  const recoveryMode = !interactionBusy && activeRuntimeNode?.status === "paused";
   const hasDraft = Boolean(input.trim() || references.length > 0 || pendingUploads.some((upload) => upload.status === "done"));
   const actionMode: ComposerActionMode = ((activeRuntimeNode?.status === "running" && !hasDraft) || (!activeRuntimeNode && busy && !hasDraft))
     ? "pause"
@@ -613,7 +616,7 @@ export default function ChatPage({
   }
 
   function sendQueuedMessage() {
-    if (!conversation?.sessionId || busy || queueFlushRef.current || queuedMessages.length === 0) return;
+    if (!conversation?.sessionId || interactionBusy || queueFlushRef.current || queuedMessages.length === 0) return;
     queueAutoBlockedRef.current = false;
     queueFlushRef.current = true;
     queueInFlightIdsRef.current = new Set(queuedMessages.map((item) => item.id));
@@ -713,6 +716,7 @@ export default function ChatPage({
 
 
   async function executeCommand(name: string, argument: string) {
+    if (compactionPending) return;
     editorRef.current?.clear();
     setReferences([]);
     setCommandMenuDismissedFor(null);
@@ -737,17 +741,20 @@ export default function ChatPage({
     }
     if (name === "/compact") {
       if (!conversation || !activeRuntimeNode) return;
+      setCompactionPending(true);
       try {
-        await compactTurn(activeRuntimeNode.id);
-        await insert("上下文已压缩。");
-        await onReload(conversation.id);
+        const compacted = await compactTurn(activeRuntimeNode.id);
+        await onReload(conversation.id, compacted.id);
       } catch (error) {
         await insert(`⚠️ 压缩失败：${String((error as Error).message ?? error)}`);
+      } finally {
+        setCompactionPending(false);
       }
     }
   }
 
   async function send() {
+    if (compactionPending) return;
     const prompt = input.trim();
     // A running assistant no longer blocks the composer: a draft is handed
     // to the in-memory FIFO queue below.  Only an in-progress upload prevents
@@ -804,7 +811,7 @@ export default function ChatPage({
   }
 
   function beginEdit(message: ChatMessage) {
-    if (busy || !onRewind || !message.content) return;
+    if (interactionBusy || !onRewind || !message.content) return;
     setEditingMessageId(message.id);
     setEditingDraft(message.content);
   }
@@ -815,7 +822,7 @@ export default function ChatPage({
   }
 
   async function saveEdit(message: ChatMessage) {
-    if (!conversation || !onRewind || busy || !editingDraft.trim() || rewindPending || editingSubmitting || editingSubmittingRef.current) {
+    if (!conversation || !onRewind || interactionBusy || !editingDraft.trim() || rewindPending || editingSubmitting || editingSubmittingRef.current) {
       return;
     }
     setRewindPending(true);
@@ -846,7 +853,7 @@ export default function ChatPage({
 
   function handleUserBubbleClick(event: ReactMouseEvent<HTMLDivElement>, message: ChatMessage) {
     if (
-      busy ||
+      interactionBusy ||
       !onRewind ||
       !message.content ||
       event.button !== 0 ||
@@ -863,12 +870,12 @@ export default function ChatPage({
   }
 
   function forkMessage(messageId: string) {
-    if (!conversation || !onFork || busy) return;
+    if (!conversation || !onFork || interactionBusy) return;
     void onFork(conversation.id, messageId);
   }
 
   async function changeMessageVersion(message: ChatMessage, direction: -1 | 1) {
-    if (!conversation || !message.nodeId || busy) return;
+    if (!conversation || !message.nodeId || interactionBusy) return;
     const turn = conversation.runtimeNodes?.find((item) => item.id === message.nodeId);
     if (!turn) return;
     const nextIndex = turn.current_data_idx + direction;
@@ -937,7 +944,7 @@ export default function ChatPage({
                           ref={editRef}
                           aria-label="编辑用户消息"
                           value={editingDraft}
-                          disabled={busy}
+                          disabled={interactionBusy}
                           onChange={(event) => setEditingDraft(event.target.value)}
                           onKeyDown={(event) => {
                             if (event.key === "Escape") {
@@ -952,14 +959,14 @@ export default function ChatPage({
                         />
                         <div className="message-edit-actions">
                           <Button type="text" onClick={cancelEdit}>取消</Button>
-                          <Button type="primary" onClick={() => void saveEdit(message)} loading={rewindPending || editingSubmitting} disabled={!editingDraft.trim() || editingSubmitting || rewindPending || busy}>保存并重新生成</Button>
+                          <Button type="primary" onClick={() => void saveEdit(message)} loading={rewindPending || editingSubmitting} disabled={!editingDraft.trim() || editingSubmitting || rewindPending || interactionBusy}>保存并重新生成</Button>
                         </div>
                       </div>
                     ) : (
                       <div
                         className="bubble user-bubble"
                         onClick={(event) => handleUserBubbleClick(event, message)}
-                        title={onRewind && !busy ? "点击编辑此消息" : undefined}
+                        title={onRewind && !interactionBusy ? "点击编辑此消息" : undefined}
                       >
                         <MarkdownContent text={message.content} />
                         {message.references && message.references.length > 0 ? (
@@ -975,7 +982,7 @@ export default function ChatPage({
                       <>
                         <MessageActions
                           msg={message}
-                          busy={busy}
+                          busy={interactionBusy}
                           onEdit={onRewind ? () => beginEdit(message) : undefined}
                         />
                         {messageVersion(message) ? (
@@ -985,7 +992,7 @@ export default function ChatPage({
                               size="small"
                               icon={<LeftOutlined />}
                               aria-label="上一个消息版本"
-                              disabled={busy || messageVersion(message)!.index === 0}
+                              disabled={interactionBusy || messageVersion(message)!.index === 0}
                               onClick={() => void changeMessageVersion(message, -1)}
                             />
                             <span aria-live="polite">{messageVersion(message)!.index + 1} / {messageVersion(message)!.total}</span>
@@ -994,7 +1001,7 @@ export default function ChatPage({
                               size="small"
                               icon={<RightOutlined />}
                               aria-label="下一个消息版本"
-                              disabled={busy || messageVersion(message)!.index >= messageVersion(message)!.total - 1}
+                              disabled={interactionBusy || messageVersion(message)!.index >= messageVersion(message)!.total - 1}
                               onClick={() => void changeMessageVersion(message, 1)}
                             />
                           </div>
@@ -1009,10 +1016,15 @@ export default function ChatPage({
                   msg={message}
                   display={display}
                   onDecision={chooseDecision}
-                  busy={busy}
+                  busy={interactionBusy}
                   onFork={onFork ? () => forkMessage(message.id) : undefined}
                 />
               ))}
+              {compactionPending ? (
+                <div className="message assistant runtime-compaction-progress" role="status" aria-live="polite">
+                  <ShimmerText active>正在执行compaction操作中</ShimmerText>
+                </div>
+              ) : null}
           </div>
           </div>
           {!isMobile ? <ConversationTimeline messages={messages} scrollContainerRef={chatScrollRef} /> : null}
@@ -1020,7 +1032,7 @@ export default function ChatPage({
       </div>
       <Composer
         input={input}
-        busy={busy}
+        busy={interactionBusy}
         isMobile={isMobile}
         filteredCommands={filteredCommands}
         commandMenuVisible={commandMenuVisible}
@@ -1072,8 +1084,8 @@ export default function ChatPage({
         onStop={stop}
         onSend={() => void send()}
         actionMode={actionMode}
-        submitDisabled={projectUnavailable || (actionMode === "send" && busy && !hasDraft)}
-        disabled={projectUnavailable}
+        submitDisabled={projectUnavailable || compactionPending || (actionMode === "send" && busy && !hasDraft)}
+        disabled={projectUnavailable || compactionPending}
         disabledReason={conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
         startMode={recoveryMode}
         fileCandidates={fileCandidates}

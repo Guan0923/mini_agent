@@ -11,6 +11,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from backend.domain import CHECKPOINT_PREAMBLE
 from backend.domain.runtime_state import (
     RuntimeState,
     RuntimeStateValidationError,
@@ -58,7 +59,7 @@ def _messages(values: Iterable[RuntimeState | Mapping[str, Any]]) -> list[Mappin
             rendered: list[dict[str, Any]] = []
             for block in blocks:
                 if block.get("type") == "compaction":
-                    rendered.append({"type": "text", "text": f"[compaction]\n{block.get('summary', '')}"})
+                    rendered.append({"type": "text", "text": f"{CHECKPOINT_PREAMBLE}\n\n{block.get('summary', '')}"})
                 elif block.get("type") == "error":
                     rendered.append({"type": "text", "text": str(block.get("message") or "Execution failed.")})
                 else:

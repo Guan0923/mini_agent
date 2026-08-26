@@ -33,10 +33,14 @@ import type {
   RuntimeStateNode,
 } from "../types";
 
-function withLoadedTurns(conversation: Conversation, nodes: RuntimeStateNode[]): Conversation {
+function withLoadedTurns(
+  conversation: Conversation,
+  nodes: RuntimeStateNode[],
+  preferredActiveTurnId?: string,
+): Conversation {
   const threadId = conversation.threadId ?? conversation.sessionId;
   const threadNodes = nodes.filter((node) => node.thread_id === threadId);
-  const selected = threadNodes.find((node) => node.id === conversation.activeTurnId);
+  const selected = threadNodes.find((node) => node.id === (preferredActiveTurnId ?? conversation.activeTurnId));
   const parentIds = new Set(threadNodes.map((node) => node.parent_id).filter(Boolean));
   const leaves = threadNodes
     .filter((node) => !parentIds.has(node.id))
@@ -621,12 +625,12 @@ function AgentApp() {
       return undefined;
     }
   }
-  async function reloadConversation(id: string): Promise<void> {
+  async function reloadConversation(id: string, preferredActiveTurnId?: string): Promise<void> {
     const conversation = conversations.find((item) => item.id === id);
     if (!conversation) throw new Error("会话不存在");
     const sessionId = await ensureSession(id);
     const nodes = await getSessionNodes(sessionId);
-    updateConversation(id, (currentConversation) => withLoadedTurns(currentConversation, nodes));
+    updateConversation(id, (currentConversation) => withLoadedTurns(currentConversation, nodes, preferredActiveTurnId));
   }
 
   async function refreshSessions(): Promise<void> {

@@ -24,10 +24,8 @@ export async function forkTurn(
   });
 }
 
-export async function compactTurn(turnId: string, summary?: string): Promise<RuntimeStateNode> {
+export async function compactTurn(turnId: string): Promise<RuntimeStateNode> {
   return requestJson(`/api/turns/${encodeURIComponent(turnId)}/compact`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(summary ? { summary } : {}),
   });
 }
