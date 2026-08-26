@@ -109,7 +109,7 @@ class SandboxNetworkRulePayload(BaseModel):
 
 
 class SandboxConfigPayload(BaseModel):
-    enabled: StrictBool = False
+    enabled: Literal[True] = True
     file_mode: Literal["read_only", "workspace_write", "full_access"] = "read_only"
     network_mode: Literal["no_network", "restricted_network", "full_network"] = "no_network"
     network_allowlist: list[SandboxNetworkRulePayload] = Field(default_factory=list, max_length=128)

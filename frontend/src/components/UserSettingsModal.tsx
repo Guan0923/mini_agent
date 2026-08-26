@@ -7,7 +7,6 @@ import {
   Form,
   Input,
   InputNumber,
-  List,
   Menu,
   Modal,
   Progress,
@@ -21,9 +20,6 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getSettings,
-  getSandboxStatus,
-  installSandboxBroker,
-  repairSandboxBroker,
   addProviderConfig,
   activateProviderConfig,
   deleteProviderConfig,
@@ -35,19 +31,17 @@ import {
   updateAgentConfig,
   updateProfile,
   updateRuntimeConfig,
-  updateSandboxConfig,
   updateProviderConfigById,
   updateSyncPreferences,
   type AgentConfig,
   type ProviderConfig,
   type UserSettings,
   type RuntimeConfig,
-  type SandboxBrokerStatus,
   type SandboxConfig,
   type SyncJob,
 } from "../api";
 import type { AuthUser } from "../types";
-type SettingsSection = "profile" | "agent" | "runtime" | "sandbox" | "provider_add" | "provider_manage" | "cloud";
+type SettingsSection = "profile" | "agent" | "runtime" | "provider_add" | "provider_manage" | "cloud";
 
 type ProviderDraft = {
   provider_name: string;
@@ -124,7 +118,7 @@ const defaultSyncState = {
 };
 
 const defaultSandboxConfig: SandboxConfig = {
-  enabled: false,
+  enabled: true,
   file_mode: "read_only",
   network_mode: "no_network",
   network_allowlist: [],
@@ -177,10 +171,6 @@ export default function UserSettingsModal({
   const [managedModelFeedback, setManagedModelFeedback] = useState<Record<string, ProviderModelFeedback>>({});
   const [syncJob, setSyncJob] = useState<SyncJob | null>(null);
   const [cloudLoading, setCloudLoading] = useState(false);
-  const [brokerStatus, setBrokerStatus] = useState<SandboxBrokerStatus | null>(null);
-  const [brokerAction, setBrokerAction] = useState<"install" | "repair" | null>(null);
-  const [sandboxHostDraft, setSandboxHostDraft] = useState("");
-  const [sandboxPortDraft, setSandboxPortDraft] = useState<number | null>(443);
   const settingsOpenRef = useRef(open);
 
   useEffect(() => {
@@ -243,9 +233,6 @@ export default function UserSettingsModal({
         setManagedModelQueries({});
         setManagedModelOpen({});
         setManagedModelFeedback({});
-        if (typeof getSandboxStatus === "function") {
-          void getSandboxStatus().then(setBrokerStatus).catch(() => setBrokerStatus(null));
-        }
         if ((next.cloud_sync_available ?? user?.kind !== "guest") && user?.kind !== "guest") void refreshCloud();
       })
       .catch((cause) => {
@@ -415,26 +402,6 @@ export default function UserSettingsModal({
         const runtime = await updateRuntimeConfig(settings.runtime_config);
         updateSettings({ runtime_config: runtime });
         setSaved((current) => (current ? { ...current, runtime_config: runtime } : current));
-      } else if (section === "sandbox") {
-        if (settings.sandbox_config.file_mode === "full_access" && saved?.sandbox_config.file_mode !== "full_access") {
-          const confirmed = await new Promise<boolean>((resolve) => {
-            modal.confirm({
-              title: "启用 Full access？",
-              content: "这会同时放开工作区文件和网络访问，并标记为非沙箱运行。",
-              okText: "继续",
-              cancelText: "取消",
-              onOk: () => resolve(true),
-              onCancel: () => resolve(false),
-            });
-          });
-          if (!confirmed) return;
-        }
-        const sandbox = await updateSandboxConfig({
-          ...settings.sandbox_config,
-          ...(settings.sandbox_config.file_mode === "full_access" ? { full_access_acknowledged: true } : {}),
-        });
-        updateSettings({ sandbox_config: sandbox });
-        setSaved((current) => (current ? { ...current, sandbox_config: sandbox } : current));
       } else if (section === "provider_add") {
         const provider = await addProviderConfig({
           provider_name: providerAddDraft.provider_name,
@@ -477,22 +444,6 @@ export default function UserSettingsModal({
       setError(cause instanceof Error ? cause.message : "保存失败，请稍后重试。");
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function runBrokerAction(action: "install" | "repair") {
-    setBrokerAction(action);
-    try {
-      const status = await (action === "install" ? installSandboxBroker() : repairSandboxBroker());
-      setBrokerStatus(status);
-    } catch (cause) {
-      setBrokerStatus({
-        installed: false,
-        healthy: false,
-        detail: cause instanceof Error ? cause.message : "Broker 操作失败。",
-      });
-    } finally {
-      setBrokerAction(null);
     }
   }
 
@@ -641,7 +592,6 @@ export default function UserSettingsModal({
     { key: "profile", label: "个人简介" },
     { key: "agent", label: "Agent 配置" },
     { key: "runtime", label: "运行配置" },
-    { key: "sandbox", label: "沙箱" },
     { key: "provider_add", label: "添加提供商" },
     { key: "provider_manage", label: "Provider 与模型" },
     { key: "cloud", label: "云同步" },
@@ -820,123 +770,6 @@ export default function UserSettingsModal({
                 默认值为 32。成功、失败和重复的工具调用都会计入整个 Agent 工作流的上限；保存后仅影响新建或恢复的运行。
               </Typography.Paragraph>
             </Form.Item>
-          </Form>
-        )}
-        {section === "sandbox" && (
-          <Form layout="vertical">
-            <Typography.Title level={4}>Windows 沙箱</Typography.Title>
-            <Form.Item label="启用严格沙箱">
-              <Switch
-                checked={settings.sandbox_config.enabled}
-                onChange={(enabled) => updateSettings({ sandbox_config: { ...settings.sandbox_config, enabled } })}
-              />
-            </Form.Item>
-            <Form.Item label="文件权限">
-              <Select
-                aria-label="文件权限"
-                value={settings.sandbox_config.file_mode}
-                options={[
-                  { value: "read_only", label: "只读工作区" },
-                  { value: "workspace_write", label: "读写工作区" },
-                  { value: "full_access", label: "Full access（高风险）" },
-                ]}
-                onChange={(file_mode) => updateSettings({
-                  sandbox_config: {
-                    ...settings.sandbox_config,
-                    file_mode,
-                    ...(file_mode === "full_access" ? { network_mode: "full_network" as const } : {}),
-                  },
-                })}
-              />
-            </Form.Item>
-            <Form.Item label="网络权限">
-              <Select
-                aria-label="网络权限"
-                value={settings.sandbox_config.network_mode}
-                options={[
-                  { value: "no_network", label: "禁止网络" },
-                  { value: "restricted_network", label: "受限网络" },
-                  { value: "full_network", label: "完整网络" },
-                ]}
-                disabled={settings.sandbox_config.file_mode === "full_access"}
-                onChange={(network_mode) => updateSettings({ sandbox_config: { ...settings.sandbox_config, network_mode } })}
-              />
-            </Form.Item>
-            <Form.Item label="受限网络白名单">
-              <Space.Compact block>
-                <Input
-                  aria-label="白名单域名"
-                  placeholder="example.com"
-                  value={sandboxHostDraft}
-                  onChange={(event) => setSandboxHostDraft(event.target.value)}
-                />
-                <InputNumber
-                  aria-label="白名单端口"
-                  min={1}
-                  max={65535}
-                  precision={0}
-                  value={sandboxPortDraft}
-                  onChange={setSandboxPortDraft}
-                />
-                <Button
-                  onClick={() => {
-                    const host = sandboxHostDraft.trim().toLowerCase();
-                    if (!host || sandboxPortDraft == null || !Number.isInteger(sandboxPortDraft)) return;
-                    const exists = settings.sandbox_config.network_allowlist.some(
-                      (rule) => rule.host === host && rule.port === sandboxPortDraft,
-                    );
-                    if (exists) return;
-                    updateSettings({
-                      sandbox_config: {
-                        ...settings.sandbox_config,
-                        network_allowlist: [...settings.sandbox_config.network_allowlist, { host, port: sandboxPortDraft }],
-                      },
-                    });
-                    setSandboxHostDraft("");
-                  }}
-                >添加</Button>
-              </Space.Compact>
-              <List
-                size="small"
-                dataSource={settings.sandbox_config.network_allowlist}
-                locale={{ emptyText: "暂无白名单规则" }}
-                renderItem={(rule) => (
-                  <List.Item actions={[
-                    <Button
-                      key={`${rule.host}:${rule.port}`}
-                      type="link"
-                      danger
-                      onClick={() => updateSettings({
-                        sandbox_config: {
-                          ...settings.sandbox_config,
-                          network_allowlist: settings.sandbox_config.network_allowlist.filter(
-                            (item) => item.host !== rule.host || item.port !== rule.port,
-                          ),
-                        },
-                      })}
-                    >删除</Button>,
-                  ]}>
-                    {rule.host}:{rule.port}
-                  </List.Item>
-                )}
-              />
-            </Form.Item>
-            <Space wrap>
-              <Form.Item label="墙钟秒数"><InputNumber aria-label="墙钟秒数" min={1} max={300} value={settings.sandbox_config.limits.wall_seconds} onChange={(wall_seconds) => wall_seconds != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, wall_seconds } } })} /></Form.Item>
-              <Form.Item label="CPU 秒数"><InputNumber aria-label="CPU 秒数" min={1} max={300} value={settings.sandbox_config.limits.cpu_seconds} onChange={(cpu_seconds) => cpu_seconds != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, cpu_seconds } } })} /></Form.Item>
-              <Form.Item label="内存 MiB"><InputNumber aria-label="内存 MiB" min={128} max={4096} value={settings.sandbox_config.limits.memory_mib} onChange={(memory_mib) => memory_mib != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, memory_mib } } })} /></Form.Item>
-              <Form.Item label="进程数"><InputNumber aria-label="进程数" min={1} max={256} value={settings.sandbox_config.limits.processes} onChange={(processes) => processes != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, processes } } })} /></Form.Item>
-              <Form.Item label="句柄数"><InputNumber aria-label="句柄数" min={64} max={16384} value={settings.sandbox_config.limits.handles} onChange={(handles) => handles != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, handles } } })} /></Form.Item>
-              <Form.Item label="输出字符数"><InputNumber aria-label="输出字符数" min={1000} max={20000} value={settings.sandbox_config.limits.output_chars} onChange={(output_chars) => output_chars != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, output_chars } } })} /></Form.Item>
-              <Form.Item label="磁盘写入 MiB"><InputNumber aria-label="磁盘写入 MiB" min={0} max={20480} value={settings.sandbox_config.limits.disk_mib} onChange={(disk_mib) => disk_mib != null && updateSettings({ sandbox_config: { ...settings.sandbox_config, limits: { ...settings.sandbox_config.limits, disk_mib } } })} /></Form.Item>
-            </Space>
-            <Alert
-              type={brokerStatus?.healthy ? "success" : "warning"}
-              showIcon
-              title={brokerStatus?.healthy ? "Broker 已就绪" : "Broker 未就绪"}
-              description={brokerStatus?.detail ?? "严格沙箱初始化失败时不会降级到普通进程。"}
-              action={<Space><Button autoInsertSpace={false} size="small" loading={brokerAction === "install"} onClick={() => void runBrokerAction("install")}>安装</Button><Button autoInsertSpace={false} size="small" loading={brokerAction === "repair"} onClick={() => void runBrokerAction("repair")}>修复</Button></Space>}
-            />
           </Form>
         )}
         {section === "provider_add" && (

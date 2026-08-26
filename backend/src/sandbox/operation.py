@@ -46,9 +46,16 @@ def sandbox_operation(context: ToolHookContext) -> HookOperationResult:
         _publish(context, "approval_granted", request.message, request.data)
 
     execution_data: dict[str, object] = {}
-    sandbox_decision = _command_decision(context)
-    if sandbox_decision is not None:
-        execution_data["sandbox_decision"] = sandbox_decision
+    if context.name == "run_command":
+        if (
+            not isinstance(context.sandbox_launcher, SandboxLauncher)
+            or context.sandbox_config.get("enabled") is not True
+        ):
+            return HookOperationResult.reject(
+                "Command execution is unavailable because the Sandbox runtime is not healthy.",
+                {"failure_code": "sandbox_unavailable"},
+            )
+        execution_data["sandbox_decision"] = _command_decision(context)
     return HookOperationResult.continue_execution(execution_data)
 
 
@@ -71,11 +78,8 @@ def _approval_request(context: ToolHookContext) -> InterruptRequest:
     )
 
 
-def _command_decision(context: ToolHookContext) -> SandboxExecutionDecision | None:
-    if context.name != "run_command" or not isinstance(context.sandbox_launcher, SandboxLauncher):
-        return None
-    if not bool(context.sandbox_config.get("enabled", True)):
-        return None
+def _command_decision(context: ToolHookContext) -> SandboxExecutionDecision:
+    assert isinstance(context.sandbox_launcher, SandboxLauncher)
     raw_limits = context.sandbox_config.get("limits")
     limits = SandboxLimits.from_mapping(raw_limits if isinstance(raw_limits, Mapping) else None)
     return SandboxExecutionDecision(

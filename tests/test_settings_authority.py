@@ -168,6 +168,20 @@ def test_user_settings_are_isolated_and_api_keys_are_not_returned(tmp_path) -> N
     assert first.model_config_for_user(first_id).api_key == "secret-key"
 
 
+def test_legacy_disabled_sandbox_is_migrated_to_mandatory_enabled(tmp_path: Path) -> None:
+    user_id = str(uuid4())
+    store = UserSettingsStore(tmp_path / user_id / "user.db")
+    current = store.sandbox_config_for_user(user_id)
+    store.config_store.update({"sandbox": {**current, "enabled": False}})
+
+    migrated = store.sandbox_config_for_user(user_id)
+
+    assert migrated["enabled"] is True
+    assert store.config_store.read()["sandbox"]["enabled"] is True
+    with pytest.raises(ValueError, match="cannot be disabled"):
+        store.update_sandbox_config(user_id, {"enabled": False})
+
+
 def test_legacy_profile_is_migrated_to_user_db_once(tmp_path: Path) -> None:
     user_id = str(uuid4())
     root = tmp_path / user_id

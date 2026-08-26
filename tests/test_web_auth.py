@@ -219,6 +219,7 @@ def test_runtime_config_defaults_validates_and_persists_per_user(tmp_path: Path)
             "max_tool_calls": 32,
             "terminal_type": "cmd",
         }
+        assert settings["sandbox_config"]["enabled"] is True
         assert {option["value"] for option in settings["terminal_options"]} >= {"cmd"}
         assert settings["terminal_notice"] is None
 
@@ -233,6 +234,9 @@ def test_runtime_config_defaults_validates_and_persists_per_user(tmp_path: Path)
         for value in (0, 1001, True, "32"):
             response = client.put("/api/auth/runtime-config", json={"max_tool_calls": value})
             assert response.status_code == 422
+
+        disabled = client.put("/api/auth/sandbox-config", json={"enabled": False})
+        assert disabled.status_code == 422
 
 
 def test_runtime_config_accepts_each_detected_terminal(tmp_path: Path, monkeypatch) -> None:

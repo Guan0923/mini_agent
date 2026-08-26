@@ -47,7 +47,7 @@ DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {}
 DEFAULT_RUNTIME_CONFIG: dict[str, object] = {"max_tool_calls": 32, "terminal_type": DEFAULT_TERMINAL_TYPE}
 DEFAULT_SANDBOX_CONFIG: dict[str, object] = {
     "policy_version": 2,
-    "enabled": False,
+    "enabled": True,
     "file_mode": PermissionMode.READ_ONLY.value,
     "network_mode": NetworkMode.NO_NETWORK.value,
     "network_allowlist": [],
@@ -82,9 +82,11 @@ def normalize_sandbox_config(
         result.update(current_values)
     if isinstance(values, Mapping):
         result.update(values)
-    enabled = result.get("enabled", False)
+    enabled = result.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ValueError("sandbox enabled must be a boolean")
+    if isinstance(values, Mapping) and values.get("enabled") is False:
+        raise ValueError("sandbox cannot be disabled")
     file_mode = normalize_permission_mode(result.get("file_mode"))
     network_mode = str(result.get("network_mode") or NetworkMode.NO_NETWORK.value)
     try:
@@ -123,7 +125,7 @@ def normalize_sandbox_config(
     limits = SandboxLimits.from_mapping(result.get("limits") if isinstance(result.get("limits"), Mapping) else None)
     return {
         "policy_version": 2,
-        "enabled": enabled,
+        "enabled": True,
         "file_mode": file_mode.value,
         "network_mode": network.value,
         "network_allowlist": allowlist,

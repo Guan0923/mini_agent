@@ -19,6 +19,7 @@ from backend.runtime.capability_settings import SubagentSettings
 from backend.runtime.core.context import AgentRuntime
 from backend.runtime.subagent_bridge import ParentRuntimeBridge
 from backend.runtime.subagents import SubagentCoordinator
+from backend.sandbox import BrokerStatus, SandboxInitializationError, SandboxLauncher
 from backend.tools import ToolError, ToolRegistry
 from backend.tools.filesystem import normalized_workspace_path
 
@@ -70,7 +71,7 @@ def test_user_mcp_servers_are_started_and_project_file_is_ignored(tmp_path: Path
     workspace.mkdir()
     started: list[tuple] = []
 
-    def start(configs, _settings):
+    def start(configs, _settings, **_kwargs):
         started.append(configs)
         return mcp_client.ExternalMcpResources()
 
@@ -81,10 +82,52 @@ def test_user_mcp_servers_are_started_and_project_file_is_ignored(tmp_path: Path
     assert started == [()]
 
     _write_mcp(paths.mcp_file, plaintext=False)
-    app_factory._external_resources(workspace, paths, {})
+    app_factory._external_resources(
+        workspace,
+        paths,
+        {},
+        sandbox_launcher=SandboxLauncher(is_windows=False, allow_local_backend=True),
+        sandbox_config={"enabled": True},
+    )
     assert len(started) == 2
     assert len(started[1]) == 1
     assert started[1][0].name == "demo"
+
+
+def test_external_mcp_server_cannot_start_without_sandbox(tmp_path: Path, monkeypatch) -> None:
+    paths = ClientPaths(tmp_path / "home")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_mcp(paths.mcp_file, plaintext=False)
+    monkeypatch.setattr(
+        app_factory,
+        "start_external_tools",
+        lambda *_args, **_kwargs: pytest.fail("MCP process must not start"),
+    )
+
+    with pytest.raises(SandboxInitializationError, match="require a healthy Sandbox"):
+        app_factory._external_resources(workspace, paths, {})
+
+
+def test_sandbox_runtime_requires_healthy_broker_and_migrates_disabled_config(monkeypatch) -> None:
+    class Broker:
+        def __init__(self, status: BrokerStatus) -> None:
+            self._status = status
+
+        def status(self) -> BrokerStatus:
+            return self._status
+
+    unhealthy = Broker(BrokerStatus(installed=True, healthy=False))
+    monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda: unhealthy)
+    with pytest.raises(SandboxInitializationError, match="unavailable or unhealthy"):
+        app_factory._sandbox_runtime({})
+
+    healthy = Broker(BrokerStatus(installed=True, healthy=True))
+    monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda: healthy)
+    launcher, config = app_factory._sandbox_runtime({"sandbox_config": {"policy_version": 2, "enabled": False}})
+
+    assert isinstance(launcher, SandboxLauncher)
+    assert config["enabled"] is True
 
 
 def test_mcp_trust_store_is_compat_noop(tmp_path: Path) -> None:

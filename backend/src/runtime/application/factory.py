@@ -19,12 +19,14 @@ from backend.sandbox import (
     NetworkRule,
     PermissionMode,
     SandboxAdmission,
+    SandboxInitializationError,
     SandboxLauncher,
     SandboxLimits,
     SandboxPolicy,
     WindowsBrokerClient,
 )
 from backend.skills import ProjectSkillGate, ProjectSkillTrustStore, SkillCatalog
+from backend.storage.settings_contract import normalize_sandbox_config
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.sync import RequestsSyncTransport, SyncClient, SyncCoordinator
 from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry, delegation_tools
@@ -332,6 +334,9 @@ def _external_resources(
     sandbox_user_id: str | None = None,
 ) -> ExternalMcpResources:
     plan = prepare_mcp_plan(paths)
+    servers = plan.effective_servers()
+    if servers and (sandbox_launcher is None or sandbox_config is None):
+        raise SandboxInitializationError("External MCP tools require a healthy Sandbox runtime.")
     kwargs = {}
     if job_registry is not None:
         kwargs["job_registry"] = job_registry
@@ -345,21 +350,21 @@ def _external_resources(
             config=sandbox_config,
         )
         kwargs["sandbox_user_id"] = sandbox_user_id
-    return start_external_tools(plan.effective_servers(), McpSettings.from_config(config), **kwargs)
+    return start_external_tools(servers, McpSettings.from_config(config), **kwargs)
 
 
-def _sandbox_runtime(config: dict[str, object]) -> tuple[SandboxLauncher | None, dict[str, object] | None]:
-    """Build the process launcher only when the local sandbox switch is on."""
+def _sandbox_runtime(config: dict[str, object]) -> tuple[SandboxLauncher, dict[str, object]]:
+    """Build the mandatory process launcher or fail before a Runner can be used."""
 
     raw = config.get("sandbox_config")
     if not isinstance(raw, dict):
         raw = config.get("sandbox") if isinstance(config.get("sandbox"), dict) else None
-    if not isinstance(raw, dict):
-        return None, None
-    normalized = dict(raw)
-    if not bool(normalized.get("enabled", False)):
-        return None, None
-    return SandboxLauncher(broker=WindowsBrokerClient.from_system(), admission=SandboxAdmission()), normalized
+    normalized = normalize_sandbox_config(raw) if isinstance(raw, dict) else normalize_sandbox_config()
+    broker = WindowsBrokerClient.from_system()
+    status = broker.status()
+    if not status.installed or not status.healthy:
+        raise SandboxInitializationError("Windows Sandbox Broker is unavailable or unhealthy.")
+    return SandboxLauncher(broker=broker, admission=SandboxAdmission()), normalized
 
 
 def _sandbox_policy_factory(workspace: Path, *, session_id: str, config: dict[str, object]):

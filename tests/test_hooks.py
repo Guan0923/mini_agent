@@ -294,6 +294,51 @@ def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(tmp_
     assert launcher._temp_dirs == {}
 
 
+def test_command_without_sandbox_launcher_is_rejected_before_handler() -> None:
+    calls: list[str] = []
+
+    class CommandPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def decide(self, _runtime):
+            self.calls += 1
+            if self.calls == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="run_command",
+                            call_id="call_without_sandbox",
+                            arguments={"command": "must-not-run"},
+                        )
+                    ]
+                )
+            return AssistantMessage(content="done")
+
+    tools = ToolRegistry(
+        [
+            Tool(
+                "run_command",
+                "command",
+                lambda command: calls.append(command) or "unexpected",
+                parameters={
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+                read_only=False,
+            )
+        ]
+    )
+    runner = AgentRunner(CommandPlanner(), tools)
+
+    result = runner.run(runner.new_runtime(task="run command without sandbox"))
+
+    assert calls == []
+    assert result.actions[0].status == "failed"
+    assert "Sandbox runtime is not healthy" in (result.actions[0].content or "")
+
+
 def test_real_sandbox_command_timeout_cleans_process_resources(tmp_path: Path) -> None:
     launcher = SandboxLauncher(is_windows=os.name == "nt", allow_local_backend=True, environment=os.environ)
     decision = SandboxExecutionDecision(

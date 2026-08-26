@@ -88,14 +88,6 @@ export interface SandboxConfig {
   full_access_acknowledged?: boolean;
 }
 
-export interface SandboxBrokerStatus {
-  installed: boolean;
-  healthy: boolean;
-  version?: string | null;
-  installation_id?: string | null;
-  detail?: string | null;
-}
-
 export type TerminalType = "cmd" | "git_bash" | "powershell" | "pwsh" | "wsl";
 
 export interface TerminalOption {
@@ -137,26 +129,6 @@ export async function updateRuntimeConfig(config: RuntimeConfig): Promise<Runtim
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
-}
-
-export async function updateSandboxConfig(config: SandboxConfig): Promise<SandboxConfig> {
-  return requestJson<SandboxConfig>("/api/auth/sandbox-config", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config),
-  });
-}
-
-export async function getSandboxStatus(): Promise<SandboxBrokerStatus> {
-  return requestJson<SandboxBrokerStatus>("/api/sandbox/status");
-}
-
-export async function installSandboxBroker(): Promise<SandboxBrokerStatus> {
-  return requestJson<SandboxBrokerStatus>("/api/sandbox/install", { method: "POST" });
-}
-
-export async function repairSandboxBroker(): Promise<SandboxBrokerStatus> {
-  return requestJson<SandboxBrokerStatus>("/api/sandbox/repair", { method: "POST" });
 }
 
 export async function updateProviderConfig(

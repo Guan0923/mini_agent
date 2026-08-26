@@ -550,7 +550,7 @@ class AuthSettingsMixin:
         config = self._config(user_id)
         raw = config.get("sandbox")
         result = normalize_sandbox_config(raw if isinstance(raw, Mapping) else DEFAULT_SANDBOX_CONFIG)
-        if isinstance(raw, Mapping) and raw.get("policy_version") != 2:
+        if isinstance(raw, Mapping) and (raw.get("policy_version") != 2 or raw.get("enabled") is not True):
             config_store = self._config_store(user_id)
             if config_store is not None:
                 config_store.update({"sandbox": result})
