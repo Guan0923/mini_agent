@@ -11,7 +11,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: "python ../tests/support/turn_e2e_server.py",
+      command: "uv run --project .. python ../tests/support/turn_e2e_server.py",
       url: "http://127.0.0.1:18080/api/health",
       env: {
         MINI_AGENT_E2E_PORT: "18080",

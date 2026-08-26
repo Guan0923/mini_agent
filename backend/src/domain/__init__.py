@@ -2,6 +2,7 @@
 
 from .errors import ModelOutputError, PlanningError
 from .messages import (
+    CHECKPOINT_PREAMBLE,
     AssistantMessage,
     ChatMessage,
     Message,
@@ -91,6 +92,7 @@ from .state import (
 __all__ = [
     "AgentAction",
     "AssistantMessage",
+    "CHECKPOINT_PREAMBLE",
     "APP_VERSION",
     "ChatMessage",
     "CONTENT_BLOCK_TYPES",

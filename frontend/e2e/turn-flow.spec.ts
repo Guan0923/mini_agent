@@ -58,7 +58,9 @@ test("real Turn SSE flow supports tools, rewind versions, fork, and compact", as
     response.request().method() === "POST" && response.url().endsWith("/compact"),
   );
   await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "正在执行compaction操作中" })).toBeVisible();
   expect((await compactResponse).ok()).toBeTruthy();
+  await expect(page.getByText("正在执行compaction操作中")).toHaveCount(0);
   await expect(page.getByText("上下文已压缩", { exact: false })).toBeVisible();
 });
 

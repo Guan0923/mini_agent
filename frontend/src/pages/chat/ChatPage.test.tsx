@@ -1,10 +1,17 @@
 import { App as AntApp } from "antd";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { projectTurnPath } from "../../app/runtimeDetailProjection";
+import { compactTurn } from "../../api";
 import type { Conversation, RuntimeStateNode } from "../../types";
 import ChatPage from "./ChatPage";
+
+vi.mock("../../api", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../api")>(),
+  compactTurn: vi.fn(),
+}));
 
 function turn(id: string, userText: string, parent?: RuntimeStateNode): RuntimeStateNode {
   return {
@@ -41,7 +48,15 @@ function turn(id: string, userText: string, parent?: RuntimeStateNode): RuntimeS
   };
 }
 
-function Harness({ onRun, onRewind }: { onRun: ReturnType<typeof vi.fn>; onRewind: ReturnType<typeof vi.fn> }) {
+function Harness({
+  onRun,
+  onRewind,
+  onReload = vi.fn(),
+}: {
+  onRun: ReturnType<typeof vi.fn>;
+  onRewind: ReturnType<typeof vi.fn>;
+  onReload?: ReturnType<typeof vi.fn>;
+}) {
   const root = turn("turn-root", "root");
   const target = turn("turn-target", "target", root);
   const descendant = turn("turn-descendant", "descendant", target);
@@ -68,6 +83,7 @@ function Harness({ onRun, onRewind }: { onRun: ReturnType<typeof vi.fn>; onRewin
         onNavigate={() => undefined}
         onEnsureSession={async () => conversation.sessionId!}
         onRewind={onRewind}
+        onReload={onReload}
         onRun={async (request) => { onRun(request); }}
       />
       <output data-testid="runtime-node-ids">{conversation.runtimeNodes?.map((node) => node.id).join(",")}</output>
@@ -78,7 +94,10 @@ function Harness({ onRun, onRewind }: { onRun: ReturnType<typeof vi.fn>; onRewin
 }
 
 describe("ChatPage rewind projection", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(compactTurn).mockReset();
+  });
 
   it("prunes descendants only when the edited message is submitted for rewind", async () => {
     const nativeGetComputedStyle = window.getComputedStyle.bind(window);
@@ -130,5 +149,46 @@ describe("ChatPage rewind projection", () => {
     expect(screen.getByTestId("active-turn-id")).toHaveTextContent("turn-target");
     expect(screen.getByTestId("visible-message-text")).toHaveTextContent("root|root-answer|target");
     expect(screen.getByTestId("visible-message-text")).not.toHaveTextContent("descendant");
+  });
+
+  it("shows an accessible shimmer while Compact is pending and reloads on success", async () => {
+    const user = userEvent.setup();
+    const onReload = vi.fn().mockResolvedValue(undefined);
+    let resolveCompact!: (value: RuntimeStateNode) => void;
+    vi.mocked(compactTurn).mockReturnValue(new Promise((resolve) => { resolveCompact = resolve; }));
+    render(<Harness onRun={vi.fn()} onRewind={vi.fn()} onReload={onReload} />);
+
+    await user.type(screen.getByLabelText("聊天输入"), "/compact");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    const status = await screen.findByText("正在执行compaction操作中");
+    const progress = status.closest(".runtime-compaction-progress");
+    expect(progress).not.toBeNull();
+    expect(progress).toHaveAttribute("role", "status");
+    expect(progress).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveTextContent("正在执行compaction操作中");
+    expect(progress?.querySelector(".shimmer-text.is-active")).not.toBeNull();
+    expect(vi.mocked(compactTurn)).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText("聊天输入")).toHaveAttribute("contenteditable", "false");
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(vi.mocked(compactTurn)).toHaveBeenCalledTimes(1);
+
+    resolveCompact(turn("turn-compact", "compact"));
+    await waitFor(() => expect(screen.queryByText("正在执行compaction操作中")).toBeNull());
+    expect(onReload).toHaveBeenCalledWith("session-rewind", "turn-compact");
+    expect(vi.mocked(compactTurn)).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes the Compact shimmer and surfaces the request failure", async () => {
+    const user = userEvent.setup();
+    vi.mocked(compactTurn).mockRejectedValue(new Error("summary provider failed"));
+    render(<Harness onRun={vi.fn()} onRewind={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("聊天输入"), "/compact");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => expect(screen.queryByText("正在执行compaction操作中")).toBeNull());
+    expect(screen.getByText("⚠️ 压缩失败：summary provider failed", { selector: "p" })).toBeVisible();
   });
 });

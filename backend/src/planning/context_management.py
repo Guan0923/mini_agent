@@ -7,12 +7,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from backend.domain import AssistantMessage, ChatMessage, PlanningError, SystemMessage, ToolSpec, UserMessage
+from backend.domain import (
+    CHECKPOINT_PREAMBLE,
+    AssistantMessage,
+    ChatMessage,
+    PlanningError,
+    SystemMessage,
+    ToolSpec,
+    UserMessage,
+)
 from backend.runtime.core.context import AgentRuntime
 from backend.runtime.core.events import RuntimeEvent
 
 _CONTEXT_SUMMARY_NAME = "context_summary"
-_CONTEXT_SUMMARY_PREFIX = "[Conversation summary]"
 _DEFAULT_TARGET_RATIO = 0.8
 
 
@@ -211,7 +218,7 @@ class ContextManager:
             if not summary:
                 raise PlanningError("Context summarization returned no content.")
             compressed = [
-                SystemMessage(name=_CONTEXT_SUMMARY_NAME, content=f"{_CONTEXT_SUMMARY_PREFIX}\n{summary}"),
+                SystemMessage(name=_CONTEXT_SUMMARY_NAME, content=f"{CHECKPOINT_PREAMBLE}\n\n{summary}"),
                 *retained,
             ]
             estimated_after = estimate_candidate(compressed)

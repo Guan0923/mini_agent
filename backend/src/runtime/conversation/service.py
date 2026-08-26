@@ -14,6 +14,7 @@ from backend.domain import (
     RunMode,
     RunProvenance,
     RunState,
+    RuntimeStateNode,
     RunTrigger,
     Session,
     SkillSnapshot,
@@ -76,14 +77,23 @@ class ConversationService(ConversationSessionController):
         self.runtime_node_bridge = bridge
         self._node_bridge_events_external = events_external
 
-    def compact_context(self):
+    def compact_context(
+        self,
+        *,
+        source_node_id: str | None = None,
+        compact_turn_id: str | None = None,
+    ):
         """Compact an idle conversation through the canonical message-tree bridge."""
 
         if self.runtime is None:
             return super().compact_context()
         bridge = self.runtime_node_bridge
         if bridge is None or bridge.closed:
-            bridge = self._node_bridge_for_runtime("")
+            bridge = self._node_bridge_for_runtime(
+                "",
+                source_node_id=source_node_id,
+                compaction_turn_id=compact_turn_id,
+            )
             self.runtime_node_bridge = bridge
             self._node_bridge_events_external = False
         previous_on_event = self.runtime.services.on_event
@@ -100,6 +110,8 @@ class ConversationService(ConversationSessionController):
         canonical_context = bool(self.runtime.model_nodes())
         try:
             result = super().compact_context()
+            if result.compacted and bridge is not None and bridge.finish("success") is None:
+                raise RuntimeError("Compaction Turn could not be finalized.")
         finally:
             self.runtime.services.on_event = previous_on_event
             if bridge is not None:
@@ -117,10 +129,30 @@ class ConversationService(ConversationSessionController):
         self.conversation = text_messages(self.runtime.state.messages)
         return result
 
+    def compact_turn(self, source_node_id: str, compact_turn_id: str) -> RuntimeStateNode:
+        """Create one finalized Compaction Turn from an exact source Turn."""
+
+        result = self.compact_context(
+            source_node_id=source_node_id,
+            compact_turn_id=compact_turn_id,
+        )
+        if not result.compacted or self.session_store is None or self.active_session is None:
+            raise RuntimeError("Conversation context did not produce a Compaction Turn.")
+        getter = getattr(self.session_store, "get_node", None)
+        if not callable(getter):
+            raise RuntimeError("The Turn store cannot load the completed Compaction Turn.")
+        compacted = getter(self.active_session.session_id, compact_turn_id)
+        if not isinstance(compacted, RuntimeStateNode) or compacted.status != "success":
+            raise RuntimeError("The completed Compaction Turn is unavailable.")
+        return compacted
+
     def _node_bridge_for_runtime(
         self,
         prompt: str,
         references: list[Mapping[str, str]] | None = None,
+        *,
+        source_node_id: str | None = None,
+        compaction_turn_id: str | None = None,
     ) -> RuntimeEventNodeBridge | None:
         """Create a local bridge from the latest durable node configuration."""
 
@@ -135,8 +167,13 @@ class ConversationService(ConversationSessionController):
         # the legacy RuntimeState checkpoint still has older compatibility
         # fields.  A provider client supplies defaults for an empty session.
         latest = None
+        if source_node_id:
+            getter = getattr(store, "get_node", None)
+            latest = getter(session.session_id, source_node_id) if callable(getter) else None
+            if latest is None:
+                raise ValueError("Unknown source Turn.")
         loader = getattr(store, "load_nodes", None)
-        if callable(loader):
+        if latest is None and callable(loader):
             nodes = list(loader(session.session_id))
             if nodes:
                 parent_keys = {(node.parent_session_id, node.parent_id) for node in nodes if node.parent_id}
@@ -167,6 +204,9 @@ class ConversationService(ConversationSessionController):
         return RuntimeEventNodeBridge(
             store,
             session_id=session.session_id,
+            thread_id=latest.thread_id if latest is not None else session.session_id,
+            source_node_id=latest.id if source_node_id and latest is not None else None,
+            compaction_turn_id=compaction_turn_id,
             prompt=prompt,
             user=str(getattr(self.runtime.state, "user", "") or ""),
             provider_name=provider_name,

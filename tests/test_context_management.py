@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from backend.configuration import ClientPaths
 from backend.domain import (
+    CHECKPOINT_PREAMBLE,
     AssistantMessage,
     PlanningError,
     RunState,
@@ -17,12 +19,38 @@ from backend.domain import (
 )
 from backend.planning.context_management import ContextManager
 from backend.planning.llm import LLMPlanner
+from backend.planning.llm.requests import COMPACTION_INSTRUCTION
 from backend.planning.rule_based import RuleBasedPlanner
 from backend.providers import ChatCompletions, ModelConfig, ModelConfigurationError
-from backend.runtime import AgentRunner
+from backend.runtime import AgentRunner, ConversationService
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 from backend.runtime.core.events import CHECKPOINT_EVENT_KINDS
+from backend.storage.sqlite import SQLiteSessionStore
 from backend.tools import ToolRegistry
+
+STRUCTURED_CHECKPOINT = """## Primary Request and Intent
+- Keep the exact user goal.
+
+## Key Technical Concepts
+- RuntimeState Turn tree
+
+## Files and Code
+- backend/src/planning/llm/requests.py: compaction prompt
+
+## Errors and Fixes
+- (none)
+
+## Pending Jobs
+- Run focused tests.
+
+## Current Work
+- Unifying manual and automatic compaction.
+
+## Next Step
+- Verify the Compaction Turn.
+
+## Critical Context
+- Preserve the last 8 Items."""
 
 
 @dataclass
@@ -98,7 +126,7 @@ def test_automatic_compaction_compresses_only_completed_history() -> None:
 
     assert transcripts and "old question" in transcripts[0] and "old answer" in transcripts[0]
     assert runtime.state.messages == [
-        SystemMessage(name="context_summary", content="[Conversation summary]\nold exchange summary"),
+        SystemMessage(name="context_summary", content=f"{CHECKPOINT_PREAMBLE}\n\nold exchange summary"),
         UserMessage(content="current"),
     ]
     assert runtime.run.turn_start_index == 1
@@ -203,7 +231,7 @@ def test_manual_compaction_summarizes_all_finished_history_and_tool_results() ->
     assert result.remaining_messages == 1
     assert transcripts and all(value in transcripts[0] for value in ("search", "found", "denied", "outcome unknown"))
     assert runtime.state.messages == [
-        SystemMessage(name="context_summary", content="[Conversation summary]\ndurable summary"),
+        SystemMessage(name="context_summary", content=f"{CHECKPOINT_PREAMBLE}\n\ndurable summary"),
     ]
     assert runtime.run.turn_start_index == 1
     assert [event.kind for event in runtime.run.events] == [
@@ -356,8 +384,74 @@ def test_llm_planner_runs_non_streaming_summary_before_normal_request() -> None:
 
     assert response.content == "final"
     assert client.operations == [("summarize", False), ("decision", True)]
-    assert client.summary_prompt is not None and "CONTEXT CHECKPOINT COMPACTION" in client.summary_prompt
+    assert client.summary_prompt is not None and "acting as a compaction engine" in client.summary_prompt
     assert runtime.state.turn_usage == {"total_tokens": 9}
+
+
+def test_compaction_instruction_requires_every_checkpoint_section_in_order() -> None:
+    headings = [
+        "## Primary Request and Intent",
+        "## Key Technical Concepts",
+        "## Files and Code",
+        "## Errors and Fixes",
+        "## Pending Jobs",
+        "## Current Work",
+        "## Next Step",
+        "## Critical Context",
+    ]
+
+    positions = [COMPACTION_INSTRUCTION.index(heading) for heading in headings]
+    assert positions == sorted(positions)
+    assert 'Write "(none)" for an empty section' in COMPACTION_INSTRUCTION
+    assert CHECKPOINT_PREAMBLE in COMPACTION_INSTRUCTION
+
+
+class StructuredCompactionClient:
+    context_size = 100_000
+
+    def __init__(self) -> None:
+        self.operations: list[str | None] = []
+
+    def estimate_tokens(self, messages, tools, request_parameters) -> int:
+        return 100
+
+    def run(self, runtime: AgentRuntime) -> PreparedResponse:
+        self.operations.append(runtime.exchange.operation)
+        content = STRUCTURED_CHECKPOINT if runtime.exchange.operation == "summarize" else "initial answer"
+        return PreparedResponse(AssistantMessage(content=content), {"total_tokens": 1})
+
+
+def test_conversation_compact_turn_uses_llm_summary_and_finalizes_exact_source(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    client = StructuredCompactionClient()
+    service = ConversationService(
+        AgentRunner(LLMPlanner(client, [], []), ToolRegistry(tmp_path / "workspace")),
+        store,
+    )
+
+    completed = service.run_task("preserve this request", mode="agent")
+    assert completed.status == "completed"
+    assert service.active_session is not None
+    source = store.load_nodes(service.active_session.session_id)[-1]
+
+    compacted = service.compact_turn(source.id, "turn_structured_compact")
+
+    assert client.operations == ["decision", "summarize"]
+    assert compacted.id == compacted.compaction_id == "turn_structured_compact"
+    assert compacted.parent_id == source.id
+    assert compacted.status == "success"
+    assert compacted.assistant_items[0] == {
+        "type": "compaction",
+        "summary": STRUCTURED_CHECKPOINT,
+        "kept_item_count": 2,
+    }
+    assert CHECKPOINT_PREAMBLE not in compacted.assistant_items[0]["summary"]
+    assert service.runtime is not None
+    projected = service.runtime.model_messages()
+    assert any(
+        isinstance(message, UserMessage) and message.content == f"{CHECKPOINT_PREAMBLE}\n\n{STRUCTURED_CHECKPOINT}"
+        for message in projected
+    )
 
 
 def test_rule_planner_rejects_manual_context_compaction() -> None:

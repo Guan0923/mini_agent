@@ -10,6 +10,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from backend.domain import (
+    CHECKPOINT_PREAMBLE,
     DEFAULT_TIME_ZONE,
     AssistantMessage,
     ChatMessage,
@@ -266,7 +267,7 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
         blocks = [item for item in assistant_raw.get("content", []) if isinstance(item, Mapping)]
         summary = next((str(item.get("summary") or "") for item in blocks if item.get("type") == "compaction"), "")
         if summary:
-            result.append(UserMessage(content=f"[compaction]\n{summary}"))
+            result.append(UserMessage(content=f"{CHECKPOINT_PREAMBLE}\n\n{summary}"))
         text_parts = [str(item.get("text") or "") for item in blocks if item.get("type") in {"text", "bash"}]
         reasoning_parts = [str(item.get("text") or "") for item in blocks if item.get("type") == "reasoning"]
         calls: dict[str, ToolMessage] = {}

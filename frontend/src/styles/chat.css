@@ -260,6 +260,11 @@
   font-size: 12.5px;
 }
 
+.runtime-compaction-progress {
+  color: #a8a9aa;
+  font-size: 12.5px;
+}
+
 .runtime-collapse.ant-collapse,
 .runtime-collapse .ant-collapse-item,
 .runtime-collapse .ant-collapse-panel,
