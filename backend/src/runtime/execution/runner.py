@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from time import perf_counter
 
 from backend.domain import (
@@ -23,14 +22,15 @@ from ..core.config import RunnerSettings
 from ..core.context import AgentRuntime, RuntimeServices, RuntimeState
 from ..core.events import RuntimeEvent
 from ..core.hooks import (
-    AgentHook,
-    HookCancellation,
+    HookErrorInfo,
     HookExecutionError,
-    HookManager,
     HookOutcome,
+    HookRejected,
     RunHookContext,
     RunHookInfo,
     RunHookResult,
+    after_run_hook_manager,
+    before_run_hook_manager,
 )
 from ..persistence.checkpointing import CheckpointStore
 from ..planning.mode import PlanModeWorkflow
@@ -50,7 +50,6 @@ class AgentRunner:
         tools: object,
         log_full_messages: bool = True,
         checkpoints: CheckpointStore | None = None,
-        hooks: Iterable[AgentHook] = (),
         max_tool_calls: int | None = None,
         max_transport_retries: int = 5,
         skill_catalog: object | None = None,
@@ -63,6 +62,9 @@ class AgentRunner:
         job_registry: JobRegistry | None = None,
         job_scope: JobScope | None = None,
         parent_job_id: str | None = None,
+        sandbox_launcher: object | None = None,
+        sandbox_config: dict[str, object] | None = None,
+        sandbox_user_id: str | None = None,
     ) -> None:
         self.planner = planner
         self.tools = tools
@@ -84,7 +86,9 @@ class AgentRunner:
             log_full_messages=log_full_messages,
         )
         self.checkpoints = checkpoints
-        self.hooks = HookManager(hooks)
+        self.sandbox_launcher = sandbox_launcher
+        self.sandbox_config = dict(sandbox_config or {})
+        self.sandbox_user_id = sandbox_user_id
         self._skills = SkillActivator(self.project_skill_gate)
         self._execution = ExecutionWorkflow()
         self._plan_mode = PlanModeWorkflow()
@@ -165,8 +169,10 @@ class AgentRunner:
             project_skill_gate=self.project_skill_gate,
             checkpoint_store=self.checkpoints,
             runtime_store=runtime_store,  # type: ignore[arg-type]
-            hooks=self.hooks,
             subagents=self.subagents,
+            sandbox_launcher=self.sandbox_launcher,
+            sandbox_config=self.sandbox_config,
+            sandbox_user_id=self.sandbox_user_id,
             provider_config_resolver=self.provider_config_resolver,
             job_scope=self.job_scope,
         )
@@ -181,8 +187,10 @@ class AgentRunner:
         runtime.services.skill_catalog = self.skill_catalog
         runtime.services.skill_auto_select = self.skill_auto_select
         runtime.services.project_skill_gate = self.project_skill_gate
-        runtime.services.hooks = self.hooks
         runtime.services.subagents = self.subagents
+        runtime.services.sandbox_launcher = self.sandbox_launcher
+        runtime.services.sandbox_config = self.sandbox_config
+        runtime.services.sandbox_user_id = self.sandbox_user_id
         runtime.services.provider_config_resolver = self.provider_config_resolver
         if runtime.services.job_scope is None and runtime.state.current_run is not None:
             runtime.services.job_scope = self.job_scope.child(
@@ -234,25 +242,39 @@ class AgentRunner:
             run.mode = runtime.state.running_mode  # type: ignore[assignment]
         run.history = runtime.state.messages
         publish = runtime.services.publish
-        context = RunHookContext(RunHookInfo(runtime.state.session_id, run.run_id, run.task, run.mode))
+        info = RunHookInfo(runtime.state.session_id, run.run_id, run.task, run.mode)
+        context = RunHookContext(info)
         try:
-            self.hooks.run_run(
-                context,
-                lambda _context: self._resume_dispatch(runtime) if resumed else self._dispatch(runtime),
-                lambda _result: HookOutcome(
-                    status=(
-                        "succeeded"
-                        if run.status == "completed"
-                        else run.status
-                        if run.status in {"failed", "cancelled"}
-                        else "failed"
+            before = before_run_hook_manager.execute(context, publish)
+            if before.decision == "reject":
+                raise HookRejected("run", before.reason or "Run rejected by hook.", before.data)
+            try:
+                if resumed:
+                    self._resume_dispatch(runtime)
+                else:
+                    self._dispatch(runtime)
+            except Exception as error:
+                after_run_hook_manager.execute(
+                    RunHookContext(
+                        info,
+                        HookOutcome(status="failed", error=HookErrorInfo.from_exception(error)),
                     ),
-                    result=RunHookResult(run.status, run.final_answer),
+                    publish,
+                )
+                raise
+            outcome = HookOutcome(
+                status=(
+                    "succeeded"
+                    if run.status == "completed"
+                    else run.status
+                    if run.status in {"failed", "cancelled"}
+                    else "failed"
                 ),
-                publish,
+                result=RunHookResult(run.status, run.final_answer),
             )
-        except HookCancellation:
-            cancel_run(runtime)
+            after_run_hook_manager.execute(RunHookContext(info, outcome), publish)
+        except HookRejected as exc:
+            cancel_run(runtime, message=exc.reason)
         except HookExecutionError as exc:
             fail_run(
                 runtime,

@@ -75,8 +75,8 @@ def build_user_application(
         "job_parent_id": job_parent_id,
         "sandbox_session_id": session_id,
     }
-    # Preserve compatibility with embedders/tests that inject the historical
-    # builder signature while still passing hooks to the canonical factory.
+    # Preserve compatibility with embedders/tests that accept only a subset
+    # of the canonical application builder options.
     try:
         signature = inspect.signature(application_builder)
     except (TypeError, ValueError):

@@ -15,6 +15,7 @@ from .broker_service import (
     WindowsNamedPipeServer,
     WindowsServiceInstaller,
 )
+from .decision import SandboxExecutionDecision
 from .errors import (
     BrokerInstallationError,
     BrokerInstallFailureCode,
@@ -84,6 +85,7 @@ __all__ = [
     "SandboxAdmission",
     "SandboxAdmissionTimeout",
     "SandboxError",
+    "SandboxExecutionDecision",
     "SandboxFailureCode",
     "SandboxInitializationError",
     "SandboxLauncher",

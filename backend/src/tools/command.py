@@ -27,14 +27,8 @@ from backend.jobs import (
     TreeTerminator,
 )
 from backend.sandbox import (
-    NetworkMode,
-    NetworkRule,
-    PermissionMode,
-    SandboxLauncher,
-    SandboxLimits,
-    SandboxPolicy,
+    SandboxExecutionDecision,
     TerminalKind,
-    normalize_permission_mode,
 )
 
 from .base import ToolError, ToolInvocationContext
@@ -74,18 +68,12 @@ class WorkspaceCommand:
         popen_factory: ProcessFactory | None = None,
         tree_terminator: TreeTerminator | None = None,
         environment: Mapping[str, str] | None = None,
-        sandbox_launcher: SandboxLauncher | None = None,
-        sandbox_config: Mapping[str, object] | None = None,
-        sandbox_user_id: str | None = None,
     ) -> None:
         self._workspace = workspace.resolve()
         self._is_windows = os.name == "nt" if is_windows is None else is_windows
         self._terminal_type = normalize_terminal_type(terminal_type)
         self._popen_factory = popen_factory
         self._tree_terminator = tree_terminator
-        self._sandbox_launcher = sandbox_launcher
-        self._sandbox_config = dict(sandbox_config or {})
-        self._sandbox_user_id = sandbox_user_id
         self._environment = self._filtered_environment(os.environ if environment is None else environment)
 
     def run(self, command: str, timeout_seconds: int = 30) -> str:
@@ -122,60 +110,20 @@ class WorkspaceCommand:
                 job_options["popen_factory"] = self._popen_factory
             job_id = parent_scope.registry.new_job_id()
             effective_timeout = timeout_seconds
-            if self._sandbox_launcher is not None and bool(self._sandbox_config.get("enabled", True)):
-                configured_file_mode = PermissionMode(
-                    str(self._sandbox_config.get("file_mode", PermissionMode.READ_ONLY.value))
-                )
-                requested_file_mode = context.permission_mode
-                file_mode = (
-                    normalize_permission_mode(requested_file_mode)
-                    if requested_file_mode is not None
-                    else configured_file_mode
-                )
-                network_mode = NetworkMode(str(self._sandbox_config.get("network_mode", NetworkMode.NO_NETWORK.value)))
-                raw_rules = self._sandbox_config.get("network_allowlist")
-                network_allowlist = (
-                    tuple(
-                        NetworkRule(str(item.get("host") or ""), int(item.get("port")))
-                        for item in raw_rules
-                        if isinstance(item, Mapping)
-                    )
-                    if isinstance(raw_rules, (list, tuple))
-                    else ()
-                )
-                limits = SandboxLimits.from_mapping(
-                    self._sandbox_config.get("limits")
-                    if isinstance(self._sandbox_config.get("limits"), Mapping)
-                    else None
-                )
-                if file_mode is PermissionMode.FULL_ACCESS:
-                    # Full access is a joint file/network decision. The
-                    # frontend confirmation is represented by the explicit
-                    # runtime mode and never persisted in the sandbox config.
-                    network_mode = NetworkMode.FULL_NETWORK
-                policy = SandboxPolicy(
-                    workspace=self._workspace,
-                    session_id=context.session_id or "runtime",
-                    job_id=job_id,
-                    file_mode=file_mode,
-                    network_mode=network_mode,
-                    network_allowlist=network_allowlist,
-                    limits=limits,
-                    terminal=TerminalKind(self._terminal_type),
-                    enforced=file_mode is not PermissionMode.FULL_ACCESS,
-                    full_access_acknowledged=file_mode is PermissionMode.FULL_ACCESS,
-                )
-                job_options["max_output_chars"] = limits.output_chars
-                effective_timeout = min(timeout_seconds, limits.wall_seconds)
-                sandbox_user_id = task_scope.owner.user_id or self._sandbox_user_id or "local"
-                job_options["popen_factory"] = self._sandbox_launcher.popen_factory(
+            decision = context.sandbox_decision
+            if isinstance(decision, SandboxExecutionDecision):
+                policy = decision.command_policy(job_id, TerminalKind(self._terminal_type))
+                job_options["max_output_chars"] = decision.limits.output_chars
+                effective_timeout = min(timeout_seconds, decision.limits.wall_seconds)
+                sandbox_user_id = task_scope.owner.user_id or decision.user_id
+                job_options["popen_factory"] = decision.launcher.popen_factory(
                     policy,
                     user_id=sandbox_user_id,
                     job_kind="command",
                 )
-                job_options["tree_terminator"] = self._sandbox_launcher.terminate_tree
+                job_options["tree_terminator"] = decision.launcher.terminate_tree
                 job_options["sandbox_policy"] = policy
-                job_options["sandbox_launcher"] = self._sandbox_launcher
+                job_options["sandbox_launcher"] = decision.launcher
             job = SubprocessJob(
                 job_id,
                 self._command_line(command),

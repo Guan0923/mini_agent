@@ -26,7 +26,6 @@ from backend.domain.state import utc_now
 
 from .config import RunnerSettings
 from .contracts import CancellationHandler, Confirm, EventHandler, InterruptHandler, SteeringHandler, SuspensionHandler
-from .hooks import HookManager
 from .ports import RuntimeStore
 
 RuntimeOperation = Literal[
@@ -326,8 +325,10 @@ class RuntimeServices:
     id_factory: Callable[[], str] = new_tool_call_id
     clock: Callable[[], str] = utc_now
     publish: EventHandler | None = None
-    hooks: HookManager = field(default_factory=HookManager)
     subagents: object | None = None
+    sandbox_launcher: object | None = None
+    sandbox_config: Mapping[str, Any] | None = None
+    sandbox_user_id: str | None = None
     # Optional authenticated-provider resolver.  It deliberately lives on the
     # non-serializable service bundle so provider credentials never enter a
     # RuntimeState/node or a sync snapshot.

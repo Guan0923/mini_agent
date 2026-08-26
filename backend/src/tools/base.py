@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from backend.domain import DEFAULT_TIME_ZONE, ToolSpec
 from backend.domain.state import utc_now
+from backend.sandbox import SandboxExecutionDecision
 
 
 class ToolError(Exception):
@@ -27,7 +28,7 @@ class ToolInvocationContext:
     clock: Callable[[], str] = utc_now
     job_scope: object | None = None
     cancel_requested: Callable[[], bool] | None = None
-    permission_mode: str | None = None
+    sandbox_decision: SandboxExecutionDecision | None = None
 
 
 ToolHandler = Callable[..., str]

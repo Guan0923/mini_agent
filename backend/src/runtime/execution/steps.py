@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 
+from backend.sandbox import SandboxExecutionDecision
 from backend.tools import ToolError, ToolInvocationContext
 
 from ..core.context import AgentRuntime
-from ..core.contracts import InterruptDecision, InterruptRequest
+from ..core.contracts import InterruptDecision
 from ..core.events import RuntimeEvent
 from ..core.hooks import (
-    HookCancellation,
     HookOutcome,
     RunHookInfo,
     ToolHookContext,
     ToolHookResult,
+    after_tool_hook_manager,
+    before_tool_hook_manager,
 )
 
 USER_DENIED_FAILURE_CODE = "user_denied"
@@ -51,12 +53,11 @@ class ToolStepExecutor:
             if run.mode == "plan" and not tools.is_read_only(tool):
                 return self._failure(runtime, tool, f"Read-only Plan mode blocked tool: {tool}")
             requires_confirmation = tools.requires_confirmation(tool)
-            # Permission is read at every tool boundary.  A full-access update
-            # bypasses approval even when the run was started in approval mode;
-            # switching back to approval is handled by the same live check.
-            if runtime.state.permission_mode == "full_access":
-                requires_confirmation = False
+            read_only = tools.is_read_only(tool)
             retryable = tools.is_retryable(tool)
+            validate = getattr(tools, "validate_arguments", None)
+            if callable(validate):
+                validate(tool, tool_message.arguments)
         except ToolError as exc:
             return self._failure(runtime, tool, str(exc))
 
@@ -64,41 +65,43 @@ class ToolStepExecutor:
             run=RunHookInfo(runtime.state.session_id, run.run_id, run.task, run.mode),
             call_id=tool_message.call_id,
             name=tool,
-            arguments=dict(tool_message.arguments),
+            arguments=tool_message.arguments,
+            workspace_root=runtime.state.workspace_root or "",
+            permission_mode=runtime.state.permission_mode,
+            requires_confirmation=requires_confirmation,
+            read_only=read_only,
+            sandbox_launcher=runtime.services.sandbox_launcher,
+            sandbox_config=runtime.services.sandbox_config or {},
+            sandbox_user_id=runtime.services.sandbox_user_id,
+            interrupt=runtime.services.interrupt,
+            record_event=lambda kind, message, data: run.add_event(kind, message, **dict(data)),
+            publish=publish,
         )
-        try:
-            return runtime.services.hooks.run_tool(
-                context,
-                lambda hook_context: self._invoke(
-                    runtime,
-                    hook_context,
-                    requires_confirmation=requires_confirmation,
-                    retryable=retryable,
-                ),
-                self._hook_outcome,
-                publish,
-            )
-        except HookCancellation as exc:
-            tool_message.status = "failed"
-            tool_message.content = exc.reason
-            tool_message.retryable = False
-            run.add_event("tool_failed", f"{tool} failed", call_id=tool_message.call_id, error=exc.reason)
-            publish(RuntimeEvent("tool_failed", exc.reason, {"tool": tool, "call_id": tool_message.call_id}))
-            runtime.save()
+        before = before_tool_hook_manager.execute(context, publish)
+        if before.decision == "reject":
+            interrupt = before.data.get("interrupt")
+            decision = interrupt if isinstance(interrupt, InterruptDecision) else InterruptDecision("cancel")
+            if decision.choice == "deny":
+                return self._denied(runtime, tool, decision)
+            failure = self._failure(runtime, tool, before.reason or "Tool call rejected by hook.", retryable=False)
             return ToolStepResult(
                 success=False,
-                error=exc.reason,
-                interrupt=InterruptDecision("cancel"),
+                error=failure.error,
+                interrupt=decision,
                 retryable=False,
             )
+        sandbox_data = before.data.get("sandbox_decision")
+        sandbox_decision = sandbox_data if isinstance(sandbox_data, SandboxExecutionDecision) else None
+        result = self._invoke(runtime, retryable=retryable, sandbox_decision=sandbox_decision)
+        after_tool_hook_manager.execute(replace(context, outcome=self._hook_outcome(result)), publish)
+        return result
 
     def _invoke(
         self,
         runtime: AgentRuntime,
-        context: ToolHookContext,
         *,
-        requires_confirmation: bool,
         retryable: bool,
+        sandbox_decision: SandboxExecutionDecision | None,
     ) -> ToolStepResult:
         run = runtime.run
         message = runtime.state.active_message
@@ -108,59 +111,6 @@ class ToolStepExecutor:
         tool = tool_message.name
         tools = runtime.services.tools
         publish = runtime.services.publish or (lambda _event: None)
-        tool_message.arguments = dict(context.arguments)
-        validate = getattr(tools, "validate_arguments", None)
-        if callable(validate):
-            try:
-                validate(tool, tool_message.arguments)
-            except ToolError as exc:
-                return self._failure(runtime, tool, str(exc), retryable=retryable)
-
-        if requires_confirmation:
-            request = InterruptRequest(
-                "tool",
-                f"Call tool {tool}?",
-                {
-                    "run_id": run.run_id,
-                    "tool": tool,
-                    "call_id": tool_message.call_id,
-                    "arguments": tool_message.arguments,
-                    "session_id": runtime.state.session_id,
-                    "command": (
-                        str(tool_message.arguments.get("command"))
-                        if isinstance(tool_message.arguments.get("command"), str)
-                        else tool
-                    ),
-                    "cwd": runtime.state.workspace_root or "",
-                    "permission_target": runtime.state.permission_mode,
-                },
-            )
-            run.add_event("approval_requested", "Tool approval requested", interrupt_kind="tool", **request.data)
-            publish(RuntimeEvent("approval_requested", request.message, request.data))
-            if runtime.services.interrupt is None:
-                failure = self._failure(
-                    runtime, tool, "Tool approval cancelled because no interrupt handler is available."
-                )
-                return ToolStepResult(
-                    success=False,
-                    error=failure.error,
-                    interrupt=InterruptDecision("cancel"),
-                    retryable=failure.retryable,
-                )
-            decision = runtime.services.interrupt(request)
-            if decision.choice == "deny":
-                return self._denied(runtime, tool, decision)
-            if decision.choice != "continue":
-                failure = self._failure(runtime, tool, "Tool approval was not granted.")
-                return ToolStepResult(
-                    success=False,
-                    error=failure.error,
-                    interrupt=decision,
-                    retryable=failure.retryable,
-                )
-            run.add_event("approval_granted", "Tool approval granted", interrupt_kind="tool", **request.data)
-            publish(RuntimeEvent("approval_granted", request.message, request.data))
-
         started_at = perf_counter()
         run.add_event(
             "tool_call", f"Calling {tool}", call_id=tool_message.call_id, arguments=dict(tool_message.arguments)
@@ -193,7 +143,7 @@ class ToolStepExecutor:
                             clock=runtime.services.clock,
                             job_scope=runtime.services.job_scope,
                             cancel_requested=runtime.services.cancel_requested,
-                            permission_mode=runtime.state.permission_mode,
+                            sandbox_decision=sandbox_decision,
                         ),
                         confirmed=True,
                     )

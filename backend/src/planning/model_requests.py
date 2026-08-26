@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
+from dataclasses import replace
 from typing import Protocol
 
 from backend.domain import ToolSpec
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 from backend.runtime.core.events import RuntimeEvent
-from backend.runtime.core.hooks import HookOutcome, ModelHookContext, ModelHookResult, RunHookInfo
+from backend.runtime.core.hooks import (
+    HookErrorInfo,
+    HookOutcome,
+    HookRejected,
+    ModelHookContext,
+    ModelHookResult,
+    RunHookInfo,
+    after_model_hook_manager,
+    before_model_hook_manager,
+)
 from backend.runtime.persistence.recording import model_error_data, model_request_data, model_response_data
 
 
@@ -98,19 +109,33 @@ class ModelRequestExecutor:
             exchange_id=exchange.exchange_id,
             output_mode=output_mode,
             stream=exchange.stream,
-            messages=list(exchange.messages),
-            allowed_tools=list(exchange.operation_tools),
+            messages=exchange.messages,
+            allowed_tools=exchange.operation_tools,
             request_parameters=parameters,
         )
 
         previous_parameters = exchange.context.get("request_parameters")
         had_parameters = "request_parameters" in exchange.context
+        exchange.context["request_parameters"] = parameters
         try:
-            result = runtime.services.hooks.run_model(
-                context,
-                lambda hook_context: self._send(runtime, hook_context, output_mode),
-                self._hook_outcome,
-                runtime.services.publish or (lambda _event: None),
+            publish = runtime.services.publish or (lambda _event: None)
+            before = before_model_hook_manager.execute(context, publish)
+            if before.decision == "reject":
+                raise HookRejected("model", before.reason or "Model request rejected by hook.", before.data)
+            try:
+                result = self._send(runtime)
+            except Exception as error:
+                after_model_hook_manager.execute(
+                    replace(
+                        context,
+                        outcome=HookOutcome(status="failed", error=HookErrorInfo.from_exception(error)),
+                    ),
+                    publish,
+                )
+                raise
+            after_model_hook_manager.execute(
+                replace(context, outcome=self._hook_outcome(result)),
+                publish,
             )
             if exchange.required_tool_name:
                 runtime.state.request_parameters.pop("required_tool_name", None)
@@ -124,21 +149,18 @@ class ModelRequestExecutor:
     def _send(
         self,
         runtime: AgentRuntime,
-        hook_context: ModelHookContext,
-        output_mode: str,
     ) -> PreparedResponse:
         exchange = runtime.exchange
-        exchange.messages = list(hook_context.messages)
-        exchange.operation_tools = list(hook_context.allowed_tools)
-        if output_mode == "tools":
-            exchange.allowed_tools = list(hook_context.allowed_tools)
-        exchange.context["request_parameters"] = dict(hook_context.request_parameters)
+        raw_parameters = exchange.context.get("request_parameters")
+        parameters = (
+            dict(raw_parameters) if isinstance(raw_parameters, Mapping) else dict(runtime.state.request_parameters)
+        )
         estimate_input = getattr(self._client, "estimate_input_tokens", None)
         if callable(estimate_input):
             exchange.context["estimated_input_tokens"] = estimate_input(
                 exchange.messages,
                 exchange.allowed_tools,
-                dict(hook_context.request_parameters),
+                parameters,
             )
 
         if getattr(self._client, "records_runtime_events", False):
@@ -177,8 +199,8 @@ class ModelRequestExecutor:
         return HookOutcome(
             status="succeeded",
             result=ModelHookResult(
-                prepared.message,
-                prepared.usage,
+                copy.deepcopy(prepared.message),
+                copy.deepcopy(prepared.usage),
                 prepared.response_id,
                 prepared.model,
                 prepared.finish_reason,

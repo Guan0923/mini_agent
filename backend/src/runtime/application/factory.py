@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -34,7 +33,6 @@ from backend.tools.terminal import effective_terminal_type
 from ..capability_settings import SkillSettings, SubagentSettings
 from ..conversation.references import FileReferenceExpander
 from ..core.config import RunnerSettings, log_full_messages_from_toml
-from ..core.hooks import AgentHook
 from ..execution.runner import AgentRunner
 from ..subagents import SubagentCoordinator
 from .services import AgentApplication
@@ -56,7 +54,6 @@ def build_application(
     workspace: Path,
     planner_name: PlannerName = "llm",
     settings: RunnerSettings | None = None,
-    hooks: Iterable[AgentHook] = (),
     *,
     paths: ClientPaths | None = None,
     user_preferences: str = "",
@@ -90,7 +87,6 @@ def build_application(
         workspace,
         planner_name,
         resolved,
-        hooks,
         config,
         store,
         files,
@@ -140,7 +136,6 @@ def build_runner(
     workspace: Path,
     planner_name: PlannerName = "llm",
     settings: RunnerSettings | None = None,
-    hooks: Iterable[AgentHook] = (),
     user_preferences: str = "",
     model_config: ModelConfig | None = None,
 ) -> AgentRunner:
@@ -150,7 +145,6 @@ def build_runner(
         workspace,
         planner_name,
         _settings_for(paths, settings),
-        hooks,
         config,
         paths=paths,
         user_preferences=user_preferences,
@@ -162,7 +156,6 @@ def _build_subagent_runner(
     workspace: Path,
     planner_name: PlannerName,
     settings: RunnerSettings,
-    hooks: Iterable[AgentHook],
     config: dict[str, object],
     checkpoints: object | None = None,
     files: WorkspaceFiles | None = None,
@@ -193,11 +186,8 @@ def _build_subagent_runner(
                 workspace,
                 upload_files=upload_files,
                 terminal_type=terminal_type,
-                sandbox_launcher=sandbox_launcher,
                 sandbox_config=sandbox_config,
-                sandbox_user_id=job_user_id,
             ),
-            hooks,
             checkpoints,
             resolved_paths,
             skill_settings,
@@ -207,6 +197,8 @@ def _build_subagent_runner(
             job_registry=job_registry,
             job_user_id=job_user_id,
             job_parent_id=job_parent_id,
+            sandbox_launcher=sandbox_launcher,
+            sandbox_config=sandbox_config,
         )
 
     coordinator = SubagentCoordinator(child_factory, workspace, subagent_settings)
@@ -230,9 +222,7 @@ def _build_subagent_runner(
             workspace_files=files,
             upload_files=upload_files,
             terminal_type=terminal_type,
-            sandbox_launcher=sandbox_launcher,
             sandbox_config=sandbox_config,
-            sandbox_user_id=job_user_id,
             extra_tools=(
                 *delegation_tools(subagent_settings.max_tasks_per_batch),
                 *external,
@@ -243,7 +233,6 @@ def _build_subagent_runner(
             planner_name,
             settings,
             tools,
-            hooks,
             checkpoints,
             resolved_paths,
             skill_settings,
@@ -255,6 +244,8 @@ def _build_subagent_runner(
             job_registry=job_registry,
             job_user_id=job_user_id,
             job_parent_id=job_parent_id,
+            sandbox_launcher=sandbox_launcher,
+            sandbox_config=sandbox_config,
         )
     except Exception:
         external.close()
@@ -266,7 +257,6 @@ def _build_runner(
     planner_name: PlannerName,
     settings: RunnerSettings,
     tools: ToolExecutor,
-    hooks: Iterable[AgentHook],
     checkpoints: object | None,
     paths: ClientPaths,
     skill_settings: SkillSettings,
@@ -279,6 +269,8 @@ def _build_runner(
     job_registry: JobRegistry | None = None,
     job_user_id: str | None = None,
     job_parent_id: str | None = None,
+    sandbox_launcher: SandboxLauncher | None = None,
+    sandbox_config: dict[str, object] | None = None,
 ) -> AgentRunner:
     skills = SkillCatalog.discover(global_root=paths.skills_dir)
     project_skill_gate = (
@@ -312,7 +304,6 @@ def _build_runner(
         max_tool_calls=settings.max_tool_calls,
         log_full_messages=settings.log_full_messages,
         checkpoints=checkpoints,
-        hooks=hooks,
         skill_catalog=skills,
         skill_auto_select=skill_settings.auto_select,
         project_skill_gate=project_skill_gate,
@@ -322,6 +313,9 @@ def _build_runner(
         job_registry=job_registry,
         job_scope=runner_scope,
         parent_job_id=job_parent_id,
+        sandbox_launcher=sandbox_launcher,
+        sandbox_config=sandbox_config,
+        sandbox_user_id=job_user_id,
     )
 
 

@@ -6,7 +6,6 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, TerminalType
-from backend.sandbox import SandboxLauncher
 
 from .base import Tool
 from .default_tools import build_default_tools
@@ -23,9 +22,7 @@ def _build_tools(
     workspace_files: WorkspaceFiles | None = None,
     upload_files: WorkspaceFiles | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
-    sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: Mapping[str, object] | None = None,
-    sandbox_user_id: str | None = None,
     network_mode: str | None = None,
 ) -> tuple[Tool, ...]:
     """Create the standard tool set for one workspace."""
@@ -37,9 +34,7 @@ def _build_tools(
         fetcher=web_fetch,
         upload_files=upload_files,
         terminal_type=terminal_type,
-        sandbox_launcher=sandbox_launcher,
         sandbox_config=sandbox_config,
-        sandbox_user_id=sandbox_user_id,
         network_mode=network_mode,
     )
 
@@ -53,9 +48,7 @@ def build_tool_registry(
     upload_files: WorkspaceFiles | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
     extra_tools: Iterable[Tool] = (),
-    sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: Mapping[str, object] | None = None,
-    sandbox_user_id: str | None = None,
     network_mode: str | None = None,
 ) -> ToolRegistry:
     """Build the standard workspace tool registry."""
@@ -69,9 +62,7 @@ def build_tool_registry(
                 workspace_files=workspace_files,
                 upload_files=upload_files,
                 terminal_type=terminal_type,
-                sandbox_launcher=sandbox_launcher,
                 sandbox_config=sandbox_config,
-                sandbox_user_id=sandbox_user_id,
                 network_mode=network_mode,
             ),
             *extra_tools,

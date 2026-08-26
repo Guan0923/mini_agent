@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, TerminalType
-from backend.sandbox import SandboxLauncher
 
 from ..base import Tool
 from ..command import WorkspaceCommand
@@ -27,9 +26,7 @@ def build_default_tools(
     fetcher: SafeWebFetcher | None = None,
     upload_files: WorkspaceFiles | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
-    sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: Mapping[str, object] | None = None,
-    sandbox_user_id: str | None = None,
     network_mode: str | None = None,
 ) -> tuple[Tool, ...]:
     """Build tools in the stable order exposed to planners."""
@@ -69,9 +66,6 @@ def build_default_tools(
             WorkspaceCommand(
                 workspace,
                 terminal_type=terminal_type,
-                sandbox_launcher=sandbox_launcher,
-                sandbox_config=sandbox_config,
-                sandbox_user_id=sandbox_user_id,
             )
         ),
     ]

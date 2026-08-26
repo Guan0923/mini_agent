@@ -1,19 +1,30 @@
-"""Synchronous lifecycle hooks with controlled, provider-neutral contexts."""
+"""Process-wide lifecycle hook managers and immutable hook contracts."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Generic, Literal, TypeVar
 
 from backend.domain import ChatMessage, ToolSpec
 
+from .contracts import InterruptHandler
 from .events import RuntimeEvent
 
 HookLifecycle = Literal["run", "model", "tool"]
+HookPhase = Literal["before", "after"]
 HookStatus = Literal["succeeded", "failed", "cancelled"]
+HookDecision = Literal["continue", "reject"]
 T = TypeVar("T")
+
+
+def readonly_mapping(values: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
+    """Return a detached, read-only mapping for hook input or output data."""
+
+    return MappingProxyType(deepcopy(dict(values or {})))
 
 
 @dataclass(frozen=True)
@@ -22,44 +33,6 @@ class RunHookInfo:
     run_id: str
     task: str
     mode: str
-
-
-class _CancellableContext:
-    cancellation_reason: str | None
-
-    def cancel(self, reason: str) -> None:
-        value = reason.strip()
-        if not value:
-            raise ValueError("Hook cancellation requires a non-empty reason.")
-        self.cancellation_reason = value
-
-
-@dataclass
-class RunHookContext(_CancellableContext):
-    run: RunHookInfo
-    cancellation_reason: str | None = field(default=None, init=False)
-
-
-@dataclass
-class ModelHookContext(_CancellableContext):
-    run: RunHookInfo
-    operation: str
-    exchange_id: str
-    output_mode: str
-    stream: bool
-    messages: list[ChatMessage]
-    allowed_tools: list[ToolSpec]
-    request_parameters: dict[str, Any]
-    cancellation_reason: str | None = field(default=None, init=False)
-
-
-@dataclass
-class ToolHookContext(_CancellableContext):
-    run: RunHookInfo
-    call_id: str
-    name: str
-    arguments: dict[str, Any]
-    cancellation_reason: str | None = field(default=None, init=False)
 
 
 @dataclass(frozen=True)
@@ -102,199 +75,228 @@ class ToolHookResult:
     retryable: bool | None
 
 
-class AgentHook:
-    """Override only the lifecycle methods needed by one extension."""
-
-    name: str | None = None
-
-    def before_run(self, context: RunHookContext) -> None:
-        pass
-
-    def after_run(self, context: RunHookContext, outcome: HookOutcome[RunHookResult]) -> None:
-        pass
-
-    def before_model(self, context: ModelHookContext) -> None:
-        pass
-
-    def after_model(self, context: ModelHookContext, outcome: HookOutcome[ModelHookResult]) -> None:
-        pass
-
-    def before_tool(self, context: ToolHookContext) -> None:
-        pass
-
-    def after_tool(self, context: ToolHookContext, outcome: HookOutcome[ToolHookResult]) -> None:
-        pass
+@dataclass(frozen=True)
+class RunHookContext:
+    run: RunHookInfo
+    outcome: HookOutcome[RunHookResult] | None = None
 
 
-class HookCancellation(RuntimeError):
-    def __init__(self, lifecycle: HookLifecycle, hook: str, reason: str) -> None:
-        super().__init__(f"{lifecycle.capitalize()} cancelled by hook {hook!r}: {reason}")
-        self.lifecycle = lifecycle
-        self.hook = hook
-        self.reason = reason
+@dataclass(frozen=True)
+class ModelHookContext:
+    run: RunHookInfo
+    operation: str
+    exchange_id: str
+    output_mode: str
+    stream: bool
+    messages: Sequence[ChatMessage]
+    allowed_tools: Sequence[ToolSpec]
+    request_parameters: Mapping[str, Any]
+    outcome: HookOutcome[ModelHookResult] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "messages", tuple(deepcopy(self.messages)))
+        object.__setattr__(self, "allowed_tools", tuple(deepcopy(self.allowed_tools)))
+        object.__setattr__(self, "request_parameters", readonly_mapping(self.request_parameters))
+
+
+RunEventRecorder = Callable[[str, str, Mapping[str, Any]], None]
+HookPublisher = Callable[[RuntimeEvent], None]
+
+
+@dataclass(frozen=True)
+class ToolHookContext:
+    run: RunHookInfo
+    call_id: str
+    name: str
+    arguments: Mapping[str, Any]
+    workspace_root: str
+    permission_mode: str
+    requires_confirmation: bool
+    read_only: bool
+    sandbox_launcher: object | None = None
+    sandbox_config: Mapping[str, Any] = field(default_factory=readonly_mapping)
+    sandbox_user_id: str | None = None
+    interrupt: InterruptHandler | None = None
+    record_event: RunEventRecorder | None = None
+    publish: HookPublisher | None = None
+    outcome: HookOutcome[ToolHookResult] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "arguments", readonly_mapping(self.arguments))
+        object.__setattr__(self, "sandbox_config", readonly_mapping(self.sandbox_config))
+
+
+@dataclass(frozen=True)
+class HookOperationResult:
+    """Explicit result returned by every hook operation."""
+
+    decision: HookDecision
+    data: Mapping[str, Any] = field(default_factory=readonly_mapping)
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
+        if self.decision == "reject" and not (self.reason or "").strip():
+            raise ValueError("A rejected hook operation requires a reason.")
+        if self.decision == "continue" and self.reason is not None:
+            raise ValueError("A continuing hook operation cannot carry a rejection reason.")
+
+    @classmethod
+    def continue_execution(cls, data: Mapping[str, Any] | None = None) -> HookOperationResult:
+        return cls("continue", data or {})
+
+    @classmethod
+    def reject(cls, reason: str, data: Mapping[str, Any] | None = None) -> HookOperationResult:
+        return cls("reject", data or {}, reason)
+
+
+HookOperation = Callable[[Any], HookOperationResult]
 
 
 class HookExecutionError(RuntimeError):
-    def __init__(self, lifecycle: HookLifecycle, phase: str, hook: str, error: Exception) -> None:
-        super().__init__(f"Hook {hook!r} failed during {phase}_{lifecycle}.")
+    """Stable error raised when one registered operation fails."""
+
+    def __init__(
+        self,
+        lifecycle: HookLifecycle,
+        phase: HookPhase,
+        operation: str,
+        error: Exception,
+    ) -> None:
+        super().__init__(f"Hook operation {operation!r} failed during {phase}_{lifecycle}.")
         self.lifecycle = lifecycle
         self.phase = phase
-        self.hook = hook
+        self.operation = operation
+        self.hook = operation
         self.error_type = error.__class__.__name__
 
 
-HookPublisher = Callable[[RuntimeEvent], None]
-HookOperation = Callable[[Any], T]
-OutcomeFactory = Callable[[T], HookOutcome[Any]]
+class HookRejected(RuntimeError):
+    """Raised by a lifecycle boundary when its before manager rejects."""
+
+    def __init__(self, lifecycle: HookLifecycle, reason: str, data: Mapping[str, Any]) -> None:
+        super().__init__(reason)
+        self.lifecycle = lifecycle
+        self.reason = reason
+        self.data = MappingProxyType(dict(data))
 
 
-class HookManager:
-    """Run hooks as a middleware stack around one lifecycle operation."""
+class HookManager(ABC):
+    """Abstract manager for one process-wide lifecycle boundary."""
 
-    def __init__(self, hooks: Iterable[AgentHook] = ()) -> None:
-        self._hooks = tuple(hooks)
+    @property
+    @abstractmethod
+    def operations(self) -> tuple[HookOperation, ...]: ...
 
-    def run_run(
-        self,
-        context: RunHookContext,
-        operation: Callable[[RunHookContext], T],
-        outcome: OutcomeFactory,
-        publish: HookPublisher,
-    ) -> T:
-        return self._run("run", context, operation, outcome, publish)
+    @abstractmethod
+    def register(self, operation: HookOperation) -> None: ...
 
-    def run_model(
-        self,
-        context: ModelHookContext,
-        operation: Callable[[ModelHookContext], T],
-        outcome: OutcomeFactory,
-        publish: HookPublisher,
-    ) -> T:
-        return self._run("model", context, operation, outcome, publish)
+    @abstractmethod
+    def execute(self, context: Any, publish: HookPublisher | None = None) -> HookOperationResult: ...
 
-    def run_tool(
-        self,
-        context: ToolHookContext,
-        operation: Callable[[ToolHookContext], T],
-        outcome: OutcomeFactory,
-        publish: HookPublisher,
-    ) -> T:
-        return self._run("tool", context, operation, outcome, publish)
 
-    def _run(
-        self,
-        lifecycle: HookLifecycle,
-        context: Any,
-        operation: HookOperation[T],
-        outcome_factory: OutcomeFactory,
-        publish: HookPublisher,
-    ) -> T:
-        entered: list[AgentHook] = []
-        for hook in self._hooks:
-            before_name = f"before_{lifecycle}"
-            after_name = f"after_{lifecycle}"
-            if not self._implements(hook, before_name) and not self._implements(hook, after_name):
-                continue
+class SequentialHookManager(HookManager):
+    """Execute registered operations once in strict FIFO registration order."""
+
+    def __init__(self, phase: HookPhase, lifecycle: HookLifecycle) -> None:
+        self.phase = phase
+        self.lifecycle = lifecycle
+        self._operations: list[HookOperation] = []
+
+    @property
+    def operations(self) -> tuple[HookOperation, ...]:
+        return tuple(self._operations)
+
+    def register(self, operation: HookOperation) -> None:
+        if not callable(operation):
+            raise TypeError("Hook operation must be callable.")
+        self._operations.append(operation)
+
+    def execute(self, context: Any, publish: HookPublisher | None = None) -> HookOperationResult:
+        emit = publish or (lambda _event: None)
+        accumulated: dict[str, Any] = {}
+        for operation in self._operations:
+            name = self._name(operation)
+            event_data = {
+                "hook": name,
+                "operation": name,
+                "phase": self.phase,
+                "lifecycle": self.lifecycle,
+            }
+            event_name = f"{self.phase}_{self.lifecycle}"
+            emit(RuntimeEvent("hook_started", event_name, event_data))
             try:
-                if self._implements(hook, before_name):
-                    self._invoke(hook, "before", lifecycle, context, publish)
-            except HookExecutionError as error:
-                self._after(
-                    entered,
-                    lifecycle,
-                    context,
-                    HookOutcome(status="failed", error=HookErrorInfo(error.error_type, str(error))),
-                    publish,
-                    suppress_errors=True,
+                result = operation(context)
+                if not isinstance(result, HookOperationResult):
+                    raise TypeError("Hook operation must return HookOperationResult.")
+            except Exception as error:
+                emit(
+                    RuntimeEvent(
+                        "hook_failed",
+                        event_name,
+                        {**event_data, "error_type": error.__class__.__name__},
+                    )
                 )
-                raise
-            entered.append(hook)
-            if context.cancellation_reason is not None:
-                cancellation = HookCancellation(
-                    lifecycle,
-                    self._name(hook),
-                    context.cancellation_reason,
-                )
-                self._after(
-                    entered,
-                    lifecycle,
-                    context,
-                    HookOutcome(status="cancelled", error=HookErrorInfo.from_exception(cancellation)),
-                    publish,
-                )
-                raise cancellation
-
-        try:
-            result = operation(context)
-        except Exception as error:
-            status: HookStatus = "cancelled" if isinstance(error, HookCancellation) else "failed"
-            self._after(
-                entered,
-                lifecycle,
-                context,
-                HookOutcome(status=status, error=HookErrorInfo.from_exception(error)),
-                publish,
-            )
-            raise
-
-        self._after(entered, lifecycle, context, outcome_factory(result), publish)
-        return result
-
-    def _after(
-        self,
-        hooks: list[AgentHook],
-        lifecycle: HookLifecycle,
-        context: Any,
-        outcome: HookOutcome[Any],
-        publish: HookPublisher,
-        *,
-        suppress_errors: bool = False,
-    ) -> None:
-        first_error: HookExecutionError | None = None
-        for hook in reversed(hooks):
-            if not self._implements(hook, f"after_{lifecycle}"):
-                continue
-            try:
-                self._invoke(hook, "after", lifecycle, deepcopy(context), publish, deepcopy(outcome))
-            except HookExecutionError as error:
-                first_error = first_error or error
-        if first_error is not None and not suppress_errors:
-            raise first_error
-
-    @staticmethod
-    def _name(hook: AgentHook) -> str:
-        return hook.name or hook.__class__.__name__
-
-    @staticmethod
-    def _implements(hook: AgentHook, method_name: str) -> bool:
-        return getattr(type(hook), method_name) is not getattr(AgentHook, method_name)
-
-    def _invoke(
-        self,
-        hook: AgentHook,
-        phase: Literal["before", "after"],
-        lifecycle: HookLifecycle,
-        context: Any,
-        publish: HookPublisher,
-        outcome: HookOutcome[Any] | None = None,
-    ) -> None:
-        name = self._name(hook)
-        method_name = f"{phase}_{lifecycle}"
-        data = {"hook": name, "phase": phase, "lifecycle": lifecycle}
-        publish(RuntimeEvent("hook_started", method_name, data))
-        try:
-            method = getattr(hook, method_name)
-            if outcome is None:
-                method(context)
-            else:
-                method(context, outcome)
-        except Exception as error:
-            publish(
+                raise HookExecutionError(self.lifecycle, self.phase, name, error) from error
+            accumulated.update(result.data)
+            emit(
                 RuntimeEvent(
-                    "hook_failed",
-                    method_name,
-                    {**data, "error_type": error.__class__.__name__},
+                    "hook_completed",
+                    event_name,
+                    {**event_data, "decision": result.decision},
                 )
             )
-            raise HookExecutionError(lifecycle, phase, name, error) from error
-        publish(RuntimeEvent("hook_completed", method_name, data))
+            if result.decision == "reject":
+                return HookOperationResult.reject(result.reason or "Hook operation rejected.", accumulated)
+        return HookOperationResult.continue_execution(accumulated)
+
+    @staticmethod
+    def _name(operation: HookOperation) -> str:
+        explicit = getattr(operation, "name", None)
+        if isinstance(explicit, str) and explicit:
+            return explicit
+        function_name = getattr(operation, "__name__", None)
+        if isinstance(function_name, str) and function_name:
+            return function_name
+        return operation.__class__.__name__
+
+
+before_run_hook_manager = SequentialHookManager("before", "run")
+after_run_hook_manager = SequentialHookManager("after", "run")
+before_model_hook_manager = SequentialHookManager("before", "model")
+after_model_hook_manager = SequentialHookManager("after", "model")
+before_tool_hook_manager = SequentialHookManager("before", "tool")
+after_tool_hook_manager = SequentialHookManager("after", "tool")
+
+
+# Sandbox is an ordinary operation. Importing it only after all contracts and
+# global managers exist guarantees that no later registration can precede it.
+from backend.sandbox.operation import sandbox_operation  # noqa: E402
+
+before_tool_hook_manager.register(sandbox_operation)
+
+
+__all__ = [
+    "HookErrorInfo",
+    "HookExecutionError",
+    "HookManager",
+    "HookOperation",
+    "HookOperationResult",
+    "HookOutcome",
+    "HookRejected",
+    "ModelHookContext",
+    "ModelHookResult",
+    "RunHookContext",
+    "RunHookInfo",
+    "RunHookResult",
+    "SequentialHookManager",
+    "ToolHookContext",
+    "ToolHookResult",
+    "after_model_hook_manager",
+    "after_run_hook_manager",
+    "after_tool_hook_manager",
+    "before_model_hook_manager",
+    "before_run_hook_manager",
+    "before_tool_hook_manager",
+    "readonly_mapping",
+]
