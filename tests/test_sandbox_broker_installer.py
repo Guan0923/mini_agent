@@ -9,14 +9,18 @@ import pytest
 from fastapi import Request
 
 from backend.api.sandbox_routes import install as install_broker
+from backend.api.sandbox_routes import repair as repair_broker
 from backend.sandbox.broker_service import WindowsServiceInstaller
 from backend.sandbox.errors import BrokerInstallationError, BrokerInstallFailureCode
 from backend.sandbox.install_helper import (
+    EXIT_SERVICE_STOP_FAILED,
     _icacls_sid,
     _persist_sid,
     _secure_program_data,
     _service_sid,
     _source_acl_grants,
+    _stop_service_for_repair,
+    _TransactionFailure,
     run_transaction,
 )
 
@@ -183,6 +187,7 @@ def test_elevated_transaction_classifies_uac_cancel(monkeypatch: pytest.MonkeyPa
     [
         (4, BrokerInstallFailureCode.ACL_FAILED),
         (5, BrokerInstallFailureCode.SERVICE_START_FAILED),
+        (7, BrokerInstallFailureCode.SERVICE_STOP_FAILED),
     ],
 )
 def test_elevated_transaction_classifies_helper_phases(
@@ -238,6 +243,106 @@ def test_install_route_returns_safe_category_and_code() -> None:
         "detail": "需要管理员权限才能安装沙箱 Broker。",
         "code": "broker_admin_required",
     }
+
+
+def test_repair_route_returns_safe_stop_category_and_code() -> None:
+    message = "Broker Windows 服务未能停止，请稍后重试或重启 Windows。"
+
+    class Broker:
+        def status(self):
+            return {"installed": True, "healthy": False}
+
+        def repair(self):
+            raise BrokerInstallationError(BrokerInstallFailureCode.SERVICE_STOP_FAILED, message)
+
+    app = types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            web=types.SimpleNamespace(
+                sandbox_broker=Broker(),
+                auth_service=types.SimpleNamespace(origin_allowed=lambda request: True),
+            )
+        )
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/sandbox/repair",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+            "app": app,
+        }
+    )
+
+    response = repair_broker(request)
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {
+        "detail": message,
+        "code": "broker_service_stop_failed",
+    }
+
+
+@pytest.mark.parametrize("stop_returncode", [0, 1])
+def test_repair_waits_for_stopped_after_any_stop_result(stop_returncode: int) -> None:
+    calls: list[list[str]] = []
+    states = iter([3, 1])
+
+    _stop_service_for_repair(
+        "MiniAgentSandboxBroker",
+        runner=lambda command, **kwargs: calls.append(list(command)) or _Result(stop_returncode),
+        state_reader=lambda service_name: next(states),
+        clock=lambda: 0.0,
+        sleeper=lambda seconds: None,
+    )
+
+    assert calls == [["sc.exe", "stop", "MiniAgentSandboxBroker"]]
+
+
+def test_repair_stop_timeout_has_dedicated_exit_code() -> None:
+    ticks = iter([0.0, 0.0, 5.0])
+
+    with pytest.raises(_TransactionFailure) as raised:
+        _stop_service_for_repair(
+            "MiniAgentSandboxBroker",
+            runner=lambda command, **kwargs: _Result(),
+            state_reader=lambda service_name: 4,
+            clock=lambda: next(ticks),
+            sleeper=lambda seconds: None,
+        )
+
+    assert raised.value.exit_code == EXIT_SERVICE_STOP_FAILED
+
+
+def test_repair_state_query_failure_aborts_before_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "backend.sandbox.install_helper.subprocess.run",
+        lambda command, **kwargs: calls.append(list(command)) or _Result(),
+    )
+    monkeypatch.setattr(
+        "backend.sandbox.install_helper._query_service_state",
+        lambda service_name: (_ for _ in ()).throw(OSError("unavailable")),
+    )
+
+    with pytest.raises(_TransactionFailure) as raised:
+        run_transaction(
+            {
+                "operation": "repair",
+                "service_name": "MiniAgentSandboxBroker",
+                "service_command": ["python.exe", "-m", "backend.sandbox.service_main", "run"],
+                "backend_sid": None,
+                "backend_sid_path": None,
+                "program_data_path": None,
+                "service_code_path": None,
+                "service_code_boundary_path": None,
+            }
+        )
+
+    assert raised.value.exit_code == EXIT_SERVICE_STOP_FAILED
+    assert calls == [["sc.exe", "stop", "MiniAgentSandboxBroker"]]
 
 
 def test_numeric_sid_is_prefixed_for_icacls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -319,6 +424,10 @@ def test_helper_transaction_orders_sid_service_acl_source_and_start(
     monkeypatch.setattr(
         "backend.sandbox.install_helper._secure_source_code",
         lambda path, boundary, service_name: calls.append(["win32-acl-batch", str(path), str(boundary), service_name]),
+    )
+    monkeypatch.setattr(
+        "backend.sandbox.install_helper._wait_for_service_stopped",
+        lambda service_name, **kwargs: True,
     )
 
     assert (

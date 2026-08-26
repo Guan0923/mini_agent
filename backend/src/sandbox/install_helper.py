@@ -16,7 +16,8 @@ import struct
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,11 @@ EXIT_SERVICE_FAILED = 3
 EXIT_ACL_FAILED = 4
 EXIT_SERVICE_START_FAILED = 5
 EXIT_FILESYSTEM_FAILED = 6
+EXIT_SERVICE_STOP_FAILED = 7
+
+_SERVICE_STOPPED = 1
+_SERVICE_STOP_TIMEOUT_SECONDS = 5.0
+_SERVICE_STOP_POLL_SECONDS = 0.1
 
 
 class _TransactionFailure(RuntimeError):
@@ -123,6 +129,82 @@ def _run(
         raise _TransactionFailure(EXIT_FILESYSTEM_FAILED, "Broker service command could not start") from exc
     if result.returncode not in accepted_returncodes:
         raise _TransactionFailure(failure_code, "Broker service command failed")
+
+
+def _query_service_state(service_name: str) -> int:
+    """Read the numeric SCM state without parsing localized command output."""
+
+    manager = None
+    service = None
+    win32service = None
+    try:
+        import win32service as win32service_module  # type: ignore[import-not-found]
+
+        win32service = win32service_module
+        manager = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+        service = win32service.OpenService(manager, service_name, win32service.SERVICE_QUERY_STATUS)
+        status = win32service.QueryServiceStatusEx(service)
+        return int(status["CurrentState"])
+    except Exception as exc:
+        raise OSError("Broker service state is unavailable") from exc
+    finally:
+        if win32service is not None and service is not None:
+            try:
+                win32service.CloseServiceHandle(service)
+            except Exception:
+                pass
+        if win32service is not None and manager is not None:
+            try:
+                win32service.CloseServiceHandle(manager)
+            except Exception:
+                pass
+
+
+def _wait_for_service_stopped(
+    service_name: str,
+    *,
+    state_reader: Callable[[str], int] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], Any] = time.sleep,
+) -> bool:
+    reader = state_reader or _query_service_state
+    deadline = clock() + _SERVICE_STOP_TIMEOUT_SECONDS
+    while True:
+        try:
+            state = int(reader(service_name))
+        except Exception:
+            return False
+        if state == _SERVICE_STOPPED:
+            return True
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return False
+        sleeper(min(_SERVICE_STOP_POLL_SECONDS, remaining))
+
+
+def _stop_service_for_repair(
+    service_name: str,
+    *,
+    runner: Callable[..., Any] | None = None,
+    state_reader: Callable[[str], int] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], Any] = time.sleep,
+) -> None:
+    command_runner = runner or subprocess.run
+    try:
+        command_runner(["sc.exe", "stop", service_name], check=False, capture_output=True)
+    except OSError:
+        # SCM state is authoritative: a command failure may race with the
+        # service reaching STOPPED, so always perform the bounded state check.
+        pass
+    if _wait_for_service_stopped(
+        service_name,
+        state_reader=state_reader,
+        clock=clock,
+        sleeper=sleeper,
+    ):
+        return
+    raise _TransactionFailure(EXIT_SERVICE_STOP_FAILED, "Broker service did not stop")
 
 
 def _persist_sid(path: Path | None, value: str | None) -> None:
@@ -348,10 +430,7 @@ def run_transaction(payload: Mapping[str, Any]) -> int:
         )
         _run(["sc.exe", "sidtype", service_name, "unrestricted"])
     else:
-        _run(
-            ["sc.exe", "stop", service_name],
-            accepted_returncodes=frozenset({0, 1062}),
-        )
+        _stop_service_for_repair(service_name)
         _run(
             [
                 "sc.exe",
@@ -411,6 +490,7 @@ __all__ = [
     "EXIT_OK",
     "EXIT_SERVICE_FAILED",
     "EXIT_SERVICE_START_FAILED",
+    "EXIT_SERVICE_STOP_FAILED",
     "main",
     "run_transaction",
 ]

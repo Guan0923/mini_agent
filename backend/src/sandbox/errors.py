@@ -21,6 +21,7 @@ class BrokerInstallFailureCode(StrEnum):
     DEPENDENCY_MISSING = "broker_dependency_missing"
     ACL_FAILED = "broker_acl_failed"
     SERVICE_FAILED = "broker_service_failed"
+    SERVICE_STOP_FAILED = "broker_service_stop_failed"
     SERVICE_START_FAILED = "broker_service_start_failed"
     NOT_READY = "broker_not_ready"
     UNKNOWN = "broker_install_failed"

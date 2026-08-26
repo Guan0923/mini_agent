@@ -425,6 +425,9 @@ class WindowsServiceInstaller:
                 elif len(command_args) > 1 and command_args[1].lower() == "start":
                     failure_code = BrokerInstallFailureCode.SERVICE_START_FAILED
                     message = "Broker Windows 服务启动失败。"
+                elif len(command_args) > 1 and command_args[1].lower() == "stop":
+                    failure_code = BrokerInstallFailureCode.SERVICE_STOP_FAILED
+                    message = "Broker Windows 服务未能停止，请稍后重试或重启 Windows。"
                 else:
                     failure_code = BrokerInstallFailureCode.SERVICE_FAILED
                     message = "Windows 服务创建或配置失败。"
@@ -507,6 +510,7 @@ class WindowsServiceInstaller:
             EXIT_FILESYSTEM_FAILED,
             EXIT_INVALID,
             EXIT_SERVICE_START_FAILED,
+            EXIT_SERVICE_STOP_FAILED,
         )
 
         if code == EXIT_FILESYSTEM_FAILED:
@@ -523,6 +527,11 @@ class WindowsServiceInstaller:
             raise BrokerInstallationError(
                 BrokerInstallFailureCode.SERVICE_START_FAILED,
                 "Broker Windows 服务启动失败。",
+            )
+        if code == EXIT_SERVICE_STOP_FAILED:
+            raise BrokerInstallationError(
+                BrokerInstallFailureCode.SERVICE_STOP_FAILED,
+                "Broker Windows 服务未能停止，请稍后重试或重启 Windows。",
             )
         if code == EXIT_INVALID:
             raise BrokerInstallationError(
@@ -1039,9 +1048,7 @@ class WindowsNamedPipeServer:
                 import servicemanager  # type: ignore[import-not-found]
 
                 winerror = getattr(exc, "winerror", None)
-                servicemanager.LogErrorMsg(
-                    f"Broker named-pipe creation failed (winerror={winerror!s})"
-                )
+                servicemanager.LogErrorMsg(f"Broker named-pipe creation failed (winerror={winerror!s})")
             except Exception:
                 pass
             logger.error(
