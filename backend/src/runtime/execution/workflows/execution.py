@@ -7,6 +7,7 @@ from backend.planning import PlannerCapabilities
 
 from ...conversation.steering import collect_steering, consume_steering
 from ...core.context import AgentRuntime
+from ...core.contracts import WorkflowModeChanged
 from ..lifecycle.cancellation import cancel_if_requested
 from ..lifecycle.outcomes import cancel_run, complete_run, fail_run, planning_failure_data, record_plan_feedback
 from ..steps import USER_DENIED_BATCH_FAILURE_CODE, ToolStepExecutor
@@ -37,6 +38,9 @@ class ExecutionWorkflow:
             fail_run(runtime, f"Planner {capabilities.name!r} does not support decisions.")
             return runtime.run
         while True:
+            runtime.apply_pending_runtime_config()
+            if runtime.run.mode != "agent":
+                raise WorkflowModeChanged("Agent workflow changed to Plan mode.")
             if cancel_if_requested(runtime):
                 return runtime.run
             if not _ensure_tool_budget(runtime):
@@ -93,7 +97,12 @@ class ExecutionWorkflow:
                     )
                     steered = True
                     break
-                outcome = _execute_tool(runtime, index, self._steps)
+                try:
+                    outcome = _execute_tool(runtime, index, self._steps)
+                except WorkflowModeChanged:
+                    _fail_pending_tools(runtime, response, "Not executed because the workflow mode changed.")
+                    _finish_assistant(runtime)
+                    raise
                 if cancel_if_requested(runtime):
                     return runtime.run
                 if outcome.interrupt is not None:

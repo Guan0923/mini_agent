@@ -34,12 +34,14 @@ class _PendingDecision:
     def __init__(
         self,
         owner_id: str | None = None,
+        request_kind: str | None = None,
         approval_context: dict[str, str] | None = None,
         approval_store: ApprovalStore | None = None,
     ) -> None:
         self.event = threading.Event()
         self.result: dict[str, Any] = {}
         self.owner_id = owner_id
+        self.request_kind = request_kind
         self.approval_context = approval_context
         self.approval_store = approval_store
 
@@ -57,13 +59,21 @@ class DecisionRegistry:
         decision_id: str,
         owner_id: str | None = None,
         *,
+        request_kind: str | None = None,
         approval_context: dict[str, str] | None = None,
         approval_store: ApprovalStore | None = None,
     ) -> _PendingDecision:
-        pending = _PendingDecision(owner_id, approval_context, approval_store)
+        pending = _PendingDecision(owner_id, request_kind, approval_context, approval_store)
         with self._lock:
             self._pending[decision_id] = pending
         return pending
+
+    def kind(self, decision_id: str, owner_id: str | None = None) -> str | None:
+        with self._lock:
+            pending = self._pending.get(decision_id)
+            if pending is None or (pending.owner_id is not None and pending.owner_id != owner_id):
+                return None
+            return pending.request_kind
 
     def resolve(self, decision_id: str, decision: dict[str, Any], owner_id: str | None = None) -> bool:
         with self._lock:
@@ -156,6 +166,7 @@ def make_interactive_interrupt(
         pending = registry.register(
             decision_id,
             owner_id,
+            request_kind=request.kind,
             approval_context=approval_context,
             approval_store=active_approval_store,
         )
@@ -187,9 +198,9 @@ def make_interactive_interrupt(
                 supplement=supplement if isinstance(supplement, str) and supplement else None,
             )
         if request.kind == "plan":
-            if choice == "implement_clear_session":
-                return InterruptDecision("implement_clear_session")
-            return InterruptDecision("implement" if choice == "implement" else "cancel")
+            if choice in {"implement", "implement_and_compaction", "stay_in_plan_mode"}:
+                return InterruptDecision(choice)  # type: ignore[arg-type]
+            return InterruptDecision("stay_in_plan_mode")
         if request.kind == "question":
             answers = pending.result.get("answers")
             return InterruptDecision("answer", answers=answers if isinstance(answers, dict) else None)

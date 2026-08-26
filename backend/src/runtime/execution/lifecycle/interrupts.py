@@ -13,7 +13,7 @@ def default_interrupt(runtime: AgentRuntime):
 
     def decide(request: InterruptRequest) -> InterruptDecision:
         if request.kind == "plan":
-            return InterruptDecision("cancel")
+            return InterruptDecision("stay_in_plan_mode")
         if request.kind == "skill":
             # Without an interactive handler an untrusted project Skill must
             # never be activated: fail closed by skipping it.

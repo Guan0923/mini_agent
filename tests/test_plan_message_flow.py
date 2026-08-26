@@ -2,17 +2,17 @@ from pathlib import Path
 
 import pytest
 
-from backend.configuration import ClientPaths
 from backend.domain import (
     AssistantMessage,
     ToolMessage,
     UserMessage,
     message_from_dict,
 )
+from backend.planning.context_management import ContextCompactionResult
 from backend.runtime import AgentRunner, ConversationService
 from backend.runtime.core.contracts import InterruptDecision
+from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
-from backend.storage.sqlite import SQLiteSessionStore
 from backend.tools import ToolRegistry
 from tests.local_store import session_store
 
@@ -58,6 +58,13 @@ class PlanMessagePlanner:
         self.agent_histories.append(list(runtime.state.messages))
         return AssistantMessage(content="Implemented from ordinary messages.")
 
+    def compact_context(self, runtime):
+        assert runtime.services.publish is not None
+        runtime.services.publish(
+            RuntimeEvent("context_compaction_completed", data={"summary": "Compacted reviewed plan."})
+        )
+        return ContextCompactionResult(True, 2, 1, "Compacted reviewed plan.")
+
 
 class ConversationPlanner(PlanMessagePlanner):
     def decide(self, runtime):
@@ -86,12 +93,12 @@ def test_plan_implement_keeps_control_call_as_ordinary_history(tmp_path: Path) -
     assert planner.agent_histories[-1] == [
         UserMessage(content="Plan the change"),
         completed_review_message(),
-        UserMessage(content="Implement the plan"),
+        UserMessage(content=PLAN),
     ]
     assert all(message.role != "artifact" for message in service.runtime.state.messages)
 
 
-def test_plan_implement_clear_session_seeds_only_final_plan(tmp_path: Path) -> None:
+def test_plan_implement_after_compaction_keeps_session_and_uses_raw_plan(tmp_path: Path) -> None:
     planner = PlanMessagePlanner()
     service = build_service(tmp_path, planner)
     source = service.new_session("Source conversation")
@@ -102,16 +109,13 @@ def test_plan_implement_clear_session_seeds_only_final_plan(tmp_path: Path) -> N
     result = service.run_task(
         "Plan the change",
         mode="plan",
-        interrupt=lambda _request: InterruptDecision("implement_clear_session"),
+        interrupt=lambda _request: InterruptDecision("implement_and_compaction"),
     )
 
     assert result.mode == "agent"
     assert service.active_session is not None
-    assert service.active_session.session_id != source.session_id
-    assert planner.agent_histories[-1] == [
-        AssistantMessage(content=PLAN),
-        UserMessage(content="Implement the plan"),
-    ]
+    assert service.active_session.session_id == source.session_id
+    assert planner.agent_histories[-1][-1] == UserMessage(content=PLAN)
 
 
 def test_legacy_artifact_message_is_not_loadable() -> None:
@@ -152,15 +156,16 @@ def test_plan_conversation_completes_without_review_or_format_repair(tmp_path: P
     assert all(event.kind != "model_repair" for event in events)
 
 
-def test_cancelled_plan_history_survives_restart(tmp_path: Path) -> None:
+def test_stay_in_plan_mode_history_survives_restart(tmp_path: Path) -> None:
     planner = PlanMessagePlanner()
     service = build_service(tmp_path, planner)
     result = service.run_task(
         "Plan the change",
         mode="plan",
-        interrupt=lambda _request: InterruptDecision("cancel"),
+        interrupt=lambda _request: InterruptDecision("stay_in_plan_mode"),
     )
-    assert result.status == "cancelled"
+    assert result.status == "completed"
+    assert result.mode == "plan"
     assert service.active_session is not None
 
     reopened = ConversationService(
@@ -172,37 +177,4 @@ def test_cancelled_plan_history_survives_restart(tmp_path: Path) -> None:
     assert reopened.runtime is not None
     assert reopened.runtime.state.messages[0] == UserMessage(content="Plan the change")
     assert reopened.runtime.state.messages[1].tool_messages == completed_review_message().tool_messages
-    assert "aborted at the user's request" in (reopened.runtime.state.messages[1].content or "")
-
-
-class FailingSecondSessionStore(SQLiteSessionStore):
-    def __init__(self, root: Path) -> None:
-        super().__init__(ClientPaths(root), "device_test")
-        self.created_sessions = 0
-
-    def create_session(self, title: str | None = None):
-        if self.created_sessions == 1:
-            raise OSError("session storage unavailable")
-        self.created_sessions += 1
-        return super().create_session(title)
-
-
-def test_clear_session_failure_preserves_source_plan_history(tmp_path: Path) -> None:
-    planner = PlanMessagePlanner()
-    store = FailingSecondSessionStore(tmp_path / "store")
-    service = ConversationService(AgentRunner(planner, ToolRegistry(tmp_path)), store)
-    source = service.new_session("Source plan")
-
-    with pytest.raises(OSError, match="session storage unavailable"):
-        service.run_task(
-            "Plan the change",
-            mode="plan",
-            interrupt=lambda _request: InterruptDecision("implement_clear_session"),
-        )
-
-    assert service.active_session is not None
-    assert service.active_session.session_id == source.session_id
-    persisted = store.load_runtime(source.session_id)
-    assert persisted is not None
-    assert persisted.messages[-1] == completed_review_message()
-    assert len(store.list_sessions()) == 1
+    assert reopened.runtime.state.messages[1].content is None

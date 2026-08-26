@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
+from threading import RLock
 from typing import Any
 
 from backend.domain.runtime_state import (
@@ -103,6 +104,7 @@ class RuntimeEventNodeBridge:
         self.started = False
         self.closed = False
         self.runtime: Any = None
+        self._runtime_config_lock = RLock()
 
     def bind_runtime(self, runtime: Any) -> None:
         self.runtime = runtime
@@ -317,6 +319,12 @@ class RuntimeEventNodeBridge:
         self.last_node = self.assistant
 
     def apply_runtime_config(self, config: Mapping[str, Any]) -> RuntimeState | None:
+        """Merge one PATCH atomically and queue it for the next runtime boundary."""
+
+        with self._runtime_config_lock:
+            return self._apply_runtime_config_unlocked(config)
+
+    def _apply_runtime_config_unlocked(self, config: Mapping[str, Any]) -> RuntimeState | None:
         provider_name = str(config.get("provider_name") or self.provider_name)
         if not provider_name.strip():
             raise RuntimeStateValidationError("provider_name must be a non-empty string.")
@@ -342,6 +350,64 @@ class RuntimeEventNodeBridge:
             pending.update(dict(config))
             self.runtime.services.pending_runtime_config = pending
         return self.assistant
+
+    def finalize_current(self, status: NodeStatus = "success") -> RuntimeState:
+        """Finalize the active node while keeping this multi-node stream open."""
+
+        if status == "running":
+            raise ValueError("A finalized Turn cannot remain running.")
+        self._finish_stream_item()
+        current = self.assistant or self.last_node
+        if current is None:
+            current = self.start()
+        if current.status == "running":
+            current = self.writer.finalize(current, status)
+        self.assistant = current
+        self.last_node = current
+        return current
+
+    def start_child(self, prompt: str, *, running_mode: str) -> RuntimeState:
+        """Create the next child Turn in the same Session, Thread, and SSE stream."""
+
+        if running_mode not in {"agent", "plan"}:
+            raise RuntimeStateValidationError("running_mode must be agent or plan.")
+        parent = self.finalize_current("success")
+        self.prompt = prompt
+        self.parent = parent
+        self.running_mode = running_mode
+        child = RuntimeState.create(
+            session_id=parent.session_id,
+            thread_id=parent.thread_id,
+            parent=parent,
+            user_content=[{"type": "text", "text": prompt}],
+            user=parent.user or self.user,
+            provider_name=parent.provider_name or self.provider_name,
+            model=parent.model,
+            permission_mode=parent.permission_mode,
+            running_mode=running_mode,
+            cwd=parent.cwd or self.cwd,
+        )
+        child = self.writer.create(child)
+        self.assistant = child
+        self.last_node = child
+        self.turn_id = child.id
+        self.assistant_blocks = child.assistant_items
+        self.protected_item_count = 0
+        self._stream_item_index = None
+        self._stream_item_type = None
+        self._stream_text = ""
+        self.produced_item = False
+        self.abort_category = None
+        self.abort_code = ""
+        self.terminal_error = None
+        self.closed = False
+        return child
+
+    def record_compaction_failure(self, message: str) -> RuntimeState:
+        """Persist a safe failure on the successful Plan node without creating a child."""
+
+        self._append_item(terminal_error_payload("agent", message, retryable=True))
+        return self.finalize_current("success")
 
     @staticmethod
     def _error_category(data: Mapping[str, Any]) -> TerminalErrorCategory:

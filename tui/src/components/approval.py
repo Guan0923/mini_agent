@@ -122,7 +122,7 @@ class TerminalApproval:
         if supplement:
             return "Supplement: "
         if request.kind == "plan":
-            return "[1] Implement  [2] Implement and Clear Session  [3] Cancel and Stay in plan mode: "
+            return "[1] Implement  [2] Implement after Compaction  [3] Stay in Plan mode: "
         if request.kind == "resume":
             return "[1] Continue  [2] Back: "
         return "[1] Continue  [2] Cancel  [3] Supplement: "
@@ -142,13 +142,12 @@ class TerminalApproval:
                 return InterruptDecision("implement"), False
             if choice in {
                 "2",
-                "implement clear",
-                "implement_clear_session",
-                "implement and clear session",
+                "implement after compaction",
+                "implement_and_compaction",
             }:
-                return InterruptDecision("implement_clear_session"), False
-            if choice in {"3", "cancel", "cancel and stay", "cancel and stay in plan mode"}:
-                return InterruptDecision("cancel"), False
+                return InterruptDecision("implement_and_compaction"), False
+            if choice in {"3", "stay", "stay in plan mode", "stay_in_plan_mode"}:
+                return InterruptDecision("stay_in_plan_mode"), False
             return None, False
         if request.kind == "resume":
             if choice in {"1", "continue"}:

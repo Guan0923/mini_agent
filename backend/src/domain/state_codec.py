@@ -61,7 +61,9 @@ def run_state_from_dict(data: dict[str, Any]) -> RunState:
         handoff = RunHandoff(
             mode=handoff_data.get("mode", "agent"),
             task=str(handoff_data.get("task") or ""),
-            new_session=handoff_data["new_session"] if isinstance(handoff_data.get("new_session"), bool) else False,
+            compact_before=(
+                handoff_data["compact_before"] if isinstance(handoff_data.get("compact_before"), bool) else False
+            ),
             active_skills=tuple(
                 SkillSnapshot.from_dict(dict(item))
                 for item in handoff_data.get("active_skills", [])

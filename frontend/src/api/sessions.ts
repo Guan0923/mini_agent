@@ -75,13 +75,14 @@ export async function getSessionLeaves(sessionId: string): Promise<RuntimeStateN
 export async function patchRuntimeConfig(
   _sessionId: string,
   values: { node_id: string; provider_name?: string; model?: Record<string, unknown>; permission_mode?: "read_only" | "workspace_write" | "full_access"; full_access_acknowledged?: boolean; running_mode?: "agent" | "plan" },
-): Promise<Record<string, unknown>> {
+): Promise<RuntimeStateNode> {
   const { node_id, ...body } = values;
-  return requestJson(`/api/turns/${encodeURIComponent(node_id)}/config`, {
+  const node = await requestJson<RuntimeStateNode>(`/api/turns/${encodeURIComponent(node_id)}/config`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  return normalizeRuntimeNode(node);
 }
 
 export async function getTimezone(_sessionId: string): Promise<TimezoneInfo> {

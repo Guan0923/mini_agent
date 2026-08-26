@@ -441,7 +441,7 @@ def _stream(
                         code=stop_reason or bridge.abort_code,
                     )
                 terminal_status = final_node.status if final_node is not None else "failed"
-                terminal_id = turn_id or (final_node.id if final_node is not None else bridge.turn_id or "unknown")
+                terminal_id = final_node.id if final_node is not None else turn_id or bridge.turn_id or "unknown"
                 terminal_error = bridge.terminal_error
                 rendered_error = terminal_error_text(terminal_error) if terminal_error is not None else ""
                 if requested_status == "running":
@@ -484,7 +484,7 @@ def _stream(
             if bridge is not None:
                 final_node = bridge.finish_exception(exc)
                 rendered_error = terminal_error_text(bridge.terminal_error or {}) if bridge.terminal_error else ""
-                terminal_id = turn_id or (final_node.id if final_node is not None else bridge.turn_id or "unknown")
+                terminal_id = final_node.id if final_node is not None else turn_id or bridge.turn_id or "unknown"
                 if bridge.abort_category == "network" and not bridge.produced_item:
                     enqueue_terminal("network", terminal_id)
                 else:

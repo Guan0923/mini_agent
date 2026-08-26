@@ -108,7 +108,7 @@ class RunHandoff:
 
     mode: RunMode
     task: str
-    new_session: bool = False
+    compact_before: bool = False
     active_skills: tuple[SkillSnapshot, ...] = ()
 
 

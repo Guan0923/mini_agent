@@ -71,32 +71,42 @@ class PlanModeWorkflow:
         decision = runtime.services.interrupt(request)
         if cancel_if_requested(runtime):
             return
-        if decision.choice == "cancel":
-            cancel_run(runtime)
+        if decision.choice == "stay_in_plan_mode":
+            runtime.state.running_mode = "plan"
+            runtime.run.mode = "plan"
+            runtime.run.add_event("approval_granted", "Plan mode retained", **request.data)
+            publish(RuntimeEvent("approval_granted", request.message, {**request.data, "stay_in_plan_mode": True}))
+            complete_run(
+                runtime,
+                message,
+                final_answer=proposal,
+                event_kind="plan",
+                response_streamed=content_streamed,
+            )
             return
-        if decision.choice not in {"implement", "implement_clear_session"}:
+        if decision.choice not in {"implement", "implement_and_compaction"}:
             fail_run(runtime, f"Invalid Plan Review decision: {decision.choice}.")
             return
 
-        new_session = decision.choice == "implement_clear_session"
+        compact_before = decision.choice == "implement_and_compaction"
         runtime.run.handoff = RunHandoff(
             "agent",
-            "Implement the plan",
-            new_session=new_session,
+            proposal,
+            compact_before=compact_before,
             active_skills=tuple(runtime.run.active_skills),
         )
         runtime.run.add_event(
             "approval_granted",
             "Plan implementation requested",
-            new_session=new_session,
+            compact_before=compact_before,
             **request.data,
         )
-        publish(RuntimeEvent("approval_granted", request.message, {**request.data, "new_session": new_session}))
+        publish(RuntimeEvent("approval_granted", request.message, {**request.data, "compact_before": compact_before}))
         runtime.run.add_event(
             "handoff_created",
             "Agent implementation handoff created",
             task=runtime.run.handoff.task,
-            new_session=new_session,
+            compact_before=compact_before,
         )
         publish(
             RuntimeEvent(
@@ -104,7 +114,7 @@ class PlanModeWorkflow:
                 runtime.run.handoff.task,
                 {
                     "mode": runtime.run.handoff.mode,
-                    "new_session": new_session,
+                    "compact_before": compact_before,
                 },
             )
         )

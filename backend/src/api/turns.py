@@ -7,7 +7,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from backend.domain import PlanningError
 from backend.domain.runtime_state import (
@@ -68,11 +68,31 @@ class CurrentDataRequest(BaseModel):
     current_data_idx: int = Field(ge=0)
 
 
-class TurnConfigPatch(TurnExecutionConfig):
+class RuntimeModelPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    current_model: str | None = Field(default=None, min_length=1, max_length=500)
+    context_length: int | None = Field(default=None, gt=1)
+    output_length: int | None = Field(default=None, ge=1)
+    thinking: Literal["enable", "disable"] | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
+
+
+class TurnConfigPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     provider_name: str | None = Field(default=None, min_length=1, max_length=80)
-    model: RuntimeModelRequest | None = None
+    model: RuntimeModelPatch | None = None
     permission_mode: PermissionMode | None = None
     running_mode: RunningMode | None = None
+    full_access_acknowledged: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def validate_full_access(self):
+        if self.permission_mode == "full_access" and self.full_access_acknowledged is not True:
+            raise ValueError("full_access requires explicit joint file and network confirmation")
+        return self
 
 
 class ForkTurnRequest(BaseModel):
@@ -406,11 +426,17 @@ def patch_turn_config(
     state: WebAppState = request.app.state.web
     store = session_store(state, identity.id)
     node = _turn(store, turn_id)
+    if node.status != "running":
+        raise HTTPException(status_code=409, detail="只有 running Turn 可以修改运行配置。")
     changes: dict[str, object] = {}
     if body.provider_name is not None:
         changes["provider_name"] = body.provider_name
     if body.model is not None:
-        changes["model"] = body.model.model_dump()
+        merged_model = {**node.model, **body.model.model_dump(exclude_none=True)}
+        try:
+            changes["model"] = RuntimeModelRequest.model_validate(merged_model).model_dump()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     if body.permission_mode is not None:
         changes["permission_mode"] = body.permission_mode
     if body.running_mode is not None:

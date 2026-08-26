@@ -9,7 +9,7 @@ from backend.sandbox import SandboxExecutionDecision
 from backend.tools import ToolError, ToolInvocationContext
 
 from ..core.context import AgentRuntime
-from ..core.contracts import InterruptDecision
+from ..core.contracts import InterruptDecision, WorkflowModeChanged
 from ..core.events import RuntimeEvent
 from ..core.hooks import (
     HookOutcome,
@@ -37,10 +37,13 @@ class ToolStepExecutor:
     """Execute runtime.state.active_message.tool_messages[active_tool_index]."""
 
     def execute(self, runtime: AgentRuntime) -> ToolStepResult:
+        previous_mode = runtime.run.mode
         runtime.apply_pending_runtime_config()
         run = runtime.run
         if runtime.state.running_mode in {"agent", "plan"}:
             run.mode = runtime.state.running_mode  # type: ignore[assignment]
+        if run.mode != previous_mode:
+            raise WorkflowModeChanged(f"Workflow mode changed from {previous_mode} to {run.mode}.")
         message = runtime.state.active_message
         index = runtime.state.active_tool_index
         if message is None or index is None or not 0 <= index < len(message.tool_messages):

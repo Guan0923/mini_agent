@@ -39,8 +39,8 @@ export default function DecisionCard({ request, onSubmit }: Props) {
         {proposal ? <MarkdownContent text={proposal} /> : <p>{request.message || "Agent 请求审核一个计划。"}</p>}
         <Space className="decision-actions" wrap>
           <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("implement")}>实施</Button>
-          <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("implement_clear_session")}>实施并清空会话</Button>
-          <Button autoInsertSpace={false} loading={submitting} disabled={submitting} onClick={() => void submit("cancel")}>取消并留在 Plan</Button>
+          <Button autoInsertSpace={false} type="primary" loading={submitting} disabled={submitting} onClick={() => void submit("implement_and_compaction")}>压缩后实施</Button>
+          <Button autoInsertSpace={false} loading={submitting} disabled={submitting} onClick={() => void submit("stay_in_plan_mode")}>留在 Plan</Button>
         </Space>
       </Card>
     );

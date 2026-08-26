@@ -34,12 +34,19 @@ def submit_decision(
         "allow_session",
         "supplement",
         "implement",
-        "implement_clear_session",
+        "implement_and_compaction",
+        "stay_in_plan_mode",
         "answer",
         "back",
     }
     if body.choice not in allowed:
         raise HTTPException(status_code=422, detail=f"不支持的决策：{body.choice}")
+    if registry.kind(body.decision_id, identity.id) == "plan" and body.choice not in {
+        "implement",
+        "implement_and_compaction",
+        "stay_in_plan_mode",
+    }:
+        raise HTTPException(status_code=422, detail=f"不支持的 Plan 决策：{body.choice}")
     if body.choice == "supplement" and not (body.supplement or "").strip():
         raise HTTPException(status_code=422, detail="补充说明不能为空")
     if body.choice == "answer" and body.answers is None:

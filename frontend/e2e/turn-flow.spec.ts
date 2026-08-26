@@ -68,6 +68,72 @@ test("real Turn SSE flow supports tools, rewind versions, fork, and compact", as
   await expect(page.getByText("上下文已压缩", { exact: false })).toBeVisible();
 });
 
+test("Plan Review compacts and implements as Plan, Compact, Agent Turns in one SSE flow", async ({ page }) => {
+  const guest = await page.request.post("/api/auth/guest");
+  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Plan Review Compact" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Plan Review Compact", exact: true }).click();
+  await page.getByRole("combobox", { name: "运行模式" }).click();
+  await page.getByRole("option", { name: /Plan/ }).click();
+  await page.getByLabel("聊天输入").fill("plan review compact");
+  const createResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await createResponse).ok()).toBeTruthy();
+
+  const review = page.locator(".plan-decision");
+  await expect(review).toContainText("Compact implementation plan", { timeout: 15_000 });
+  const decisionResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/decisions"),
+  );
+  await review.getByRole("button", { name: "压缩后实施" }).click();
+  expect((await decisionResponse).ok()).toBeTruthy();
+
+  await expect(page.locator(".message.assistant").last()).toContainText(
+    "Implemented the exact reviewed plan after compaction.",
+    { timeout: 15_000 },
+  );
+  await expect(page.locator(".message.user").last()).toContainText("Compact implementation plan");
+
+  const turnsResponse = await page.request.get(
+    `/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`,
+  );
+  expect(turnsResponse.ok(), `${turnsResponse.status()} ${await turnsResponse.text()}`).toBeTruthy();
+  const turns = await turnsResponse.json() as Array<{
+    id: string;
+    parent_id: string;
+    running_mode: "agent" | "plan";
+    status: string;
+    current_data_idx: number;
+    data: Array<Array<{ role: string; content: Array<Record<string, unknown>> }>>;
+  }>;
+  expect(turns).toHaveLength(3);
+  const plan = turns.find((turn) => !turn.parent_id);
+  expect(plan).toBeDefined();
+  const compact = turns.find((turn) => turn.parent_id === plan?.id);
+  expect(compact).toBeDefined();
+  const agent = turns.find((turn) => turn.parent_id === compact?.id);
+  expect(agent).toBeDefined();
+  expect([plan?.running_mode, compact?.running_mode, agent?.running_mode]).toEqual(["plan", "plan", "agent"]);
+  expect([plan?.status, compact?.status, agent?.status]).toEqual(["success", "success", "success"]);
+  expect(compact?.data[compact.current_data_idx][1].content).toEqual(
+    expect.arrayContaining([expect.objectContaining({ type: "compaction" })]),
+  );
+  expect(agent?.data[agent.current_data_idx][0].content).toEqual([
+    {
+      type: "text",
+      text: "# Compact implementation plan\n\n1. Preserve the reviewed Plan Turn.\n2. Compact the conversation context.\n3. Implement from this exact plan text.",
+    },
+  ]);
+});
+
 test("refresh reattaches a running Turn and flushes the persisted queue as one message", async ({ page }) => {
   const guest = await page.request.post("/api/auth/guest");
   expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();

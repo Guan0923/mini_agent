@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -10,7 +9,6 @@ from backend.domain import (
     FAILED_TERMINAL_MESSAGE,
     AssistantMessage,
     ResumePreview,
-    RunHandoff,
     RunMode,
     RunProvenance,
     RunState,
@@ -29,6 +27,7 @@ from ..core.contracts import CancellationHandler, EventHandler, InterruptHandler
 from ..core.events import RuntimeEvent
 from ..execution import RuntimeRunner
 from ..node_bridge import RuntimeEventNodeBridge
+from ..persistence.recording import persistent_event
 from .ports import SessionStore, TaskPreprocessor
 from .recovery.resuming import prepare_resume
 from .recovery.resuming import resume_session as resume_conversation
@@ -224,6 +223,8 @@ class ConversationService(ConversationSessionController):
         prompt: str,
         on_event: EventHandler | None,
         references: list[Mapping[str, str]] | None = None,
+        *,
+        running_mode: RunMode | None = None,
     ) -> None:
         """Bind a bridge to the runtime and compose its local event sink."""
 
@@ -234,6 +235,8 @@ class ConversationService(ConversationSessionController):
             self._node_bridge_events_external = False
         if bridge is None or self.runtime is None:
             return
+        if running_mode in {"agent", "plan"}:
+            bridge.running_mode = running_mode
         bridge.bind_runtime(self.runtime)
         if not bridge.started:
             bridge.start()
@@ -283,15 +286,26 @@ class ConversationService(ConversationSessionController):
         source_session_id = (
             self.active_session.session_id if self.active_session is not None else self.runtime.state.session_id
         )
-        if handoff.new_session:
-            self._start_isolated_handoff_session(handoff)
-        # A plan review and its implementation handoff belong to the same
-        # user interaction, so the bridge must keep appending to the same
-        # durable Turn across this runtime boundary.
         bridge = self.runtime_node_bridge
+        if handoff.compact_before:
+            try:
+                self.runner.compact_context(self.runtime)
+                if bridge is not None:
+                    bridge.finalize_current("success")
+                if self.runtime.model_nodes():
+                    self.runtime.state.messages = self.runtime.model_messages()
+                    self.runtime.save()
+            except Exception as exc:
+                safe_detail, _ = persistent_event(RuntimeEvent("error", str(exc)), True)
+                safe_message = f"Context compaction failed: {safe_detail or exc.__class__.__name__}"
+                self.runtime.state.running_mode = "plan"
+                state.mode = "plan"
+                if bridge is not None and not bridge.closed:
+                    bridge.record_compaction_failure(safe_message)
+                    bridge.closed = True
+                return state
         if bridge is not None and not bridge.closed:
-            if self.runtime is not None:
-                bridge.bind_runtime(self.runtime)
+            bridge.start_child(handoff.task, running_mode=handoff.mode)
         follow_up = self._run_single_turn(
             handoff.task,
             mode=handoff.mode,
@@ -309,71 +323,6 @@ class ConversationService(ConversationSessionController):
         if follow_up.handoff is not None:
             raise RuntimeError("Nested run handoffs are not supported.")
         return follow_up
-
-    def _start_isolated_handoff_session(self, handoff: RunHandoff) -> None:
-        if self.runtime is None:
-            raise RuntimeError("Cannot start a handoff without an active runtime.")
-        source_runtime = self.runtime
-        proposal = (source_runtime.run.final_answer or "").strip()
-        if not proposal:
-            raise RuntimeError("Cannot start an isolated handoff without a completed plan proposal.")
-        plan_message = AssistantMessage(content=proposal)
-
-        if self.session_store is None:
-            self.runtime = self.runner.empty_runtime(
-                session_id=new_session_id(),
-                messages=[plan_message],
-            )
-            self.runtime.state.timezone = self.default_timezone
-            self.conversation = text_messages(self.runtime.state.messages)
-            return
-
-        if self.active_session is None:
-            raise RuntimeError("Cannot create an isolated handoff session without an active session.")
-        source_session = self.active_session
-        provisioned = False
-        title = f"Implement: {source_session.title}"
-        if self._session_provisioner is not None:
-            isolated_session = self._session_provisioner(self.session_store, title, source_session)
-            provisioned = isolated_session is not None
-        else:
-            isolated_session = None
-        if isolated_session is None:
-            isolated_session = self.session_store.create_session(title)
-        paths = getattr(self.session_store, "paths", None)
-        try:
-            isolated_runtime = self.runner.empty_runtime(
-                session_id=isolated_session.session_id,
-                messages=[plan_message],
-                runtime_store=self.session_store,
-            )
-            isolated_runtime.state.timezone = self.default_timezone
-            isolated_runtime.save()
-            if paths is not None and not provisioned:
-                paths.ensure_session(isolated_session.session_id)
-                # Uploads live below the workspace in the canonical layout, so
-                # a single workspace copy carries them.  Migrate a legacy
-                # sibling uploads directory first so old sessions are copied
-                # completely.
-                paths.migrate_legacy_uploads(source_session.session_id)
-                _copy_session_tree(
-                    paths.session_workspace(source_session.session_id),
-                    paths.session_workspace(isolated_session.session_id),
-                )
-        except Exception:
-            if provisioned and self._session_provisioner_cleanup is not None:
-                try:
-                    self._session_provisioner_cleanup(isolated_session.session_id)
-                except Exception:
-                    pass
-            if paths is not None:
-                shutil.rmtree(paths.session_root(isolated_session.session_id), ignore_errors=True)
-            raise
-
-        self.active_session = isolated_session
-        self.runtime = isolated_runtime
-        self.conversation = text_messages(isolated_runtime.state.messages)
-        self._clear_pending_session()
 
     def _run_single_turn(
         self,
@@ -447,7 +396,7 @@ class ConversationService(ConversationSessionController):
         # embedding executions as well as Web SSE.  Web attaches a bridge
         # ahead of time so it can expose the active dynamic leaf to PATCH;
         # local callers get an equivalent bridge here.
-        self._bind_node_bridge(prepared, on_event, references)
+        self._bind_node_bridge(prepared, on_event, references, running_mode=mode)
         # ``mode`` is the initial runtime configuration for this turn.  The
         # runner refreshes ``RunState.mode`` from ``state.running_mode`` at
         # dispatch time and the bridge's ``bind_runtime`` derives it from the
@@ -569,25 +518,3 @@ class ConversationService(ConversationSessionController):
                 run.status,
                 run.final_answer,
             )
-
-
-def _copy_session_tree(source, target) -> None:
-    """Copy a session payload without following links or special files."""
-
-    if source.is_symlink() or not source.is_dir():
-        raise ValueError("Session payload source must be a real directory.")
-    if target.is_symlink():
-        raise ValueError("Session payload target cannot be a symbolic link.")
-    target.mkdir(parents=True, exist_ok=True)
-    for item in source.rglob("*"):
-        relative = item.relative_to(source)
-        destination = target / relative
-        if item.is_symlink() or destination.is_symlink():
-            raise ValueError("Session payload cannot contain symbolic links.")
-        if item.is_dir():
-            destination.mkdir(parents=True, exist_ok=True)
-        elif item.is_file():
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item, destination)
-        else:
-            raise ValueError("Session payload cannot contain special files.")

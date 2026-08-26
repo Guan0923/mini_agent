@@ -24,14 +24,14 @@ def test_plan_review_implements_plan(monkeypatch, capsys) -> None:
     assert "PLAN REVIEW\n1. Edit README." in capsys.readouterr().out
 
 
-def test_plan_review_implements_and_clears_session(monkeypatch, capsys) -> None:
+def test_plan_review_implements_after_compaction(monkeypatch, capsys) -> None:
     prompts = []
     monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "2")
 
     decision = TerminalApproval()(InterruptRequest("plan", "Implement this plan?", {"plan": "1. Edit README."}))
 
-    assert decision.choice == "implement_clear_session"
-    assert prompts == ["[1] Implement  [2] Implement and Clear Session  [3] Cancel and Stay in plan mode: "]
+    assert decision.choice == "implement_and_compaction"
+    assert prompts == ["[1] Implement  [2] Implement after Compaction  [3] Stay in Plan mode: "]
     assert "PLAN REVIEW\n1. Edit README." in capsys.readouterr().out
 
 
@@ -51,7 +51,7 @@ def test_plan_review_rejects_tool_supplement_choice(monkeypatch, capsys) -> None
 
     decision = TerminalApproval()(InterruptRequest("plan", "Implement this plan?", {"plan": "1. Edit README."}))
 
-    assert decision.choice == "cancel"
+    assert decision.choice == "stay_in_plan_mode"
     assert decision.supplement is None
     assert "Choose 1, 2, or 3." in capsys.readouterr().out
 
@@ -104,7 +104,7 @@ def test_full_access_keeps_dangerous_tool_and_plan_review_manual(monkeypatch, ca
     plan_decision = approval(InterruptRequest("plan", "Implement this plan?", {"plan": "1. Write the file."}))
 
     assert tool_decision.choice == "continue"
-    assert plan_decision.choice == "cancel"
+    assert plan_decision.choice == "stay_in_plan_mode"
     output = capsys.readouterr().out
     assert "TOOL REVIEW" in output
     assert "PLAN REVIEW\n1. Write the file." in output

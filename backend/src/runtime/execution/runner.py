@@ -20,6 +20,7 @@ from backend.planning.context_management import ContextCompactionResult
 
 from ..core.config import RunnerSettings
 from ..core.context import AgentRuntime, RuntimeServices, RuntimeState
+from ..core.contracts import WorkflowModeChanged
 from ..core.events import RuntimeEvent
 from ..core.hooks import (
     HookErrorInfo,
@@ -304,10 +305,7 @@ class AgentRunner:
         )
         if cancel_if_requested(runtime):
             return
-        if run.mode == "plan":
-            self._plan_mode.run(runtime)
-        else:
-            self._execution.run(runtime)
+        self._run_selected_workflow(runtime)
 
     def _dispatch(self, runtime: AgentRuntime) -> None:
         runtime.apply_pending_runtime_config()
@@ -335,10 +333,21 @@ class AgentRunner:
             return
         if not self._skills.activate(runtime):
             return
-        if runtime.run.mode == "plan":
-            self._plan_mode.run(runtime)
-        else:
-            self._execution.run(runtime)
+        self._run_selected_workflow(runtime)
+
+    def _run_selected_workflow(self, runtime: AgentRuntime) -> None:
+        """Re-dispatch a running Turn whenever its mode changes at a boundary."""
+
+        while runtime.run.status == "running":
+            runtime.apply_pending_runtime_config()
+            try:
+                if runtime.run.mode == "plan":
+                    self._plan_mode.run(runtime)
+                else:
+                    self._execution.run(runtime)
+            except WorkflowModeChanged:
+                continue
+            return
 
     def _default_interrupt(self, runtime: AgentRuntime):
         return default_interrupt(runtime)

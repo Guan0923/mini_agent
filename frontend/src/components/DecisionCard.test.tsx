@@ -16,6 +16,10 @@ describe("DecisionCard", () => {
 
     await user.click(screen.getByRole("button", { name: "实施" }));
     expect(onSubmit).toHaveBeenCalledWith("implement", {});
+    await user.click(screen.getByRole("button", { name: "压缩后实施" }));
+    expect(onSubmit).toHaveBeenCalledWith("implement_and_compaction", {});
+    await user.click(screen.getByRole("button", { name: "留在 Plan" }));
+    expect(onSubmit).toHaveBeenCalledWith("stay_in_plan_mode", {});
   });
 
   it("submits selected question answers through the answers protocol", async () => {

@@ -26,6 +26,7 @@ from backend.domain.runtime_state import (
     RuntimeStateTree,
     RuntimeStateValidationError,
 )
+from backend.planning.context_management import ContextCompactionResult
 from backend.planning.llm import LLMPlanner
 from backend.planning.rule_based import RuleBasedPlanner
 from backend.providers import ModelConfig, ModelConfigurationError
@@ -657,7 +658,7 @@ def test_fork_sidebar_title_is_copied_once_unless_explicitly_named(tmp_path: Pat
         assert explicit["title_is_custom"] is True
 
 
-def test_plan_handoff_appends_to_the_same_turn(tmp_path: Path) -> None:
+def test_plan_handoff_creates_agent_child_with_raw_plan_message(tmp_path: Path) -> None:
     class PlanHandoffPlanner:
         name = "plan-handoff"
 
@@ -689,13 +690,127 @@ def test_plan_handoff_appends_to_the_same_turn(tmp_path: Path) -> None:
     assert result.status == "completed"
     assert service.active_session is not None
     turns = store.load_nodes(service.active_session.session_id)
-    assert len(turns) == 1
-    assert turns[0].status == "success"
-    assert turns[0].selected_messages[0]["content"] == [{"type": "text", "text": "plan the change"}]
+    assert len(turns) == 2
+    plan, agent = turns
+    assert plan.status == agent.status == "success"
+    assert plan.running_mode == "plan"
+    assert agent.running_mode == "agent"
+    assert agent.parent_id == plan.id
+    assert plan.selected_messages[0]["content"] == [{"type": "text", "text": "plan the change"}]
+    assert agent.selected_messages[0]["content"] == [{"type": "text", "text": "Implement the reviewed change."}]
     assert any(
         item.get("type") == "text" and item.get("text") == "Implemented from the reviewed plan."
-        for item in turns[0].assistant_items
+        for item in agent.assistant_items
     )
+
+
+def test_plan_compaction_handoff_emits_plan_compact_agent_nodes_in_one_stream(tmp_path: Path) -> None:
+    class CompactingPlanPlanner:
+        name = "compacting-plan"
+
+        def decide(self, runtime):
+            if runtime.run.mode == "plan":
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name=REQUEST_PLAN_REVIEW_NAME,
+                            call_id="review_compact",
+                            arguments={"plan": "Implement after a real compaction."},
+                        )
+                    ]
+                )
+            return AssistantMessage(content="Implemented after compaction.")
+
+        def compact_context(self, runtime):
+            assert runtime.services.publish is not None
+            runtime.services.publish(
+                RuntimeEvent(
+                    "context_compaction_completed",
+                    "Conversation context compacted manually",
+                    {"summary": "deterministic compact summary"},
+                )
+            )
+            return ContextCompactionResult(True, 2, 1, "deterministic compact summary")
+
+    frames: list[NodeFrame] = []
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    service = ConversationService(AgentRunner(CompactingPlanPlanner(), ToolRegistry()), store)
+    session = service.new_session("Plan compaction")
+    bridge = RuntimeEventNodeBridge(
+        store,
+        session_id=session.session_id,
+        thread_id=session.session_id,
+        prompt="plan the compacted change",
+        running_mode="plan",
+        emit=frames.append,
+    )
+    service.attach_runtime_node_bridge(bridge, events_external=False)
+
+    result = service.run_task(
+        "plan the compacted change",
+        mode="plan",
+        interrupt=lambda _request: InterruptDecision("implement_and_compaction"),
+    )
+
+    assert result.status == "completed"
+    snapshots = [frame.turn for frame in frames if frame.type == "turn.snapshot"]
+    assert len(snapshots) == 3 and all(node is not None for node in snapshots)
+    plan, compact, agent = snapshots
+    assert plan is not None and compact is not None and agent is not None
+    assert compact.parent_id == plan.id
+    assert agent.parent_id == compact.id
+    assert [node.running_mode for node in (plan, compact, agent)] == ["plan", "plan", "agent"]
+    assert compact.assistant_items[0]["type"] == "compaction"
+    assert compact.assistant_items[0]["summary"] == "deterministic compact summary"
+    assert agent.selected_messages[0]["content"] == [{"type": "text", "text": "Implement after a real compaction."}]
+    assert [node.status for node in store.load_nodes(session.session_id)] == ["success", "success", "success"]
+
+
+def test_plan_compaction_failure_keeps_successful_plan_and_records_redacted_reason(tmp_path: Path) -> None:
+    class FailingCompactionPlanner:
+        name = "failing-compaction"
+
+        def decide(self, _runtime):
+            return AssistantMessage(
+                tool_messages=[
+                    ToolMessage(
+                        name=REQUEST_PLAN_REVIEW_NAME,
+                        call_id="review_failure",
+                        arguments={"plan": "Keep this plan available."},
+                    )
+                ]
+            )
+
+        def compact_context(self, runtime):
+            assert runtime.services.publish is not None
+            runtime.services.publish(
+                RuntimeEvent(
+                    "context_compaction_failed",
+                    "Conversation context compaction failed",
+                    {"error": "summary provider unavailable; api_key=super-secret"},
+                )
+            )
+            raise PlanningError("summary provider unavailable; api_key=super-secret")
+
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    service = ConversationService(AgentRunner(FailingCompactionPlanner(), ToolRegistry()), store)
+
+    result = service.run_task(
+        "plan a change",
+        mode="plan",
+        interrupt=lambda _request: InterruptDecision("implement_and_compaction"),
+    )
+
+    assert result.status == "completed"
+    assert result.mode == "plan"
+    assert service.active_session is not None
+    turns = store.load_nodes(service.active_session.session_id)
+    assert len(turns) == 1
+    assert turns[0].status == "success" and turns[0].running_mode == "plan"
+    error = next(item for item in turns[0].assistant_items if item["type"] == "error")
+    assert "summary provider unavailable" in error["message"]
+    assert "super-secret" not in error["message"]
+    assert "[REDACTED]" in error["message"]
 
 
 def test_sse_terminal_mapping_distinguishes_user_pause_from_network_pause() -> None:

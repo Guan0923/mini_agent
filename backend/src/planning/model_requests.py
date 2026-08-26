@@ -9,6 +9,7 @@ from typing import Protocol
 
 from backend.domain import ToolSpec
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
+from backend.runtime.core.contracts import WorkflowModeChanged
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.core.hooks import (
     HookErrorInfo,
@@ -44,9 +45,12 @@ class ModelRequestExecutor:
         operation_tools: list[ToolSpec] | None = None,
         stream: bool | None = None,
     ) -> PreparedResponse:
+        previous_mode = runtime.run.mode
         runtime.apply_pending_runtime_config()
         if runtime.state.current_run is not None and runtime.state.running_mode in {"agent", "plan"}:
             runtime.state.current_run.mode = runtime.state.running_mode  # type: ignore[assignment]
+        if operation == "decision" and runtime.run.mode != previous_mode:
+            raise WorkflowModeChanged(f"Workflow mode changed from {previous_mode} to {runtime.run.mode}.")
         prepare_runtime = getattr(self._client, "prepare_runtime", None)
         if callable(prepare_runtime):
             prepare_runtime(runtime)

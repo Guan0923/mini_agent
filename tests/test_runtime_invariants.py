@@ -85,7 +85,7 @@ class PlanProposalPlanner:
         )
 
 
-def test_plan_review_defaults_to_cancel_without_an_interrupt_handler() -> None:
+def test_plan_review_defaults_to_staying_in_plan_mode_without_an_interrupt_handler() -> None:
     runner = AgentRunner(PlanProposalPlanner(), ToolRegistry())
     runtime = runner.new_runtime(
         task="prepare a plan",
@@ -95,8 +95,9 @@ def test_plan_review_defaults_to_cancel_without_an_interrupt_handler() -> None:
 
     result = runner.run(runtime)
 
-    assert result.status == "cancelled"
-    assert not any(event.kind == "approval_granted" for event in result.events)
+    assert result.status == "completed"
+    assert result.mode == "plan"
+    assert any(event.kind == "approval_granted" for event in result.events)
 
 
 class ToolPlanProposalPlanner:

@@ -142,6 +142,12 @@ export default function ChatPage({
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
   const [providerName, setProviderName] = useState("unknown");
   const [runtimeModel, setRuntimeModel] = useState<RuntimeNodeModel>(DEFAULT_RUNTIME_NODE_MODEL);
+  const [runtimeConfigPending, setRuntimeConfigPending] = useState<Record<SettingsSelectKey, boolean>>({
+    mode: false,
+    permission: false,
+    reasoning: false,
+  });
+  const runtimeConfigPendingRef = useRef(runtimeConfigPending);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [openSettingsSelect, setOpenSettingsSelect] = useState<SettingsSelectKey | null>(null);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
@@ -244,10 +250,14 @@ export default function ChatPage({
     if (!node) return;
     const model = normalizeRuntimeNodeModel(node.model);
     setProviderName(node.provider_name || "unknown");
-    setRuntimeModel(model);
-    setPermissionMode(node.permission_mode || "read_only");
-    setReasoningEffort(model.reasoning_effort);
-    if (node.running_mode && node.running_mode !== mode) onModeChange(node.running_mode);
+    setRuntimeModel((current) => (
+      runtimeConfigPendingRef.current.reasoning ? { ...model, reasoning_effort: current.reasoning_effort } : model
+    ));
+    if (!runtimeConfigPendingRef.current.permission) setPermissionMode(node.permission_mode || "read_only");
+    if (!runtimeConfigPendingRef.current.reasoning) setReasoningEffort(model.reasoning_effort);
+    if (!runtimeConfigPendingRef.current.mode && node.running_mode && node.running_mode !== mode) {
+      onModeChange(node.running_mode);
+    }
   }, [activeRuntimeNode?.id, activeRuntimeNode?.provider_name, activeRuntimeNode?.model, activeRuntimeNode?.permission_mode, activeRuntimeNode?.running_mode]);
 
   function nearestUsage(node: RuntimeStateNode | undefined): { total: number; context: number } | undefined {
@@ -292,20 +302,18 @@ export default function ChatPage({
     permission_mode?: PermissionMode;
     full_access_acknowledged?: boolean;
     running_mode?: ChatMode;
-  }) {
-    if (!conversation?.sessionId || !activeRuntimeNode || activeRuntimeNode.status !== "running") return;
-    try {
-      await patchRuntimeConfig(conversation.sessionId, {
-        node_id: activeRuntimeNode.id,
-        provider_name: patch.provider_name,
-        model: patch.model,
-        permission_mode: patch.permission_mode,
-        full_access_acknowledged: patch.full_access_acknowledged,
-        running_mode: patch.running_mode,
-      });
-    } catch (error) {
-      setLast({ error: `运行配置更新失败：${String((error as Error).message ?? error)}` });
+  }): Promise<RuntimeStateNode> {
+    if (!conversation?.sessionId || !activeRuntimeNode || activeRuntimeNode.status !== "running") {
+      throw new Error("当前没有可更新的 running Turn。");
     }
+    return patchRuntimeConfig(conversation.sessionId, {
+      node_id: activeRuntimeNode.id,
+      provider_name: patch.provider_name,
+      model: patch.model,
+      permission_mode: patch.permission_mode,
+      full_access_acknowledged: patch.full_access_acknowledged,
+      running_mode: patch.running_mode,
+    });
   }
 
   useEffect(() => {
@@ -319,6 +327,8 @@ export default function ChatPage({
     void updateRuntimeConfig({
       provider_name: configuredProviderName,
       model: requestModel,
+    }).catch((error) => {
+      setLast({ error: `运行配置更新失败：${String((error as Error).message ?? error)}` });
     });
   }, [
     busy,
@@ -334,6 +344,98 @@ export default function ChatPage({
     requestModel?.context_length,
     requestModel?.output_length,
   ]);
+
+  function runtimeConfigFailure(error: unknown) {
+    setLast({ error: `运行配置更新失败：${String((error as Error).message ?? error)}` });
+  }
+
+  function setRuntimeConfigFieldPending(field: SettingsSelectKey, pending: boolean) {
+    runtimeConfigPendingRef.current = { ...runtimeConfigPendingRef.current, [field]: pending };
+    setRuntimeConfigPending(runtimeConfigPendingRef.current);
+  }
+
+  async function changeRunningMode(value: ChatMode) {
+    const previous = mode;
+    if (canPatchRuntimeConfig) {
+      setRuntimeConfigFieldPending("mode", true);
+    }
+    onModeChange(value);
+    setOpenSettingsSelect(null);
+    if (!canPatchRuntimeConfig) return;
+    try {
+      const updated = await updateRuntimeConfig({ running_mode: value });
+      onModeChange(updated.running_mode);
+    } catch (error) {
+      onModeChange(previous);
+      runtimeConfigFailure(error);
+    } finally {
+      setRuntimeConfigFieldPending("mode", false);
+    }
+  }
+
+  async function changePermissionMode(value: PermissionMode) {
+    const previous = permissionMode;
+    if (value === "full_access" && previous !== "full_access") {
+      const confirmed = await new Promise<boolean>((resolve) => {
+        fullAccessConfirmRef.current = Modal.confirm({
+          title: "启用 Full access？",
+          content: "这会同时放开文件和网络访问，并标记为非沙箱运行。",
+          okText: "继续",
+          cancelText: "取消",
+          onOk: () => {
+            fullAccessConfirmRef.current = null;
+            resolve(true);
+          },
+          onCancel: () => {
+            fullAccessConfirmRef.current = null;
+            resolve(false);
+          },
+        });
+      });
+      if (!confirmed) return;
+    }
+    if (canPatchRuntimeConfig) {
+      setRuntimeConfigFieldPending("permission", true);
+    }
+    setPermissionMode(value);
+    setOpenSettingsSelect(null);
+    if (!canPatchRuntimeConfig) return;
+    try {
+      const updated = await updateRuntimeConfig({
+        permission_mode: value,
+        full_access_acknowledged: value === "full_access",
+      });
+      setPermissionMode(updated.permission_mode);
+    } catch (error) {
+      setPermissionMode(previous);
+      runtimeConfigFailure(error);
+    } finally {
+      setRuntimeConfigFieldPending("permission", false);
+    }
+  }
+
+  async function changeReasoningEffort(value: ReasoningEffort) {
+    const previous = reasoningEffort;
+    if (canPatchRuntimeConfig) {
+      setRuntimeConfigFieldPending("reasoning", true);
+    }
+    setReasoningEffort(value);
+    setRuntimeModel((current) => ({ ...current, reasoning_effort: value }));
+    setOpenSettingsSelect(null);
+    if (!canPatchRuntimeConfig) return;
+    try {
+      const updated = await updateRuntimeConfig({ model: { reasoning_effort: value } });
+      const accepted = normalizeRuntimeNodeModel(updated.model).reasoning_effort;
+      setReasoningEffort(accepted);
+      setRuntimeModel((current) => ({ ...current, reasoning_effort: accepted }));
+    } catch (error) {
+      setReasoningEffort(previous);
+      setRuntimeModel((current) => ({ ...current, reasoning_effort: previous }));
+      runtimeConfigFailure(error);
+    } finally {
+      setRuntimeConfigFieldPending("reasoning", false);
+    }
+  }
 
   useEffect(() => () => {
     // Static antd confirmations are mounted outside ChatPage.  Tie the
@@ -1040,6 +1142,9 @@ export default function ChatPage({
         mode={mode}
         permissionMode={permissionMode}
         reasoningEffort={reasoningEffort}
+        modePending={runtimeConfigPending.mode}
+        permissionPending={runtimeConfigPending.permission}
+        reasoningPending={runtimeConfigPending.reasoning}
         todos={todo}
         usagePercent={usagePercent}
         usageTotalTokens={activeUsage?.total ?? null}
@@ -1051,33 +1156,9 @@ export default function ChatPage({
         onKeyDown={handleComposerKeyDown}
         onComplete={completeCommand}
         onActiveCommandChange={setActiveCommandIndex}
-        onModeChange={(value) => { onModeChange(value); if (canPatchRuntimeConfig) void updateRuntimeConfig({ running_mode: value }); setOpenSettingsSelect(null); }}
-        onPermissionChange={async (value) => {
-          const next = value;
-          if (next === "full_access" && permissionMode !== "full_access") {
-            const confirmed = await new Promise<boolean>((resolve) => {
-              fullAccessConfirmRef.current = Modal.confirm({
-                title: "启用 Full access？",
-                content: "这会同时放开文件和网络访问，并标记为非沙箱运行。",
-                okText: "继续",
-                cancelText: "取消",
-                onOk: () => {
-                  fullAccessConfirmRef.current = null;
-                  resolve(true);
-                },
-                onCancel: () => {
-                  fullAccessConfirmRef.current = null;
-                  resolve(false);
-                },
-              });
-            });
-            if (!confirmed) return;
-          }
-          setPermissionMode(next);
-          if (canPatchRuntimeConfig) void updateRuntimeConfig({ permission_mode: next, full_access_acknowledged: next === "full_access" });
-          setOpenSettingsSelect(null);
-        }}
-        onReasoningChange={(value) => { setReasoningEffort(value); setRuntimeModel((current) => ({ ...current, reasoning_effort: value })); if (canPatchRuntimeConfig) void updateRuntimeConfig({ model: { reasoning_effort: value } }); setOpenSettingsSelect(null); }}
+        onModeChange={(value) => void changeRunningMode(value)}
+        onPermissionChange={(value) => void changePermissionMode(value)}
+        onReasoningChange={(value) => void changeReasoningEffort(value)}
         onSettingsSelectChange={setOpenSettingsSelect}
         onOpenSettings={() => setSettingsOpen(true)}
         onCloseSettings={() => setSettingsOpen(false)}

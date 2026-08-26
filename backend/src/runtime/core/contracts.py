@@ -13,11 +13,12 @@ EventHandler = Callable[[RuntimeEvent], None]
 SteeringHandler = Callable[[], list[str]]
 CancellationHandler = Callable[[], bool]
 SuspensionHandler = Callable[[], bool]
-PlanReviewChoice = Literal["implement", "implement_clear_session", "cancel"]
+PlanReviewChoice = Literal["implement", "implement_and_compaction", "stay_in_plan_mode"]
 ToolReviewChoice = Literal["continue", "deny", "cancel", "supplement"]
 HumanChoice = Literal[
     "implement",
-    "implement_clear_session",
+    "implement_and_compaction",
+    "stay_in_plan_mode",
     "continue",
     "deny",
     "cancel",
@@ -61,3 +62,7 @@ class InterruptDecision:
 
 
 InterruptHandler = Callable[[InterruptRequest], InterruptDecision]
+
+
+class WorkflowModeChanged(RuntimeError):
+    """Stop the current workflow before sending or executing with a new mode."""

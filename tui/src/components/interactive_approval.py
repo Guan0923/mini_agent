@@ -114,8 +114,12 @@ class InteractiveApproval:
                 self._plan_details(request),
                 (
                     ChoiceItem("implement", "Implement", "Implement in the current session."),
-                    ChoiceItem("implement_clear_session", "Implement and Clear Session", "Start in a new session."),
-                    ChoiceItem("cancel", "Cancel and Stay in plan mode", "Do not implement this plan."),
+                    ChoiceItem(
+                        "implement_and_compaction",
+                        "Implement after Compaction",
+                        "Compact the context before implementation.",
+                    ),
+                    ChoiceItem("stay_in_plan_mode", "Stay in Plan mode", "Do not implement this plan."),
                 ),
                 self._complete_review,
             )
@@ -174,7 +178,7 @@ class InteractiveApproval:
             return
         request, future = self._pending
         allowed = (
-            {"implement", "implement_clear_session", "cancel"}
+            {"implement", "implement_and_compaction", "stay_in_plan_mode"}
             if request.kind == "plan"
             else {"continue", "back"}
             if request.kind == "resume"

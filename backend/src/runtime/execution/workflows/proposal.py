@@ -8,6 +8,7 @@ from backend.planning import PlannerCapabilities
 from ...conversation.steering import collect_steering, consume_steering
 from ...conversation.user_input import REQUEST_USER_INPUT_NAME
 from ...core.context import AgentRuntime
+from ...core.contracts import WorkflowModeChanged
 from ...planning.review import REQUEST_PLAN_REVIEW_NAME
 from ..lifecycle.cancellation import cancel_if_requested
 from ..lifecycle.outcomes import cancel_run, fail_run, planning_failure_data, record_plan_feedback
@@ -41,6 +42,9 @@ class PlanProposalWorkflow(PlanControlMixin):
             fail_run(runtime, f"Planner {capabilities.name!r} does not support plan proposals.")
             return None
         while True:
+            runtime.apply_pending_runtime_config()
+            if runtime.run.mode != "plan":
+                raise WorkflowModeChanged("Plan workflow changed to Agent mode.")
             if cancel_if_requested(runtime):
                 return None
             if not _ensure_tool_budget(runtime):
@@ -104,7 +108,12 @@ class PlanProposalWorkflow(PlanControlMixin):
                     )
                     steered = True
                     break
-                outcome = _execute_tool(runtime, index, self._steps)
+                try:
+                    outcome = _execute_tool(runtime, index, self._steps)
+                except WorkflowModeChanged:
+                    _fail_pending_tools(runtime, response, "Not executed because the workflow mode changed.")
+                    _finish_assistant(runtime)
+                    raise
                 if cancel_if_requested(runtime):
                     return None
                 if outcome.interrupt is not None:

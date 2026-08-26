@@ -27,6 +27,9 @@ export interface ComposerProps {
   mode: ChatMode;
   permissionMode: PermissionMode;
   reasoningEffort: ReasoningEffort;
+  modePending?: boolean;
+  permissionPending?: boolean;
+  reasoningPending?: boolean;
   todos: TodoItem[] | null;
   usagePercent?: number;
   usageTotalTokens?: number | null;
@@ -112,13 +115,13 @@ export default function Composer(props: ComposerProps) {
 
   const settingsControls = (
     <Space className="composer-settings-controls" size={[6, 6]} wrap>
-      <Select className="mode-picker" placement="topLeft" open={props.openSettingsSelect === "mode"} aria-label="运行模式" disabled={props.disabled} value={props.mode} options={[{ value: "agent", label: "⚙ Agent" }, { value: "plan", label: "📋 Plan" }]} onChange={props.onModeChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "mode" : null)} />
-      <Select virtual={false} className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "permission"} aria-label="权限模式" disabled={props.disabled} value={props.permissionMode} options={[{ value: "read_only", label: "只读" }, { value: "workspace_write", label: "工作区读写" }, { value: "full_access", label: "完全访问" }]} onChange={props.onPermissionChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "permission" : null)} />
+      <Select virtual={false} className="mode-picker" placement="topLeft" open={props.openSettingsSelect === "mode"} aria-label="运行模式" loading={props.modePending} disabled={props.disabled || props.modePending} value={props.mode} options={[{ value: "agent", label: "⚙ Agent" }, { value: "plan", label: "📋 Plan" }]} onChange={props.onModeChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "mode" : null)} />
+      <Select virtual={false} className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "permission"} aria-label="权限模式" loading={props.permissionPending} disabled={props.disabled || props.permissionPending} value={props.permissionMode} options={[{ value: "read_only", label: "只读" }, { value: "workspace_write", label: "工作区读写" }, { value: "full_access", label: "完全访问" }]} onChange={props.onPermissionChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "permission" : null)} />
       <Space size={4} align="center">
         <Tooltip title={props.usageTotalTokens == null ? "暂无 token usage" : `${props.usageTotalTokens.toLocaleString()} / ${(props.usageContextLength ?? 0).toLocaleString()} tokens`}>
           <Progress type="circle" size={32} percent={Math.max(0, Math.min(100, props.usagePercent ?? 0))} format={() => props.usageTotalTokens == null ? "–" : props.usageTotalTokens >= 1000 ? `${(props.usageTotalTokens / 1000).toFixed(1)}k` : String(props.usageTotalTokens)} />
         </Tooltip>
-        <Select className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "reasoning"} aria-label="思考等级" disabled={props.disabled} value={props.reasoningEffort} options={(Object.keys(REASONING_LABELS) as ReasoningEffort[]).map((level) => ({ value: level, label: `${level}` }))} onChange={props.onReasoningChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "reasoning" : null)} />
+        <Select virtual={false} className="composer-picker" placement="topLeft" open={props.openSettingsSelect === "reasoning"} aria-label="思考等级" loading={props.reasoningPending} disabled={props.disabled || props.reasoningPending} value={props.reasoningEffort} options={(Object.keys(REASONING_LABELS) as ReasoningEffort[]).map((level) => ({ value: level, label: `${level}` }))} onChange={props.onReasoningChange} onOpenChange={(open) => props.onSettingsSelectChange(open ? "reasoning" : null)} />
       </Space>
     </Space>
   );

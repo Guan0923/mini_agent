@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from backend.domain import (
-    AssistantMessage,
     RunState,
     UserMessage,
     message_from_dict,
     new_run_id,
-    new_session_id,
 )
 
 from ..core.context import AgentRuntime
@@ -39,41 +37,23 @@ class LegacyAgentRunner(AgentRunner):
         result = super().run(runtime)
         if result.handoff is not None:
             handoff = result.handoff
-            if handoff.new_session:
-                proposal = (result.final_answer or "").strip()
-                if not proposal:
-                    raise RuntimeError("Cannot start an isolated handoff without a completed plan proposal.")
-                runtime = self.new_runtime(
-                    task=handoff.task,
-                    mode=handoff.mode,
-                    session_id=new_session_id(),
-                    messages=[AssistantMessage(content=proposal)],
-                    active_skills=list(handoff.active_skills),
-                    on_event=runtime.services.on_event,
-                    interrupt=runtime.services.interrupt,
-                    confirm=runtime.services.confirm,
-                )
-            else:
-                turn_start_index = len(runtime.state.messages)
-                runtime.state.messages.append(UserMessage(content=handoff.task))
-                # ``AgentRunner._run_attempt`` treats the canonical runtime
-                # mode as authoritative at every dispatch boundary.  Keep
-                # the compatibility facade's in-place handoff in sync with
-                # the new RunState, otherwise the previous Plan value would
-                # overwrite this Agent handoff immediately before execution.
-                runtime.state.running_mode = handoff.mode
-                runtime.state.current_run = RunState(
-                    task=handoff.task,
-                    mode=handoff.mode,
-                    run_id=new_run_id(),
-                    turn_start_index=turn_start_index,
-                    history=runtime.state.messages,
-                    active_skills=list(handoff.active_skills),
-                )
-                runtime.state.active_message = None
-                runtime.state.active_tool_index = None
-                runtime.state.turn_usage = None
-                runtime.state.status = "running"
+            if handoff.compact_before:
+                super().compact_context(runtime)
+            turn_start_index = len(runtime.state.messages)
+            runtime.state.messages.append(UserMessage(content=handoff.task))
+            runtime.state.running_mode = handoff.mode
+            runtime.state.current_run = RunState(
+                task=handoff.task,
+                mode=handoff.mode,
+                run_id=new_run_id(),
+                turn_start_index=turn_start_index,
+                history=runtime.state.messages,
+                active_skills=list(handoff.active_skills),
+            )
+            runtime.state.active_message = None
+            runtime.state.active_tool_index = None
+            runtime.state.turn_usage = None
+            runtime.state.status = "running"
             result = super().run(runtime)
         if conversation is not None and result.mode == "agent":
             conversation.extend(

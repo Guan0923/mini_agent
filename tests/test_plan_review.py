@@ -116,12 +116,12 @@ def test_blank_plan_is_retryable_then_valid_plan_opens_review(tmp_path: Path) ->
     runtime = runner.new_runtime(
         task="Plan the change",
         mode="plan",
-        interrupt=lambda request: requests.append(request.kind) or InterruptDecision("cancel"),
+        interrupt=lambda request: requests.append(request.kind) or InterruptDecision("stay_in_plan_mode"),
     )
 
     result = runner.run(runtime)
 
-    assert result.status == "cancelled"
+    assert result.status == "completed"
     assert requests == ["plan"]
     first = runtime.state.messages[1].tool_messages[0]
     second = runtime.state.messages[2].tool_messages[0]

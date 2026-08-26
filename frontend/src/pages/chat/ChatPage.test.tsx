@@ -1,17 +1,18 @@
-import { App as AntApp } from "antd";
+import { App as AntApp, Modal } from "antd";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { projectTurnPath } from "../../app/runtimeDetailProjection";
 import type { QueuedMessage } from "../../app/types";
-import { compactTurn } from "../../api";
-import type { Conversation, RuntimeStateNode } from "../../types";
+import { compactTurn, patchRuntimeConfig } from "../../api";
+import type { ChatMode, Conversation, RuntimeStateNode } from "../../types";
 import ChatPage from "./ChatPage";
 
 vi.mock("../../api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../api")>(),
   compactTurn: vi.fn(),
+  patchRuntimeConfig: vi.fn(),
 }));
 
 function turn(id: string, userText: string, parent?: RuntimeStateNode): RuntimeStateNode {
@@ -171,10 +172,46 @@ function QueueHarness({
   );
 }
 
+function ConfigHarness() {
+  const [mode, setMode] = useState<ChatMode>("agent");
+  const [conversation, setConversation] = useState<Conversation>(() => {
+    const node = turn("turn-config", "configure");
+    node.status = "running";
+    return {
+      id: node.session_id,
+      sessionId: node.session_id,
+      threadId: node.thread_id,
+      title: "config",
+      runtimeNodes: [node],
+      activeTurnId: node.id,
+      lastNodeId: node.id,
+      messagesLoaded: true,
+      messages: projectTurnPath(new Map([[`${node.session_id}:${node.id}`, node]]), node.id),
+    };
+  });
+  return (
+    <AntApp>
+      <ChatPage
+        conversation={conversation}
+        running
+        mode={mode}
+        onModeChange={setMode}
+        onUpdate={(_id, updater) => setConversation((current) => updater(current))}
+        onNew={async () => conversation.id}
+        onNavigate={() => undefined}
+        onEnsureSession={async () => conversation.sessionId!}
+        onRun={async () => undefined}
+      />
+      <output data-testid="selected-mode">{mode}</output>
+    </AntApp>
+  );
+}
+
 describe("ChatPage rewind projection", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.mocked(compactTurn).mockReset();
+    vi.mocked(patchRuntimeConfig).mockReset();
   });
 
   it("prunes descendants only when the edited message is submitted for rewind", async () => {
@@ -268,6 +305,103 @@ describe("ChatPage rewind projection", () => {
 
     await waitFor(() => expect(screen.queryByText("正在执行compaction操作中")).toBeNull());
     expect(screen.getByText("⚠️ 压缩失败：summary provider failed", { selector: "p" })).toBeVisible();
+  });
+});
+
+describe("ChatPage running Turn configuration", () => {
+  afterEach(() => {
+    Modal.destroyAll();
+    vi.mocked(patchRuntimeConfig).mockReset();
+  });
+
+  it("optimistically patches mode and disables only that Select while pending", async () => {
+    const user = userEvent.setup();
+    let resolvePatch!: (node: RuntimeStateNode) => void;
+    vi.mocked(patchRuntimeConfig).mockReturnValue(new Promise((resolve) => { resolvePatch = resolve; }));
+    render(<ConfigHarness />);
+
+    await user.click(screen.getByRole("combobox", { name: "运行模式" }));
+    await user.click(await screen.findByRole("option", { name: /Plan/ }));
+
+    expect(screen.getByTestId("selected-mode")).toHaveTextContent("plan");
+    expect(screen.getByRole("combobox", { name: "运行模式" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "权限模式" })).not.toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "思考等级" })).not.toBeDisabled();
+    expect(patchRuntimeConfig).toHaveBeenCalledWith("session-rewind", expect.objectContaining({
+      node_id: "turn-config",
+      running_mode: "plan",
+    }));
+
+    const accepted = turn("turn-config", "configure");
+    accepted.status = "running";
+    accepted.running_mode = "plan";
+    await act(async () => resolvePatch(accepted));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "运行模式" })).not.toBeDisabled());
+    expect(screen.getByTestId("selected-mode")).toHaveTextContent("plan");
+  });
+
+  it("rolls back only the failed field", async () => {
+    const user = userEvent.setup();
+    vi.mocked(patchRuntimeConfig).mockRejectedValue(new Error("config write failed"));
+    render(<ConfigHarness />);
+
+    await user.click(screen.getByRole("combobox", { name: "运行模式" }));
+    await user.click(await screen.findByRole("option", { name: /Plan/ }));
+
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "运行模式" })).not.toBeDisabled());
+    expect(screen.getByTestId("selected-mode")).toHaveTextContent("agent");
+    expect(screen.getByText(/运行配置更新失败：config write failed/)).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "权限模式" })).not.toBeDisabled();
+  });
+
+  it("keeps reasoning reconciliation independent from an older mode response", async () => {
+    const user = userEvent.setup();
+    let resolveMode!: (node: RuntimeStateNode) => void;
+    vi.mocked(patchRuntimeConfig).mockImplementation(async (_sessionId, values) => {
+      if (values.running_mode) return new Promise((resolve) => { resolveMode = resolve; });
+      const accepted = turn("turn-config", "configure");
+      accepted.status = "running";
+      accepted.model.reasoning_effort = "high";
+      return accepted;
+    });
+    render(<ConfigHarness />);
+
+    await user.click(screen.getByRole("combobox", { name: "运行模式" }));
+    await user.click(await screen.findByRole("option", { name: /Plan/ }));
+    await user.click(screen.getByRole("combobox", { name: "思考等级" }));
+    await user.click(await screen.findByRole("option", { name: "high" }));
+
+    await waitFor(() => expect(patchRuntimeConfig).toHaveBeenCalledWith(
+      "session-rewind",
+      expect.objectContaining({ model: { reasoning_effort: "high" } }),
+    ));
+    expect(screen.getByRole("combobox", { name: "思考等级" }).closest(".ant-select")).toHaveTextContent("high");
+
+    const modeAccepted = turn("turn-config", "configure");
+    modeAccepted.status = "running";
+    modeAccepted.running_mode = "plan";
+    await act(async () => resolveMode(modeAccepted));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "运行模式" })).not.toBeDisabled());
+    expect(screen.getByRole("combobox", { name: "思考等级" }).closest(".ant-select")).toHaveTextContent("high");
+  });
+
+  it("requires Full access confirmation and sends the acknowledgement", async () => {
+    const user = userEvent.setup();
+    const accepted = turn("turn-config", "configure");
+    accepted.status = "running";
+    accepted.permission_mode = "full_access";
+    vi.mocked(patchRuntimeConfig).mockResolvedValue(accepted);
+    render(<ConfigHarness />);
+
+    await user.click(screen.getByRole("combobox", { name: "权限模式" }));
+    await user.click(await screen.findByRole("option", { name: "完全访问" }));
+    expect((await screen.findAllByText("启用 Full access？")).length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: /继\s*续/ }));
+
+    await waitFor(() => expect(patchRuntimeConfig).toHaveBeenCalledWith(
+      "session-rewind",
+      expect.objectContaining({ permission_mode: "full_access", full_access_acknowledged: true }),
+    ));
   });
 });
 
