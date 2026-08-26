@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.api.active_turn_stream import ActiveTurnStream
 from backend.api.app import create_app
 from backend.api.chat import routes as chat_routes
 from backend.api.chat.routes import _startup_failure_message, _terminal_type_for_status
@@ -187,6 +188,76 @@ def test_writer_emits_one_baseline_then_exact_incremental_operations() -> None:
     child = writer.create(make_turn(turn_id="turn_2", parent=turn))
     assert frames[-1].type == "turn.snapshot" and frames[-1].revision == 0
     assert child.parent_id == turn.id
+
+
+def test_active_turn_stream_rebases_late_subscribers_and_broadcasts_terminal() -> None:
+    stream = ActiveTurnStream("turn_1")
+    original = stream.subscribe("turn_1")
+    turn = make_turn()
+    stream.publish_frame(NodeFrame.snapshot(turn), turn)
+    assert original.next_event()["revision"] == 0
+
+    with_text = turn.clone()
+    with_text.data[0][1]["content"].append({"type": "text", "text": "first"})
+    first_delta = NodeFrame.delta(turn, with_text, revision=1)
+    assert first_delta is not None
+    stream.publish_frame(first_delta, with_text)
+    assert original.next_event()["revision"] == 1
+
+    late = stream.subscribe("turn_1")
+    late_snapshot = late.next_event()
+    assert late_snapshot["revision"] == 0
+    assert late_snapshot["turn"]["data"][0][1]["content"][-1]["text"] == "first"
+
+    completed = with_text.clone()
+    completed.status = "success"
+    final_delta = NodeFrame.delta(with_text, completed, revision=2)
+    assert final_delta is not None
+    stream.publish_frame(final_delta, completed)
+    assert original.next_event()["revision"] == 2
+    assert late.next_event()["revision"] == 1
+
+    stream.publish_terminal("success", "turn_1")
+    assert original.next_event()["terminal_type"] == "success"
+    assert late.next_event()["terminal_type"] == "success"
+
+
+def test_active_turn_stream_unsubscribe_does_not_close_other_subscribers() -> None:
+    stream = ActiveTurnStream("turn_1")
+    first = stream.subscribe("turn_1")
+    second = stream.subscribe("turn_1")
+    stream.unsubscribe(first.token)
+    assert first.closed is True
+    assert stream.subscriber_count == 1
+
+    turn = make_turn()
+    stream.publish_frame(NodeFrame.snapshot(turn), turn)
+    assert second.next_event()["turn"]["id"] == "turn_1"
+
+
+def test_turn_stream_endpoint_returns_terminal_snapshot_and_rejects_missing_turn(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    with TestClient(create_app(state)) as client:
+        assert client.get("/api/turns/anything/stream").status_code == 401
+        identity = client.post("/api/auth/guest").json()["user"]
+        sidebar = client.post("/api/sidebar-threads", json={}).json()
+        store = session_store(state, identity["id"])
+        writer = NodeWriter(store)
+        turn = writer.create(
+            RuntimeState.create(
+                session_id=sidebar["session_id"],
+                thread_id=sidebar["thread_id"],
+                id="turn_completed_stream",
+                user_content=[{"type": "text", "text": "hello"}],
+            )
+        )
+        writer.finalize(turn, "success")
+
+        response = client.get("/api/turns/turn_completed_stream/stream")
+        payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+        assert json.loads(payloads[0])["turn"]["status"] == "success"
+        assert payloads[1] == '<SSE id="turn_completed_stream" type="success"></SSE>'
+        assert client.get("/api/turns/missing/stream").status_code == 404
 
 
 def test_writer_rejects_a_delta_for_an_existing_turn_without_a_stream_baseline() -> None:
@@ -734,3 +805,4 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
         )
         assert refreshed_sidebar["title"] == "hello sidebar"
         assert refreshed_sidebar["title_is_custom"] is False
+        assert state.active_turn_streams == {}

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { streamChat } from "./chat";
+import { streamAttachedTurn, streamChat } from "./chat";
 import type { RuntimeStateNode, StreamMessage } from "../types";
 
 function turn(status: RuntimeStateNode["status"] = "running"): RuntimeStateNode {
@@ -68,6 +68,25 @@ describe("Turn SSE contract", () => {
       turnId: "turn_1",
     })).resolves.toBe("completed");
     expect(frames.map((frame) => frame.type)).toEqual(["turn.snapshot", "turn.delta"]);
+  });
+
+  it("attaches to a running Turn with GET and the same strict frame contract", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response([
+      JSON.stringify({ type: "turn.snapshot", revision: 0, turn: turn() }),
+      JSON.stringify({ type: "turn.delta", session_id: "session_1", turn_id: "turn_1", revision: 1, patch: { status: "success" } }),
+      '<SSE id="turn_1" type="success"></SSE>',
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(streamAttachedTurn(
+      "turn_1",
+      () => undefined,
+      new AbortController().signal,
+    )).resolves.toBe("completed");
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/turns/turn_1/stream"),
+      expect.objectContaining({ method: "GET", credentials: "include" }),
+    );
   });
 
   it("rejects a stream that ends without a terminal envelope", async () => {

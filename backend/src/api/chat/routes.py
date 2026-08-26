@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import html
-import json
-import queue
 import threading
 from collections.abc import Callable
 from typing import Literal
@@ -14,12 +10,14 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.domain import FAILED_TERMINAL_MESSAGE, terminal_error_text
+from backend.domain.runtime_state import NodeFrame
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.sandbox import ApprovalStore, SandboxInitializationError
 from backend.storage.auth.crypto import SecretDecryptionError
 
+from ..active_turn_stream import ActiveTurnStream
 from ..auth.types import UserIdentity
 from ..session_store import session_store as _store
 from ..shared.runtime import build_user_application
@@ -159,8 +157,19 @@ def _stream(
         # mutation if two stores ever contain the same session id.
         return owner_id, active_thread_id
 
-    q: queue.Queue = queue.Queue()
-    done = threading.Event()
+    active_turn_streams = getattr(state, "active_turn_streams", None)
+    if not isinstance(active_turn_streams, dict):
+        active_turn_streams = {}
+        setattr(state, "active_turn_streams", active_turn_streams)
+    active_turn_streams_lock = getattr(state, "active_turn_streams_lock", None)
+    if not hasattr(active_turn_streams_lock, "__enter__"):
+        active_turn_streams_lock = threading.RLock()
+        setattr(state, "active_turn_streams_lock", active_turn_streams_lock)
+    active_stream = ActiveTurnStream(turn_id)
+    active_stream_aliases: set[tuple[str, str]] = {(identity.id, turn_id)}
+    with active_turn_streams_lock:
+        active_turn_streams[(identity.id, turn_id)] = active_stream
+    original_subscription = active_stream.subscribe(turn_id)
     cancel_requested = threading.Event()
     pause_requested = threading.Event()
     active_turn_cancellations = getattr(state, "active_turn_cancellations", None)
@@ -234,8 +243,18 @@ def _stream(
                     stream_locks["keys"].add(new_stream_key)
                 reserved_stream_keys.add(new_stream_key)
 
+    def publish_frame(frame: NodeFrame) -> None:
+        bridge = bridge_ref["bridge"]
+        if bridge is None:
+            return
+        alias = (identity.id, frame.turn_id)
+        with active_turn_streams_lock:
+            active_turn_streams[alias] = active_stream
+            active_stream_aliases.add(alias)
+        active_stream.publish_frame(frame, bridge.writer.current(frame.session_id, frame.turn_id))
+
     def enqueue_terminal(terminal_type: str, terminal_id: str, message: str = "") -> None:
-        q.put({"type": "terminal", "terminal_type": terminal_type, "terminal_id": terminal_id, "message": message})
+        active_stream.publish_terminal(terminal_type, terminal_id, message)
 
     approval_store = ApprovalStore(_store(state, identity.id))
     interrupt = make_interactive_interrupt(
@@ -328,7 +347,7 @@ def _stream(
                         running_mode=mode,
                         cwd=str(workspace),
                         references=references,
-                        emit=lambda frame: q.put(frame.to_dict()),
+                        emit=publish_frame,
                     )
                     bridge_ref["bridge"].apply_runtime_config(
                         {
@@ -478,7 +497,10 @@ def _stream(
                 with stream_lock:
                     stream_locks["keys"].difference_update(reserved_stream_keys)
             active_turn_cancellations.pop(cancellation_key, None)
-            done.set()
+            with active_turn_streams_lock:
+                for alias in active_stream_aliases:
+                    if active_turn_streams.get(alias) is active_stream:
+                        active_turn_streams.pop(alias, None)
 
     if job_registry is not None:
         parent_scope = getattr(state, "system_job_scope", job_registry.root_scope())
@@ -495,37 +517,4 @@ def _stream(
         # self-contained fallback while production always supplies a registry.
         threading.Thread(target=worker, daemon=True).start()
 
-    async def generator():
-        try:
-            while True:
-                try:
-                    item = q.get_nowait()
-                except queue.Empty:
-                    if done.is_set():
-                        break
-                    await asyncio.sleep(0.05)
-                    continue
-                if item is None:
-                    break
-                if item.get("type") == "terminal":
-                    terminal_id = html.escape(str(item.get("terminal_id") or "unknown"), quote=True)
-                    terminal_type = html.escape(str(item.get("terminal_type") or "failed"), quote=True)
-                    message = html.escape(str(item.get("message") or ""), quote=False)
-                    yield f'data: <SSE id="{terminal_id}" type="{terminal_type}">{message}</SSE>\n\n'
-                elif item.get("type") in {"turn.snapshot", "turn.delta"}:
-                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-        finally:
-            # A closed browser/TUI response is the cancellation signal for the
-            # associated runtime.  Normal completion is harmlessly idempotent.
-            cancel_requested.set()
-            job = job_holder["job"]
-            if job is not None:
-                try:
-                    job.cancel("stream disconnected")
-                except Exception:
-                    pass
-            if reserved_stream_keys:
-                with stream_lock:
-                    stream_locks["keys"].difference_update(reserved_stream_keys)
-
-    return generator()
+    return original_subscription.as_sse()

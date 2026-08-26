@@ -29,9 +29,13 @@ test("real Turn SSE flow supports tools, rewind versions, fork, and compact", as
   await send(page, "read README.md");
   await expect(page.locator(".message.assistant").last()).toContainText("local-first Agent", { timeout: 15_000 });
 
-  await page.locator(".message.user").first().getByRole("button", { name: "回溯" }).click();
-  await expect(page.getByLabel("聊天输入")).toContainText("hello");
-  await send(page, "rewound hello");
+  await page.locator(".message.user").first().getByRole("button", { name: "编辑" }).click();
+  await page.getByRole("textbox", { name: "编辑用户消息" }).fill("rewound hello");
+  const rewindResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().includes("/rewind"),
+  );
+  await page.getByRole("button", { name: "保存并重新生成" }).click();
+  expect((await rewindResponse).ok()).toBeTruthy();
   await expect(page.locator(".message.user")).toHaveCount(1);
   await expect(page.locator(".message.user").first()).toContainText("rewound hello");
   await page.locator(".message.user").first().getByRole("button", { name: "上一个消息版本" }).click();
@@ -60,6 +64,61 @@ test("real Turn SSE flow supports tools, rewind versions, fork, and compact", as
   await page.getByRole("button", { name: "发送" }).click();
   expect((await compactResponse).ok()).toBeTruthy();
   await expect(page.getByText("上下文已压缩", { exact: false })).toBeVisible();
+});
+
+test("refresh reattaches a running Turn and flushes the persisted queue as one message", async ({ page }) => {
+  const guest = await page.request.post("/api/auth/guest");
+  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Reconnect Queue" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Reconnect Queue", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("delayed reconnect");
+  const createResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await createResponse).ok()).toBeTruthy();
+  await expect(page.locator(".message.assistant").last()).toContainText(
+    "Streaming began before refresh.",
+    { timeout: 15_000 },
+  );
+
+  await page.getByLabel("聊天输入").fill("queued first");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("queued second");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByRole("region", { name: "待发送消息" })).toContainText("待发送 2 条");
+
+  await page.reload();
+  await expect(page.getByLabel("聊天输入")).toBeVisible();
+  await expect(page.getByRole("region", { name: "待发送消息" })).toContainText("待发送 2 条");
+  await expect(page.locator(".message.assistant").first()).toContainText(
+    "Streaming finished after refresh.",
+    { timeout: 15_000 },
+  );
+  await expect(page.getByRole("region", { name: "待发送消息" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.locator(".message.user")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".message.user").last()).toContainText("queued first");
+  await expect(page.locator(".message.user").last()).toContainText("queued second");
+
+  await expect.poll(async () => {
+    const response = await page.request.get(
+      `/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`,
+    );
+    const turns = await response.json() as Array<{
+      data: Array<Array<{ role: string; content: Array<{ type: string; text?: string }> }>>;
+      current_data_idx: number;
+    }>;
+    return turns.map((turn) => turn.data[turn.current_data_idx][0].content
+      .filter((item) => item.type === "text")
+      .map((item) => item.text ?? "")
+      .join(""));
+  }, { timeout: 15_000 }).toEqual(["delayed reconnect", "queued first\n\nqueued second"]);
 });
 
 test("a paused Turn resumes in place with the same id", async ({ page }) => {

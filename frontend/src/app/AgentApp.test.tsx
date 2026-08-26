@@ -16,6 +16,11 @@ const api = vi.hoisted(() => ({
   listSessions: vi.fn(),
   renameSession: vi.fn(),
   restoreSession: vi.fn(),
+  pauseTurn: vi.fn(),
+  streamAttachedTurn: vi.fn(),
+  streamChat: vi.fn(),
+  streamResume: vi.fn(),
+  streamRewind: vi.fn(),
   updateProfile: vi.fn(),
 }));
 
@@ -144,6 +149,7 @@ describe("AgentApp new conversation initialization", () => {
     api.getSettings.mockRejectedValue(new Error("settings unavailable"));
     api.getSessionNodes.mockResolvedValue([]);
     api.listSessions.mockResolvedValue([]);
+    api.streamAttachedTurn.mockResolvedValue("completed");
     projectsApi.listProjects.mockResolvedValue([]);
   });
 
@@ -276,5 +282,32 @@ describe("AgentApp new conversation initialization", () => {
 
     expect(api.forkTurn).toHaveBeenCalledWith("turn-source");
     expect(shell.props?.current).toMatchObject({ id: "thread-fork", title: "源对话标题" });
+  });
+
+  it("attaches exactly once to a running Turn loaded after refresh", async () => {
+    const summary = { ...session("session-running"), thread_id: "session-running" };
+    const running = turn("session-running", "session-running", "turn-running");
+    running.status = "running";
+    running.data[0][1].content = [{ type: "reasoning", text: "已恢复" }];
+    api.listSessions.mockResolvedValue([summary]);
+    api.getSessionNodes.mockResolvedValue([running]);
+    let finish!: () => void;
+    api.streamAttachedTurn.mockImplementation(async (_turnId, onMessage) => {
+      onMessage({ type: "turn.snapshot", revision: 0, turn: running });
+      await new Promise<void>((resolve) => { finish = resolve; });
+      return "completed";
+    });
+
+    await renderReady();
+
+    await waitFor(() => expect(api.streamAttachedTurn).toHaveBeenCalledTimes(1));
+    expect(api.streamAttachedTurn).toHaveBeenCalledWith(
+      "turn-running",
+      expect.any(Function),
+      expect.any(AbortSignal),
+    );
+    await act(async () => Promise.resolve());
+    expect(api.streamAttachedTurn).toHaveBeenCalledTimes(1);
+    await act(async () => finish());
   });
 });

@@ -26,6 +26,7 @@ import { latestTodoList } from "./todoPanel";
 import { messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "../../app/runtimeDetailProjection";
 import { leafNodes } from "../../app/runtimeNodeReducer";
 import type { QueuedMessage } from "../../app/types";
+import { mergeQueuedMessages } from "../../app/queuedMessages";
 import { DEFAULT_RUNTIME_NODE_MODEL, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
 import type {
   ChatMessage,
@@ -101,7 +102,8 @@ interface ChatRunRequest {
   sourceNodeId?: string;
   rewindTurnId?: string;
   references?: FileReference[];
-  queuedTurns?: Array<{ content: string; references?: FileReference[] }>;
+  waitForActiveRun?: boolean;
+  onBaseline?: (turn: RuntimeStateNode) => void;
 }
 
 function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
@@ -156,12 +158,6 @@ export default function ChatPage({
   const fileSearchTimerRef = useRef<number | null>(null);
   const latestFileTriggerRef = useRef<FileTrigger | null>(null);
   const fileMenuDismissedPromptRef = useRef<string | null>(null);
-  const pendingRewindRef = useRef<{
-    conversationId: string;
-    sessionId: string;
-    sourceNodeId?: string;
-    rewindTurnId?: string;
-  } | null>(null);
   const editorRef = useRef<FileMentionEditorHandle>(null);
   const editRef = useRef<TextAreaRef>(null);
   const fullAccessConfirmRef = useRef<{ destroy: () => void } | null>(null);
@@ -172,10 +168,7 @@ export default function ChatPage({
   // is running belong to the next FIFO pass and must never be removed when
   // the submitted user frames are acknowledged.
   const queueInFlightIdsRef = useRef<Set<string> | null>(null);
-  const queueSourceKeyRef = useRef<string | null>(null);
-  const queueExpectedUserCountRef = useRef(0);
-  const queueKnownUserKeysRef = useRef<Set<string>>(new Set());
-  const canonicalRunningRef = useRef(false);
+  const queueAutoBlockedRef = useRef(false);
 
   const messages = conversation?.messages ?? [];
   // A queue flush has no optimistic assistant message by design. Keep the
@@ -225,50 +218,18 @@ export default function ChatPage({
   const canPatchRuntimeConfig = activeRuntimeNode?.status === "running";
 
   useEffect(() => {
-    const node = activeRuntimeNode;
-    const status = node?.status;
-    if (queueFlushRef.current && queueExpectedUserCountRef.current > 0) {
-      const known = queueKnownUserKeysRef.current;
-      const submittedUserCount = (conversation?.runtimeNodes ?? []).filter((candidate) => {
-        return candidate.data[candidate.current_data_idx]?.[0]?.role === "user"
-          && candidate.status === "success"
-          && !known.has(`${candidate.session_id}:${candidate.id}`);
-      }).length;
-      if (submittedUserCount >= queueExpectedUserCountRef.current) {
-        const submitted = queueInFlightIdsRef.current;
-        if (submitted && submitted.size > 0) {
-          onQueuedMessagesChange(conversation?.id ?? "", (items) => items.filter((item) => !submitted.has(item.id)));
-        }
-        queueInFlightIdsRef.current = null;
-        queueExpectedUserCountRef.current = 0;
-        queueKnownUserKeysRef.current = new Set();
-        queueSourceKeyRef.current = null;
-      }
-    }
+    const status = activeRuntimeNode?.status;
     if (status === "running") {
-      canonicalRunningRef.current = true;
-      if (
-        queueFlushRef.current
-        && node
-        && `${node.session_id}:${node.id}` !== queueSourceKeyRef.current
-      ) {
-        const submitted = queueInFlightIdsRef.current;
-        if (submitted && submitted.size > 0) {
-          onQueuedMessagesChange(conversation?.id ?? "", (items) => items.filter((item) => !submitted.has(item.id)));
-          queueInFlightIdsRef.current = null;
-          queueSourceKeyRef.current = null;
-        }
-      }
+      queueAutoBlockedRef.current = false;
       return;
     }
     if (
-      canonicalRunningRef.current
-      && !queueFlushRef.current
+      !queueFlushRef.current
+      && !queueAutoBlockedRef.current
       && queuedMessages.length > 0
       && conversation?.id
       && (status === "success" || status === "paused" || status === "failed")
     ) {
-      canonicalRunningRef.current = false;
       queueFlushRef.current = true;
       setQueueSubmitting(true);
       void flushQueuedMessages();
@@ -391,7 +352,6 @@ export default function ChatPage({
     fileMenuDismissedPromptRef.current = null;
     setFileMenuDismissedFor(null);
     setPendingUploads([]);
-    pendingRewindRef.current = null;
     editingSubmittingRef.current = false;
     setEditingSubmitting(false);
     // Upload callbacks use the uid set above to delete files that finish after
@@ -577,8 +537,9 @@ export default function ChatPage({
     resume = false,
     sourceNodeId: string | null = defaultSourceNodeId() ?? null,
     references?: FileReference[],
-    queuedTurns?: QueuedMessage[],
     rewindTurnId?: string,
+    waitForActiveRun = false,
+    onBaseline?: (turn: RuntimeStateNode) => void,
   ) {
     if (!onRun) throw new Error("ChatPage requires the Turn run controller.");
     await onRun({
@@ -595,8 +556,9 @@ export default function ChatPage({
         threadId: conversation?.threadId ?? sessionId,
         turnId: crypto.randomUUID(),
         references,
-        queuedTurns,
         rewindTurnId,
+        waitForActiveRun,
+        onBaseline,
     });
   }
 
@@ -652,52 +614,53 @@ export default function ChatPage({
 
   function sendQueuedMessage() {
     if (!conversation?.sessionId || busy || queueFlushRef.current || queuedMessages.length === 0) return;
+    queueAutoBlockedRef.current = false;
     queueFlushRef.current = true;
     queueInFlightIdsRef.current = new Set(queuedMessages.map((item) => item.id));
-    queueSourceKeyRef.current = activeRuntimeNode ? `${activeRuntimeNode.session_id}:${activeRuntimeNode.id}` : null;
     setQueueSubmitting(true);
     void flushQueuedMessages();
   }
 
   async function flushQueuedMessages() {
-    // Snapshot both content and IDs.  React may render a new queue while the
-    // request is in flight; that new content must remain available for the
-    // next run.
+    // Snapshot both content and IDs. React may persist a new queue while this
+    // request is in flight; that new content belongs to the next merged Turn.
     const items = queuedMessages.slice();
     if (!conversation?.sessionId || items.length === 0) {
       queueFlushRef.current = false;
       queueInFlightIdsRef.current = null;
-      queueExpectedUserCountRef.current = 0;
-      queueKnownUserKeysRef.current = new Set();
       setQueueSubmitting(false);
       return;
     }
     if (!queueInFlightIdsRef.current) queueInFlightIdsRef.current = new Set(items.map((item) => item.id));
-    queueExpectedUserCountRef.current = items.length;
-    queueKnownUserKeysRef.current = new Set(
-      (conversation.runtimeNodes ?? [])
-        .filter((node) => node.data[node.current_data_idx]?.[0]?.role === "user")
-        .map((node) => `${node.session_id}:${node.id}`),
-    );
+    const submittedIds = queueInFlightIdsRef.current;
+    const merged = mergeQueuedMessages(items);
+    let acknowledged = false;
     try {
       const source = activeRuntimeNode;
-      if (queueSourceKeyRef.current === null && source) {
-        queueSourceKeyRef.current = `${source.session_id}:${source.id}`;
-      }
       await dispatchRun(
         conversation.id,
         conversation.sessionId,
-        null,
+        merged.content,
         false,
         source?.id ?? null,
+        merged.references,
         undefined,
-        items,
+        true,
+        () => {
+          if (acknowledged) return;
+          acknowledged = true;
+          onQueuedMessagesChange(conversation.id, (current) =>
+            current.filter((item) => !submittedIds.has(item.id)));
+          queueInFlightIdsRef.current = null;
+        },
       );
+      if (!acknowledged) queueAutoBlockedRef.current = true;
     } catch (error) {
       // A rejected Turn leaves its in-memory queue items untouched. Surface the
       // failure on the current assistant projection without converting the
       // queued content into optimistic canonical messages.
       setLast({ error: String((error as Error).message ?? error), running: false, decision: undefined });
+      queueAutoBlockedRef.current = true;
     } finally {
       queueFlushRef.current = false;
       setQueueSubmitting(false);
@@ -744,14 +707,12 @@ export default function ChatPage({
       false,
       target ? target.sourceNodeId ?? null : defaultSourceNodeId() ?? null,
       references,
-      undefined,
       target?.rewindTurnId,
     );
   }
 
 
   async function executeCommand(name: string, argument: string) {
-    pendingRewindRef.current = null;
     editorRef.current?.clear();
     setReferences([]);
     setCommandMenuDismissedFor(null);
@@ -818,13 +779,11 @@ export default function ChatPage({
       queueCurrentPrompt(prompt, mergedReferences);
       return;
     }
-    const rewindTarget = pendingRewindRef.current;
-    pendingRewindRef.current = null;
     editorRef.current?.clear();
     setReferences([]);
     await runPrompt(
       prompt,
-      rewindTarget ? { ...rewindTarget } : undefined,
+      undefined,
       mergedReferences.length > 0 ? mergedReferences : undefined,
     );
   }
@@ -844,34 +803,8 @@ export default function ChatPage({
     }
   }
 
-  async function rewindMessage(messageId: string) {
-    if (!conversation || !onRewind || busy || rewindPending) return;
-    const message = conversation.messages.find((item) => item.id === messageId);
-    setRewindPending(true);
-    try {
-      const result = await onRewind(conversation.id, messageId);
-      if (result === undefined) return;
-      const content = typeof result === "string" ? result : result.content;
-      editorRef.current?.restore(content, message?.references ?? []);
-      pendingRewindRef.current = typeof result === "string"
-        ? { conversationId: conversation.id, sessionId: conversation.sessionId ?? conversation.id }
-        : {
-          conversationId: conversation.id,
-          sessionId: result.sessionId,
-          sourceNodeId: result.sourceNodeId,
-          rewindTurnId: result.rewindTurnId ?? message?.nodeId,
-        };
-      setInput(content);
-      setReferences(message?.references ?? []);
-      window.setTimeout(() => editorRef.current?.focus(), 0);
-    } finally {
-      setRewindPending(false);
-    }
-  }
-
   function beginEdit(message: ChatMessage) {
     if (busy || !onRewind || !message.content) return;
-    pendingRewindRef.current = null;
     setEditingMessageId(message.id);
     setEditingDraft(message.content);
   }
@@ -895,7 +828,6 @@ export default function ChatPage({
       const sessionId = typeof result === "string" ? conversation.sessionId : result.sessionId;
       if (!sessionId) return;
       cancelEdit();
-      pendingRewindRef.current = null;
       await runPrompt(
         nextPrompt,
         {
@@ -1044,7 +976,6 @@ export default function ChatPage({
                         <MessageActions
                           msg={message}
                           busy={busy}
-                          onRewind={onRewind ? () => void rewindMessage(message.id) : undefined}
                           onEdit={onRewind ? () => beginEdit(message) : undefined}
                         />
                         {messageVersion(message) ? (

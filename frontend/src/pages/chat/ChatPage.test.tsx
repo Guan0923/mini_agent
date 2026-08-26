@@ -1,8 +1,9 @@
 import { App as AntApp } from "antd";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { projectTurnPath } from "../../app/runtimeDetailProjection";
+import type { QueuedMessage } from "../../app/types";
 import type { Conversation, RuntimeStateNode } from "../../types";
 import ChatPage from "./ChatPage";
 
@@ -77,6 +78,83 @@ function Harness({ onRun, onRewind }: { onRun: ReturnType<typeof vi.fn>; onRewin
   );
 }
 
+function QueueHarness({
+  terminalStatus,
+  onRun,
+  runGate,
+}: {
+  terminalStatus: RuntimeStateNode["status"];
+  onRun: ReturnType<typeof vi.fn>;
+  runGate?: Promise<void>;
+}) {
+  const [node, setNode] = useState(() => {
+    const value = turn("turn-running", "running");
+    value.status = "running";
+    return value;
+  });
+  const [queued, setQueued] = useState<QueuedMessage[]>([
+    {
+      id: "queued-1",
+      content: "第一条",
+      references: [{ source: "project", path: "README.md" }],
+    },
+    {
+      id: "queued-2",
+      content: "第二条",
+      references: [
+        { source: "project", path: "README.md" },
+        { source: "upload", path: "notes.txt" },
+      ],
+    },
+  ]);
+  const conversation: Conversation = {
+    id: "session-rewind",
+    sessionId: "session-rewind",
+    threadId: "session-rewind",
+    title: "queue",
+    runtimeNodes: [node],
+    activeTurnId: node.id,
+    lastNodeId: node.id,
+    messagesLoaded: true,
+    messages: projectTurnPath(new Map([[`${node.session_id}:${node.id}`, node]]), node.id),
+  };
+  return (
+    <AntApp>
+      <ChatPage
+        conversation={conversation}
+        running={node.status === "running"}
+        queuedMessages={queued}
+        onQueuedMessagesChange={(_conversationId, updater) => setQueued((current) => updater(current))}
+        onUpdate={() => undefined}
+        onNew={async () => conversation.id}
+        onNavigate={() => undefined}
+        onEnsureSession={async () => conversation.sessionId!}
+        onRun={async (request) => {
+          onRun(request);
+          const accepted = turn("turn-queued", request.prompt ?? "");
+          accepted.status = "running";
+          setNode(accepted);
+          request.onBaseline?.(accepted);
+          if (runGate) {
+            await runGate;
+            setNode((current) => ({ ...current, status: "success" }));
+          }
+        }}
+      />
+      <button type="button" onClick={() => setNode((current) => ({ ...current, status: terminalStatus }))}>
+        结束当前 Turn
+      </button>
+      <button type="button" onClick={() => setQueued((current) => [
+        ...current,
+        { id: "queued-during-submit", content: "提交期间新增" },
+      ])}>
+        提交期间新增队列项
+      </button>
+      <output data-testid="queued-count">{queued.length}</output>
+    </AntApp>
+  );
+}
+
 describe("ChatPage rewind projection", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -130,5 +208,51 @@ describe("ChatPage rewind projection", () => {
     expect(screen.getByTestId("active-turn-id")).toHaveTextContent("turn-target");
     expect(screen.getByTestId("visible-message-text")).toHaveTextContent("root|root-answer|target");
     expect(screen.getByTestId("visible-message-text")).not.toHaveTextContent("descendant");
+  });
+});
+
+describe("ChatPage queued message flushing", () => {
+  it.each(["success", "paused", "failed"] as const)(
+    "merges the persisted queue after a %s terminal",
+    async (terminalStatus) => {
+      const onRun = vi.fn();
+      render(<QueueHarness terminalStatus={terminalStatus} onRun={onRun} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "结束当前 Turn" }));
+      await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
+
+      expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
+        prompt: "第一条\n\n第二条",
+        sourceNodeId: "turn-running",
+        waitForActiveRun: true,
+        references: [
+          { source: "project", path: "README.md" },
+          { source: "upload", path: "notes.txt" },
+        ],
+      }));
+      await waitFor(() => expect(screen.getByTestId("queued-count")).toHaveTextContent("0"));
+    },
+  );
+
+  it("keeps items added during submission for the next Turn", async () => {
+    let releaseRun!: () => void;
+    const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
+    const onRun = vi.fn();
+    render(<QueueHarness terminalStatus="success" onRun={onRun} runGate={runGate} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "结束当前 Turn" }));
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("queued-count")).toHaveTextContent("0"));
+
+    fireEvent.click(screen.getByRole("button", { name: "提交期间新增队列项" }));
+    expect(screen.getByTestId("queued-count")).toHaveTextContent("1");
+    expect(onRun).toHaveBeenCalledTimes(1);
+
+    await act(async () => releaseRun());
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(2));
+    expect(onRun.mock.calls[1][0]).toEqual(expect.objectContaining({
+      prompt: "提交期间新增",
+      waitForActiveRun: true,
+    }));
   });
 });

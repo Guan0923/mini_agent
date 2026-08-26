@@ -9,8 +9,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictBool, model_validator
 
-from backend.domain.runtime_state import RuntimeState, RuntimeStateTree, RuntimeStateValidationError, new_thread_id
+from backend.domain.runtime_state import (
+    NodeFrame,
+    RuntimeState,
+    RuntimeStateTree,
+    RuntimeStateValidationError,
+    new_thread_id,
+)
 
+from .active_turn_stream import ActiveTurnStream
 from .auth.dependencies import require_user
 from .auth.types import UserIdentity
 from .chat.routes import RuntimeModelRequest, _model_config_snapshot, _stream
@@ -166,6 +173,34 @@ def list_turns(
     store = session_store(request.app.state.web, identity.id)
     require_active_session(store, session_id)
     return [item.to_dict() for item in store.load_nodes(session_id) if item.session_id == session_id]
+
+
+@router.get("/{turn_id}/stream")
+def stream_running_turn(
+    turn_id: str, request: Request, identity: UserIdentity = Depends(require_user)
+) -> StreamingResponse:
+    state: WebAppState = request.app.state.web
+    store = session_store(state, identity.id)
+    turn = _turn(store, turn_id)
+    active_streams = getattr(state, "active_turn_streams", {})
+    lock = getattr(state, "active_turn_streams_lock", None)
+    if hasattr(lock, "__enter__"):
+        with lock:
+            active_stream = active_streams.get((identity.id, turn_id))
+    else:
+        active_stream = active_streams.get((identity.id, turn_id))
+    if isinstance(active_stream, ActiveTurnStream):
+        subscription = active_stream.subscribe(turn_id)
+        return StreamingResponse(subscription.as_sse(), media_type="text/event-stream")
+
+    async def completed_stream():
+        yield NodeFrame.snapshot(turn).as_sse()
+        terminal_type = "success" if turn.status in {"success", "paused"} else "failed"
+        yield f'data: <SSE id="{turn.id}" type="{terminal_type}"></SSE>\n\n'
+
+    if turn.status != "running":
+        return StreamingResponse(completed_stream(), media_type="text/event-stream")
+    raise HTTPException(status_code=409, detail="运行流正在切换，请重新加载 Turn。")
 
 
 @router.post("")

@@ -316,9 +316,14 @@
 
 .thinking-content {
   color: #a8a9aa;
-  line-height: 1.65;
-  white-space: pre-wrap;
+  line-height: 1.5;
+  white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.thinking-content .markdown {
+  line-height: inherit;
+  white-space: normal;
 }
 
 .shimmer-text {

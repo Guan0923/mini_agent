@@ -21,6 +21,7 @@ import type { ArchiveReadState } from "./storage";
 import AgentShell from "./AgentShell";
 import { createRunController } from "./runController";
 import type { QueuedMessage } from "./types";
+import { loadQueuedMessages, saveQueuedMessages } from "./queuedMessages";
 import { effectiveDisplayMode } from "./displayMode";
 import { projectTurnPath } from "./runtimeDetailProjection";
 import type {
@@ -72,8 +73,9 @@ function AgentApp() {
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const activeRunsRef = useRef(new Map<string, import("./types").ActiveRun>());
-  const queuedMessagesRef = useRef(new Map<string, QueuedMessage[]>());
-  const [, refreshQueuedMessages] = useState(0);
+  const [queuedMessages, setQueuedMessages] = useState(
+    () => loadQueuedMessages(localStorage, user?.id),
+  );
 
   useEffect(() => {
     if (!user?.id) {
@@ -274,11 +276,14 @@ function AgentApp() {
   }
 
   function updateQueuedMessages(conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) {
-    const current = queuedMessagesRef.current.get(conversationId) ?? [];
-    const next = updater(current);
-    if (next.length > 0) queuedMessagesRef.current.set(conversationId, next);
-    else queuedMessagesRef.current.delete(conversationId);
-    refreshQueuedMessages((value) => value + 1);
+    setQueuedMessages((previous) => {
+      const queues = new Map(previous);
+      const next = updater(previous.get(conversationId) ?? []);
+      if (next.length > 0) queues.set(conversationId, next);
+      else queues.delete(conversationId);
+      saveQueuedMessages(localStorage, user?.id, queues);
+      return queues;
+    });
   }
 
   function updateLastMessage(id: string, updater: (message: ChatMessage) => ChatMessage) {
@@ -321,6 +326,29 @@ function AgentApp() {
     updateConversation,
     recoverConversation,
   });
+
+  useEffect(() => {
+    if (!current?.sessionId || !current.runtimeNodes || activeRunsRef.current.has(current.id)) return;
+    const activeTurn = current.runtimeNodes.find(
+      (node) => node.id === current.activeTurnId && node.status === "running",
+    );
+    if (!activeTurn) return;
+    void runConversation({
+      conversationId: current.id,
+      sessionId: current.sessionId,
+      threadId: activeTurn.thread_id,
+      turnId: activeTurn.id,
+      prompt: null,
+      resume: false,
+      attach: true,
+      mode: activeTurn.running_mode,
+      permissionMode: activeTurn.permission_mode,
+      reasoningEffort: activeTurn.model.reasoning_effort,
+      providerName: activeTurn.provider_name,
+      model: activeTurn.model,
+      sourceNodeId: activeTurn.id,
+    });
+  }, [current?.id, current?.sessionId, current?.activeTurnId, current?.runtimeNodes]);
 
   async function ensureSession(id: string): Promise<string> {
     const conversation = conversations.find((item) => item.id === id);
@@ -695,7 +723,7 @@ function AgentApp() {
       onRefresh={refreshSessions}
       onRun={runConversation}
       onStopRun={stopConversation}
-      queuedMessages={queuedMessagesRef.current}
+      queuedMessages={queuedMessages}
       onQueuedMessagesChange={updateQueuedMessages}
       onClearError={() => setActionError(null)}
       onDisplayModeUpdate={(config) => setDisplayMode(effectiveDisplayMode(config.display_mode))}

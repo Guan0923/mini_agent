@@ -2,7 +2,7 @@ import { App as AntApp } from "antd";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage, TurnItem } from "../../types";
-import { AssistantMessage, summarizeThinking, ToolLine } from "./messageParts";
+import { AssistantMessage, MessageActions, summarizeThinking, ToolLine } from "./messageParts";
 
 describe("runtime thinking summary", () => {
   it("uses the first non-empty paragraph and trims its edges", () => {
@@ -20,6 +20,45 @@ describe("runtime thinking summary", () => {
     const summary = summarizeThinking(value);
     expect(summary.slice(0, -5)).toBe(Array.from(value).slice(0, 100).join(""));
     expect(summary.endsWith(".....")).toBe(true);
+  });
+});
+
+describe("message actions", () => {
+  it("removes the user rewind action while retaining copy and edit", () => {
+    render(
+      <AntApp>
+        <MessageActions
+          msg={{ id: "user-1", role: "user", content: "hello", events: [] }}
+          busy={false}
+          onEdit={vi.fn()}
+        />
+      </AntApp>,
+    );
+
+    expect(screen.getByRole("button", { name: "复制" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "编辑" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "回溯" })).not.toBeInTheDocument();
+  });
+
+  it("keeps thinking Markdown at 1.5 line height without pre-wrapped outer whitespace", async () => {
+    const fs = await vi.importActual<{ readFileSync(path: string, encoding: "utf8"): string }>("node:fs");
+    const runtime = globalThis as typeof globalThis & { process: { cwd(): string } };
+    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat.css`, "utf8");
+    const rule = css.slice(css.indexOf(".thinking-content {"), css.indexOf(".shimmer-text {"));
+
+    expect(rule).toMatch(/\.thinking-content\s*{[^}]*line-height:\s*1\.5;/s);
+    expect(rule).toMatch(/\.thinking-content\s*{[^}]*white-space:\s*normal;/s);
+    expect(rule).toMatch(/\.thinking-content \.markdown\s*{[^}]*white-space:\s*normal;/s);
+
+    const { container } = render(
+      <>
+        <style>{css}</style>
+        <div className="thinking-content"><div className="markdown">第一行<br />第二行</div></div>
+      </>,
+    );
+    const thinking = container.querySelector<HTMLElement>(".thinking-content")!;
+    expect(window.getComputedStyle(thinking).lineHeight).toBe("1.5");
+    expect(window.getComputedStyle(thinking).whiteSpace).toBe("normal");
   });
 });
 

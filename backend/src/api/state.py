@@ -66,6 +66,8 @@ class WebAppState:
         # another user's active run in a shared process.
         self.active_runtime_configs: dict[tuple[str, str], dict[str, object]] = {}
         self.active_runtime_bridges: dict[tuple[str, str], object] = {}
+        self.active_turn_streams: dict[tuple[str, str], object] = {}
+        self.active_turn_streams_lock = RLock()
         # A PATCH and the worker's next-boundary consumption can arrive on
         # different threads.  Serialize those transitions per active session
         # so a partial update can never be interleaved with another update.

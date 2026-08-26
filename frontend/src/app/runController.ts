@@ -1,4 +1,4 @@
-import { pauseTurn, SseProtocolError, streamChat, streamQueuedTurns, streamResume, streamRewind } from "../api";
+import { pauseTurn, SseProtocolError, streamAttachedTurn, streamChat, streamResume, streamRewind } from "../api";
 import type { ChatMessage, RuntimeStateNode, StreamMessage } from "../types";
 import type { ActiveRun, ChatRunRequest } from "./types";
 import { integrateRuntimeNodeUpdates, projectRuntimeNode } from "./runtimeDetailProjection";
@@ -15,9 +15,18 @@ export interface RunControllerCallbacks {
 
 export function createRunController(callbacks: RunControllerCallbacks) {
   async function runConversation(request: ChatRunRequest): Promise<void> {
-    if (callbacks.activeRuns.has(request.conversationId)) return;
+    const previous = callbacks.activeRuns.get(request.conversationId);
+    if (previous) {
+      if (!request.waitForActiveRun) return;
+      await previous.settled;
+      if (callbacks.activeRuns.has(request.conversationId)) return;
+    }
     const controller = new AbortController();
-    const active: ActiveRun = { controller, sessionId: request.sessionId, turnId: request.turnId };
+    let releaseSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      releaseSettled = resolve;
+    });
+    const active: ActiveRun = { controller, sessionId: request.sessionId, turnId: request.turnId, settled };
     callbacks.activeRuns.set(request.conversationId, active);
     const accumulator = runtimeNodeAccumulator();
     const pendingTurns = new Map<string, RuntimeStateNode>();
@@ -81,6 +90,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       const key = `${turn.session_id}:${turn.id}`;
       finalTurn = turn;
       active.turnId = turn.id;
+      if (message.type === "turn.snapshot") request.onBaseline?.(turn);
       pendingTurns.set(key, turn);
       pendingActiveTurnId = turn.id;
       forcePathProjection ||= message.type === "turn.snapshot" || message.patch?.current_data_idx !== undefined;
@@ -106,8 +116,10 @@ export function createRunController(callbacks: RunControllerCallbacks) {
     } as const;
 
     try {
-      const result = request.resume
-        ? await streamResume(
+      const result = request.attach
+        ? await streamAttachedTurn(request.turnId ?? request.sourceNodeId ?? "", onMessage, controller.signal)
+        : request.resume
+          ? await streamResume(
             request.sessionId,
             onMessage,
             controller.signal,
@@ -119,13 +131,20 @@ export function createRunController(callbacks: RunControllerCallbacks) {
             request.mode,
             request.permissionMode === "full_access",
           )
-        : request.rewindTurnId
-          ? await streamRewind(request.rewindTurnId, request.prompt ?? "", onMessage, controller.signal, options)
-          : request.queuedTurns
-            ? await streamQueuedTurns(request.queuedTurns, onMessage, controller.signal, options)
+          : request.rewindTurnId
+            ? await streamRewind(request.rewindTurnId, request.prompt ?? "", onMessage, controller.signal, options)
             : await streamChat(request.prompt ?? "", onMessage, controller.signal, options);
       flushPendingFrames();
       if (result === "aborted") return;
+      if (request.attach && finalTurn?.status === "running") {
+        await callbacks.recoverConversation(
+          request.conversationId,
+          request.sessionId,
+          finalTurn.id,
+        ).catch(() => undefined);
+        await callbacks.refreshSessions().catch(() => undefined);
+        return;
+      }
       if (finalTurn) {
         const projection = projectRuntimeNode(finalTurn);
         callbacks.updateLastMessage(request.conversationId, (item) => ({
@@ -144,8 +163,15 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       if (protocolError) {
         controller.abort();
         const recoveryTurnId = active.turnId ?? request.turnId ?? request.sourceNodeId;
-        if (recoveryTurnId) await pauseTurn(recoveryTurnId).catch(() => undefined);
+        if (recoveryTurnId && !request.attach) await pauseTurn(recoveryTurnId).catch(() => undefined);
         await callbacks.recoverConversation(request.conversationId, request.sessionId, recoveryTurnId).catch(() => undefined);
+      }
+      if (request.attach) {
+        if (!protocolError) {
+          const recoveryTurnId = active.turnId ?? request.turnId ?? request.sourceNodeId;
+          await callbacks.recoverConversation(request.conversationId, request.sessionId, recoveryTurnId).catch(() => undefined);
+        }
+        return;
       }
       if (protocolError || !controller.signal.aborted) {
         callbacks.updateLastMessage(request.conversationId, (item) => ({
@@ -160,6 +186,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       if (callbacks.activeRuns.get(request.conversationId)?.controller === controller) {
         callbacks.activeRuns.delete(request.conversationId);
       }
+      releaseSettled();
     }
   }
 

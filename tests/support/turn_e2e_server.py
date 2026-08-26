@@ -32,6 +32,16 @@ class CooperativePausePlanner(RuleBasedPlanner):
     """Hold one deterministic request until the browser asks to pause it."""
 
     def decide(self, runtime):
+        if runtime.run.task.strip() == "delayed reconnect":
+            if runtime.exchange.on_reasoning is not None:
+                runtime.exchange.on_reasoning("Streaming began before refresh.")
+            sleep(4.0)
+            if runtime.exchange.on_content is not None:
+                runtime.exchange.on_content("Streaming finished after refresh.")
+            return AssistantMessage(
+                reasoning="Streaming began before refresh.",
+                content="Streaming finished after refresh.",
+            )
         if runtime.run.task.strip() == "approval presentation":
             if runtime.run.model_turns == 1:
                 return AssistantMessage(

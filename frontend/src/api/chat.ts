@@ -17,11 +17,6 @@ export interface StreamOptions {
   references?: FileReference[];
 }
 
-export interface QueuedTurnMessage {
-  content: string;
-  references?: FileReference[];
-}
-
 const terminalPattern = /^<SSE id="([^"]+)" type="(success|network|failed)">([\s\S]*)<\/SSE>$/;
 
 export class SseProtocolError extends Error {
@@ -43,7 +38,7 @@ function executionConfig(options: StreamOptions): Record<string, unknown> {
 
 async function streamEndpoint(
   url: string,
-  body: Record<string, unknown>,
+  body: Record<string, unknown> | undefined,
   expectedTurnId: string,
   onMessage: (message: StreamMessage) => void,
   signal: AbortSignal,
@@ -51,9 +46,8 @@ async function streamEndpoint(
   let response: Response;
   try {
     response = await fetch(apiUrl(url), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      method: body ? "POST" : "GET",
+      ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
       signal,
       credentials: "include",
     });
@@ -203,22 +197,18 @@ export async function streamResume(
   );
 }
 
-export async function streamQueuedTurns(
-  messages: QueuedTurnMessage[],
+export async function streamAttachedTurn(
+  turnId: string,
   onMessage: (message: StreamMessage) => void,
   signal: AbortSignal,
-  options: StreamOptions,
 ): Promise<"completed" | "aborted"> {
-  let parent = options.sourceNodeId;
-  for (const message of messages) {
-    const turnId = crypto.randomUUID();
-    const result = await streamChat(message.content, (frame) => {
-      parent = frame.type === "turn.snapshot" ? frame.turn.id : frame.turn_id;
-      onMessage(frame);
-    }, signal, { ...options, turnId, sourceNodeId: parent, references: message.references });
-    if (result === "aborted") return result;
-  }
-  return "completed";
+  return streamEndpoint(
+    `/api/turns/${encodeURIComponent(turnId)}/stream`,
+    undefined,
+    turnId,
+    onMessage,
+    signal,
+  );
 }
 
 export async function pauseTurn(turnId: string): Promise<void> {

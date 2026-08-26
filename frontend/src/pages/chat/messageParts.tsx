@@ -1,5 +1,5 @@
 import { Alert, BorderBeam, Collapse, App as AntApp, message as staticMessage } from "antd";
-import { BranchesOutlined, CopyOutlined, EditOutlined, FileTextOutlined, RollbackOutlined, ToolOutlined } from "@ant-design/icons";
+import { BranchesOutlined, CopyOutlined, EditOutlined, FileTextOutlined, ToolOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, DecisionRequest, DisplayMode, FileReference, ToolEvent, TurnItem } from "../../types";
 import { effectiveDisplayMode } from "../../app/displayMode";
@@ -80,13 +80,11 @@ export function MessageActions({
   msg,
   busy,
   onFork,
-  onRewind,
   onEdit,
 }: {
   msg: ChatMessage;
   busy: boolean;
   onFork?: () => void;
-  onRewind?: () => void;
   onEdit?: () => void;
 }) {
   const { message: contextMessage } = AntApp.useApp();
@@ -98,7 +96,6 @@ export function MessageActions({
   return (
     <div className="message-actions" aria-label={`${msg.role === "user" ? "用户" : "Agent"}消息操作`}>
       <IconAction label="复制" icon={<CopyOutlined />} onClick={() => void copy()} disabled={!msg.content} />
-      {onRewind ? <IconAction label="回溯" icon={<RollbackOutlined />} onClick={onRewind} disabled={busy} /> : null}
       {onEdit ? <IconAction label="编辑" icon={<EditOutlined />} onClick={onEdit} disabled={busy || !msg.content} /> : null}
       {onFork ? <IconAction label="Fork" icon={<BranchesOutlined />} onClick={onFork} disabled={busy || msg.running || !msg.content} /> : null}
     </div>

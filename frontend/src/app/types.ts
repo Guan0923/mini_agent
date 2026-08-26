@@ -1,4 +1,4 @@
-import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, RuntimeConfigModel } from "../types";
+import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, RuntimeConfigModel, RuntimeStateNode } from "../types";
 export interface ChatRunRequest {
   conversationId: string;
   sessionId: string;
@@ -14,13 +14,16 @@ export interface ChatRunRequest {
   sourceNodeId?: string;
   rewindTurnId?: string;
   references?: FileReference[];
-  queuedTurns?: Array<{ content: string; references?: FileReference[] }>;
+  attach?: boolean;
+  waitForActiveRun?: boolean;
+  onBaseline?: (turn: RuntimeStateNode) => void;
 }
 
 export interface ActiveRun {
   controller: AbortController;
   sessionId: string;
   turnId?: string;
+  settled: Promise<void>;
   stopRequested?: boolean;
   cancelIssued?: boolean;
   cancelTimer?: ReturnType<typeof setTimeout>;

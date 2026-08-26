@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { pauseTurn, streamChat } from "../api";
+import { pauseTurn, streamAttachedTurn, streamChat } from "../api";
 import type { Conversation, RuntimeStateNode } from "../types";
 import { createRunController } from "./runController";
 
@@ -10,7 +10,7 @@ vi.mock("../api", async () => {
     ...actual,
     pauseTurn: vi.fn().mockResolvedValue(undefined),
     streamChat: vi.fn(),
-    streamQueuedTurns: vi.fn(),
+    streamAttachedTurn: vi.fn(),
     streamResume: vi.fn(),
     streamRewind: vi.fn(),
   };
@@ -136,5 +136,93 @@ describe("run controller incremental batching", () => {
 
     expect(pauseTurn).toHaveBeenCalledWith("turn_1");
     expect(recoverConversation).toHaveBeenCalledWith("conversation_1", "session_1", "turn_1");
+  });
+
+  it("attaches to an existing Turn without pausing it", async () => {
+    vi.mocked(streamAttachedTurn).mockImplementation(async (_turnId, onMessage) => {
+      onMessage({ type: "turn.snapshot", revision: 0, turn: turn() });
+      onMessage({
+        type: "turn.delta",
+        session_id: "session_1",
+        turn_id: "turn_1",
+        revision: 1,
+        patch: { status: "success" },
+      });
+      return "completed";
+    });
+    const onBaseline = vi.fn();
+    const controller = createRunController({
+      activeRuns: new Map(),
+      updateLastMessage: vi.fn(),
+      rebindRunSession: vi.fn().mockResolvedValue(undefined),
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+      updateConversation: vi.fn(),
+      recoverConversation: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await controller.runConversation({ ...request(), attach: true, prompt: null, onBaseline });
+
+    expect(streamAttachedTurn).toHaveBeenCalledWith("turn_1", expect.any(Function), expect.any(AbortSignal));
+    expect(onBaseline).toHaveBeenCalledTimes(1);
+    expect(pauseTurn).not.toHaveBeenCalled();
+  });
+
+  it("reloads the final Turn when an attached terminal races the last delta", async () => {
+    vi.mocked(streamAttachedTurn).mockImplementation(async (_turnId, onMessage) => {
+      onMessage({ type: "turn.snapshot", revision: 0, turn: turn() });
+      return "completed";
+    });
+    const recoverConversation = vi.fn().mockResolvedValue(undefined);
+    const updateLastMessage = vi.fn();
+    const controller = createRunController({
+      activeRuns: new Map(),
+      updateLastMessage,
+      rebindRunSession: vi.fn().mockResolvedValue(undefined),
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+      updateConversation: vi.fn(),
+      recoverConversation,
+    });
+
+    await controller.runConversation({ ...request(), attach: true, prompt: null });
+
+    expect(recoverConversation).toHaveBeenCalledWith("conversation_1", "session_1", "turn_1");
+    expect(updateLastMessage).not.toHaveBeenCalled();
+    expect(pauseTurn).not.toHaveBeenCalled();
+  });
+
+  it("waits for the current run to release before starting a queued run", async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    vi.mocked(streamChat)
+      .mockImplementationOnce(async () => {
+        await firstGate;
+        return "completed";
+      })
+      .mockResolvedValueOnce("completed");
+    const activeRuns = new Map();
+    const controller = createRunController({
+      activeRuns,
+      updateLastMessage: vi.fn(),
+      rebindRunSession: vi.fn().mockResolvedValue(undefined),
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+      updateConversation: vi.fn(),
+      recoverConversation: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const first = controller.runConversation(request());
+    const second = controller.runConversation({
+      ...request(),
+      turnId: "turn_2",
+      prompt: "queued",
+      waitForActiveRun: true,
+    });
+    await Promise.resolve();
+    expect(streamChat).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await first;
+    await second;
+    expect(streamChat).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(streamChat).mock.calls[1][0]).toBe("queued");
   });
 });
