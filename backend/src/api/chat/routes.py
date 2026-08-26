@@ -17,7 +17,7 @@ from backend.domain import FAILED_TERMINAL_MESSAGE, terminal_error_text
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
-from backend.sandbox import ApprovalStore
+from backend.sandbox import ApprovalStore, SandboxInitializationError
 from backend.storage.auth.crypto import SecretDecryptionError
 
 from ..auth.types import UserIdentity
@@ -33,6 +33,15 @@ def _terminal_type_for_status(status: str, category: str | None) -> Literal["suc
     if status == "success" or (status == "paused" and category == "user"):
         return "success"
     return "failed"
+
+
+def _startup_failure_message(error: Exception) -> str:
+    """Render failures raised before a persisted Turn baseline exists."""
+
+    if isinstance(error, SandboxInitializationError):
+        detail = str(error).strip() or "Windows Sandbox Broker 无法初始化。"
+        return f"Sandbox 初始化失败：{detail} Agent 已停止，未降级执行。"
+    return str(error) or FAILED_TERMINAL_MESSAGE
 
 
 class RuntimeModelRequest(BaseModel):
@@ -448,7 +457,7 @@ def _stream(
                 else:
                     enqueue_terminal("failed", terminal_id, rendered_error or str(exc))
             else:
-                enqueue_terminal("failed", turn_id or "unknown", str(exc) or FAILED_TERMINAL_MESSAGE)
+                enqueue_terminal("failed", turn_id or "unknown", _startup_failure_message(exc))
         finally:
             bridge = bridge_ref["bridge"]
             if bridge is not None:

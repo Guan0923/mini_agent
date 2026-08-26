@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from backend.api.app import create_app
 from backend.api.chat import routes as chat_routes
-from backend.api.chat.routes import _terminal_type_for_status
+from backend.api.chat.routes import _startup_failure_message, _terminal_type_for_status
 from backend.api.session_store import session_store
 from backend.api.state import WebAppState
 from backend.configuration import ClientPaths
@@ -28,6 +28,7 @@ from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
+from backend.sandbox import SandboxInitializationError
 from backend.storage.auth import LocalAuthStore
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.storage.sqlite_schema import SCHEMA, SQLiteSchemaMixin
@@ -625,6 +626,45 @@ def test_sse_terminal_mapping_distinguishes_user_pause_from_network_pause() -> N
     assert _terminal_type_for_status("paused", "user") == "success"
     assert _terminal_type_for_status("paused", "network") == "failed"
     assert _terminal_type_for_status("failed", "agent") == "failed"
+
+
+def test_sandbox_startup_failure_message_explains_fail_closed_behavior() -> None:
+    message = _startup_failure_message(SandboxInitializationError("Windows Sandbox Broker 未安装或当前不可用。"))
+
+    assert message == ("Sandbox 初始化失败：Windows Sandbox Broker 未安装或当前不可用。 Agent 已停止，未降级执行。")
+
+
+def test_http_sse_surfaces_sandbox_failure_before_turn_baseline(tmp_path: Path, monkeypatch) -> None:
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    state.model_config_for_user = lambda _user_id: None
+
+    def fail_sandbox_startup(*_args, **_kwargs):
+        raise SandboxInitializationError("Windows Sandbox Broker 已安装，但健康检查未通过。")
+
+    monkeypatch.setattr(chat_routes, "build_user_application", fail_sandbox_startup)
+
+    with TestClient(create_app(state)) as client:
+        assert client.post("/api/auth/guest").status_code == 200
+        sidebar = client.post("/api/sidebar-threads", json={}).json()
+        turn_id = "turn_sandbox_startup_failure"
+        response = client.post(
+            "/api/turns",
+            json={
+                "id": turn_id,
+                "session_id": sidebar["session_id"],
+                "thread_id": sidebar["thread_id"],
+                "parent_id": "",
+                "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+                "permission_mode": "read_only",
+                "running_mode": "agent",
+            },
+        )
+
+    assert response.status_code == 200
+    payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+    assert payloads == [
+        f'<SSE id="{turn_id}" type="failed">Sandbox 初始化失败：Windows Sandbox Broker 已安装，但健康检查未通过。 Agent 已停止，未降级执行。</SSE>'
+    ]
 
 
 def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_deltas(

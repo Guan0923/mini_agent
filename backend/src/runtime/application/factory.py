@@ -362,8 +362,10 @@ def _sandbox_runtime(config: dict[str, object]) -> tuple[SandboxLauncher, dict[s
     normalized = normalize_sandbox_config(raw) if isinstance(raw, dict) else normalize_sandbox_config()
     broker = WindowsBrokerClient.from_system()
     status = broker.status()
-    if not status.installed or not status.healthy:
-        raise SandboxInitializationError("Windows Sandbox Broker is unavailable or unhealthy.")
+    if not status.installed:
+        raise SandboxInitializationError("Windows Sandbox Broker 未安装或当前不可用。")
+    if not status.healthy:
+        raise SandboxInitializationError("Windows Sandbox Broker 已安装，但健康检查未通过。")
     return SandboxLauncher(broker=broker, admission=SandboxAdmission()), normalized
 
 

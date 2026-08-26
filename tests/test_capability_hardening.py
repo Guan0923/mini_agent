@@ -117,9 +117,14 @@ def test_sandbox_runtime_requires_healthy_broker_and_migrates_disabled_config(mo
         def status(self) -> BrokerStatus:
             return self._status
 
+    unavailable = Broker(BrokerStatus(installed=False, healthy=False))
+    monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda: unavailable)
+    with pytest.raises(SandboxInitializationError, match="未安装或当前不可用"):
+        app_factory._sandbox_runtime({})
+
     unhealthy = Broker(BrokerStatus(installed=True, healthy=False))
     monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda: unhealthy)
-    with pytest.raises(SandboxInitializationError, match="unavailable or unhealthy"):
+    with pytest.raises(SandboxInitializationError, match="健康检查未通过"):
         app_factory._sandbox_runtime({})
 
     healthy = Broker(BrokerStatus(installed=True, healthy=True))

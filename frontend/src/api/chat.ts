@@ -121,9 +121,12 @@ async function streamEndpoint(
   }
   if (signal.aborted) return "aborted";
   if (!terminal) throw new SseProtocolError("SSE stream unexpectedly ended before completion");
-  if (!receivedFrame) throw new SseProtocolError("SSE stream completed without a Turn baseline");
   if (terminal[1] !== expectedTurnId) {
     throw new SseProtocolError("SSE terminal id does not match the active Turn");
+  }
+  if (!receivedFrame) {
+    if (terminal[2] === "failed") throw new Error(terminal[3] || "Turn failed");
+    throw new SseProtocolError("SSE stream completed without a Turn baseline");
   }
   if (terminal[2] === "network") throw new Error("network");
   if (terminal[2] === "failed") throw new Error(terminal[3] || "Turn failed");
