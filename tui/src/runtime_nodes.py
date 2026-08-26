@@ -93,6 +93,16 @@ class RuntimeNodeView:
         index = value["current_data_idx"]
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(data):
             raise ValueError("current_data_idx is out of range.")
+        for version in data:
+            if not isinstance(version, list) or not version:
+                raise ValueError("A Turn version must contain Messages.")
+            for message_idx, message in enumerate(version):
+                expected_role = "user" if message_idx % 2 == 0 else "assistant"
+                if not isinstance(message, dict) or message.get("role") != expected_role:
+                    raise ValueError("Turn Messages must alternate user and assistant.")
+                content = message.get("content")
+                if not isinstance(content, list) or (expected_role == "user" and len(content) != 1):
+                    raise ValueError("Invalid Turn Message content.")
         return cls(
             thread_id=str(value["thread_id"]),
             parent_thread_id=str(value["parent_thread_id"]),
@@ -165,18 +175,33 @@ class RuntimeNodeReducer:
         for operation in operations:
             if not isinstance(operation, dict):
                 raise ValueError("Turn delta operation is invalid.")
-            data_idx, item_idx = operation.get("data_idx"), operation.get("item_idx")
+            data_idx, message_idx = operation.get("data_idx"), operation.get("message_idx")
             if (
                 isinstance(data_idx, bool)
                 or not isinstance(data_idx, int)
                 or data_idx < 0
-                or isinstance(item_idx, bool)
-                or not isinstance(item_idx, int)
-                or item_idx < 0
+                or isinstance(message_idx, bool)
+                or not isinstance(message_idx, int)
+                or message_idx < 0
             ):
                 raise ValueError("Turn delta indexes are invalid.")
+            if operation.get("op") == "append_message":
+                try:
+                    messages = data[data_idx]
+                except (IndexError, TypeError) as exc:
+                    raise ValueError("Turn delta target is invalid.") from exc
+                if message_idx != len(messages) or not isinstance(operation.get("message"), dict):
+                    raise ValueError("Turn Message delta is out of order.")
+                messages.append(deepcopy(operation["message"]))
+                continue
+            item_idx = operation.get("item_idx")
+            if isinstance(item_idx, bool) or not isinstance(item_idx, int) or item_idx < 0:
+                raise ValueError("Turn Item index is invalid.")
             try:
-                items = data[data_idx][1]["content"]
+                message = data[data_idx][message_idx]
+                if message.get("role") != "assistant":
+                    raise ValueError("Turn delta target is not an assistant Message.")
+                items = message["content"]
             except (IndexError, KeyError, TypeError) as exc:
                 raise ValueError("Turn delta target is invalid.") from exc
             if operation.get("op") == "append_item":

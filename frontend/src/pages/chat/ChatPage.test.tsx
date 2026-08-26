@@ -5,14 +5,15 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { projectTurnPath } from "../../app/runtimeDetailProjection";
 import type { QueuedMessage } from "../../app/types";
-import { compactTurn, patchRuntimeConfig } from "../../api";
+import { compactTurn, patchRuntimeConfig, steerTurn } from "../../api";
 import type { ChatMode, Conversation, RuntimeStateNode } from "../../types";
-import ChatPage from "./ChatPage";
+import ChatPage, { composerAction } from "./ChatPage";
 
 vi.mock("../../api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../api")>(),
   compactTurn: vi.fn(),
   patchRuntimeConfig: vi.fn(),
+  steerTurn: vi.fn().mockResolvedValue(undefined),
 }));
 
 function turn(id: string, userText: string, parent?: RuntimeStateNode): RuntimeStateNode {
@@ -166,6 +167,17 @@ function QueueHarness({
         { id: "queued-during-submit", content: "提交期间新增" },
       ])}>
         提交期间新增队列项
+      </button>
+      <button type="button" onClick={() => setNode((current) => {
+        const data = structuredClone(current.data);
+        data[current.current_data_idx].push({
+          role: "user",
+          steering_id: "queued-1",
+          content: [{ type: "text", text: "第一条" }],
+        });
+        return { ...current, data };
+      })}>
+        确认 steering
       </button>
       <output data-testid="queued-count">{queued.length}</output>
     </AntApp>
@@ -406,7 +418,7 @@ describe("ChatPage running Turn configuration", () => {
 });
 
 describe("ChatPage queued message flushing", () => {
-  it.each(["success", "paused", "failed"] as const)(
+  it.each(["success", "failed"] as const)(
     "merges the persisted queue after a %s terminal",
     async (terminalStatus) => {
       const onRun = vi.fn();
@@ -428,6 +440,90 @@ describe("ChatPage queued message flushing", () => {
     },
   );
 
+  it("keeps the queue local when a Turn becomes paused", async () => {
+    const onRun = vi.fn();
+    render(<QueueHarness terminalStatus="paused" onRun={onRun} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "结束当前 Turn" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "继续" })).toBeEnabled());
+    expect(onRun).not.toHaveBeenCalled();
+    expect(screen.getByTestId("queued-count")).toHaveTextContent("2");
+  });
+
+  it("sends one queued entry to the running Turn and waits for SSE acknowledgement", async () => {
+    render(<QueueHarness terminalStatus="success" onRun={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "发送第 1 条待发送消息" }));
+    await waitFor(() => expect(vi.mocked(steerTurn)).toHaveBeenCalledWith(
+      "turn-running",
+      "queued-1",
+      "第一条",
+      [{ source: "project", path: "README.md" }],
+    ));
+    expect(screen.getByTestId("queued-count")).toHaveTextContent("2");
+    expect(screen.getByRole("button", { name: "发送第 1 条待发送消息" })).toBeDisabled();
+    expect(screen.getByText(/发送中/)).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认 steering" }));
+    await waitFor(() => expect(screen.getByTestId("queued-count")).toHaveTextContent("1"));
+  });
+
+  it("uses Pause to merge all unsent entries into one steering input", async () => {
+    render(<QueueHarness terminalStatus="success" onRun={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "暂停" }));
+    await waitFor(() => expect(vi.mocked(steerTurn)).toHaveBeenCalledWith(
+      "turn-running",
+      expect.any(String),
+      "第一条\n\n第二条",
+      [
+        { source: "project", path: "README.md" },
+        { source: "upload", path: "notes.txt" },
+      ],
+    ));
+    expect(screen.getAllByText(/发送中/)).toHaveLength(2);
+  });
+
+  it("keeps both draft and queue entry when edit is blocked", async () => {
+    const user = userEvent.setup();
+    render(<QueueHarness terminalStatus="success" onRun={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("聊天输入"), "existing draft");
+    await user.click(screen.getByRole("button", { name: "编辑第 1 条待发送消息" }));
+
+    expect(await screen.findByText("输入框有内容，无法修改队列消息")).toBeVisible();
+    expect(screen.getByLabelText("聊天输入")).toHaveTextContent("existing draft");
+    expect(screen.getByTestId("queued-count")).toHaveTextContent("2");
+  });
+
+  it("moves an editable queue entry back into an empty composer", async () => {
+    const user = userEvent.setup();
+    render(<QueueHarness terminalStatus="success" onRun={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "编辑第 1 条待发送消息" }));
+    expect(screen.getByLabelText("聊天输入")).toHaveTextContent("第一条");
+    expect(screen.getByTestId("queued-count")).toHaveTextContent("1");
+    expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
+  });
+
+  it("creates a child Turn for a paused Turn with a draft", async () => {
+    const user = userEvent.setup();
+    const onRun = vi.fn();
+    render(<QueueHarness terminalStatus="paused" onRun={onRun} />);
+    await user.click(screen.getByRole("button", { name: "结束当前 Turn" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "继续" })).toBeEnabled());
+    await user.type(screen.getByLabelText("聊天输入"), "new child input");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
+    expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: "new child input",
+      resume: false,
+      sourceNodeId: "turn-running",
+      waitForActiveRun: true,
+    }));
+  });
+
   it("keeps items added during submission for the next Turn", async () => {
     let releaseRun!: () => void;
     const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
@@ -448,5 +544,27 @@ describe("ChatPage queued message flushing", () => {
       prompt: "提交期间新增",
       waitForActiveRun: true,
     }));
+  });
+});
+
+describe("ChatPage composer action matrix", () => {
+  it.each([
+    ["running", true, "send", false],
+    ["running", false, "pause", false],
+    ["paused", true, "send", false],
+    ["paused", false, "resume", false],
+    ["success", true, "send", false],
+    ["success", false, "send", true],
+    ["failed", true, "send", false],
+    ["failed", false, "send", true],
+    [undefined, true, "send", false],
+    [undefined, false, "send", true],
+  ] as const)("derives %s × draft=%s", (status, hasDraft, mode, disabled) => {
+    expect(composerAction(status, hasDraft)).toEqual({ mode, disabled });
+  });
+
+  it("disables every action while uploads are in progress", () => {
+    expect(composerAction("running", true, true)).toEqual({ mode: "send", disabled: true });
+    expect(composerAction("paused", false, true)).toEqual({ mode: "resume", disabled: true });
   });
 });

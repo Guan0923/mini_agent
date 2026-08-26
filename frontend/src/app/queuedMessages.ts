@@ -17,6 +17,8 @@ function validQueuedMessage(value: unknown): value is QueuedMessage {
   return typeof candidate.id === "string"
     && candidate.id.length > 0
     && typeof candidate.content === "string"
+    && (candidate.sendingSteeringId === undefined || typeof candidate.sendingSteeringId === "string")
+    && (candidate.sendingTurnId === undefined || typeof candidate.sendingTurnId === "string")
     && (candidate.references === undefined
       || (Array.isArray(candidate.references) && candidate.references.every(validReference)));
 }

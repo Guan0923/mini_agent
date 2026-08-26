@@ -87,12 +87,18 @@ export function normalizeRuntimeNode(node: RuntimeStateNode): RuntimeStateNode {
     throw new Error("Invalid Turn data/current_data_idx");
   }
   for (const version of node.data) {
-    if (!Array.isArray(version) || version.length !== 2 || version[0]?.role !== "user" || version[1]?.role !== "assistant") {
-      throw new Error("A Turn version must contain one user and one assistant Message");
+    if (!Array.isArray(version) || version.length === 0) throw new Error("A Turn version must contain Messages");
+    for (let index = 0; index < version.length; index += 1) {
+      const message = version[index];
+      const expectedRole = index % 2 === 0 ? "user" : "assistant";
+      if (message?.role !== expectedRole || !Array.isArray(message.content)) {
+        throw new Error("Turn Messages must alternate user and assistant");
+      }
+      if (expectedRole === "user" && (message.content.length !== 1 || message.content[0]?.type !== "text" || typeof message.content[0]?.text !== "string")) {
+        throw new Error("A user Message must contain one text Item");
+      }
     }
-    if (!Array.isArray(version[0].content) || version[0].content.length !== 1 || !Array.isArray(version[1].content)) {
-      throw new Error("Invalid Turn Message content");
-    }
+    if (node.status !== "running" && version[version.length - 1]?.role !== "assistant") throw new Error("A non-running Turn must end with assistant");
   }
   const model = objectValue(node.model);
   const normalizedModel = normalizeRuntimeNodeModel(model);

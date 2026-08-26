@@ -252,55 +252,63 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
 
     result: list[ChatMessage] = []
     for node in nodes:
-        messages = node.selected_messages
-        user = messages[0]
-        assistant_raw = messages[1]
-        user_blocks = [item for item in user.get("content", []) if isinstance(item, Mapping)]
-        user_text = "".join(
-            str(item.get("text") or item.get("summary") or "")
-            for item in user_blocks
-            if item.get("type") in {"text", "bash", "compaction"}
-        )
-        if user_text:
-            result.append(UserMessage(content=user_text))
+        for message in node.selected_messages:
+            blocks = [item for item in message.get("content", []) if isinstance(item, Mapping)]
+            if message.get("role") == "user":
+                user_text = "".join(
+                    str(item.get("text") or item.get("summary") or "")
+                    for item in blocks
+                    if item.get("type") in {"text", "bash", "compaction"}
+                )
+                references: list[str] = []
+                for item in blocks:
+                    for reference in item.get("references", []) if isinstance(item.get("references"), list) else []:
+                        if isinstance(reference, Mapping) and reference.get("path"):
+                            references.append(f"- @{reference['path']} ({reference.get('source', 'project')})")
+                if references:
+                    user_text = f"{user_text}\n\nFile references:\n" + "\n".join(references)
+                if user_text:
+                    result.append(UserMessage(content=user_text))
+                continue
 
-        blocks = [item for item in assistant_raw.get("content", []) if isinstance(item, Mapping)]
-        summary = next((str(item.get("summary") or "") for item in blocks if item.get("type") == "compaction"), "")
-        if summary:
-            result.append(UserMessage(content=f"{CHECKPOINT_PREAMBLE}\n\n{summary}"))
-        text_parts = [str(item.get("text") or "") for item in blocks if item.get("type") in {"text", "bash"}]
-        reasoning_parts = [str(item.get("text") or "") for item in blocks if item.get("type") == "reasoning"]
-        calls: dict[str, ToolMessage] = {}
-        for item in blocks:
-            kind = item.get("type")
-            call_id = str(item.get("call_id") or "")
-            if kind == "tool_call" and call_id:
-                calls[call_id] = ToolMessage(
-                    name=str(item.get("name") or "unknown"),
-                    call_id=call_id,
-                    arguments=dict(item.get("arguments") or {}) if isinstance(item.get("arguments"), Mapping) else {},
-                )
-            elif kind == "tool_result" and call_id:
-                tool = calls.get(call_id)
-                if tool is None:
-                    tool = ToolMessage(name=str(item.get("tool") or "unknown"), call_id=call_id, arguments={})
-                    calls[call_id] = tool
-                content = item.get("content")
-                tool.content = (
-                    content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
-                )
-                tool.status = "failed" if item.get("status") == "failed" else "succeeded"
-                tool.retryable = item.get("retryable") if isinstance(item.get("retryable"), bool) else None
-                tool.failure_code = item.get("failure_code") if isinstance(item.get("failure_code"), str) else None
-            elif kind == "error":
-                text_parts.append(str(item.get("message") or "Execution failed."))
-        assistant = AssistantMessage(
-            content="".join(text_parts) or None,
-            reasoning="".join(reasoning_parts) or None,
-            tool_messages=list(calls.values()),
-        )
-        if assistant.content or assistant.reasoning or assistant.tool_messages:
-            result.append(assistant)
+            summary = next((str(item.get("summary") or "") for item in blocks if item.get("type") == "compaction"), "")
+            if summary:
+                result.append(UserMessage(content=f"{CHECKPOINT_PREAMBLE}\n\n{summary}"))
+            text_parts = [str(item.get("text") or "") for item in blocks if item.get("type") in {"text", "bash"}]
+            reasoning_parts = [str(item.get("text") or "") for item in blocks if item.get("type") == "reasoning"]
+            calls: dict[str, ToolMessage] = {}
+            for item in blocks:
+                kind = item.get("type")
+                call_id = str(item.get("call_id") or "")
+                if kind == "tool_call" and call_id:
+                    calls[call_id] = ToolMessage(
+                        name=str(item.get("name") or "unknown"),
+                        call_id=call_id,
+                        arguments=(
+                            dict(item.get("arguments") or {}) if isinstance(item.get("arguments"), Mapping) else {}
+                        ),
+                    )
+                elif kind == "tool_result" and call_id:
+                    tool = calls.get(call_id)
+                    if tool is None:
+                        tool = ToolMessage(name=str(item.get("tool") or "unknown"), call_id=call_id, arguments={})
+                        calls[call_id] = tool
+                    content = item.get("content")
+                    tool.content = (
+                        content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+                    )
+                    tool.status = "failed" if item.get("status") == "failed" else "succeeded"
+                    tool.retryable = item.get("retryable") if isinstance(item.get("retryable"), bool) else None
+                    tool.failure_code = item.get("failure_code") if isinstance(item.get("failure_code"), str) else None
+                elif kind == "error":
+                    text_parts.append(str(item.get("message") or "Execution failed."))
+            assistant = AssistantMessage(
+                content="".join(text_parts) or None,
+                reasoning="".join(reasoning_parts) or None,
+                tool_messages=list(calls.values()),
+            )
+            if assistant.content or assistant.reasoning or assistant.tool_messages:
+                result.append(assistant)
     return result
 
 

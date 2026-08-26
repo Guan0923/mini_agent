@@ -79,6 +79,11 @@ class RuntimeModelPatch(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
 
 
+class SteerTurnRequest(BaseModel):
+    steering_id: str = Field(min_length=1, max_length=200)
+    message: dict[str, object]
+
+
 class TurnConfigPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -115,8 +120,10 @@ def _user_item(message: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], Mapping):
         raise HTTPException(status_code=422, detail="user Message 必须恰好包含一个 Item。")
     item = dict(content[0])
-    if item.get("type") != "text" or not isinstance(item.get("text"), str) or not str(item["text"]).strip():
-        raise HTTPException(status_code=422, detail="当前交互要求一个非空 text Item。")
+    if item.get("type") != "text" or not isinstance(item.get("text"), str):
+        raise HTTPException(status_code=422, detail="当前交互要求一个 text Item。")
+    if not str(item["text"]).strip() and not item.get("references"):
+        raise HTTPException(status_code=422, detail="text 或文件引用至少需要一个。")
     return item
 
 
@@ -125,13 +132,17 @@ def _references(item: Mapping[str, object]) -> list[dict[str, str]]:
     if not isinstance(raw, list):
         raise HTTPException(status_code=422, detail="references 必须为 list。")
     result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for value in raw:
         if not isinstance(value, Mapping) or value.get("source") not in {"project", "upload"}:
             raise HTTPException(status_code=422, detail="无效的文件引用。")
         path = value.get("path")
         if not isinstance(path, str) or not path:
             raise HTTPException(status_code=422, detail="文件引用 path 不能为空。")
-        result.append({"source": str(value["source"]), "path": path})
+        key = (str(value["source"]), path)
+        if key not in seen:
+            seen.add(key)
+            result.append({"source": key[0], "path": key[1]})
     return result
 
 
@@ -280,7 +291,15 @@ async def resume_turn(
     if source.status != "paused":
         raise HTTPException(status_code=409, detail="只有 paused Turn 可以恢复。")
 
-    def operation(conversation, interrupt, sink, cancel_requested, suspend_requested, request_parameters):
+    def operation(
+        conversation,
+        interrupt,
+        sink,
+        cancel_requested,
+        suspend_requested,
+        request_parameters,
+        steering,
+    ):
         return conversation.resume_session(
             source.session_id,
             on_event=sink,
@@ -288,6 +307,8 @@ async def resume_turn(
             cancel_requested=cancel_requested,
             suspend_requested=suspend_requested,
             request_parameters=request_parameters,
+            steering=steering,
+            resume_confirmed=True,
         )
 
     return _stream_turn(
@@ -317,6 +338,35 @@ def pause_turn(turn_id: str, request: Request, identity: UserIdentity = Depends(
         return store.pause_turn(turn_id).to_dict()
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{turn_id}/steer", status_code=202)
+def steer_turn(
+    turn_id: str,
+    body: SteerTurnRequest,
+    request: Request,
+    identity: UserIdentity = Depends(require_user),
+) -> dict[str, str]:
+    state: WebAppState = request.app.state.web
+    store = session_store(state, identity.id)
+    source = _turn(store, turn_id)
+    if source.status != "running":
+        raise HTTPException(status_code=409, detail="只有 running Turn 可以接收新输入。")
+    item = _user_item(body.message)
+    normalized_message = {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": str(item["text"]).strip(),
+                **({"references": _references(item)} if item.get("references") else {}),
+            }
+        ],
+    }
+    inbox = getattr(state, "active_turn_steering", {}).get((identity.id, turn_id))
+    if inbox is None or not inbox.put(body.steering_id, normalized_message):
+        raise HTTPException(status_code=409, detail="Turn 执行流已经封闭。")
+    return {"steering_id": body.steering_id, "status": "accepted"}
 
 
 @router.post("/{turn_id}/fork", status_code=201)

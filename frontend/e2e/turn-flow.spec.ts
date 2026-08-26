@@ -219,9 +219,7 @@ test("a paused Turn resumes in place with the same id", async ({ page }) => {
   );
   await page.getByRole("button", { name: "继续" }).click();
   expect((await resumeResponse).ok()).toBeTruthy();
-  const resumeCard = page.locator(".decision-card").filter({ hasText: "恢复运行" });
-  await expect(page.getByText("恢复运行", { exact: true })).toBeVisible();
-  await resumeCard.getByRole("button", { name: "继续" }).click();
+  await expect(page.getByText("恢复运行", { exact: true })).toHaveCount(0);
 
   await expect(page.locator(".message.assistant").last()).toContainText("Resumed the same Turn successfully.", { timeout: 15_000 });
   await expect(page.getByRole("button", { name: "发送" })).toBeVisible();
@@ -229,6 +227,125 @@ test("a paused Turn resumes in place with the same id", async ({ page }) => {
   const resumedTurns = await resumedTurnsResponse.json() as Array<{ id: string; status: string }>;
   expect(resumedTurns).toHaveLength(1);
   expect(resumedTurns[0]).toMatchObject({ id: originalTurnId, status: "success" });
+});
+
+test("running Turn consumes FIFO steering as separate user Messages", async ({ page }) => {
+  const guest = await page.request.post("/api/auth/guest");
+  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "FIFO Steering" } });
+  expect(sidebarResponse.ok(), String(sidebarResponse.status())).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "FIFO Steering", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("steering fifo");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByRole("button", { name: "暂停" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Fork" })).toHaveCount(0);
+
+  await page.getByLabel("聊天输入").fill("first redirect");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("second redirect");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByRole("region", { name: "待发送消息" })).toContainText("待发送 2 条");
+
+  const firstSteer = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/steer"));
+  await page.getByRole("button", { name: "发送第 1 条待发送消息" }).click();
+  expect((await firstSteer).status()).toBe(202);
+  const secondSteer = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/steer"));
+  await page.getByRole("button", { name: "发送第 2 条待发送消息" }).click();
+  expect((await secondSteer).status()).toBe(202);
+
+  await expect(page.getByRole("region", { name: "待发送消息" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.locator(".message.user")).toHaveCount(3, { timeout: 15_000 });
+  await expect(page.locator(".message.user").nth(1)).toContainText("first redirect");
+  await expect(page.locator(".message.user").nth(2)).toContainText("second redirect");
+  await expect(page.locator(".message.assistant").last()).toContainText("FIFO steering complete.");
+  await expect(page.getByRole("button", { name: "Fork" })).toBeVisible();
+
+  const turnsResponse = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`);
+  const turns = await turnsResponse.json() as Array<{ current_data_idx: number; data: Array<Array<{ role: string; steering_id?: string }>> }>;
+  expect(turns).toHaveLength(1);
+  expect(turns[0].data[turns[0].current_data_idx].map((message) => message.role)).toEqual([
+    "user", "assistant", "user", "assistant", "user", "assistant",
+  ]);
+});
+
+test("steering waits for the active tool and skips the next stale tool", async ({ page }) => {
+  const guest = await page.request.post("/api/auth/guest");
+  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Tool Steering" } });
+  expect(sidebarResponse.ok(), String(sidebarResponse.status())).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Tool Steering", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("steering during tool");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.locator(".message.assistant").last()).toContainText("slow_tool", { timeout: 15_000 });
+
+  await page.getByLabel("聊天输入").fill("redirect after slow tool");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  const steerResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/steer"));
+  await page.getByRole("button", { name: "发送第 1 条待发送消息" }).click();
+  expect((await steerResponse).status()).toBe(202);
+
+  await expect(page.locator(".message.assistant").last()).toContainText("Tool-boundary steering complete.", { timeout: 15_000 });
+  await expect(page.getByText("Forbidden tool executed.", { exact: false })).toHaveCount(0);
+  await expect(page.locator(".message.user")).toHaveCount(2);
+
+  const turnsResponse = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`);
+  const turns = await turnsResponse.json() as Array<{
+    current_data_idx: number;
+    data: Array<Array<{ role: string; content: Array<Record<string, unknown>> }>>;
+  }>;
+  const firstAssistant = turns[0].data[turns[0].current_data_idx][1].content;
+  expect(firstAssistant).toContainEqual(expect.objectContaining({
+    type: "tool_result",
+    call_id: "slow_steering",
+    content: "Slow tool completed.",
+    status: "succeeded",
+  }));
+  expect(firstAssistant).toContainEqual(expect.objectContaining({
+    type: "tool_result",
+    call_id: "forbidden_steering",
+    status: "failed",
+  }));
+});
+
+test("Pause merges the local queue into one same-Turn steering Message", async ({ page }) => {
+  const guest = await page.request.post("/api/auth/guest");
+  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Merged Steering" } });
+  expect(sidebarResponse.ok(), String(sidebarResponse.status())).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Merged Steering", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("steering merge");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByRole("button", { name: "暂停" })).toBeVisible();
+  await page.getByLabel("聊天输入").fill("merge first");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("merge second");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+
+  const steerResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/steer"));
+  await page.getByRole("button", { name: "暂停" }).click();
+  expect((await steerResponse).status()).toBe(202);
+  await expect(page.getByRole("button", { name: "继续" })).toHaveCount(0);
+  await expect(page.locator(".message.user")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".message.user").last()).toContainText("merge first");
+  await expect(page.locator(".message.user").last()).toContainText("merge second");
+  await expect(page.locator(".message.assistant").last()).toContainText("Merged steering complete.");
+
+  const turnsResponse = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`);
+  const turns = await turnsResponse.json() as Array<{ status: string; current_data_idx: number; data: Array<Array<{ role: string }>> }>;
+  expect(turns).toHaveLength(1);
+  expect(turns[0].status).toBe("success");
+  expect(turns[0].data[turns[0].current_data_idx].map((message) => message.role)).toEqual([
+    "user", "assistant", "user", "assistant",
+  ]);
 });
 
 test("assistant Items stay chronological and fold after the next Item arrives", async ({ page }) => {

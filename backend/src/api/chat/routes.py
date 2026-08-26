@@ -22,6 +22,7 @@ from ..auth.types import UserIdentity
 from ..session_store import session_store as _store
 from ..shared.runtime import build_user_application
 from ..state import WebAppState
+from ..turn_steering import TurnSteeringInbox
 from .interrupts import make_interactive_interrupt
 
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
@@ -150,6 +151,10 @@ def _stream(
     if not isinstance(active_runtime_bridges, dict):
         active_runtime_bridges = {}
         setattr(state, "active_runtime_bridges", active_runtime_bridges)
+    active_turn_steering = getattr(state, "active_turn_steering", None)
+    if not isinstance(active_turn_steering, dict):
+        active_turn_steering = {}
+        setattr(state, "active_turn_steering", active_turn_steering)
 
     # Reserve the session before creating the Job object.  Endpoint-level
     # summary checks are advisory; this lock closes the two-window race where
@@ -192,6 +197,8 @@ def _stream(
         setattr(state, "active_turn_cancellations", active_turn_cancellations)
     cancellation_key = (identity.id, turn_id)
     active_turn_cancellations[cancellation_key] = pause_requested.set
+    steering_inbox = TurnSteeringInbox()
+    active_turn_steering[cancellation_key] = steering_inbox
     job_registry = getattr(state, "job_registry", None)
     job_holder: dict[str, ThreadJob | None] = {"job": None}
     bridge_ref: dict[str, RuntimeEventNodeBridge | None] = {"bridge": None}
@@ -374,6 +381,7 @@ def _stream(
                     runtime_for_bridge = getattr(conversation, "runtime", None)
                     if runtime_for_bridge is not None:
                         bridge_ref["bridge"].bind_runtime(runtime_for_bridge)
+                        runtime_for_bridge.services.steering = steering_inbox.take
                     if operation is not None:
                         # Resume keeps the immediate bridge start: there is no
                         # new user text and the bridge must adopt the paused
@@ -398,6 +406,7 @@ def _stream(
                     suspend_requested=suspension_requested,
                     request_parameters=request_parameters,
                     references=references or [],
+                    steering=steering_inbox.take,
                 )
             else:
                 run_state = operation(
@@ -407,6 +416,7 @@ def _stream(
                     cancellation_requested,
                     suspension_requested,
                     _model_request_parameters(request_model, effective_reasoning),
+                    steering_inbox.take,
                 )
             active_session = getattr(conversation, "active_session", None)
             bridge = bridge_ref["bridge"]
@@ -511,6 +521,9 @@ def _stream(
                 with stream_lock:
                     stream_locks["keys"].difference_update(reserved_stream_keys)
             active_turn_cancellations.pop(cancellation_key, None)
+            steering_inbox.close()
+            if active_turn_steering.get(cancellation_key) is steering_inbox:
+                active_turn_steering.pop(cancellation_key, None)
             with active_turn_streams_lock:
                 for alias in active_stream_aliases:
                     if active_turn_streams.get(alias) is active_stream:

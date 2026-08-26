@@ -10,7 +10,7 @@ from .events import RuntimeEvent
 
 Confirm = Callable[[str], bool]
 EventHandler = Callable[[RuntimeEvent], None]
-SteeringHandler = Callable[[], list[str]]
+SteeringHandler = Callable[[], list[object]]
 CancellationHandler = Callable[[], bool]
 SuspensionHandler = Callable[[], bool]
 PlanReviewChoice = Literal["implement", "implement_and_compaction", "stay_in_plan_mode"]

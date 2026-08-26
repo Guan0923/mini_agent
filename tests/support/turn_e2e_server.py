@@ -99,6 +99,37 @@ class CooperativePausePlanner(LLMPlanner):
             )
         if runtime.run.mode == "agent" and task == PLAN_REVIEW_MARKDOWN:
             return AssistantMessage(content="Implemented the exact reviewed plan after compaction.")
+        if task == "steering fifo":
+            if runtime.run.model_turns <= 2:
+                sleep(3.0 if runtime.run.model_turns == 1 else 0.5)
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="read_file",
+                            call_id=f"stale_{runtime.run.model_turns}",
+                            arguments={"path": "README.md"},
+                        )
+                    ]
+                )
+            return AssistantMessage(content="FIFO steering complete.")
+        if task == "steering merge":
+            if runtime.run.model_turns == 1:
+                sleep(4.0)
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(name="read_file", call_id="stale_merge", arguments={"path": "README.md"})
+                    ]
+                )
+            return AssistantMessage(content="Merged steering complete.")
+        if task == "steering during tool":
+            if runtime.run.model_turns == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(name="slow_tool", call_id="slow_steering", arguments={}),
+                        ToolMessage(name="forbidden_tool", call_id="forbidden_steering", arguments={}),
+                    ]
+                )
+            return AssistantMessage(content="Tool-boundary steering complete.")
         if task == "delayed reconnect":
             if runtime.exchange.on_reasoning is not None:
                 runtime.exchange.on_reasoning("Streaming began before refresh.")
@@ -174,6 +205,11 @@ def local_application(_state, user_id: str, *, session_id: str, workspace=None, 
         paths=state.user_paths(user_id),
     )
     application.runner.planner = CooperativePausePlanner()
+
+    def slow_tool() -> str:
+        sleep(2.0)
+        return "Slow tool completed."
+
     application.runner.tools = ToolRegistry(
         [
             Tool(
@@ -194,6 +230,8 @@ def local_application(_state, user_id: str, *, session_id: str, workspace=None, 
                 lambda query: f"Deterministic search result for {query}.",
                 requires_confirmation=True,
             ),
+            Tool("slow_tool", "Run one deterministic slow tool.", slow_tool),
+            Tool("forbidden_tool", "Must be skipped after steering.", lambda: "Forbidden tool executed."),
         ]
     )
     return application

@@ -458,6 +458,7 @@ class ConversationService(ConversationSessionController):
         cancel_requested: CancellationHandler | None = None,
         suspend_requested: CancellationHandler | None = None,
         request_parameters: Mapping[str, Any] | None = None,
+        resume_confirmed: bool = False,
     ) -> RunState | None:
         return resume_conversation(
             self,
@@ -468,6 +469,7 @@ class ConversationService(ConversationSessionController):
             cancel_requested=cancel_requested,
             suspend_requested=suspend_requested,
             request_parameters=request_parameters,
+            resume_confirmed=resume_confirmed,
         )
 
     def _prepare(self, task: str, *, structured: bool = False) -> str:
