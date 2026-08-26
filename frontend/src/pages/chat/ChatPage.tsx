@@ -23,7 +23,7 @@ import Composer, { type ComposerActionMode, type SettingsSelectKey } from "./Com
 import type { FileMentionChange, FileMentionEditorHandle } from "./FileMentionEditor";
 import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import { latestTodoList } from "./todoPanel";
-import { messagesBeforeRewind, projectTurnPath } from "../../app/runtimeDetailProjection";
+import { messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "../../app/runtimeDetailProjection";
 import { leafNodes } from "../../app/runtimeNodeReducer";
 import type { QueuedMessage } from "../../app/types";
 import { DEFAULT_RUNTIME_NODE_MODEL, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
@@ -714,8 +714,17 @@ export default function ChatPage({
     const assistantMessage: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", events: [], running: true };
     onUpdate(conversationId, (current) => {
       let visibleMessages = current.messages;
+      let runtimeNodes = current.runtimeNodes;
       if (target?.rewindTurnId) {
-        visibleMessages = messagesBeforeRewind(current.messages, target.rewindTurnId);
+        if (current.runtimeNodes) {
+          runtimeNodes = pruneTurnDescendants(current.runtimeNodes, target.rewindTurnId);
+          const map = new Map(runtimeNodes.map((node) => [`${node.session_id}:${node.id}`, node] as const));
+          visibleMessages = map.has(`${sessionId}:${target.rewindTurnId}`)
+            ? messagesBeforeRewind(projectTurnPath(map, target.rewindTurnId), target.rewindTurnId)
+            : messagesBeforeRewind(current.messages, target.rewindTurnId);
+        } else {
+          visibleMessages = messagesBeforeRewind(current.messages, target.rewindTurnId);
+        }
       }
       const messages = [...visibleMessages, userMessage, assistantMessage];
       return {
@@ -723,6 +732,7 @@ export default function ChatPage({
         title: current.title === "新对话" ? prompt.slice(0, 18) + (prompt.length > 18 ? "…" : "") : current.title,
         messageCount: messages.filter((message) => message.role === "user" || message.role === "assistant").length,
         messages,
+        runtimeNodes,
         activeTurnId: target?.rewindTurnId ?? current.activeTurnId,
         lastNodeId: target?.rewindTurnId ?? current.lastNodeId,
       };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Conversation, RuntimeNodeFrame, RuntimeStateNode } from "../types";
-import { integrateRuntimeNodeUpdates, messagesBeforeRewind, projectTurnPath } from "./runtimeDetailProjection";
+import { integrateRuntimeNodeUpdates, messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "./runtimeDetailProjection";
 import { applyRuntimeNodeFrame, runtimeNodeAccumulator } from "./runtimeNodeReducer";
 
 function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
@@ -207,6 +207,70 @@ describe("Turn protocol projection", () => {
     expect(projectTurnPath(map, "turn_2").map((message) => message.content)).toEqual(["v2", "a2", "child", "answer"]);
     parent.current_data_idx = 0;
     expect(projectTurnPath(map, "turn_2").map((message) => message.content)).toEqual(["v1", "a1", "child", "answer"]);
+  });
+
+  it("prunes only same-Thread descendants when rewind is submitted", () => {
+    const root = turn();
+    const target = turn({
+      id: "turn_target",
+      parent_id: root.id,
+      parent_session_id: root.session_id,
+      parent_thread_id: root.thread_id,
+      current_data_idx: 1,
+      data: [
+        [{ role: "user", content: [{ type: "text", text: "target-v1" }] }, { role: "assistant", content: [{ type: "text", text: "answer-v1" }] }],
+        [{ role: "user", content: [{ type: "text", text: "target-v2" }] }, { role: "assistant", content: [{ type: "text", text: "answer-v2" }] }],
+      ],
+    });
+    const descendant = turn({
+      id: "turn_descendant",
+      parent_id: target.id,
+      parent_session_id: target.session_id,
+      parent_thread_id: target.thread_id,
+    });
+    const grandchild = turn({
+      id: "turn_grandchild",
+      parent_id: descendant.id,
+      parent_session_id: descendant.session_id,
+      parent_thread_id: descendant.thread_id,
+    });
+    const sibling = turn({
+      id: "turn_sibling",
+      parent_id: root.id,
+      parent_session_id: root.session_id,
+      parent_thread_id: root.thread_id,
+    });
+    const otherThread = turn({
+      id: "turn_other_thread",
+      thread_id: "thread_other",
+      parent_thread_id: root.thread_id,
+    });
+
+    const pruned = pruneTurnDescendants(
+      [root, target, descendant, grandchild, sibling, otherThread],
+      target.id,
+    );
+    expect(pruned.map((node) => node.id)).toEqual([
+      root.id,
+      target.id,
+      sibling.id,
+      otherThread.id,
+    ]);
+
+    const map = new Map(pruned.map((node) => [`${node.session_id}:${node.id}`, node] as const));
+    expect(projectTurnPath(map, target.id).map((message) => message.content)).toEqual([
+      "hello",
+      "world",
+      "target-v2",
+      "answer-v2",
+    ]);
+    target.current_data_idx = 0;
+    expect(projectTurnPath(map, target.id).map((message) => message.content)).toEqual([
+      "hello",
+      "world",
+      "target-v1",
+      "answer-v1",
+    ]);
   });
 
   it("hides compact copied context and exposes only the indicator plus new output", () => {

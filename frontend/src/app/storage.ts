@@ -112,6 +112,7 @@ export function summaryToConversation(summary: SessionInfo, existing?: Conversat
     deletedAt: summary.deleted_at ?? undefined,
     messagesLoaded: existing?.messagesLoaded ?? false,
     lastNodeId: summary.last_node_id !== undefined ? summary.last_node_id ?? undefined : existing?.lastNodeId,
+    activeTurnId: existing?.activeTurnId,
     runtimeNodes: existing?.runtimeNodes,
     // When the API explicitly returns null, it is authoritative: clear a
     // stale browser-only project binding instead of hiding an ordinary

@@ -220,6 +220,32 @@ export function messagesBeforeRewind(messages: ChatMessage[], turnId: string): C
   return rewindIndex >= 0 ? messages.slice(0, rewindIndex) : messages;
 }
 
+export function pruneTurnDescendants(nodes: RuntimeStateNode[], turnId: string): RuntimeStateNode[] {
+  const target = nodes.find((node) => node.id === turnId);
+  if (!target) return nodes;
+
+  const childrenByParent = new Map<string, RuntimeStateNode[]>();
+  for (const node of nodes) {
+    if (node.session_id !== target.session_id || node.thread_id !== target.thread_id || !node.parent_id) continue;
+    const parentKey = `${node.parent_session_id}:${node.parent_id}`;
+    const children = childrenByParent.get(parentKey);
+    if (children) children.push(node);
+    else childrenByParent.set(parentKey, [node]);
+  }
+
+  const descendantKeys = new Set<string>();
+  const pending = [...(childrenByParent.get(keyOf(target)) ?? [])];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    const key = keyOf(node);
+    if (descendantKeys.has(key)) continue;
+    descendantKeys.add(key);
+    pending.push(...(childrenByParent.get(key) ?? []));
+  }
+  if (descendantKeys.size === 0) return nodes;
+  return nodes.filter((node) => !descendantKeys.has(keyOf(node)));
+}
+
 export function integrateRuntimeNodeUpdates(
   conversation: Conversation,
   turns: RuntimeStateNode[],

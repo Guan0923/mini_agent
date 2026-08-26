@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping
+from dataclasses import replace
 
 from backend.domain import RunProvenance, RunStatus, RuntimeMessage
 from backend.domain.runtime_state import (
@@ -19,6 +20,7 @@ from backend.domain.runtime_state import (
     terminal_error_payload,
     utc_iso,
 )
+from backend.domain.sidebar_thread import SidebarThread
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState
 
@@ -45,9 +47,48 @@ class SQLiteRuntimeMixin:
             nodes = self._objects(connection, node.session_id, "runtime_node")
             if any(item.status == "running" and item.thread_id == node.thread_id for item in nodes):
                 raise ValueError("A thread may have only one running Turn.")
+            self._auto_title_sidebar_thread(connection, node, nodes)
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
             self._touch_session(connection, node.session_id, node.timestamp)
             self._append_event(connection, node.session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
+
+    def _auto_title_sidebar_thread(
+        self,
+        connection: sqlite3.Connection,
+        node: TreeRuntimeState,
+        existing_nodes: list[TreeRuntimeState],
+    ) -> None:
+        """Name a new main Thread from its first persisted user text."""
+
+        if node.thread_id != node.session_id or any(item.thread_id == node.thread_id for item in existing_nodes):
+            return
+        payload = self._json_object(connection, node.session_id, "sidebar_thread", node.thread_id)
+        if payload is None:
+            return
+        sidebar = SidebarThread.from_dict(payload)
+        if sidebar.title_is_custom:
+            return
+        user_content = node.user_message.get("content", [])
+        if not user_content or user_content[0].get("type") != "text":
+            return
+        raw_title = user_content[0].get("text")
+        if not isinstance(raw_title, str) or not raw_title.strip():
+            return
+        updated = replace(sidebar, title=normalize_session_title(raw_title), updated_at=node.timestamp)
+        self._put_json_object(
+            connection,
+            node.session_id,
+            "sidebar_thread",
+            node.thread_id,
+            updated.to_dict(),
+            updated.updated_at,
+        )
+        self._append_event(
+            connection,
+            node.session_id,
+            kind="sidebar_thread_upserted",
+            payload={"sidebar_thread": updated.to_dict()},
+        )
 
     def update_node(self, node: TreeRuntimeState) -> None:
         with self._connection(node.session_id) as connection:

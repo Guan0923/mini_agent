@@ -283,14 +283,18 @@ def fork_turn(
 ) -> dict[str, object]:
     store = session_store(request.app.state.web, identity.id)
     source = _turn(store, turn_id)
+    source_sidebar = store.get_sidebar_thread(source.thread_id)
+    if source_sidebar is None or source_sidebar.session_id != source.session_id:
+        raise HTTPException(status_code=409, detail="源 SidebarThread 不可用。")
     thread_id = body.thread_id or new_thread_id()
+    explicit_title = body.title.strip() if body.title else ""
     try:
         forked = store.fork_turn_node(turn_id, new_turn_id=body.id, thread_id=thread_id)
         sidebar = store.create_sidebar_thread(
             session_id=source.session_id,
             thread_id=thread_id,
-            title=(body.title or "分支对话").strip(),
-            title_is_custom=bool(body.title),
+            title=explicit_title or source_sidebar.title,
+            title_is_custom=bool(explicit_title),
         )
     except (ValueError, RuntimeStateValidationError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

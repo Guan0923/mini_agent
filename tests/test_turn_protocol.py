@@ -48,6 +48,102 @@ def make_turn(
     )
 
 
+def test_first_main_turn_atomically_auto_titles_its_sidebar_thread(tmp_path: Path, monkeypatch) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    session = store.create_session("新对话")
+    store.create_sidebar_thread(
+        session_id=session.session_id,
+        thread_id=session.session_id,
+        title="新对话",
+    )
+    prompt = f"  第一条   用户消息 {'字' * 90}  "
+    turn = RuntimeState.create(
+        session_id=session.session_id,
+        thread_id=session.session_id,
+        id="turn_auto_title",
+        user_content=[{"type": "text", "text": prompt}],
+    )
+
+    original_append_event = store._append_event
+
+    def fail_turn_event(connection, session_id, *, kind, payload):
+        if kind == "turn_upserted":
+            raise RuntimeError("turn event failed")
+        return original_append_event(connection, session_id, kind=kind, payload=payload)
+
+    monkeypatch.setattr(store, "_append_event", fail_turn_event)
+    with pytest.raises(RuntimeError, match="turn event failed"):
+        store.create_node(turn)
+
+    assert store.get_sidebar_thread(session.session_id).title == "新对话"
+    assert store.load_nodes(session.session_id) == []
+
+    monkeypatch.setattr(store, "_append_event", original_append_event)
+    store.create_node(turn)
+    sidebar = store.get_sidebar_thread(session.session_id)
+    assert sidebar is not None
+    assert sidebar.title == (f"第一条 用户消息 {'字' * 90}")[:80]
+    assert sidebar.title_is_custom is False
+    with sqlite3.connect(store.paths.session_db(session.session_id)) as connection:
+        events = connection.execute(
+            "SELECT kind,payload_json FROM json_events ORDER BY local_sequence DESC LIMIT 2"
+        ).fetchall()
+    assert [kind for kind, _payload in reversed(events)] == ["sidebar_thread_upserted", "turn_upserted"]
+
+
+def test_auto_title_never_overwrites_manual_or_established_sidebar_titles(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+
+    manual = store.create_session("手工标题")
+    store.create_sidebar_thread(
+        session_id=manual.session_id,
+        thread_id=manual.session_id,
+        title=manual.title,
+        title_is_custom=True,
+    )
+    manual_turn = RuntimeState.create(
+        session_id=manual.session_id,
+        thread_id=manual.session_id,
+        id="turn_manual",
+        user_content=[{"type": "text", "text": "不能覆盖"}],
+    )
+    NodeWriter(store).create(manual_turn)
+    assert store.get_sidebar_thread(manual.session_id).title == "手工标题"
+
+    automatic = store.create_session("新对话")
+    store.create_sidebar_thread(
+        session_id=automatic.session_id,
+        thread_id=automatic.session_id,
+        title=automatic.title,
+    )
+    writer = NodeWriter(store)
+    first = writer.create(
+        RuntimeState.create(
+            session_id=automatic.session_id,
+            thread_id=automatic.session_id,
+            id="turn_first",
+            user_content=[{"type": "text", "text": "第一条消息"}],
+        )
+    )
+    first = writer.finalize(first, "success")
+    compacted = store.create_compact_turn(first.id, "压缩摘要", new_turn_id="turn_compact")
+    compact_writer = NodeWriter(store)
+    compacted = compact_writer.snapshot(compacted)
+    compacted = compact_writer.finalize(compacted, "success")
+    second = writer.create(
+        RuntimeState.create(
+            session_id=automatic.session_id,
+            thread_id=automatic.session_id,
+            id="turn_second",
+            parent=compacted,
+            user_content=[{"type": "text", "text": "第二条消息"}],
+        )
+    )
+    writer.finalize(second, "failed")
+    store.append_turn_version(first.id, {"type": "text", "text": "回退消息"})
+    assert store.get_sidebar_thread(automatic.session_id).title == "第一条消息"
+
+
 def test_turn_shape_is_strict_and_has_no_synthetic_root() -> None:
     turn = make_turn()
     assert turn.version == APP_VERSION == "0.0.1"
@@ -442,6 +538,47 @@ def test_pause_targets_only_the_requested_turn_in_parallel_threads(tmp_path: Pat
         assert store.find_node("turn_fork").status == "running"
 
 
+def test_fork_sidebar_title_is_copied_once_unless_explicitly_named(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    with TestClient(create_app(state)) as client:
+        assert client.post("/api/auth/guest").status_code == 200
+        identity = client.get("/api/auth/me").json()
+        source_sidebar = client.post("/api/sidebar-threads", json={}).json()
+        store = session_store(state, identity["id"])
+        writer = NodeWriter(store)
+        source = writer.create(
+            RuntimeState.create(
+                session_id=source_sidebar["session_id"],
+                thread_id=source_sidebar["thread_id"],
+                id="turn_fork_source",
+                user_content=[{"type": "text", "text": "源对话标题"}],
+            )
+        )
+        writer.finalize(source, "success")
+
+        inherited_response = client.post("/api/turns/turn_fork_source/fork", json={})
+        assert inherited_response.status_code == 201
+        inherited = inherited_response.json()["sidebar_thread"]
+        assert inherited["title"] == "源对话标题"
+        assert inherited["title_is_custom"] is False
+
+        renamed = client.patch(
+            f"/api/sidebar-threads/{source_sidebar['thread_id']}",
+            json={"title": "源对话已改名"},
+        )
+        assert renamed.status_code == 200
+        assert store.get_sidebar_thread(inherited["thread_id"]).title == "源对话标题"
+
+        explicit_response = client.post(
+            "/api/turns/turn_fork_source/fork",
+            json={"title": "手工分支标题"},
+        )
+        assert explicit_response.status_code == 201
+        explicit = explicit_response.json()["sidebar_thread"]
+        assert explicit["title"] == "手工分支标题"
+        assert explicit["title_is_custom"] is True
+
+
 def test_plan_handoff_appends_to_the_same_turn(tmp_path: Path) -> None:
     class PlanHandoffPlanner:
         name = "plan-handoff"
@@ -507,7 +644,7 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
 
     with TestClient(create_app(state)) as client:
         assert client.post("/api/auth/guest").status_code == 200
-        sidebar = client.post("/api/sidebar-threads", json={"title": "SSE round trip"}).json()
+        sidebar = client.post("/api/sidebar-threads", json={}).json()
         turn_id = "turn_http_sse"
         response = client.post(
             "/api/turns",
@@ -516,7 +653,10 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
                 "session_id": sidebar["session_id"],
                 "thread_id": sidebar["thread_id"],
                 "parent_id": "",
-                "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "  hello   sidebar  "}],
+                },
                 "permission_mode": "read_only",
                 "running_mode": "agent",
             },
@@ -547,5 +687,10 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
         assert len(turns) == 1
         assert reconstructed == turns[0]
         assert turns[0]["id"] == turn_id
-        assert turns[0]["data"][0][0]["content"] == [{"type": "text", "text": "hello"}]
+        assert turns[0]["data"][0][0]["content"] == [{"type": "text", "text": "hello   sidebar"}]
         assert turns[0]["data"][0][1]["content"][-1]["type"] == "text"
+        refreshed_sidebar = next(
+            item for item in client.get("/api/sidebar-threads").json() if item["thread_id"] == sidebar["thread_id"]
+        )
+        assert refreshed_sidebar["title"] == "hello sidebar"
+        assert refreshed_sidebar["title_is_custom"] is False

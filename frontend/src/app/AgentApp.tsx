@@ -549,7 +549,7 @@ function AgentApp() {
       await ensureSession(id);
       const sourceTurnId = source.messages[index].sourceNodeId;
       if (!sourceTurnId) throw new Error("fork requires an assistant Turn");
-      const forked = await forkTurn(sourceTurnId, `${source.title || "新对话"}（分支）`);
+      const forked = await forkTurn(sourceTurnId);
       const sidebar = forked.sidebar_thread;
       const branch = withLoadedTurns({
         id: sidebar.thread_id,

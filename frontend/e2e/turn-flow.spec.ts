@@ -34,6 +34,12 @@ test("real Turn SSE flow supports tools, rewind versions, fork, and compact", as
   await send(page, "rewound hello");
   await expect(page.locator(".message.user")).toHaveCount(1);
   await expect(page.locator(".message.user").first()).toContainText("rewound hello");
+  await page.locator(".message.user").first().getByRole("button", { name: "上一个消息版本" }).click();
+  await expect(page.locator(".message.user")).toHaveCount(1);
+  await expect(page.locator(".message.user").first()).toContainText("hello");
+  await page.locator(".message.user").first().getByRole("button", { name: "下一个消息版本" }).click();
+  await expect(page.locator(".message.user")).toHaveCount(1);
+  await expect(page.locator(".message.user").first()).toContainText("rewound hello");
 
   await send(page, "next turn");
   await expect(page.locator(".message.user").last()).toContainText("next turn");
@@ -44,7 +50,7 @@ test("real Turn SSE flow supports tools, rewind versions, fork, and compact", as
   await expect(page.locator(".message.user").first()).toContainText("rewound hello");
 
   await page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }).click();
-  await expect(page.getByRole("button", { name: "Playwright Turn（分支）", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Playwright Turn", exact: true })).toHaveCount(2);
   await expect(page.locator(".message.user").last()).toContainText("next turn");
 
   await page.getByLabel("聊天输入").fill("/compact");
