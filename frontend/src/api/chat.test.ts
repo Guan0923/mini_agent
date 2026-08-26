@@ -54,11 +54,11 @@ function response(lines: string[]): Response {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Turn SSE contract", () => {
-  it("accepts only full Turn snapshots followed by the matching success terminal", async () => {
+  it("accepts one Turn baseline followed by consecutive deltas and the matching terminal", async () => {
     const frames: StreamMessage[] = [];
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([
-      JSON.stringify({ type: "turn.create", turn: turn() }),
-      JSON.stringify({ type: "turn.update", turn: turn("success") }),
+      JSON.stringify({ type: "turn.snapshot", revision: 0, turn: turn() }),
+      JSON.stringify({ type: "turn.delta", session_id: "session_1", turn_id: "turn_1", revision: 1, patch: { status: "success" } }),
       '<SSE id="turn_1" type="success"></SSE>',
     ])));
 
@@ -67,12 +67,12 @@ describe("Turn SSE contract", () => {
       threadId: "session_1",
       turnId: "turn_1",
     })).resolves.toBe("completed");
-    expect(frames.map((frame) => frame.type)).toEqual(["turn.create", "turn.update"]);
+    expect(frames.map((frame) => frame.type)).toEqual(["turn.snapshot", "turn.delta"]);
   });
 
   it("rejects a stream that ends without a terminal envelope", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([
-      JSON.stringify({ type: "turn.create", turn: turn() }),
+      JSON.stringify({ type: "turn.snapshot", revision: 0, turn: turn() }),
     ])));
 
     await expect(streamChat("hello", () => undefined, new AbortController().signal, {
@@ -83,6 +83,7 @@ describe("Turn SSE contract", () => {
 
   it("requires network terminals to carry the original frontend Turn id", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([
+      JSON.stringify({ type: "turn.snapshot", revision: 0, turn: turn() }),
       '<SSE id="network" type="network"></SSE>',
     ])));
 
@@ -90,5 +91,24 @@ describe("Turn SSE contract", () => {
       sessionId: "session_1",
       turnId: "turn_1",
     })).rejects.toThrow("terminal id does not match");
+  });
+
+  it("rejects a terminal-only stream and a mismatched first baseline", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(response([
+      '<SSE id="turn_1" type="success"></SSE>',
+    ])));
+    await expect(streamChat("hello", () => undefined, new AbortController().signal, {
+      sessionId: "session_1",
+      turnId: "turn_1",
+    })).rejects.toThrow("without a Turn baseline");
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(response([
+      JSON.stringify({ type: "turn.snapshot", revision: 0, turn: turn() }),
+      '<SSE id="turn_2" type="success"></SSE>',
+    ])));
+    await expect(streamChat("hello", () => undefined, new AbortController().signal, {
+      sessionId: "session_1",
+      turnId: "turn_2",
+    })).rejects.toThrow("baseline id does not match");
   });
 });

@@ -32,6 +32,7 @@ from backend.storage.auth import LocalAuthStore
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.storage.sqlite_schema import SCHEMA, SQLiteSchemaMixin
 from backend.tools import ToolRegistry
+from tui.runtime_nodes import RuntimeNodeReducer
 
 
 def make_turn(
@@ -60,7 +61,7 @@ def test_turn_shape_is_strict_and_has_no_synthetic_root() -> None:
         RuntimeState.from_dict(payload)
 
 
-def test_writer_emits_full_turn_snapshots_and_persists_complete_items() -> None:
+def test_writer_emits_one_baseline_then_exact_incremental_operations() -> None:
     frames: list[NodeFrame] = []
     store = InMemoryNodeStore()
     writer = NodeWriter(store, emit=frames.append)
@@ -71,13 +72,91 @@ def test_writer_emits_full_turn_snapshots_and_persists_complete_items() -> None:
     turn = writer.append_item(
         turn, {"type": "tool_result", "call_id": "call_1", "content": "ok", "status": "succeeded", "replay_safe": True}
     )
+    turn = writer.append_item(turn, {"type": "text", "text": "answer "}, persist=False)
+    turn = writer.append_text(turn, data_idx=0, item_idx=2, delta="done", persist=True)
     turn = writer.finalize(turn, "success")
-    assert [frame.type for frame in frames] == ["turn.create", "turn.update", "turn.update", "turn.update"]
-    assert frames[-1].node.status == "success"
+    assert [frame.type for frame in frames] == ["turn.snapshot", *["turn.delta"] * 5]
+    assert [frame.revision for frame in frames] == list(range(6))
+    assert frames[4].operations == ({"op": "append_text", "data_idx": 0, "item_idx": 2, "delta": "done"},)
+    assert frames[-1].patch == {"status": "success"}
+    assert all("turn" not in frame.to_dict() and "data" not in frame.to_dict() for frame in frames[1:])
     assert [item["type"] for item in store.get_node("session_1", "turn_1").assistant_items] == [
         "tool_call",
         "tool_result",
+        "text",
     ]
+    assert store.get_node("session_1", "turn_1").assistant_items[-1]["text"] == "answer done"
+
+    child = writer.create(make_turn(turn_id="turn_2", parent=turn))
+    assert frames[-1].type == "turn.snapshot" and frames[-1].revision == 0
+    assert child.parent_id == turn.id
+
+
+def test_writer_rejects_a_delta_for_an_existing_turn_without_a_stream_baseline() -> None:
+    store = InMemoryNodeStore()
+    existing = make_turn()
+    store.create_node(existing)
+    writer = NodeWriter(store, emit=lambda _frame: None)
+    changed = existing.clone()
+    changed.status = "success"
+
+    with pytest.raises(RuntimeStateValidationError, match="baseline snapshot"):
+        writer.update(changed, persist=True)
+
+    assert store.get_node(existing.session_id, existing.id).status == "running"
+
+
+def test_long_text_delta_frames_grow_linearly_without_repeating_accumulated_text() -> None:
+    def stream_size(chunk_count: int) -> int:
+        frames: list[NodeFrame] = []
+        writer = NodeWriter(InMemoryNodeStore(), emit=frames.append)
+        turn = writer.create(make_turn())
+        chunk = "abcdefghij"
+        turn = writer.append_item(turn, {"type": "text", "text": chunk}, persist=False)
+        for _ in range(chunk_count - 1):
+            turn = writer.append_text(turn, data_idx=0, item_idx=0, delta=chunk)
+        writer.persist(turn)
+
+        text_operations = [
+            operation for frame in frames[1:] for operation in frame.operations if operation["op"] == "append_text"
+        ]
+        assert len(text_operations) == chunk_count - 1
+        assert all(operation["delta"] == chunk for operation in text_operations)
+        assert all("turn" not in frame.to_dict() and "data" not in frame.to_dict() for frame in frames[1:])
+        return sum(len(frame.to_json().encode("utf-8")) for frame in frames)
+
+    size_64 = stream_size(64)
+    size_128 = stream_size(128)
+    assert size_128 < size_64 * 2.1
+
+
+def test_legacy_tui_reducer_applies_the_incremental_turn_contract() -> None:
+    reducer = RuntimeNodeReducer()
+    baseline = make_turn().to_dict()
+    node = reducer.apply({"type": "turn.snapshot", "revision": 0, "turn": baseline})
+    assert node is not None
+    updated = reducer.apply(
+        {
+            "type": "turn.delta",
+            "session_id": "session_1",
+            "turn_id": "turn_1",
+            "revision": 1,
+            "operations": [
+                {"op": "append_item", "data_idx": 0, "item_idx": 0, "item": {"type": "text", "text": "a"}},
+                {"op": "append_text", "data_idx": 0, "item_idx": 0, "delta": "b"},
+            ],
+        }
+    )
+    assert updated is not None and updated.data[0][1]["content"] == [{"type": "text", "text": "ab"}]
+    with pytest.raises(ValueError, match="not consecutive"):
+        reducer.apply(
+            {
+                "type": "turn.delta",
+                "session_id": "session_1",
+                "turn_id": "turn_1",
+                "revision": 3,
+            }
+        )
 
 
 def test_streamed_items_keep_canonical_order_across_model_and_tool_rounds() -> None:
@@ -95,7 +174,8 @@ def test_streamed_items_keep_canonical_order_across_model_and_tool_rounds() -> N
     bridge.start()
     events = [
         RuntimeEvent("thinking_start"),
-        RuntimeEvent("thinking_delta", "思考一"),
+        RuntimeEvent("thinking_delta", "思考"),
+        RuntimeEvent("thinking_delta", "一"),
         RuntimeEvent("thinking_end"),
         RuntimeEvent(
             "assistant_message",
@@ -111,7 +191,8 @@ def test_streamed_items_keep_canonical_order_across_model_and_tool_rounds() -> N
         RuntimeEvent("tool_call", "read_file", {"call_id": "call_1", "arguments": {}}),
         RuntimeEvent("tool_result", "result one", {"call_id": "call_1", "tool": "read_file"}),
         RuntimeEvent("response_start"),
-        RuntimeEvent("response_delta", "回答一"),
+        RuntimeEvent("response_delta", "回答"),
+        RuntimeEvent("response_delta", "一"),
         RuntimeEvent("response_end"),
         RuntimeEvent(
             "assistant_message",
@@ -122,7 +203,8 @@ def test_streamed_items_keep_canonical_order_across_model_and_tool_rounds() -> N
             },
         ),
         RuntimeEvent("thinking_start"),
-        RuntimeEvent("thinking_delta", "思考二"),
+        RuntimeEvent("thinking_delta", "思考"),
+        RuntimeEvent("thinking_delta", "二"),
         RuntimeEvent("thinking_end"),
         RuntimeEvent(
             "assistant_message",
@@ -137,7 +219,8 @@ def test_streamed_items_keep_canonical_order_across_model_and_tool_rounds() -> N
         ),
         RuntimeEvent("tool_call", "glob", {"call_id": "call_2", "arguments": {}}),
         RuntimeEvent("response_start"),
-        RuntimeEvent("response_delta", "回答二"),
+        RuntimeEvent("response_delta", "回答"),
+        RuntimeEvent("response_delta", "二"),
         RuntimeEvent("response_end"),
         RuntimeEvent(
             "assistant_message",
@@ -168,6 +251,11 @@ def test_streamed_items_keep_canonical_order_across_model_and_tool_rounds() -> N
         "思考二",
         "回答二",
     ]
+    text_deltas = [
+        operation["delta"] for frame in frames for operation in frame.operations if operation["op"] == "append_text"
+    ]
+    assert text_deltas == ["一", "一", "二", "二"]
+    assert [frame.revision for frame in frames] == list(range(len(frames)))
 
 
 def test_tool_approval_persists_only_the_interactive_decision_item() -> None:
@@ -402,7 +490,9 @@ def test_sse_terminal_mapping_distinguishes_user_pause_from_network_pause() -> N
     assert _terminal_type_for_status("failed", "agent") == "failed"
 
 
-def test_real_sqlite_http_sse_round_trip_uses_one_complete_turn(tmp_path: Path, monkeypatch) -> None:
+def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_deltas(
+    tmp_path: Path, monkeypatch
+) -> None:
     state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
     state.model_config_for_user = lambda _user_id: None
 
@@ -436,12 +526,26 @@ def test_real_sqlite_http_sse_round_trip_uses_one_complete_turn(tmp_path: Path, 
         payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
         assert payloads[-1] == f'<SSE id="{turn_id}" type="success"></SSE>'
         frames = [json.loads(payload) for payload in payloads[:-1]]
-        assert frames[0]["type"] == "turn.create"
-        assert frames[-1]["type"] == "turn.update"
-        assert frames[-1]["turn"]["status"] == "success"
+        assert frames[0]["type"] == "turn.snapshot" and frames[0]["revision"] == 0
+        assert all(frame["type"] == "turn.delta" for frame in frames[1:])
+        assert [frame["revision"] for frame in frames] == list(range(len(frames)))
+        assert frames[-1]["patch"]["status"] == "success"
+        assert all("turn" not in frame and "data" not in frame for frame in frames[1:])
+
+        reconstructed = frames[0]["turn"]
+        for frame in frames[1:]:
+            reconstructed.update(frame.get("patch", {}))
+            for operation in frame.get("operations", []):
+                items = reconstructed["data"][operation["data_idx"]][1]["content"]
+                if operation["op"] == "append_item":
+                    assert operation["item_idx"] == len(items)
+                    items.append(operation["item"])
+                else:
+                    items[operation["item_idx"]]["text"] += operation["delta"]
 
         turns = client.get("/api/turns", params={"session_id": sidebar["session_id"]}).json()
         assert len(turns) == 1
+        assert reconstructed == turns[0]
         assert turns[0]["id"] == turn_id
         assert turns[0]["data"][0][0]["content"] == [{"type": "text", "text": "hello"}]
         assert turns[0]["data"][0][1]["content"][-1]["type"] == "text"

@@ -101,12 +101,32 @@ export interface RuntimeStateNode {
   data: TurnMessage[][];
 }
 
-export type NodeFrameType = "turn.create" | "turn.update";
+export type NodeFrameType = "turn.snapshot" | "turn.delta";
 
-export interface RuntimeNodeFrame {
-  type: NodeFrameType;
+export type RuntimeNodePatch = Partial<Omit<RuntimeStateNode,
+  "session_id" | "id" | "thread_id" | "parent_session_id" | "parent_id" | "parent_thread_id" | "data"
+>>;
+
+export type TurnDeltaOperation =
+  | { op: "append_item"; data_idx: number; item_idx: number; item: TurnItem }
+  | { op: "append_text"; data_idx: number; item_idx: number; delta: string };
+
+export interface RuntimeNodeSnapshotFrame {
+  type: "turn.snapshot";
+  revision: 0;
   turn: RuntimeStateNode;
 }
+
+export interface RuntimeNodeDeltaFrame {
+  type: "turn.delta";
+  session_id: string;
+  turn_id: string;
+  revision: number;
+  patch?: RuntimeNodePatch;
+  operations?: TurnDeltaOperation[];
+}
+
+export type RuntimeNodeFrame = RuntimeNodeSnapshotFrame | RuntimeNodeDeltaFrame;
 
 export interface SidebarThread {
   thread_id: string;
@@ -271,17 +291,4 @@ export interface SkillInfo {
   description: string;
 }
 
-export interface StreamMessage {
-  type: NodeFrameType;
-  kind?: string;
-  message?: string;
-  data?: Record<string, unknown>;
-  status?: string;
-  final_answer?: string;
-  metrics?: Metrics;
-  error?: string;
-  session_id?: string;
-  run_id?: string;
-  mode?: ChatMode;
-  turn: RuntimeStateNode;
-}
+export type StreamMessage = RuntimeNodeFrame;

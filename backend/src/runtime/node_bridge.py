@@ -159,6 +159,7 @@ class RuntimeEventNodeBridge:
                     source = resume(source.id)
                 elif source.status != "running":
                     raise ValueError("Only a paused or running Turn can resume in place.")
+                source = self.writer.snapshot(source)
                 self.assistant = source
                 self.last_node = source
                 self.thread_id = source.thread_id
@@ -241,10 +242,22 @@ class RuntimeEventNodeBridge:
             self._begin_stream_item(item_type)
         if self._stream_item_index is None:
             self._stream_item_index = len(self.assistant_blocks)
-            self.assistant_blocks.append({"type": item_type, "text": ""})
-        self._stream_text += chunk
-        self.assistant_blocks[self._stream_item_index] = {"type": item_type, "text": self._stream_text}
-        self._save_blocks(persist=False)
+            self._stream_text = chunk
+            item = {"type": item_type, "text": chunk}
+            self.assistant_blocks.append(item)
+            assert self.assistant is not None
+            self.assistant = self.writer.append_item(self.assistant, item, persist=False)
+        else:
+            self._stream_text += chunk
+            self.assistant_blocks[self._stream_item_index] = {"type": item_type, "text": self._stream_text}
+            assert self.assistant is not None
+            self.assistant = self.writer.append_text(
+                self.assistant,
+                data_idx=self.assistant.current_data_idx,
+                item_idx=self._stream_item_index,
+                delta=chunk,
+            )
+        self.last_node = self.assistant
 
     def _finish_stream_item(self, item_type: str | None = None) -> None:
         if self._stream_item_type is None:
@@ -252,36 +265,40 @@ class RuntimeEventNodeBridge:
         if item_type is not None and self._stream_item_type != item_type:
             return
         if self._stream_item_index is not None:
-            self._save_blocks(persist=True)
+            assert self.assistant is not None
+            self.assistant = self.writer.persist(self.assistant)
+            self.last_node = self.assistant
+            self.produced_item = True
         self._stream_item_index = None
         self._stream_item_type = None
         self._stream_text = ""
 
-    def _save_blocks(self, *, persist: bool) -> RuntimeState:
-        if self.assistant is None:
-            raise RuntimeError("No active Turn.")
-        current = self.writer.current(self.assistant.session_id, self.assistant.id)
-        current.data[current.current_data_idx][1]["content"] = [dict(item) for item in self.assistant_blocks]
-        updated = self.writer.update_data(current, current.data, persist=persist)
-        self.assistant = updated
-        self.last_node = updated
-        if persist and self.assistant_blocks:
-            self.produced_item = True
-        return updated
-
     def _append_item(self, item: Mapping[str, Any], *, persist: bool = True) -> RuntimeState:
         self._finish_stream_item()
-        self.assistant_blocks.append({str(key): self._json_value(value) for key, value in item.items()})
-        return self._save_blocks(persist=persist)
+        normalized = {str(key): self._json_value(value) for key, value in item.items()}
+        self.assistant_blocks.append(normalized)
+        if self.assistant is None:
+            raise RuntimeError("No active Turn.")
+        updated = self.writer.append_item(self.assistant, normalized, persist=persist)
+        self.assistant = updated
+        self.last_node = updated
+        if persist:
+            self.produced_item = True
+        return updated
 
     def _append_items(self, items: Sequence[Mapping[str, Any]]) -> RuntimeState | None:
         self._finish_stream_item()
         if not items:
             return self.assistant
-        self.assistant_blocks.extend(
-            {str(key): self._json_value(value) for key, value in item.items()} for item in items
-        )
-        return self._save_blocks(persist=True)
+        normalized = [{str(key): self._json_value(value) for key, value in item.items()} for item in items]
+        self.assistant_blocks.extend(normalized)
+        if self.assistant is None:
+            raise RuntimeError("No active Turn.")
+        updated = self.writer.append_items(self.assistant, normalized, persist=True)
+        self.assistant = updated
+        self.last_node = updated
+        self.produced_item = True
+        return updated
 
     def _apply_usage(self, raw: Any) -> None:
         if not isinstance(raw, Mapping) or self.assistant is None:
@@ -474,7 +491,7 @@ class RuntimeEventNodeBridge:
         creator = getattr(self.store, "create_compact_turn", None)
         if callable(creator):
             compacted = creator(source.id, summary)
-            self.writer.emit(NodeFrame("turn.create", compacted.clone()))
+            compacted = self.writer.snapshot(compacted)
         else:
             compacted = self.writer.create(
                 RuntimeStateTree(self.store.load_nodes(source.session_id)).compact(source, summary)

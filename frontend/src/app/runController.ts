@@ -1,15 +1,16 @@
-import { pauseTurn, streamChat, streamQueuedTurns, streamResume, streamRewind } from "../api";
-import type { ChatMessage, RuntimeNodeFrame, StreamMessage } from "../types";
+import { pauseTurn, SseProtocolError, streamChat, streamQueuedTurns, streamResume, streamRewind } from "../api";
+import type { ChatMessage, RuntimeStateNode, StreamMessage } from "../types";
 import type { ActiveRun, ChatRunRequest } from "./types";
-import { integrateRuntimeNodeFrame, projectRuntimeNode } from "./runtimeDetailProjection";
+import { integrateRuntimeNodeUpdates, projectRuntimeNode } from "./runtimeDetailProjection";
+import { applyRuntimeNodeFrame, runtimeNodeAccumulator } from "./runtimeNodeReducer";
 
 export interface RunControllerCallbacks {
   activeRuns: Map<string, ActiveRun>;
   updateLastMessage: (conversationId: string, updater: (message: ChatMessage) => ChatMessage) => void;
   rebindRunSession: (conversationId: string, sessionId: string) => Promise<void>;
   refreshSessions: () => Promise<void>;
-  applyRuntimeNodeFrame?: (frame: RuntimeNodeFrame) => void;
   updateConversation?: (conversationId: string, updater: (conversation: import("../types").Conversation) => import("../types").Conversation) => void;
+  recoverConversation: (conversationId: string, sessionId: string, turnId?: string) => Promise<void>;
 }
 
 export function createRunController(callbacks: RunControllerCallbacks) {
@@ -18,18 +19,75 @@ export function createRunController(callbacks: RunControllerCallbacks) {
     const controller = new AbortController();
     const active: ActiveRun = { controller, sessionId: request.sessionId, turnId: request.turnId };
     callbacks.activeRuns.set(request.conversationId, active);
-    let finalTurn: StreamMessage["turn"] | undefined;
+    const accumulator = runtimeNodeAccumulator();
+    const pendingTurns = new Map<string, RuntimeStateNode>();
+    let finalTurn: RuntimeStateNode | undefined;
+    let pendingActiveTurnId: string | undefined;
+    let forcePathProjection = false;
+    let scheduledFrame: number | undefined;
+    let scheduledWithAnimationFrame = false;
+
+    const cancelScheduledFrame = () => {
+      if (scheduledFrame === undefined) return;
+      if (scheduledWithAnimationFrame && typeof globalThis.cancelAnimationFrame === "function") {
+        globalThis.cancelAnimationFrame(scheduledFrame);
+      } else {
+        globalThis.clearTimeout(scheduledFrame);
+      }
+      scheduledFrame = undefined;
+      scheduledWithAnimationFrame = false;
+    };
+
+    const flushPendingFrames = () => {
+      cancelScheduledFrame();
+      if (!pendingActiveTurnId || pendingTurns.size === 0) return;
+      const turns = [...pendingTurns.values()];
+      const activeTurnId = pendingActiveTurnId;
+      const reproject = forcePathProjection;
+      pendingTurns.clear();
+      pendingActiveTurnId = undefined;
+      forcePathProjection = false;
+      callbacks.updateConversation?.(
+        request.conversationId,
+        (conversation) => integrateRuntimeNodeUpdates(conversation, turns, activeTurnId, reproject),
+      );
+    };
+
+    const scheduleFrameFlush = () => {
+      if (scheduledFrame !== undefined) return;
+      if (typeof globalThis.requestAnimationFrame === "function") {
+        scheduledWithAnimationFrame = true;
+        scheduledFrame = globalThis.requestAnimationFrame(() => {
+          scheduledFrame = undefined;
+          scheduledWithAnimationFrame = false;
+          flushPendingFrames();
+        });
+      } else {
+        scheduledFrame = globalThis.setTimeout(() => {
+          scheduledFrame = undefined;
+          flushPendingFrames();
+        }, 0);
+      }
+    };
 
     const onMessage = (message: StreamMessage) => {
       if (callbacks.activeRuns.get(request.conversationId)?.controller !== controller) return;
-      const frame: RuntimeNodeFrame = { type: message.type, turn: message.turn };
-      active.turnId = message.turn.id;
-      finalTurn = message.turn;
-      callbacks.applyRuntimeNodeFrame?.(frame);
-      callbacks.updateConversation?.(request.conversationId, (conversation) => integrateRuntimeNodeFrame(conversation, frame));
+      let turn: RuntimeStateNode;
+      try {
+        turn = applyRuntimeNodeFrame(accumulator, message);
+      } catch (error) {
+        throw new SseProtocolError(String((error as Error).message ?? error));
+      }
+      const key = `${turn.session_id}:${turn.id}`;
+      finalTurn = turn;
+      active.turnId = turn.id;
+      pendingTurns.set(key, turn);
+      pendingActiveTurnId = turn.id;
+      forcePathProjection ||= message.type === "turn.snapshot" || message.patch?.current_data_idx !== undefined;
+      scheduleFrameFlush();
       if (active.stopRequested && !active.cancelIssued) {
         active.cancelIssued = true;
-        void pauseTurn(message.turn.id).catch(() => undefined);
+        void pauseTurn(turn.id).catch(() => undefined);
       }
     };
 
@@ -66,6 +124,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
           : request.queuedTurns
             ? await streamQueuedTurns(request.queuedTurns, onMessage, controller.signal, options)
             : await streamChat(request.prompt ?? "", onMessage, controller.signal, options);
+      flushPendingFrames();
       if (result === "aborted") return;
       if (finalTurn) {
         const projection = projectRuntimeNode(finalTurn);
@@ -80,15 +139,24 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       }
       await callbacks.refreshSessions().catch(() => undefined);
     } catch (error) {
-      if (!controller.signal.aborted) {
+      flushPendingFrames();
+      const protocolError = error instanceof SseProtocolError;
+      if (protocolError) {
+        controller.abort();
+        const recoveryTurnId = active.turnId ?? request.turnId ?? request.sourceNodeId;
+        if (recoveryTurnId) await pauseTurn(recoveryTurnId).catch(() => undefined);
+        await callbacks.recoverConversation(request.conversationId, request.sessionId, recoveryTurnId).catch(() => undefined);
+      }
+      if (protocolError || !controller.signal.aborted) {
         callbacks.updateLastMessage(request.conversationId, (item) => ({
           ...item,
           error: String((error as Error).message ?? error),
-          running: finalTurn?.status === "running",
+          running: protocolError ? false : finalTurn?.status === "running",
           decision: undefined,
         }));
       }
     } finally {
+      cancelScheduledFrame();
       if (callbacks.activeRuns.get(request.conversationId)?.controller === controller) {
         callbacks.activeRuns.delete(request.conversationId);
       }

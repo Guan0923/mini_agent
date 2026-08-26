@@ -1,5 +1,4 @@
-import type { ChatMessage, Conversation, DecisionRequest, FileReference, RuntimeNodeFrame, RuntimeStateNode, ToolEvent, TurnItem } from "../types";
-import { applyRuntimeNodeFrame } from "./runtimeNodeReducer";
+import type { ChatMessage, Conversation, DecisionRequest, FileReference, RuntimeStateNode, ToolEvent, TurnItem } from "../types";
 import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
 const keyOf = (turn: RuntimeStateNode) => `${turn.session_id}:${turn.id}`;
@@ -221,19 +220,49 @@ export function messagesBeforeRewind(messages: ChatMessage[], turnId: string): C
   return rewindIndex >= 0 ? messages.slice(0, rewindIndex) : messages;
 }
 
-export function integrateRuntimeNodeFrame(conversation: Conversation, frame: RuntimeNodeFrame): Conversation {
+export function integrateRuntimeNodeUpdates(
+  conversation: Conversation,
+  turns: RuntimeStateNode[],
+  activeTurnId: string,
+  forcePathProjection: boolean,
+): Conversation {
   const current = new Map((conversation.runtimeNodes ?? []).map((node) => {
     const normalized = normalizeRuntimeNode(node);
     return [keyOf(normalized), normalized] as const;
   }));
-  const next = applyRuntimeNodeFrame(current, frame);
-  const activeTurnId = frame.turn.id;
+  for (const turn of turns) current.set(keyOf(turn), turn);
+  const activeTurn = [...current.values()].find((turn) => turn.id === activeTurnId);
+  if (!activeTurn) throw new Error("Active Turn is missing after applying an SSE frame");
+
+  let messages: ChatMessage[];
+  const assistantIndex = conversation.messages.findIndex(
+    (message) => message.role === "assistant" && message.sourceNodeId === activeTurnId,
+  );
+  if (forcePathProjection || assistantIndex < 0) {
+    messages = projectTurnPath(current, activeTurnId);
+  } else {
+    const projection = projectRuntimeNode(activeTurn);
+    messages = [...conversation.messages];
+    messages[assistantIndex] = {
+      ...messages[assistantIndex],
+      content: projection.content,
+      events: projection.events,
+      items: projection.items,
+      itemVersion: activeTurn.current_data_idx,
+      compactionNotice: projection.compactionNotice,
+      status: activeTurn.status,
+      error: projection.error,
+      running: activeTurn.status === "running",
+      decision: projection.decision,
+      runtimeNodeIds: [keyOf(activeTurn)],
+    };
+  }
   return {
     ...conversation,
-    runtimeNodes: [...next.values()],
-    messages: projectTurnPath(next, activeTurnId),
+    runtimeNodes: [...current.values()],
+    messages,
     activeTurnId,
     lastNodeId: activeTurnId,
-    threadId: frame.turn.thread_id,
+    threadId: activeTurn.thread_id,
   };
 }

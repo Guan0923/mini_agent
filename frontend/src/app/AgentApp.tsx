@@ -302,12 +302,24 @@ function AgentApp() {
     }
   }
 
+  async function recoverConversation(conversationId: string, sessionId: string, turnId?: string): Promise<void> {
+    let nodes: RuntimeStateNode[] = [];
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      nodes = await getSessionNodes(sessionId);
+      const target = turnId ? nodes.find((node) => node.id === turnId) : undefined;
+      if (!target || target.status !== "running") break;
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 50));
+    }
+    updateConversation(conversationId, (conversation) => withLoadedTurns(conversation, nodes));
+  }
+
   const { runConversation, stopConversation } = createRunController({
     activeRuns: activeRunsRef.current,
     updateLastMessage,
     rebindRunSession,
     refreshSessions: () => refreshSessions(),
     updateConversation,
+    recoverConversation,
   });
 
   async function ensureSession(id: string): Promise<string> {

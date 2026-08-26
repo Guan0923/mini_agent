@@ -24,6 +24,13 @@ export interface QueuedTurnMessage {
 
 const terminalPattern = /^<SSE id="([^"]+)" type="(success|network|failed)">([\s\S]*)<\/SSE>$/;
 
+export class SseProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SseProtocolError";
+  }
+}
+
 function executionConfig(options: StreamOptions): Record<string, unknown> {
   return {
     permission_mode: options.permissionMode ?? "read_only",
@@ -62,11 +69,15 @@ async function streamEndpoint(
   const decoder = new TextDecoder();
   let buffer = "";
   let terminal: RegExpMatchArray | null = null;
+  let receivedFrame = false;
   try {
     for (;;) {
       const next = await reader.read();
-      if (next.done) break;
-      buffer += decoder.decode(next.value, { stream: true }).replace(/\r\n/g, "\n");
+      if (next.done) {
+        buffer += decoder.decode().replace(/\r\n/g, "\n");
+      } else {
+        buffer += decoder.decode(next.value, { stream: true }).replace(/\r\n/g, "\n");
+      }
       let boundary: number;
       while ((boundary = buffer.indexOf("\n\n")) >= 0) {
         const block = buffer.slice(0, boundary);
@@ -76,16 +87,31 @@ async function streamEndpoint(
           const payload = line.slice(6);
           const matched = payload.match(terminalPattern);
           if (matched) {
+            if (terminal) throw new SseProtocolError("SSE stream contains more than one terminal envelope");
             terminal = matched;
             continue;
           }
-          const frame = JSON.parse(payload) as StreamMessage;
-          if (frame.type !== "turn.create" && frame.type !== "turn.update") {
-            throw new Error(`Unsupported SSE frame: ${String((frame as { type?: unknown }).type)}`);
+          if (terminal) throw new SseProtocolError("SSE frame arrived after the terminal envelope");
+          let frame: StreamMessage;
+          try {
+            frame = JSON.parse(payload) as StreamMessage;
+          } catch (error) {
+            throw new SseProtocolError(`Invalid SSE JSON: ${String((error as Error).message ?? error)}`);
           }
+          if (frame.type !== "turn.snapshot" && frame.type !== "turn.delta") {
+            throw new SseProtocolError(`Unsupported SSE frame: ${String((frame as { type?: unknown }).type)}`);
+          }
+          if (!receivedFrame) {
+            if (frame.type !== "turn.snapshot") throw new SseProtocolError("SSE stream must begin with a Turn snapshot");
+            if (frame.turn.id !== expectedTurnId) {
+              throw new SseProtocolError("SSE baseline id does not match the requested Turn");
+            }
+          }
+          receivedFrame = true;
           onMessage(frame);
         }
       }
+      if (next.done) break;
     }
   } catch (error) {
     if ((error as Error).name === "AbortError" || signal.aborted) return "aborted";
@@ -94,9 +120,10 @@ async function streamEndpoint(
     reader.releaseLock();
   }
   if (signal.aborted) return "aborted";
-  if (!terminal) throw new Error("SSE stream unexpectedly ended before completion");
+  if (!terminal) throw new SseProtocolError("SSE stream unexpectedly ended before completion");
+  if (!receivedFrame) throw new SseProtocolError("SSE stream completed without a Turn baseline");
   if (terminal[1] !== expectedTurnId) {
-    throw new Error("SSE terminal id does not match the active Turn");
+    throw new SseProtocolError("SSE terminal id does not match the active Turn");
   }
   if (terminal[2] === "network") throw new Error("network");
   if (terminal[2] === "failed") throw new Error(terminal[3] || "Turn failed");
@@ -183,7 +210,7 @@ export async function streamQueuedTurns(
   for (const message of messages) {
     const turnId = crypto.randomUUID();
     const result = await streamChat(message.content, (frame) => {
-      parent = frame.turn.id;
+      parent = frame.type === "turn.snapshot" ? frame.turn.id : frame.turn_id;
       onMessage(frame);
     }, signal, { ...options, turnId, sourceNodeId: parent, references: message.references });
     if (result === "aborted") return result;

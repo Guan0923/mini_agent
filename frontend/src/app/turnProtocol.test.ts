@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { Conversation, RuntimeStateNode } from "../types";
-import { integrateRuntimeNodeFrame, messagesBeforeRewind, projectTurnPath } from "./runtimeDetailProjection";
+import type { Conversation, RuntimeNodeFrame, RuntimeStateNode } from "../types";
+import { integrateRuntimeNodeUpdates, messagesBeforeRewind, projectTurnPath } from "./runtimeDetailProjection";
+import { applyRuntimeNodeFrame, runtimeNodeAccumulator } from "./runtimeNodeReducer";
 
 function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
   return {
@@ -32,15 +33,77 @@ function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
 }
 
 describe("Turn protocol projection", () => {
-  it("replaces full snapshots by Turn id", () => {
+  it("applies exact text deltas without rebuilding the existing user message", () => {
     const conversation: Conversation = { id: "session_1", title: "x", messages: [], runtimeNodes: [] };
-    const created = integrateRuntimeNodeFrame(conversation, { type: "turn.create", turn: turn({ status: "running" }) });
-    const updated = integrateRuntimeNodeFrame(created, {
-      type: "turn.update",
-      turn: turn({ data: [[{ role: "user", content: [{ type: "text", text: "hello" }] }, { role: "assistant", content: [{ type: "text", text: "done" }] }]] }),
+    const accumulator = runtimeNodeAccumulator();
+    const baseline = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.snapshot",
+      revision: 0,
+      turn: turn({
+        status: "running",
+        data: [[{ role: "user", content: [{ type: "text", text: "hello" }] }, { role: "assistant", content: [{ type: "text", text: "" }] }]],
+      }),
     });
+    const created = integrateRuntimeNodeUpdates(conversation, [baseline], baseline.id, true);
+    const originalUser = created.messages[0];
+    const updatedTurn = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 1,
+      patch: { status: "success" },
+      operations: [{ op: "append_text", data_idx: 0, item_idx: 0, delta: "done" }],
+    });
+    const updated = integrateRuntimeNodeUpdates(created, [updatedTurn], updatedTurn.id, false);
     expect(updated.runtimeNodes).toHaveLength(1);
     expect(updated.messages.map((message) => message.content)).toEqual(["hello", "done"]);
+    expect(updated.messages[0]).toBe(originalUser);
+  });
+
+  it("rejects missing baselines, revision gaps, and forbidden patches", () => {
+    const delta: RuntimeNodeFrame = {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 1,
+      operations: [{ op: "append_item", data_idx: 0, item_idx: 0, item: { type: "text", text: "x" } }],
+    };
+    expect(() => applyRuntimeNodeFrame(runtimeNodeAccumulator(), delta)).toThrow("before its baseline");
+
+    const accumulator = runtimeNodeAccumulator();
+    applyRuntimeNodeFrame(accumulator, { type: "turn.snapshot", revision: 0, turn: turn({ status: "running" }) });
+    expect(() => applyRuntimeNodeFrame(accumulator, { ...delta, revision: 2 })).toThrow("not consecutive");
+    expect(() => applyRuntimeNodeFrame(accumulator, {
+      ...delta,
+      patch: { data: [] },
+    } as unknown as RuntimeNodeFrame)).toThrow("cannot patch data");
+  });
+
+  it("rejects invalid patch values, malformed Items, and empty deltas", () => {
+    const accumulator = runtimeNodeAccumulator();
+    applyRuntimeNodeFrame(accumulator, { type: "turn.snapshot", revision: 0, turn: turn({ status: "running" }) });
+    expect(() => applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 1,
+      patch: { status: "invalid" },
+    } as unknown as RuntimeNodeFrame)).toThrow("patch value is invalid");
+
+    expect(() => applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 1,
+      operations: [{ op: "append_item", data_idx: 0, item_idx: 1, item: {} }],
+    } as RuntimeNodeFrame)).toThrow("item delta is invalid");
+
+    expect(() => applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 1,
+    })).toThrow("must contain a patch or operation");
   });
 
   it("projects assistant Items without grouping or reordering repeated types", () => {

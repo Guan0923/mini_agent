@@ -181,7 +181,7 @@ export default function ChatPage({
   // A queue flush has no optimistic assistant message by design. Keep the
   // composer in its running interaction mode from the moment the flush
   // request is sent until its SSE cleanup, including the tiny interval
-  // between the optimistic user bubble and the first turn.create frame.
+  // between the optimistic user bubble and the first turn.snapshot frame.
   const busy = Boolean(runningProp) || queueSubmitting;
   const todo = useMemo(() => latestTodoList(messages), [messages]);
   const filteredCommands = commandSuggestions(input);

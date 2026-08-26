@@ -1,4 +1,4 @@
-"""HTTP/SSE helpers for the canonical node lifecycle protocol."""
+"""HTTP/SSE helpers for baseline Turn snapshots and incremental deltas."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from backend.domain.runtime_state import NodeFrame, RuntimeState, RuntimeStateVa
 
 
 def encode_node_frame(frame: NodeFrame) -> dict[str, Any]:
-    """Return a JSON-safe lifecycle object with no legacy event envelope."""
+    """Return a JSON-safe snapshot or delta with no RuntimeEvent envelope."""
 
     return frame.to_dict()
 
@@ -20,13 +20,7 @@ def encode_node_sse(frame: NodeFrame) -> str:
 
 
 def node_frames(frames: Iterable[NodeFrame]) -> Iterator[str]:
-    """Yield every lifecycle frame until the producer closes the stream.
-
-    A run may seal several nodes (for example a user node, tool result, and
-    assistant node).  A delete frame is a node-level terminal transition, not
-    an SSE-level terminal marker; stopping at the first delete would silently
-    drop the rest of the tree.
-    """
+    """Yield every baseline/delta frame until the producer closes the stream."""
 
     for frame in frames:
         yield encode_node_sse(frame)

@@ -503,7 +503,7 @@ def _stream(
                     terminal_type = html.escape(str(item.get("terminal_type") or "failed"), quote=True)
                     message = html.escape(str(item.get("message") or ""), quote=False)
                     yield f'data: <SSE id="{terminal_id}" type="{terminal_type}">{message}</SSE>\n\n'
-                elif item.get("type") in {"turn.create", "turn.update"}:
+                elif item.get("type") in {"turn.snapshot", "turn.delta"}:
                     yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
         finally:
             # A closed browser/TUI response is the cancellation signal for the
