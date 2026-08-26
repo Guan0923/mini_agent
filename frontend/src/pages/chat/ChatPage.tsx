@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { Button, FloatButton, Grid, Input, Modal } from "antd";
+import { Button, FloatButton, Grid, Input, Modal, message } from "antd";
 import { LeftOutlined, RightOutlined, VerticalAlignBottomOutlined } from "@ant-design/icons";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
@@ -10,6 +10,7 @@ import {
   patchRuntimeConfig,
   searchSessionFiles,
   sessionFileContentUrl,
+  steerTurn,
   submitDecision,
   uploadSessionFiles,
 } from "../../api";
@@ -107,6 +108,19 @@ interface ChatRunRequest {
   onBaseline?: (turn: RuntimeStateNode) => void;
 }
 
+export function composerAction(
+  status: RuntimeStateNode["status"] | undefined,
+  hasDraft: boolean,
+  uploading = false,
+): { mode: ComposerActionMode; disabled: boolean } {
+  const mode: ComposerActionMode = status === "running" && !hasDraft
+    ? "pause"
+    : status === "paused" && !hasDraft
+      ? "resume"
+      : "send";
+  return { mode, disabled: uploading || (mode === "send" && !hasDraft) };
+}
+
 function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
   return ref?.resizableTextArea?.textArea ?? null;
 }
@@ -171,6 +185,7 @@ export default function ChatPage({
   // the submitted user frames are acknowledged.
   const queueInFlightIdsRef = useRef<Set<string> | null>(null);
   const queueAutoBlockedRef = useRef(false);
+  const acknowledgedSteeringIdsRef = useRef(new Set<string>());
 
   const messages = conversation?.messages ?? [];
   // A queue flush has no optimistic assistant message by design. Keep the
@@ -206,17 +221,13 @@ export default function ChatPage({
     const sorted = [...sessionLeaves].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
     return sorted[sorted.length - 1];
   })();
-  const recoveryMode = !interactionBusy && activeRuntimeNode?.status === "paused";
   const hasDraft = Boolean(input.trim() || references.length > 0 || pendingUploads.some((upload) => upload.status === "done"));
-  const actionMode: ComposerActionMode = ((activeRuntimeNode?.status === "running" && !hasDraft) || (!activeRuntimeNode && busy && !hasDraft))
-    ? "pause"
-    : activeRuntimeNode?.status === "running" || (!activeRuntimeNode && busy)
-      ? "send"
-      : activeRuntimeNode?.status === "paused" && !input.trim() && references.length === 0 && pendingUploads.every((upload) => upload.status !== "done")
-        ? "resume"
-        : activeRuntimeNode?.status === "paused"
-          ? "send"
-          : "send";
+  const composerActionState = composerAction(
+    activeRuntimeNode?.status,
+    hasDraft,
+    pendingUploads.some((upload) => upload.status === "uploading"),
+  );
+  const actionMode = composerActionState.mode;
   const projectUnavailable = conversation?.projectId !== undefined && conversation.projectAvailable === false;
   const canPatchRuntimeConfig = activeRuntimeNode?.status === "running";
 
@@ -231,13 +242,37 @@ export default function ChatPage({
       && !queueAutoBlockedRef.current
       && queuedMessages.length > 0
       && conversation?.id
-      && (status === "success" || status === "paused" || status === "failed")
+      && (status === "success" || status === "failed")
     ) {
       queueFlushRef.current = true;
       setQueueSubmitting(true);
       void flushQueuedMessages();
     }
   }, [activeRuntimeNode?.id, activeRuntimeNode?.status, busy, queuedMessages.length, conversation?.id]);
+
+  useEffect(() => {
+    if (!conversation?.id || !activeRuntimeNode) return;
+    const ids = activeRuntimeNode.data[activeRuntimeNode.current_data_idx]
+      ?.filter((item) => item.role === "user" && typeof item.steering_id === "string")
+      .map((item) => String(item.steering_id)) ?? [];
+    const fresh = ids.filter((id) => !acknowledgedSteeringIdsRef.current.has(id));
+    if (fresh.length === 0) return;
+    fresh.forEach((id) => acknowledgedSteeringIdsRef.current.add(id));
+    const accepted = new Set(fresh);
+    onQueuedMessagesChange(conversation.id, (items) =>
+      items.filter((item) => !item.sendingSteeringId || !accepted.has(item.sendingSteeringId)));
+  }, [activeRuntimeNode?.data, activeRuntimeNode?.current_data_idx, conversation?.id, onQueuedMessagesChange]);
+
+  useEffect(() => {
+    if (!conversation?.id || queuedMessages.every((item) => !item.sendingSteeringId)) return;
+    const activeId = activeRuntimeNode?.status === "running" ? activeRuntimeNode.id : undefined;
+    if (queuedMessages.every((item) => !item.sendingSteeringId || item.sendingTurnId === activeId)) return;
+    onQueuedMessagesChange(conversation.id, (items) => items.map((item) => {
+      if (!item.sendingSteeringId || item.sendingTurnId === activeId) return item;
+      const { sendingSteeringId: _steering, sendingTurnId: _turn, ...pending } = item;
+      return pending;
+    }));
+  }, [activeRuntimeNode?.id, activeRuntimeNode?.status, conversation?.id, onQueuedMessagesChange, queuedMessages]);
 
   useEffect(() => {
     const node = activeRuntimeNode;
@@ -596,16 +631,11 @@ export default function ChatPage({
   }
 
   function editQueuedMessage(item: QueuedMessage) {
+    if (item.sendingSteeringId) return;
     const currentPrompt = input.trim();
     const currentReferences = queueReferences();
     if (currentPrompt || currentReferences.length > 0) {
-      updateQueue((items) => items.map((candidate) => candidate.id === item.id
-        ? { ...candidate, content: currentPrompt, references: currentReferences }
-        : candidate));
-      editorRef.current?.clear();
-      setInput("");
-      setReferences([]);
-      setPendingUploads([]);
+      void message.warning("输入框有内容，无法修改队列消息");
       return;
     }
     updateQueue((items) => items.filter((candidate) => candidate.id !== item.id));
@@ -615,13 +645,34 @@ export default function ChatPage({
     window.setTimeout(() => editorRef.current?.focus(), 0);
   }
 
-  function sendQueuedMessage() {
-    if (!conversation?.sessionId || interactionBusy || queueFlushRef.current || queuedMessages.length === 0) return;
-    queueAutoBlockedRef.current = false;
-    queueFlushRef.current = true;
-    queueInFlightIdsRef.current = new Set(queuedMessages.map((item) => item.id));
-    setQueueSubmitting(true);
-    void flushQueuedMessages();
+  function sendQueuedMessage(item: QueuedMessage) {
+    if (item.sendingSteeringId) return;
+    void submitSteering([item]);
+  }
+
+  async function submitSteering(items: QueuedMessage[]) {
+    if (!conversation?.id || !activeRuntimeNode || activeRuntimeNode.status !== "running" || items.length === 0) return;
+    const merged = mergeQueuedMessages(items);
+    const steeringId = items.length === 1 ? items[0].id : crypto.randomUUID();
+    try {
+      await steerTurn(activeRuntimeNode.id, steeringId, merged.content, merged.references);
+      const submitted = new Set(items.map((item) => item.id));
+      updateQueue((current) => current.map((item) => submitted.has(item.id)
+        ? { ...item, sendingSteeringId: steeringId, sendingTurnId: activeRuntimeNode.id }
+        : item));
+    } catch (error) {
+      setLast({ error: String((error as Error).message ?? error) });
+    }
+  }
+
+  function pauseOrSteer() {
+    const pending = queuedMessages.filter((item) => !item.sendingSteeringId);
+    if (pending.length > 0) {
+      void submitSteering(pending);
+      return;
+    }
+    if (queuedMessages.length > 0) return;
+    stop();
   }
 
   async function flushQueuedMessages() {
@@ -711,6 +762,7 @@ export default function ChatPage({
       target ? target.sourceNodeId ?? null : defaultSourceNodeId() ?? null,
       references,
       target?.rewindTurnId,
+      Boolean(activeRuntimeNode && activeRuntimeNode.status !== "running"),
     );
   }
 
@@ -760,7 +812,7 @@ export default function ChatPage({
     // to the in-memory FIFO queue below.  Only an in-progress upload prevents
     // submission because its final reference is not available yet.
     if (pendingUploads.some((upload) => upload.status === "uploading")) return;
-    if (recoveryMode && conversation?.sessionId && activeRuntimeNode) {
+    if (actionMode === "resume" && conversation?.sessionId && activeRuntimeNode) {
       await dispatchRun(
         conversation.id,
         conversation.sessionId,
@@ -768,6 +820,8 @@ export default function ChatPage({
         true,
         activeRuntimeNode.id,
         undefined,
+        undefined,
+        true,
       );
       return;
     }
@@ -782,7 +836,7 @@ export default function ChatPage({
       await executeCommand(command.name, command.argument);
       return;
     }
-    if (busy) {
+    if (activeRuntimeNode?.status === "running") {
       queueCurrentPrompt(prompt, mergedReferences);
       return;
     }
@@ -1017,7 +1071,7 @@ export default function ChatPage({
                   display={display}
                   onDecision={chooseDecision}
                   busy={interactionBusy}
-                  onFork={onFork ? () => forkMessage(message.id) : undefined}
+                  onFork={onFork && (message.status === "success" || message.status === "failed") ? () => forkMessage(message.id) : undefined}
                 />
               ))}
               {compactionPending ? (
@@ -1081,13 +1135,12 @@ export default function ChatPage({
         onSettingsSelectChange={setOpenSettingsSelect}
         onOpenSettings={() => setSettingsOpen(true)}
         onCloseSettings={() => setSettingsOpen(false)}
-        onStop={stop}
+        onStop={pauseOrSteer}
         onSend={() => void send()}
         actionMode={actionMode}
-        submitDisabled={projectUnavailable || compactionPending || (actionMode === "send" && busy && !hasDraft)}
+        submitDisabled={projectUnavailable || compactionPending || composerActionState.disabled}
         disabled={projectUnavailable || compactionPending}
         disabledReason={conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
-        startMode={recoveryMode}
         fileCandidates={fileCandidates}
         fileMenuVisible={fileMenuVisible}
         activeFileIndex={activeFileIndex}
@@ -1101,7 +1154,9 @@ export default function ChatPage({
         queuedMessages={queuedMessages}
         onQueueSend={sendQueuedMessage}
         onQueueEdit={editQueuedMessage}
-        onQueueDelete={(item) => updateQueue((items) => items.filter((candidate) => candidate.id !== item.id))}
+        onQueueDelete={(item) => {
+          if (!item.sendingSteeringId) updateQueue((items) => items.filter((candidate) => candidate.id !== item.id));
+        }}
         onRemoveUpload={removePendingUpload}
         onRetryUpload={retryUpload}
         onUploadPreview={(index) => {

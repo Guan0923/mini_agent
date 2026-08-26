@@ -93,7 +93,9 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       if (message.type === "turn.snapshot") request.onBaseline?.(turn);
       pendingTurns.set(key, turn);
       pendingActiveTurnId = turn.id;
-      forcePathProjection ||= message.type === "turn.snapshot" || message.patch?.current_data_idx !== undefined;
+      forcePathProjection ||= message.type === "turn.snapshot"
+        || message.patch?.current_data_idx !== undefined
+        || message.operations?.some((operation) => operation.op === "append_message") === true;
       scheduleFrameFlush();
       if (active.stopRequested && !active.cancelIssued) {
         active.cancelIssued = true;

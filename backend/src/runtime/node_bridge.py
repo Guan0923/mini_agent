@@ -90,6 +90,7 @@ class RuntimeEventNodeBridge:
         self.assistant: RuntimeState | None = None
         self.last_node: RuntimeState | None = None
         self.assistant_blocks: list[dict[str, Any]] = []
+        self.assistant_message_idx: int | None = None
         self._stream_item_index: int | None = None
         self._stream_item_type: str | None = None
         self._stream_text = ""
@@ -166,7 +167,9 @@ class RuntimeEventNodeBridge:
                 self.last_node = source
                 self.thread_id = source.thread_id
                 self.turn_id = source.id
-                self.assistant_blocks = source.assistant_items
+                selected = source.data[source.current_data_idx]
+                self.assistant_message_idx = len(selected) - 1 if selected[-1]["role"] == "assistant" else None
+                self.assistant_blocks = source.assistant_items if self.assistant_message_idx is not None else []
                 if self.assistant_blocks and self.assistant_blocks[0].get("type") == "compaction":
                     self.protected_item_count = 1 + int(self.assistant_blocks[0].get("kept_item_count") or 0)
                 self.started = True
@@ -196,8 +199,48 @@ class RuntimeEventNodeBridge:
         self.assistant = node
         self.last_node = node
         self.turn_id = node.id
+        self.assistant_message_idx = 1
         self.started = True
         return node
+
+    def _ensure_assistant_message(self) -> None:
+        if self.assistant is None:
+            self.start()
+        assert self.assistant is not None
+        current = self.writer.current(self.assistant.session_id, self.assistant.id)
+        messages = current.data[current.current_data_idx]
+        if messages[-1]["role"] == "user":
+            current = self.writer.append_message(
+                current,
+                {"role": "assistant", "content": []},
+                persist=True,
+            )
+            messages = current.data[current.current_data_idx]
+            self.assistant_blocks = []
+        self.assistant = current
+        self.last_node = current
+        self.assistant_message_idx = len(messages) - 1
+
+    def _append_steering_message(self, data: Mapping[str, Any]) -> None:
+        content = str(data.get("content") or "").strip()
+        references = data.get("references")
+        if not content and not references:
+            return
+        self._finish_stream_item()
+        if self.assistant is None:
+            self.start()
+        assert self.assistant is not None
+        item: dict[str, Any] = {"type": "text", "text": content}
+        if isinstance(references, list) and references:
+            item["references"] = self._json_value(references)
+        message: dict[str, Any] = {"role": "user", "content": [item]}
+        steering_id = str(data.get("steering_id") or "")
+        if steering_id:
+            message["steering_id"] = steering_id
+        self.assistant = self.writer.append_message(self.assistant, message, persist=True)
+        self.last_node = self.assistant
+        self.assistant_blocks = []
+        self.assistant_message_idx = None
 
     def start_for_compaction(self) -> RuntimeState | None:
         if not self.started:
@@ -247,13 +290,19 @@ class RuntimeEventNodeBridge:
             return
         if self._stream_item_type != item_type:
             self._begin_stream_item(item_type)
+        self._ensure_assistant_message()
         if self._stream_item_index is None:
             self._stream_item_index = len(self.assistant_blocks)
             self._stream_text = chunk
             item = {"type": item_type, "text": chunk}
             self.assistant_blocks.append(item)
             assert self.assistant is not None
-            self.assistant = self.writer.append_item(self.assistant, item, persist=False)
+            self.assistant = self.writer.append_items(
+                self.assistant,
+                [item],
+                message_idx=self.assistant_message_idx,
+                persist=False,
+            )
         else:
             self._stream_text += chunk
             self.assistant_blocks[self._stream_item_index] = {"type": item_type, "text": self._stream_text}
@@ -261,6 +310,7 @@ class RuntimeEventNodeBridge:
             self.assistant = self.writer.append_text(
                 self.assistant,
                 data_idx=self.assistant.current_data_idx,
+                message_idx=self.assistant_message_idx,
                 item_idx=self._stream_item_index,
                 delta=chunk,
             )
@@ -282,11 +332,17 @@ class RuntimeEventNodeBridge:
 
     def _append_item(self, item: Mapping[str, Any], *, persist: bool = True) -> RuntimeState:
         self._finish_stream_item()
+        self._ensure_assistant_message()
         normalized = {str(key): self._json_value(value) for key, value in item.items()}
         self.assistant_blocks.append(normalized)
         if self.assistant is None:
             raise RuntimeError("No active Turn.")
-        updated = self.writer.append_item(self.assistant, normalized, persist=persist)
+        updated = self.writer.append_items(
+            self.assistant,
+            [normalized],
+            message_idx=self.assistant_message_idx,
+            persist=persist,
+        )
         self.assistant = updated
         self.last_node = updated
         if persist:
@@ -297,11 +353,17 @@ class RuntimeEventNodeBridge:
         self._finish_stream_item()
         if not items:
             return self.assistant
+        self._ensure_assistant_message()
         normalized = [{str(key): self._json_value(value) for key, value in item.items()} for item in items]
         self.assistant_blocks.extend(normalized)
         if self.assistant is None:
             raise RuntimeError("No active Turn.")
-        updated = self.writer.append_items(self.assistant, normalized, persist=True)
+        updated = self.writer.append_items(
+            self.assistant,
+            normalized,
+            message_idx=self.assistant_message_idx,
+            persist=True,
+        )
         self.assistant = updated
         self.last_node = updated
         self.produced_item = True
@@ -476,7 +538,11 @@ class RuntimeEventNodeBridge:
                 self._event_item("approval", kind, message, data)
         elif kind in {"user_input_requested", "user_input_received"}:
             self._event_item("question", kind, message, data)
-        elif kind in {"plan", "feedback_received", "handoff_created", "steering_received", "steering_applied"}:
+        elif kind == "steering_applied":
+            self._append_steering_message(data)
+        elif kind == "steering_received":
+            return
+        elif kind in {"plan", "feedback_received", "handoff_created"}:
             self._event_item("plan", kind, message, data)
         elif kind == "skills_selected":
             self._event_item("skill_snapshot", kind, message, data)
@@ -513,6 +579,7 @@ class RuntimeEventNodeBridge:
         self.last_node = compacted
         self.turn_id = compacted.id
         self.assistant_blocks = compacted.assistant_items
+        self.assistant_message_idx = len(compacted.data[compacted.current_data_idx]) - 1
         self.protected_item_count = len(self.assistant_blocks)
         self._stream_item_index = None
         self._stream_item_type = None
@@ -543,6 +610,7 @@ class RuntimeEventNodeBridge:
             raise ValueError("A Turn can only finish as success, paused, or failed.")
         if self.assistant is None:
             self.start()
+        self._ensure_assistant_message()
         if (
             final_answer
             and status == "success"

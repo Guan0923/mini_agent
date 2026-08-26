@@ -8,7 +8,14 @@ from typing import Any, Protocol
 from backend.domain import ResumePreview, RunState, Session
 
 from ...core.context import AgentRuntime, text_messages
-from ...core.contracts import CancellationHandler, EventHandler, InterruptHandler, InterruptRequest, SteeringHandler
+from ...core.contracts import (
+    CancellationHandler,
+    EventHandler,
+    InterruptDecision,
+    InterruptHandler,
+    InterruptRequest,
+    SteeringHandler,
+)
 from ...execution import RuntimeRunner
 from ..ports import SessionStore
 from .reconstruction import build_preview, reconstruct_attempt
@@ -56,6 +63,7 @@ def resume_session(
     cancel_requested: CancellationHandler | None = None,
     suspend_requested: CancellationHandler | None = None,
     request_parameters: Mapping[str, Any] | None = None,
+    resume_confirmed: bool = False,
 ) -> RunState | None:
     """Select an idle session or continue a stopped workflow as a new attempt."""
 
@@ -84,7 +92,9 @@ def resume_session(
         "Continue this durable workflow or go back?",
         {"details": details, "session_id": preview.session_id, "run_id": preview.run_id},
     )
-    decision = interrupt(request) if interrupt is not None else None
+    decision = (
+        InterruptDecision("continue") if resume_confirmed else (interrupt(request) if interrupt is not None else None)
+    )
     if decision is None or decision.choice == "back":
         return None
     if decision.choice != "continue":

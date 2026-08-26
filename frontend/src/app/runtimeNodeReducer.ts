@@ -112,18 +112,21 @@ export function applyRuntimeNodeFrame(
   }
 
   let data = previous.data;
-  const mutableItems = new Map<number, TurnItem[]>();
-  const itemsAt = (dataIdx: number): TurnItem[] => {
-    const cached = mutableItems.get(dataIdx);
+  const mutableItems = new Map<string, TurnItem[]>();
+  const itemsAt = (dataIdx: number, messageIdx: number): TurnItem[] => {
+    const cacheKey = `${dataIdx}:${messageIdx}`;
+    const cached = mutableItems.get(cacheKey);
     if (cached) return cached;
     const version = data[dataIdx];
-    if (!version || version[1]?.role !== "assistant" || !Array.isArray(version[1].content)) {
+    if (!version || version[messageIdx]?.role !== "assistant" || !Array.isArray(version[messageIdx].content)) {
       throw new Error("Turn delta targets invalid assistant content");
     }
     if (data === previous.data) data = [...previous.data];
-    const items = [...version[1].content];
-    data[dataIdx] = [version[0], { ...version[1], content: items }];
-    mutableItems.set(dataIdx, items);
+    const messages = data[dataIdx] === version ? [...version] : data[dataIdx];
+    const items = [...version[messageIdx].content];
+    messages[messageIdx] = { ...version[messageIdx], content: items };
+    data[dataIdx] = messages;
+    mutableItems.set(cacheKey, items);
     return items;
   };
 
@@ -131,10 +134,34 @@ export function applyRuntimeNodeFrame(
     if (!Number.isInteger(operation.data_idx) || operation.data_idx < 0) {
       throw new Error("Turn delta data index is invalid");
     }
+    if (!Number.isInteger(operation.message_idx) || operation.message_idx < 0) {
+      throw new Error("Turn delta message index is invalid");
+    }
+    if (operation.op === "append_message") {
+      const version = data[operation.data_idx];
+      if (!version || operation.message_idx !== version.length || !isRecord(operation.message)) {
+        throw new Error("Turn Message delta is out of order");
+      }
+      const expectedRole = operation.message_idx % 2 === 0 ? "user" : "assistant";
+      if (operation.message.role !== expectedRole || !Array.isArray(operation.message.content)) {
+        throw new Error("Turn Message delta breaks role alternation");
+      }
+      if (expectedRole === "user" && (
+        operation.message.content.length !== 1
+        || !isRecord(operation.message.content[0])
+        || operation.message.content[0].type !== "text"
+        || typeof operation.message.content[0].text !== "string"
+      )) {
+        throw new Error("Turn user Message delta is invalid");
+      }
+      if (data === previous.data) data = [...previous.data];
+      data[operation.data_idx] = [...version, structuredClone(operation.message)];
+      continue;
+    }
     if (!Number.isInteger(operation.item_idx) || operation.item_idx < 0) {
       throw new Error("Turn delta item index is invalid");
     }
-    const items = itemsAt(operation.data_idx);
+    const items = itemsAt(operation.data_idx, operation.message_idx);
     if (operation.op === "append_item") {
       if (operation.item_idx !== items.length) throw new Error("Turn item delta is out of order");
       if (!isRecord(operation.item) || typeof operation.item.type !== "string" || !operation.item.type) {
@@ -154,6 +181,9 @@ export function applyRuntimeNodeFrame(
   }
   turn.data = data;
   if (!turn.data[turn.current_data_idx]) throw new Error("Turn delta produced an invalid data index");
+  if (turn.status !== "running" && turn.data.some((version) => version[version.length - 1]?.role !== "assistant")) {
+    throw new Error("A non-running Turn must end with assistant");
+  }
   accumulator.nodes.set(key, turn);
   accumulator.revisions.set(key, frame.revision);
   return turn;

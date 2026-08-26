@@ -52,12 +52,71 @@ describe("Turn protocol projection", () => {
       turn_id: "turn_1",
       revision: 1,
       patch: { status: "success" },
-      operations: [{ op: "append_text", data_idx: 0, item_idx: 0, delta: "done" }],
+      operations: [{ op: "append_text", data_idx: 0, message_idx: 1, item_idx: 0, delta: "done" }],
     });
     const updated = integrateRuntimeNodeUpdates(created, [updatedTurn], updatedTurn.id, false);
     expect(updated.runtimeNodes).toHaveLength(1);
     expect(updated.messages.map((message) => message.content)).toEqual(["hello", "done"]);
     expect(updated.messages[0]).toBe(originalUser);
+  });
+
+  it("projects every same-Turn Message and updates the latest assistant incrementally", () => {
+    const accumulator = runtimeNodeAccumulator();
+    const baseline = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.snapshot",
+      revision: 0,
+      turn: turn({ status: "running" }),
+    });
+    let conversation: Conversation = { id: "session_1", title: "multi", messages: [], runtimeNodes: [] };
+    conversation = integrateRuntimeNodeUpdates(conversation, [baseline], baseline.id, true);
+    const withUser = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 1,
+      operations: [{
+        op: "append_message",
+        data_idx: 0,
+        message_idx: 2,
+        message: { role: "user", steering_id: "steer_1", content: [{ type: "text", text: "redirect" }] },
+      }],
+    });
+    conversation = integrateRuntimeNodeUpdates(conversation, [withUser], withUser.id, true);
+    const withAssistant = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 2,
+      operations: [{
+        op: "append_message",
+        data_idx: 0,
+        message_idx: 3,
+        message: { role: "assistant", content: [] },
+      }],
+    });
+    conversation = integrateRuntimeNodeUpdates(conversation, [withAssistant], withAssistant.id, true);
+    const withText = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 3,
+      operations: [{
+        op: "append_item",
+        data_idx: 0,
+        message_idx: 3,
+        item_idx: 0,
+        item: { type: "text", text: "new answer" },
+      }],
+    });
+    conversation = integrateRuntimeNodeUpdates(conversation, [withText], withText.id, false);
+
+    expect(conversation.messages.map((message) => [message.role, message.content])).toEqual([
+      ["user", "hello"],
+      ["assistant", "world"],
+      ["user", "redirect"],
+      ["assistant", "new answer"],
+    ]);
+    expect(conversation.messages[2].timelineSource).toBe("steering");
   });
 
   it("rejects missing baselines, revision gaps, and forbidden patches", () => {
@@ -66,13 +125,13 @@ describe("Turn protocol projection", () => {
       session_id: "session_1",
       turn_id: "turn_1",
       revision: 1,
-      operations: [{ op: "append_item", data_idx: 0, item_idx: 0, item: { type: "text", text: "x" } }],
+      operations: [{ op: "append_item", data_idx: 0, message_idx: 1, item_idx: 0, item: { type: "text", text: "x" } }],
     };
     expect(() => applyRuntimeNodeFrame(runtimeNodeAccumulator(), delta)).toThrow("before its baseline");
 
     const accumulator = runtimeNodeAccumulator();
     applyRuntimeNodeFrame(accumulator, { type: "turn.snapshot", revision: 0, turn: turn({ status: "running" }) });
-    expect(() => applyRuntimeNodeFrame(accumulator, { ...delta, revision: 2 })).toThrow("not consecutive");
+    expect(() => applyRuntimeNodeFrame(accumulator, { ...delta, revision: 2 } as RuntimeNodeFrame)).toThrow("not consecutive");
     expect(() => applyRuntimeNodeFrame(accumulator, {
       ...delta,
       patch: { data: [] },
@@ -95,7 +154,7 @@ describe("Turn protocol projection", () => {
       session_id: "session_1",
       turn_id: "turn_1",
       revision: 1,
-      operations: [{ op: "append_item", data_idx: 0, item_idx: 1, item: {} }],
+      operations: [{ op: "append_item", data_idx: 0, message_idx: 1, item_idx: 1, item: {} }],
     } as RuntimeNodeFrame)).toThrow("item delta is invalid");
 
     expect(() => applyRuntimeNodeFrame(accumulator, {

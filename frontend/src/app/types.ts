@@ -33,4 +33,6 @@ export interface QueuedMessage {
   id: string;
   content: string;
   references?: import("../types").FileReference[];
+  sendingSteeringId?: string;
+  sendingTurnId?: string;
 }

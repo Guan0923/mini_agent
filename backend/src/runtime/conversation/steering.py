@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from backend.domain import UserMessage
@@ -14,6 +15,8 @@ from ..core.events import RuntimeEvent
 class SteeringUpdate:
     content: str
     message_count: int
+    steering_id: str = ""
+    references: tuple[dict[str, str], ...] = ()
 
 
 def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
@@ -22,17 +25,42 @@ def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
     handler = runtime.services.steering
     if handler is None:
         return None
-    messages = [message.strip() for message in handler() if message.strip()]
+    raw_messages = handler()
+    messages: list[str] = []
+    steering_id = ""
+    references: list[dict[str, str]] = []
+    seen_references: set[tuple[str, str]] = set()
+    for raw in raw_messages:
+        if isinstance(raw, Mapping):
+            content = str(raw.get("content") or "").strip()
+            steering_id = steering_id or str(raw.get("steering_id") or "")
+            for value in raw.get("references", []):
+                if not isinstance(value, Mapping):
+                    continue
+                source, path = str(value.get("source") or ""), str(value.get("path") or "")
+                key = (source, path)
+                if source in {"project", "upload"} and path and key not in seen_references:
+                    seen_references.add(key)
+                    references.append({"source": source, "path": path})
+        else:
+            content = str(raw).strip()
+        if content or references:
+            messages.append(content)
     if not messages:
         return None
-    return SteeringUpdate("\n\n".join(messages), len(messages))
+    return SteeringUpdate("\n\n".join(messages), len(messages), steering_id, tuple(references))
 
 
 def apply_steering(runtime: AgentRuntime, update: SteeringUpdate, *, phase: str) -> None:
     """Append one merged user message and persist it before execution continues."""
 
     publish = runtime.services.publish or (lambda _event: None)
-    data = {"message_count": update.message_count, "phase": phase}
+    data = {
+        "message_count": update.message_count,
+        "phase": phase,
+        "steering_id": update.steering_id,
+        "references": list(update.references),
+    }
     publish(RuntimeEvent("steering_received", "In-run user input received", data))
 
     runtime.state.messages.append(UserMessage(content=update.content))

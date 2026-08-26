@@ -1,6 +1,6 @@
 import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, RuntimeConfigModel, StreamMessage } from "../types";
 import { apiUrl } from "./base";
-import { ApiError, errorFrom, notifyUnauthorized } from "./request";
+import { ApiError, errorFrom, jsonBody, notifyUnauthorized } from "./request";
 import { requestJson } from "./request";
 
 export interface StreamOptions {
@@ -213,4 +213,19 @@ export async function streamAttachedTurn(
 
 export async function pauseTurn(turnId: string): Promise<void> {
   await requestJson(`/api/turns/${encodeURIComponent(turnId)}/pause`, { method: "POST" });
+}
+
+export async function steerTurn(
+  turnId: string,
+  steeringId: string,
+  content: string,
+  references?: FileReference[],
+): Promise<void> {
+  await requestJson(`/api/turns/${encodeURIComponent(turnId)}/steer`, jsonBody({
+      steering_id: steeringId,
+      message: {
+        role: "user",
+        content: [{ type: "text", text: content, ...(references?.length ? { references } : {}) }],
+      },
+    }));
 }

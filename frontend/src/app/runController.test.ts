@@ -74,7 +74,7 @@ describe("run controller incremental batching", () => {
         session_id: "session_1",
         turn_id: "turn_1",
         revision: 1,
-        operations: [{ op: "append_text", data_idx: 0, item_idx: 0, delta: "world" }],
+        operations: [{ op: "append_text", data_idx: 0, message_idx: 1, item_idx: 0, delta: "world" }],
       });
       await gate;
       return "completed";
@@ -118,7 +118,7 @@ describe("run controller incremental batching", () => {
         session_id: "session_1",
         turn_id: "turn_1",
         revision: 1,
-        operations: [{ op: "append_item", data_idx: 0, item_idx: 0, item: { type: "text", text: "bad" } }],
+        operations: [{ op: "append_item", data_idx: 0, message_idx: 1, item_idx: 0, item: { type: "text", text: "bad" } }],
       });
       return "completed";
     });

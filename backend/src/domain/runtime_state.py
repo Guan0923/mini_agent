@@ -1,8 +1,9 @@
 """Canonical Session/Thread/Turn message-tree contract.
 
 One persisted node is one Turn. A Turn owns every version of one interaction;
-each version is exactly ``[user_message, assistant_message]``. No legacy
-message-node or synthetic-root representation is accepted.
+each version alternates ``user, assistant, user, assistant...``. A running
+version may temporarily end in user; no legacy message-node representation is
+accepted.
 """
 
 from __future__ import annotations
@@ -258,19 +259,23 @@ def validate_data(value: Any) -> list[list[dict[str, Any]]]:
         raise RuntimeStateValidationError("data must be a non-empty Message[][] array.")
     versions: list[list[dict[str, Any]]] = []
     for version_index, raw_version in enumerate(value):
-        if not isinstance(raw_version, list) or len(raw_version) != 2:
-            raise RuntimeStateValidationError(f"data[{version_index}] must contain user and assistant messages.")
+        if not isinstance(raw_version, list) or not raw_version:
+            raise RuntimeStateValidationError(f"data[{version_index}] must contain at least one Message.")
         messages: list[dict[str, Any]] = []
         for message_index, raw_message in enumerate(raw_version):
             message = _mapping(raw_message, f"data[{version_index}][{message_index}]")
-            expected_role = "user" if message_index == 0 else "assistant"
+            expected_role = "user" if message_index % 2 == 0 else "assistant"
             if message.get("role") != expected_role:
                 raise RuntimeStateValidationError(
                     f"data[{version_index}][{message_index}].role must be {expected_role}."
                 )
             message["content"] = normalize_content(message.get("content"))
-            if message_index == 0 and len(message["content"]) != 1:
+            if expected_role == "user" and len(message["content"]) != 1:
                 raise RuntimeStateValidationError("Every user Message must contain exactly one Item.")
+            if expected_role == "user":
+                item = message["content"][0]
+                if item.get("type") != "text" or not isinstance(item.get("text"), str):
+                    raise RuntimeStateValidationError("Every user Message must contain one text Item.")
             messages.append(_json(message, "message"))
         versions.append(messages)
     return versions
@@ -355,6 +360,8 @@ class RuntimeState:
             raise RuntimeStateValidationError("current_data_idx must be an integer.")
         if not 0 <= self.current_data_idx < len(self.data):
             raise RuntimeStateValidationError("current_data_idx is out of range.")
+        if self.status != "running" and any(version[-1]["role"] != "assistant" for version in self.data):
+            raise RuntimeStateValidationError("A non-running Turn must end with an assistant Message.")
 
     @property
     def key(self) -> tuple[str, str]:
@@ -370,11 +377,14 @@ class RuntimeState:
 
     @property
     def assistant_message(self) -> dict[str, Any]:
-        return _clone(self.data[self.current_data_idx][1])
+        for message in reversed(self.data[self.current_data_idx]):
+            if message["role"] == "assistant":
+                return _clone(message)
+        return message_payload("assistant")
 
     @property
     def assistant_items(self) -> list[dict[str, Any]]:
-        return _clone(self.data[self.current_data_idx][1]["content"])
+        return _clone(self.assistant_message["content"])
 
     @property
     def is_terminal(self) -> bool:
@@ -385,7 +395,10 @@ class RuntimeState:
 
     def with_assistant_items(self, items: Sequence[Mapping[str, Any]]) -> RuntimeState:
         result = self.clone()
-        result.data[result.current_data_idx][1]["content"] = normalize_content(items)
+        messages = result.data[result.current_data_idx]
+        if messages[-1]["role"] != "assistant":
+            messages.append(message_payload("assistant"))
+        messages[-1]["content"] = normalize_content(items)
         result.data = validate_data(result.data)
         return result
 
@@ -689,7 +702,7 @@ _TURN_CONFIG_FIELDS = frozenset(
 
 
 def _data_delta_operations(before: list[Any], after: list[Any]) -> list[TurnDeltaOperation] | None:
-    """Describe append-only assistant changes, or reject a non-incremental mutation."""
+    """Describe append-only Message/Item changes, or reject a mutation."""
 
     if len(before) != len(after):
         return None
@@ -697,18 +710,33 @@ def _data_delta_operations(before: list[Any], after: list[Any]) -> list[TurnDelt
     for data_idx, (before_version, after_version) in enumerate(zip(before, after, strict=True)):
         if before_version == after_version:
             continue
-        if (
-            not isinstance(before_version, list)
-            or not isinstance(after_version, list)
-            or len(before_version) != 2
-            or len(after_version) != 2
-            or before_version[0] != after_version[0]
-            or not isinstance(before_version[1], Mapping)
-            or not isinstance(after_version[1], Mapping)
-        ):
+        if not isinstance(before_version, list) or not isinstance(after_version, list):
             return None
-        before_assistant = dict(before_version[1])
-        after_assistant = dict(after_version[1])
+        if len(after_version) > len(before_version) and after_version[: len(before_version)] == before_version:
+            for message_idx, message in enumerate(after_version[len(before_version) :], start=len(before_version)):
+                if not isinstance(message, Mapping):
+                    return None
+                operations.append(
+                    {
+                        "op": "append_message",
+                        "data_idx": data_idx,
+                        "message_idx": message_idx,
+                        "message": _clone(message),
+                    }
+                )
+            continue
+        if len(before_version) != len(after_version):
+            return None
+        changed_messages = [index for index, message in enumerate(before_version) if message != after_version[index]]
+        if len(changed_messages) != 1:
+            return None
+        message_idx = changed_messages[0]
+        if not isinstance(before_version[message_idx], Mapping) or not isinstance(after_version[message_idx], Mapping):
+            return None
+        before_assistant = dict(before_version[message_idx])
+        after_assistant = dict(after_version[message_idx])
+        if before_assistant.get("role") != "assistant" or after_assistant.get("role") != "assistant":
+            return None
         before_items = before_assistant.pop("content", None)
         after_items = after_assistant.pop("content", None)
         if (
@@ -722,6 +750,7 @@ def _data_delta_operations(before: list[Any], after: list[Any]) -> list[TurnDelt
                 {
                     "op": "append_item",
                     "data_idx": data_idx,
+                    "message_idx": message_idx,
                     "item_idx": item_idx,
                     "item": _clone(item),
                 }
@@ -752,6 +781,7 @@ def _data_delta_operations(before: list[Any], after: list[Any]) -> list[TurnDelt
             {
                 "op": "append_text",
                 "data_idx": data_idx,
+                "message_idx": message_idx,
                 "item_idx": item_idx,
                 "delta": after_text[len(before_text) :],
             }
@@ -948,16 +978,52 @@ class NodeWriter:
     def append_item(self, node: RuntimeState, item: Mapping[str, Any], *, persist: bool = True) -> RuntimeState:
         return self.append_items(node, [item], persist=persist)
 
-    def append_items(
+    def append_message(
         self,
         node: RuntimeState,
-        items: Sequence[Mapping[str, Any]],
+        message: Mapping[str, Any],
         *,
         persist: bool = True,
     ) -> RuntimeState:
         with self._lock:
             current = self.current(node.session_id, node.id)
-            content = current.data[current.current_data_idx][1]["content"]
+            messages = current.data[current.current_data_idx]
+            message_idx = len(messages)
+            messages.append(_json(message, "Message"))
+            current.data = validate_data(current.data)
+            value = self._store_dynamic(current, persist=persist)
+            self._emit_delta(
+                value,
+                operations=(
+                    {
+                        "op": "append_message",
+                        "data_idx": current.current_data_idx,
+                        "message_idx": message_idx,
+                        "message": _clone(messages[message_idx]),
+                    },
+                ),
+            )
+            return value.clone()
+
+    def append_items(
+        self,
+        node: RuntimeState,
+        items: Sequence[Mapping[str, Any]],
+        *,
+        message_idx: int | None = None,
+        persist: bool = True,
+    ) -> RuntimeState:
+        with self._lock:
+            current = self.current(node.session_id, node.id)
+            messages = current.data[current.current_data_idx]
+            target_idx = len(messages) - 1 if message_idx is None else message_idx
+            try:
+                target = messages[target_idx]
+            except IndexError as exc:
+                raise RuntimeStateValidationError("Turn Item target Message is out of range.") from exc
+            if target.get("role") != "assistant":
+                raise RuntimeStateValidationError("Turn Items can only be appended to an assistant Message.")
+            content = target["content"]
             operations: list[TurnDeltaOperation] = []
             for item in items:
                 normalized = _json(item, "Item")
@@ -965,6 +1031,7 @@ class NodeWriter:
                     {
                         "op": "append_item",
                         "data_idx": current.current_data_idx,
+                        "message_idx": target_idx,
                         "item_idx": len(content),
                         "item": _clone(normalized),
                     }
@@ -980,6 +1047,7 @@ class NodeWriter:
         node: RuntimeState,
         *,
         data_idx: int,
+        message_idx: int | None = None,
         item_idx: int,
         delta: str,
         persist: bool = False,
@@ -989,7 +1057,11 @@ class NodeWriter:
         with self._lock:
             current = self.current(node.session_id, node.id)
             try:
-                item = current.data[data_idx][1]["content"][item_idx]
+                messages = current.data[data_idx]
+                target_idx = len(messages) - 1 if message_idx is None else message_idx
+                if messages[target_idx].get("role") != "assistant":
+                    raise RuntimeStateValidationError("Turn text delta must target an assistant Message.")
+                item = messages[target_idx]["content"][item_idx]
             except IndexError as exc:
                 raise RuntimeStateValidationError("Turn text delta target is out of range.") from exc
             if item.get("type") not in {"text", "reasoning"} or not isinstance(item.get("text"), str):
@@ -1002,6 +1074,7 @@ class NodeWriter:
                     {
                         "op": "append_text",
                         "data_idx": data_idx,
+                        "message_idx": target_idx,
                         "item_idx": item_idx,
                         "delta": delta,
                     },

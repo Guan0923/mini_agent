@@ -108,8 +108,9 @@ export type RuntimeNodePatch = Partial<Omit<RuntimeStateNode,
 >>;
 
 export type TurnDeltaOperation =
-  | { op: "append_item"; data_idx: number; item_idx: number; item: TurnItem }
-  | { op: "append_text"; data_idx: number; item_idx: number; delta: string };
+  | { op: "append_message"; data_idx: number; message_idx: number; message: TurnMessage }
+  | { op: "append_item"; data_idx: number; message_idx: number; item_idx: number; item: TurnItem }
+  | { op: "append_text"; data_idx: number; message_idx: number; item_idx: number; delta: string };
 
 export interface RuntimeNodeSnapshotFrame {
   type: "turn.snapshot";

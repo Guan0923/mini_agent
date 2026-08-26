@@ -181,7 +181,9 @@ def test_writer_emits_one_baseline_then_exact_incremental_operations() -> None:
     turn = writer.finalize(turn, "success")
     assert [frame.type for frame in frames] == ["turn.snapshot", *["turn.delta"] * 5]
     assert [frame.revision for frame in frames] == list(range(6))
-    assert frames[4].operations == ({"op": "append_text", "data_idx": 0, "item_idx": 2, "delta": "done"},)
+    assert frames[4].operations == (
+        {"op": "append_text", "data_idx": 0, "message_idx": 1, "item_idx": 2, "delta": "done"},
+    )
     assert frames[-1].patch == {"status": "success"}
     assert all("turn" not in frame.to_dict() and "data" not in frame.to_dict() for frame in frames[1:])
     assert [item["type"] for item in store.get_node("session_1", "turn_1").assistant_items] == [
@@ -316,8 +318,14 @@ def test_legacy_tui_reducer_applies_the_incremental_turn_contract() -> None:
             "turn_id": "turn_1",
             "revision": 1,
             "operations": [
-                {"op": "append_item", "data_idx": 0, "item_idx": 0, "item": {"type": "text", "text": "a"}},
-                {"op": "append_text", "data_idx": 0, "item_idx": 0, "delta": "b"},
+                {
+                    "op": "append_item",
+                    "data_idx": 0,
+                    "message_idx": 1,
+                    "item_idx": 0,
+                    "item": {"type": "text", "text": "a"},
+                },
+                {"op": "append_text", "data_idx": 0, "message_idx": 1, "item_idx": 0, "delta": "b"},
             ],
         }
     )
@@ -955,7 +963,12 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
         for frame in frames[1:]:
             reconstructed.update(frame.get("patch", {}))
             for operation in frame.get("operations", []):
-                items = reconstructed["data"][operation["data_idx"]][1]["content"]
+                messages = reconstructed["data"][operation["data_idx"]]
+                if operation["op"] == "append_message":
+                    assert operation["message_idx"] == len(messages)
+                    messages.append(operation["message"])
+                    continue
+                items = messages[operation["message_idx"]]["content"]
                 if operation["op"] == "append_item":
                     assert operation["item_idx"] == len(items)
                     items.append(operation["item"])

@@ -21,7 +21,7 @@ from backend.domain.runtime_state import (
 
 def _payload(value: RuntimeState | Mapping[str, Any]) -> Mapping[str, Any]:
     if isinstance(value, RuntimeState):
-        raise RuntimeStateValidationError("A Turn contains two messages; flatten it through _messages().")
+        raise RuntimeStateValidationError("A Turn contains a Message sequence; flatten it through _messages().")
     if not isinstance(value, Mapping) or value.get("role") not in {"user", "assistant"}:
         raise RuntimeStateValidationError("Provider adapters require a canonical Message object.")
     return value
