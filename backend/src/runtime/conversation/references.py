@@ -58,8 +58,7 @@ class FileReferenceExpander:
                     f"Referenced file content is too large; keep the total under {self._max_total_chars} characters."
                 )
             pieces.append(task[cursor : match.start()])
-            is_pdf = path.lower().endswith(".pdf")
-            reference = "Referenced PDF" if is_pdf else "Referenced file"
+            reference = "Referenced file"
             pieces.append(f"\n\n[{reference}: {path}]\n{content}\n[End {reference}: {path}]\n")
             pieces.append(suffix)
             cursor = match.end()
@@ -67,11 +66,6 @@ class FileReferenceExpander:
         return "".join(pieces)
 
     def _read(self, path: str) -> str:
-        if path.lower().endswith(".pdf"):
-            return (
-                f"This is a PDF document; its binary content cannot be inlined. "
-                f'Use the read_pdf tool with path="{path}" to extract its text and layout.'
-            )
         if self._files is not None:
             content = self._files.read_text(path)
         else:

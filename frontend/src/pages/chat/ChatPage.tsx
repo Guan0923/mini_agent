@@ -13,7 +13,6 @@ import {
   submitDecision,
   uploadSessionFiles,
 } from "../../api";
-import type { RagMode } from "../../api/chat";
 import type { ProviderConfig } from "../../api";
 import { HELP_TEXT, parseCommand } from "../../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../../commands/completion";
@@ -46,7 +45,6 @@ interface Props {
   conversation: Conversation | null;
   displayMode?: DisplayMode;
   providerConfig?: ProviderConfig | null;
-  ragEnabled?: boolean;
   mode?: ChatMode;
   onModeChange?: (mode: ChatMode) => void;
   onUpdate: (id: string, updater: (conversation: Conversation) => Conversation) => void;
@@ -104,7 +102,6 @@ interface ChatRunRequest {
   rewindTurnId?: string;
   references?: FileReference[];
   queuedTurns?: Array<{ content: string; references?: FileReference[] }>;
-  ragMode?: RagMode;
 }
 
 function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
@@ -115,7 +112,6 @@ export default function ChatPage({
   conversation,
   displayMode: configuredDisplayMode,
   providerConfig,
-  ragEnabled = false,
   mode: selectedMode,
   onModeChange = () => undefined,
   onUpdate,
@@ -140,7 +136,6 @@ export default function ChatPage({
   const [queueSubmitting, setQueueSubmitting] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("read_only");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
-  const ragMode: RagMode = ragEnabled ? "tool" : "off";
   const [providerName, setProviderName] = useState("unknown");
   const [runtimeModel, setRuntimeModel] = useState<RuntimeNodeModel>(DEFAULT_RUNTIME_NODE_MODEL);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -602,7 +597,6 @@ export default function ChatPage({
         references,
         queuedTurns,
         rewindTurnId,
-        ragMode,
     });
   }
 

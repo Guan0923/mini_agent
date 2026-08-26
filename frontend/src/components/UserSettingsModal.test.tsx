@@ -1,5 +1,5 @@
 import { App as AntApp } from "antd";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import UserSettingsModal from "./UserSettingsModal";
@@ -24,10 +24,6 @@ const api = vi.hoisted(() => ({
   getSyncJob: vi.fn(),
   updateSyncPreferences: vi.fn(),
   syncNow: vi.fn(),
-  getRagTree: vi.fn(),
-  uploadRagDocument: vi.fn(),
-  deleteRagDocument: vi.fn(),
-  reindexRagDocument: vi.fn(),
 }));
 
 vi.mock("../api", () => api);
@@ -139,10 +135,6 @@ describe("UserSettingsModal", () => {
       job: null,
     });
     api.updateSyncPreferences.mockImplementation(async (value) => value);
-    api.getRagTree.mockResolvedValue([]);
-    api.uploadRagDocument.mockResolvedValue({ job_id: "job-upload" });
-    api.deleteRagDocument.mockResolvedValue({ deleted: "document-ready", warning: null });
-    api.reindexRagDocument.mockResolvedValue({ job_id: "job-reindex" });
     api.syncNow.mockResolvedValue({
       id: "job-1",
       kind: "sync",
@@ -362,147 +354,6 @@ describe("UserSettingsModal", () => {
       model: "claude-settings",
       is_active: true,
     }));
-  });
-
-  const ragTree = [{
-    section: {
-      section_id: "section-session",
-      user_id: "u1",
-      section_type: "session" as const,
-      project_id: null,
-      session_id: "session-current",
-      display_name: "当前会话",
-      created_at: 1,
-    },
-    documents: [
-      {
-        document_id: "document-ready",
-        user_id: "u1",
-        section_id: "section-session",
-        filename: "ready.pdf",
-        relative_path: "sections/section-session/ready.pdf",
-        size_bytes: 2048,
-        sha256: "ready-hash",
-        status: "ready" as const,
-        source: "knowledge_base",
-        created_at: 1,
-        error: null,
-        ingestion_status: "ready",
-        ingestion_error: null,
-      },
-      {
-        document_id: "document-indexing",
-        user_id: "u1",
-        section_id: "section-session",
-        filename: "indexing.pdf",
-        relative_path: "sections/section-session/indexing.pdf",
-        size_bytes: 4096,
-        sha256: "indexing-hash",
-        status: "indexing" as const,
-        source: "project",
-        created_at: 2,
-        error: null,
-        ingestion_status: "indexing",
-        ingestion_error: null,
-      },
-    ],
-  }, {
-    section: {
-      section_id: "section-project",
-      user_id: "u1",
-      section_type: "project" as const,
-      project_id: "project-1",
-      session_id: null,
-      display_name: "产品项目",
-      created_at: 2,
-    },
-    documents: [],
-  }];
-
-  it("renders the knowledge-base tree, details, and manual refresh", async () => {
-    api.getRagTree.mockResolvedValue(ragTree);
-    renderModal();
-    await screen.findByDisplayValue("user@example.com");
-    await userEvent.click(screen.getByRole("menuitem", { name: "知识库内容" }));
-
-    expect(await screen.findByText("当前会话")).toBeInTheDocument();
-    expect(screen.getByText("产品项目")).toBeInTheDocument();
-    await userEvent.click(screen.getByText("ready.pdf"));
-    expect(screen.getByText("2.0 KB")).toBeInTheDocument();
-    expect(screen.getByText("知识库上传")).toBeInTheDocument();
-    expect(screen.getByText("sections/section-session/ready.pdf")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "刷新知识库" }));
-    await waitFor(() => expect(api.getRagTree).toHaveBeenCalledTimes(2));
-  });
-
-  it("uploads a PDF to the active session section", async () => {
-    api.getRagTree.mockResolvedValue(ragTree);
-    const user = userEvent.setup();
-    const { container } = renderModal();
-    await screen.findByDisplayValue("user@example.com");
-    await user.click(screen.getByRole("menuitem", { name: "知识库内容" }));
-    await screen.findByText("当前会话");
-    await user.click(screen.getByRole("button", { name: "导入 PDF" }));
-
-    await screen.findByText("导入 PDF 到知识库");
-    const sectionSelect = screen.getByRole("combobox", { name: "目标分区" });
-    expect(sectionSelect.closest(".ant-select")).toHaveTextContent("会话 · 当前会话");
-    const file = new File(["pdf"], "manual.pdf", { type: "application/pdf" });
-    const input = container.ownerDocument.querySelector('.ant-modal-root input[type="file"]') as HTMLInputElement;
-    await user.upload(input, file);
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-
-    await waitFor(() => expect(api.uploadRagDocument).toHaveBeenCalledWith("section-session", file));
-    await waitFor(() => expect(api.getRagTree).toHaveBeenCalledTimes(2));
-  });
-
-  it("reindexes and deletes ready files but locks active indexing files", async () => {
-    api.getRagTree.mockResolvedValue(ragTree);
-    const user = userEvent.setup();
-    renderModal();
-    await screen.findByDisplayValue("user@example.com");
-    await user.click(screen.getByRole("menuitem", { name: "知识库内容" }));
-    await screen.findByText("ready.pdf");
-    await user.click(screen.getByText("ready.pdf"));
-
-    await user.click(screen.getByRole("button", { name: "重新索引" }));
-    await waitFor(() => expect(api.reindexRagDocument).toHaveBeenCalledWith("document-ready"));
-    await user.click(screen.getByRole("button", { name: "删除" }));
-    const confirmation = document.querySelector(".ant-modal-confirm") as HTMLElement;
-    expect(confirmation.querySelector(".ant-modal-confirm-title")).toHaveTextContent("删除知识库文件 ready.pdf？");
-    await user.click(within(confirmation).getByRole("button", { name: /取\s*消/ }));
-    await waitFor(() => expect(document.querySelector(".ant-modal-confirm")).not.toBeInTheDocument());
-    expect(api.deleteRagDocument).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "删除" }));
-    const renewedConfirmation = document.querySelector(".ant-modal-confirm") as HTMLElement;
-    await user.click(within(renewedConfirmation).getByRole("button", { name: /删\s*除/ }));
-    await waitFor(() => expect(api.deleteRagDocument).toHaveBeenCalledWith("document-ready"));
-
-    await user.click(screen.getByText("indexing.pdf"));
-    expect(screen.getByRole("button", { name: "重新索引" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "删除" })).toBeDisabled();
-    expect(screen.getByText("索引任务运行期间不能删除或重复提交。")).toBeInTheDocument();
-  });
-
-  it("shows a knowledge-base loading failure", async () => {
-    api.getRagTree.mockRejectedValueOnce(new Error("读取知识库失败"));
-    renderModal();
-    await screen.findByDisplayValue("user@example.com");
-    await userEvent.click(screen.getByRole("menuitem", { name: "知识库内容" }));
-    expect(await screen.findByText("读取知识库失败")).toBeInTheDocument();
-  });
-
-  it("keeps the knowledge-base browser scrollable and single-column on mobile", async () => {
-    const fs = await vi.importActual<{ readFileSync(path: string, encoding: "utf8"): string }>("node:fs");
-    const runtime = globalThis as typeof globalThis & { process: { cwd(): string } };
-    const responsiveCss = fs.readFileSync(`${runtime.process.cwd()}/src/styles/responsive.css`, "utf8");
-    const mobile = responsiveCss.slice(responsiveCss.indexOf("@media (max-width: 640px)"));
-
-    expect(responsiveCss).toMatch(/\.rag-tree-pane\s*{[^}]*min-width:\s*0;[^}]*overflow:\s*auto;/s);
-    expect(responsiveCss).toMatch(/\.rag-document-details\s*{[^}]*min-width:\s*0;[^}]*overflow:\s*auto;/s);
-    expect(mobile).toMatch(/\.rag-content-browser\s*{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);/s);
-    expect(mobile).toMatch(/\.rag-tree-pane\s*{[^}]*max-height:\s*240px;/s);
   });
 
   it("opens every discovered model before filtering and keeps selection editable", async () => {

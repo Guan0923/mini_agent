@@ -49,7 +49,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS json_events_remote_revision_idx
     ON json_events (session_id, applied_revision, event_id)
     WHERE applied_revision IS NOT NULL;
 
--- Workspace files, uploads, skills, RAG, plugins and MCP state are local-only
+-- Workspace files, uploads, skills, plugins and MCP state are local-only
 -- and never enter json_events or the cloud protocol.  This table is only a
 -- content index; file bytes remain in the session workspace.
 CREATE TABLE IF NOT EXISTS workspace_files (

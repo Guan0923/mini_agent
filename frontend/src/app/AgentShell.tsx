@@ -2,7 +2,7 @@ import { Alert, Button, Drawer, Grid, Layout } from "antd";
 import { CloseOutlined, MenuOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
 import type { AuthUser } from "../types";
-import type { AgentConfig, ProviderConfig, RagConfig } from "../api";
+import type { AgentConfig, ProviderConfig } from "../api";
 import type { ChatRunRequest } from "./types";
 import type { ChatMode, Conversation, DisplayMode, Page } from "../types";
 import type { ProjectInfo } from "../api";
@@ -29,7 +29,6 @@ export interface AgentShellProps {
   draftMode: ChatMode;
   displayMode: DisplayMode;
   providerConfig: ProviderConfig | null;
-  ragEnabled: boolean;
   actionError: string | null;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
@@ -65,7 +64,6 @@ export interface AgentShellProps {
   onClearError: () => void;
   onDisplayModeUpdate: (config: AgentConfig) => void;
   onProviderConfigUpdate: (config: ProviderConfig) => void;
-  onRagConfigUpdate: (config: RagConfig) => void;
 }
 
 export default function AgentShell(props: AgentShellProps) {
@@ -159,7 +157,6 @@ export default function AgentShell(props: AgentShellProps) {
               mode={props.current ? props.modeBySession[props.current.sessionId ?? props.current.id] ?? "agent" : props.draftMode}
               displayMode={props.displayMode}
               providerConfig={props.providerConfig}
-              ragEnabled={props.ragEnabled}
               onModeChange={props.onModeChange}
               onUpdate={props.onUpdate}
               onNew={create}
@@ -187,7 +184,6 @@ export default function AgentShell(props: AgentShellProps) {
         activeSessionId={props.current?.sessionId}
         onAgentConfigUpdate={props.onDisplayModeUpdate}
         onProviderConfigUpdate={props.onProviderConfigUpdate}
-        onRagConfigUpdate={props.onRagConfigUpdate}
       />
     </Layout>
   );

@@ -48,7 +48,6 @@ def user_paths(request: Request, identity: UserIdentity = Depends(require_user))
         "config_file": str(paths.config_file),
         "user_db": str(paths.user_db),
         "skills": str(paths.skills_dir),
-        "rag": str(paths.rag_dir),
         "plugins": str(paths.plugins_dir),
         "mcp": str(paths.mcp_dir),
         "mcp_servers": str(paths.mcp_file),

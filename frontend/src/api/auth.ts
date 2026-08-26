@@ -96,16 +96,6 @@ export interface SandboxBrokerStatus {
   detail?: string | null;
 }
 
-export interface RagConfig {
-  enabled: boolean;
-  algorithm: "hybrid" | "bm25" | "vector";
-  bm25_candidate_k: number;
-  vector_candidate_k: number;
-  top_k: number;
-  embedding_base_url: string;
-  embedding_model: string;
-}
-
 export type TerminalType = "cmd" | "git_bash" | "powershell" | "pwsh" | "wsl";
 
 export interface TerminalOption {
@@ -121,36 +111,12 @@ export interface UserSettings {
   capability_config: Record<string, unknown>;
   runtime_config: RuntimeConfig;
   sandbox_config: SandboxConfig;
-  rag_config: RagConfig;
   terminal_options: TerminalOption[];
   terminal_notice: string | null;
   timezone_options: TimezoneOption[];
   sync_preferences: SyncPreferences;
   sync_state: SyncState;
   cloud_sync_available?: boolean;
-}
-
-export interface RagCapabilities {
-  fts5_available: boolean;
-  qdrant_healthy: boolean;
-  ollama_healthy: boolean;
-  embedding_models: string[];
-  algorithms: Array<"hybrid" | "bm25" | "vector">;
-  profile_id: string;
-  dimension: number;
-  imported_files: number;
-}
-
-export async function updateRagConfig(config: RagConfig): Promise<RagConfig> {
-  return requestJson<RagConfig>("/api/auth/rag-config", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config),
-  });
-}
-
-export async function getRagCapabilities(): Promise<RagCapabilities> {
-  return requestJson<RagCapabilities>("/api/rag/capabilities");
 }
 
 export async function getSettings(): Promise<UserSettings> {

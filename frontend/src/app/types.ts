@@ -1,6 +1,4 @@
 import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, RuntimeConfigModel } from "../types";
-import type { RagMode } from "../api/chat";
-
 export interface ChatRunRequest {
   conversationId: string;
   sessionId: string;
@@ -17,7 +15,6 @@ export interface ChatRunRequest {
   rewindTurnId?: string;
   references?: FileReference[];
   queuedTurns?: Array<{ content: string; references?: FileReference[] }>;
-  ragMode?: RagMode;
 }
 
 export interface ActiveRun {

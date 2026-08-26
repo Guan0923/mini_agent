@@ -264,7 +264,6 @@ def _stream(
                 project_id=bound_project.project_id if bound_project is not None else None,
                 job_registry=job_registry,
                 job_parent_id=job_parent_id,
-                rag_mode="off",
             )
             conversation = app.open_conversation(session_id)
             # The node id is the optimistic-concurrency boundary for the new

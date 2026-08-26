@@ -38,7 +38,6 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     draftMode: "agent",
     displayMode: "medium",
     providerConfig: null,
-    ragEnabled: false,
     actionError: null,
     settingsOpen: false,
     setSettingsOpen: vi.fn(),
@@ -72,7 +71,6 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     onClearError: vi.fn(),
     onDisplayModeUpdate: vi.fn(),
     onProviderConfigUpdate: vi.fn(),
-    onRagConfigUpdate: vi.fn(),
     ...overrides,
   };
 }

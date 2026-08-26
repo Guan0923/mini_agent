@@ -15,18 +15,18 @@ React/Vite frontend ── HTTP/SSE ──> FastAPI backend (127.0.0.1:8000)
 ```
 
 - `frontend/` 只调用 backend API；开发时 Vite 将 `/api` 和 `/benchmark` 代理到 8000，生产时 backend 可托管 `frontend/dist`。
-- `backend/` 负责 FastAPI、Agent Runtime、会话、模型 Provider、工具、项目、RAG、MCP、Sandbox、审计和同步；不连接 PostgreSQL，不负责 SMTP 或 cloud 主密钥。
+- `backend/` 负责 FastAPI、Agent Runtime、会话、模型 Provider、工具、项目、MCP、Sandbox、审计和同步；不连接 PostgreSQL，不负责 SMTP 或 cloud 主密钥。
 - `cloud/` 负责账户、密码/验证码、设备授权、密钥封装、加密快照和 PostgreSQL。
 - `tui/` 直接复用 backend/domain/runtime 包，是兼容性入口，不是 Web API 替代实现。
 - `benchmarks/`、`docs/`、`scripts/` 是支持目录。
 
 ## 能力
 
-Web 对话、流式事件、历史/分支/恢复、消息队列、取消运行、Plan mode、用户澄清、Plan Review、工具审批、Full access、workspace-confined 文件/搜索/网页/命令工具、文件引用与上传、RAG、Provider 设置、项目 Skills 信任、单层 Subagents、只读 stdio MCP、审批型外部 MCP、Windows Sandbox Broker、本地 SQLite 和加密增量同步均已纳入当前架构。Broker 未就绪时严格沙箱不会自动降级为普通进程。
+Web 对话、流式事件、历史/分支/恢复、消息队列、取消运行、Plan mode、用户澄清、Plan Review、工具审批、Full access、workspace-confined 文件/搜索/网页/命令工具、文件引用与上传、Provider 设置、项目 Skills 信任、单层 Subagents、只读 stdio MCP、审批型外部 MCP、Windows Sandbox Broker、本地 SQLite 和加密增量同步均已纳入当前架构。Broker 未就绪时严格沙箱不会自动降级为普通进程。
 
 ## 快速开始
 
-需要 Python 3.11+、Node.js 20+ 和 `uv`；cloud/PostgreSQL/Qdrant 仅在对应功能需要时使用。
+需要 Python 3.11+、Node.js 20+ 和 `uv`；cloud/PostgreSQL 仅在对应功能需要时使用。
 
 ```powershell
 uv sync
@@ -45,13 +45,12 @@ npm run dev
 
 浏览器打开 <http://127.0.0.1:5173>。只运行本地游客/离线 Agent 不需要 Docker 或 cloud。若不使用 `uv`，可执行 `python -m pip install -e "backend[sync]" -e tui`。
 
-### 可选 cloud、PostgreSQL 和 Qdrant
+### 可选 cloud 和 PostgreSQL
 
 ```powershell
 $env:MINI_AGENT_SECRET_KEY = "replace-with-a-32-byte-development-secret"
 docker compose up -d postgres cloud
 $env:CLOUD_URL = "http://127.0.0.1:8100"
-docker compose up -d qdrant  # 仅在需要向量检索时
 ```
 
 `DATABASE_URL`、`MINI_AGENT_SECRET_KEY` 和 SMTP 只属于 cloud 进程/部署密钥，不要写入 frontend 或本地用户 TOML。

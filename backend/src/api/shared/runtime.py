@@ -34,15 +34,10 @@ def build_user_application(
     project_id: str | None = None,
     job_registry: JobRegistry | None = None,
     job_parent_id: str | None = None,
-    rag_mode: str = "tool",
 ) -> AgentApplication:
     """Build an application with the canonical per-user runtime settings."""
     application_builder = builder or build_application
     runtime_config = state.runtime_config_for_user(user_id)
-    rag_reader = getattr(state.settings, "rag_config_for_user", None)
-    rag_config = rag_reader(user_id) if callable(rag_reader) else {}
-    if rag_mode == "off":
-        rag_config = {**rag_config, "enabled": False}
     runtime_values = runtime_config.get("runtime", {})
     log_full_messages = runtime_values.get("log_full_messages", True) if isinstance(runtime_values, dict) else True
     if not isinstance(log_full_messages, bool):
@@ -68,7 +63,6 @@ def build_user_application(
         else model_config,
         "config_override": {
             **runtime_config,
-            "rag": rag_config,
             "sandbox_config": state.settings.sandbox_config_for_user(user_id),
         },
         "default_timezone": str(state.agent_config_for_user(user_id).get("timezone", DEFAULT_TIME_ZONE)),

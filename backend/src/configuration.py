@@ -112,10 +112,6 @@ class ClientPaths:
         return cache_parent / ".mini_agent-cache" / "logs" / self.root.name
 
     @property
-    def rag_dir(self) -> Path:
-        return self.root / "rag"
-
-    @property
     def plugins_dir(self) -> Path:
         return self.root / "plugins"
 
@@ -253,7 +249,6 @@ class ClientPaths:
         self.root.mkdir(parents=True, exist_ok=True)
         for directory in (
             self.skills_dir,
-            self.rag_dir,
             self.plugins_dir,
             self.mcp_dir,
             self.mcp_resources_dir,
@@ -334,7 +329,7 @@ def initialize_config(paths: ClientPaths, workspace: Path) -> dict[str, object]:
             "tokenizer_model": "",
         },
         "runtime": {"log_full_messages": True, "max_tool_calls": 32},
-        "capabilities": {"skills": True, "rag": False, "plugins": False, "mcp": False},
+        "capabilities": {"skills": True, "plugins": False, "mcp": False},
         "sync": {"auto_save_enabled": False, "auto_save_rule": "idle_5m"},
     }
     _atomic_write(paths.config_file, _to_toml(config))

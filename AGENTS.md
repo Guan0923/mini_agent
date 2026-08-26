@@ -21,7 +21,7 @@ Mini-Agent 是一个 local-first Agent 应用：浏览器前端通过 loopback H
 ```text
 frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
                               ├─ runtime / planning / providers / tools
-                              ├─ local SQLite / RAG / MCP / Sandbox
+                              ├─ local SQLite / MCP / Sandbox
                               └─ optional HTTPS ──> cloud (8100) ──> PostgreSQL
 ```
 
@@ -31,7 +31,7 @@ frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
 - `backend/src/providers/`：通用 JSON/SSE transport 与 provider 适配；不得导入 storage 实现。
 - `backend/src/tools/`：ToolRegistry、Schema、文件/网页/命令/delegation 工具；工具必须保留路径边界、输出上限和审批策略。
 - `backend/src/mcp/`：安全只读 stdio server 与审批型外部 MCP 客户端。
-- `backend/src/storage/`、`sync/`、`observability/`、`rag/`、`sandbox/`：本地存储、加密同步、脱敏日志、检索和沙箱边界。
+- `backend/src/storage/`、`sync/`、`observability/`、`sandbox/`：本地存储、加密同步、脱敏日志和沙箱边界。
 - `frontend/`：React/Vite/TypeScript 客户端，只调用 backend API，不导入 Python 或 backend 实现模块。
 - `cloud/`：账户、邮件、设备授权、密钥封装和加密快照服务；只有 cloud 访问 PostgreSQL、SMTP 和 cloud 主密钥。
 - `tests/`：Python 端到端/契约/单元测试；前端测试位于 `frontend/src/`。
@@ -57,14 +57,12 @@ uv run python -m backend.api
 cd frontend; npm run dev
 ```
 
-可选 cloud/PostgreSQL/Qdrant：
+可选 cloud/PostgreSQL：
 
 ```powershell
 $env:MINI_AGENT_SECRET_KEY = "replace-with-a-32-byte-development-secret"
 docker compose up -d postgres cloud
 $env:CLOUD_URL = "http://127.0.0.1:8100"
-# 只有向量检索需要时才启动 qdrant
-docker compose up -d qdrant
 ```
 
 生产本地模式先执行 `cd frontend; npm run build`，再启动 backend；backend 会托管 `frontend/dist`。TUI 仅用于遗留验证，例如 `uv run python run.py --planner rule "calculate 1 + 1"`。

@@ -83,16 +83,7 @@ def user_paths(data_root: Path, user_id: str, source_config: Path | None = None)
                     "location_enabled": False,
                 },
                 "runtime": {"log_full_messages": True, "max_tool_calls": 32, "terminal_type": "cmd"},
-                "capabilities": {"skills": True, "rag": False, "plugins": False, "mcp": False},
-                "rag": {
-                    "enabled": False,
-                    "algorithm": "hybrid",
-                    "bm25_candidate_k": 20,
-                    "vector_candidate_k": 20,
-                    "top_k": 8,
-                    "embedding_base_url": "http://127.0.0.1:11434",
-                    "embedding_model": "bge-m3",
-                },
+                "capabilities": {"skills": True, "plugins": False, "mcp": False},
                 "providers": {"active_id": ""},
                 "sync": {
                     "auto_save_enabled": False,

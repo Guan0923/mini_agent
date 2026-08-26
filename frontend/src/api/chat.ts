@@ -3,8 +3,6 @@ import { apiUrl } from "./base";
 import { ApiError, errorFrom, notifyUnauthorized } from "./request";
 import { requestJson } from "./request";
 
-export type RagMode = "off" | "tool" | "forced";
-
 export interface StreamOptions {
   sessionId: string;
   threadId?: string;
@@ -17,7 +15,6 @@ export interface StreamOptions {
   providerName?: string;
   model?: RuntimeConfigModel;
   references?: FileReference[];
-  ragMode?: RagMode;
 }
 
 export interface QueuedTurnMessage {
@@ -158,7 +155,6 @@ export async function streamResume(
   providerName?: string,
   model?: RuntimeConfigModel,
   mode: ChatMode = "agent",
-  _ragMode: RagMode = "off",
   fullAccessAcknowledged = false,
 ): Promise<"completed" | "aborted"> {
   if (!sourceNodeId) throw new Error("resume requires a Turn id");

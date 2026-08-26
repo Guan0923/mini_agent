@@ -11,7 +11,6 @@ import {
   restoreSession,
   updateProfile,
   type ProviderConfig,
-  type RagConfig,
   type SessionInfo,
 } from "../api";
 import { changeProjectPath, createProject, createProjectSession, listProjects, removeProject, renameProject, restoreProject, revokeProjectSkillTrust, type ProjectInfo } from "../api/projects";
@@ -67,7 +66,6 @@ function AgentApp() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("medium");
   const [providerConfig, setProviderConfig] = useState<ProviderConfig | null>(null);
-  const [ragEnabled, setRagEnabled] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [removedProjects, setRemovedProjects] = useState<ProjectInfo[]>([]);
@@ -81,7 +79,6 @@ function AgentApp() {
     if (!user?.id) {
       setDisplayMode("medium");
       setProviderConfig(null);
-      setRagEnabled(false);
       return undefined;
     }
     let active = true;
@@ -90,7 +87,6 @@ function AgentApp() {
         if (active) {
           setDisplayMode(effectiveDisplayMode(settings.agent_config.display_mode));
           setProviderConfig(settings.provider_config?.id ? settings.provider_config : null);
-          setRagEnabled(settings.rag_config?.enabled ?? false);
           if (user) {
             const profileName = settings.profile.display_name.trim()
               || user.display_name?.trim()
@@ -654,7 +650,6 @@ function AgentApp() {
       draftMode={draftMode}
       displayMode={displayMode}
       providerConfig={providerConfig}
-      ragEnabled={ragEnabled}
       actionError={actionError}
       settingsOpen={settingsOpen}
       setSettingsOpen={setSettingsOpen}
@@ -693,7 +688,6 @@ function AgentApp() {
       onClearError={() => setActionError(null)}
       onDisplayModeUpdate={(config) => setDisplayMode(effectiveDisplayMode(config.display_mode))}
       onProviderConfigUpdate={setProviderConfig}
-      onRagConfigUpdate={(config: RagConfig) => setRagEnabled(config.enabled)}
     />
   );
 }

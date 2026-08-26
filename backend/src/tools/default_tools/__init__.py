@@ -11,7 +11,6 @@ from backend.sandbox import SandboxLauncher
 from ..base import Tool
 from ..command import WorkspaceCommand
 from ..filesystem import WorkspaceFiles
-from ..read_pdf import read_pdf_tool
 from ..web import DdgrWebSearch, SafeWebFetcher
 from .command import command_tool
 from .filesystem import filesystem_mutation_tools, filesystem_read_tools, upload_file_read_tool
@@ -28,7 +27,6 @@ def build_default_tools(
     fetcher: SafeWebFetcher | None = None,
     upload_files: WorkspaceFiles | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
-    rag_tool: Tool | None = None,
     sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: Mapping[str, object] | None = None,
     sandbox_user_id: str | None = None,
@@ -53,7 +51,6 @@ def build_default_tools(
         *time_tools(),
         *todo_tools(),
         *filesystem_read_tools(workspace_files),
-        read_pdf_tool(workspace),
         *web_tools(
             search
             or DdgrWebSearch(
@@ -80,8 +77,6 @@ def build_default_tools(
     ]
     if upload_files is not None:
         tools.append(upload_file_read_tool(upload_files))
-    if rag_tool is not None:
-        tools.append(rag_tool)
     return tuple(tools)
 
 

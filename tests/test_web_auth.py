@@ -19,7 +19,7 @@ def _state(tmp_path: Path, *, cloud_client=None) -> WebAppState:
 
 def test_default_web_state_is_local_and_does_not_require_postgres(tmp_path: Path) -> None:
     legacy_root = tmp_path / "web"
-    (legacy_root / "rag").mkdir(parents=True)
+    legacy_root.mkdir(parents=True)
     (legacy_root / "mcp").mkdir()
     (legacy_root / "skills").mkdir()
     (legacy_root / "runtime").mkdir()
@@ -33,7 +33,6 @@ def test_default_web_state_is_local_and_does_not_require_postgres(tmp_path: Path
     assert not list(tmp_path.rglob("auth.sqlite3"))
     assert (legacy_root / "config.toml").exists()
     assert (legacy_root / "client.db").read_bytes() == b"legacy"
-    assert (legacy_root / "rag").is_dir()
     assert (legacy_root / "mcp").is_dir()
     assert (legacy_root / "skills").is_dir()
     assert (legacy_root / "runtime").is_dir()

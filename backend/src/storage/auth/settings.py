@@ -26,48 +26,6 @@ from backend.storage.settings_contract import (
 
 from .crypto import _decrypt_secret, _encrypt_secret
 
-DEFAULT_RAG_CONFIG: dict[str, object] = {
-    "enabled": False,
-    "algorithm": "hybrid",
-    "bm25_candidate_k": 20,
-    "vector_candidate_k": 20,
-    "top_k": 8,
-    "embedding_base_url": "http://127.0.0.1:11434",
-    "embedding_model": "bge-m3",
-}
-
-
-def normalize_rag_config(
-    current: Mapping[str, object] | None, values: Mapping[str, object] | None = None
-) -> dict[str, object]:
-    result = dict(DEFAULT_RAG_CONFIG)
-    if isinstance(current, Mapping):
-        result.update(current)
-    if isinstance(values, Mapping):
-        result.update(values)
-    algorithm = str(result.get("algorithm") or "hybrid")
-    if algorithm not in {"hybrid", "bm25", "vector"}:
-        raise ValueError("algorithm must be hybrid, bm25, or vector")
-    for name, minimum, maximum in (("bm25_candidate_k", 1, 100), ("vector_candidate_k", 1, 100), ("top_k", 1, 20)):
-        value = result.get(name)
-        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
-            raise ValueError(f"{name} must be between {minimum} and {maximum}")
-    base_url = str(result.get("embedding_base_url") or "").strip().rstrip("/")
-    if not base_url.startswith(("http://", "https://")):
-        raise ValueError("embedding_base_url must be an HTTP(S) URL")
-    model = str(result.get("embedding_model") or "bge-m3").strip()
-    if not model or len(model) > 200:
-        raise ValueError("embedding_model must not be empty")
-    return {
-        "enabled": bool(result.get("enabled", False)),
-        "algorithm": algorithm,
-        "bm25_candidate_k": int(result["bm25_candidate_k"]),
-        "vector_candidate_k": int(result["vector_candidate_k"]),
-        "top_k": int(result["top_k"]),
-        "embedding_base_url": base_url,
-        "embedding_model": model,
-    }
-
 
 class AuthSettingsMixin:
     @staticmethod
@@ -586,7 +544,6 @@ class AuthSettingsMixin:
             "runtime_config": runtime_config,
             "sandbox_config": self.sandbox_config_for_user(user_id),
             "timezone_options": timezone_options(),
-            "rag_config": self.rag_config_for_user(user_id),
         }
 
     def sandbox_config_for_user(self, user_id: str) -> dict[str, object]:
@@ -606,19 +563,6 @@ class AuthSettingsMixin:
         if config_store is None:
             raise ValueError("sandbox settings require a local config store")
         config_store.update({"sandbox": result})
-        return result
-
-    def rag_config_for_user(self, user_id: str) -> dict[str, object]:
-        config = self._config(user_id)
-        value = config.get("rag")
-        return normalize_rag_config(value if isinstance(value, Mapping) else None)
-
-    def update_rag_config(self, user_id: str, values: Mapping[str, object]) -> dict[str, object]:
-        result = normalize_rag_config(self.rag_config_for_user(user_id), values)
-        config_store = self._config_store(user_id)
-        if config_store is None:
-            raise ValueError("rag settings require a local config store")
-        config_store.update({"rag": result})
         return result
 
     def capability_config_for_user(self, user_id: str) -> dict[str, object]:

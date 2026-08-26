@@ -15,7 +15,6 @@ def test_user_layout_is_canonical_and_rejects_non_uuid_ids(tmp_path: Path) -> No
     assert paths.root == tmp_path / USER_ID
     assert {item.relative_to(paths.root).as_posix() for item in paths.root.iterdir() if item.is_dir()} == {
         "skills",
-        "rag",
         "plugins",
         "mcp",
         "runtime",

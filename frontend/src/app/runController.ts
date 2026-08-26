@@ -45,7 +45,6 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       providerName: request.providerName,
       model: request.model,
       references: request.references,
-      ragMode: request.ragMode,
     } as const;
 
     try {
@@ -60,7 +59,6 @@ export function createRunController(callbacks: RunControllerCallbacks) {
             request.providerName,
             request.model,
             request.mode,
-            request.ragMode,
             request.permissionMode === "full_access",
           )
         : request.rewindTurnId

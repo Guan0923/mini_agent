@@ -106,7 +106,7 @@ class UserSettingsStore(AuthSettingsMixin):
                         "disk_mib": 0,
                     },
                 },
-                "capabilities": {"skills": True, "rag": False, "plugins": False, "mcp": False},
+                "capabilities": {"skills": True, "plugins": False, "mcp": False},
                 "providers": {"active_id": ""},
                 "sync": {
                     "auto_save_enabled": False,
@@ -271,7 +271,6 @@ class PerUserSettingsRepository:
             "update_runtime_config",
             # Sandbox configuration is deliberately local-only and must not
             # mark the cloud event stream dirty.
-            "update_rag_config",
             "update_provider_config",
             "add_provider_config",
             "update_provider_config_by_id",
