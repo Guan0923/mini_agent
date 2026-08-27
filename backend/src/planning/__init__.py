@@ -9,6 +9,7 @@ from .base import (
     Planner,
     RunFinalizer,
     SkillSelector,
+    TitleGenerator,
 )
 from .capabilities import PlannerCapabilities
 from .llm import LLMPlanner
@@ -24,5 +25,6 @@ __all__ = [
     "PlanningError",
     "RuleBasedPlanner",
     "SkillSelector",
+    "TitleGenerator",
     "RunFinalizer",
 ]

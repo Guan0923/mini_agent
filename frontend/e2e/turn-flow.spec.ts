@@ -13,6 +13,19 @@ async function send(page: import("@playwright/test").Page, text: string): Promis
   await expect(page.getByRole("button", { name: "发送" })).toBeVisible({ timeout: 15_000 });
 }
 
+test("first main Turn receives a dedicated model-generated title", async ({ page }) => {
+  const guest = await page.request.post("/api/auth/guest");
+  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
+  const sidebar = await page.request.post("/api/sidebar-threads", { data: {} });
+  expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "新对话", exact: true }).click();
+  await send(page, "请生成这个对话的模型标题");
+
+  await expect(page.getByRole("button", { name: "浏览器生成的新标题很", exact: true })).toBeVisible();
+});
+
 test("real Turn SSE flow supports tools, rewind versions, fork, and compact", async ({ page }) => {
   const guest = await page.request.post("/api/auth/guest");
   expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
@@ -54,7 +67,8 @@ test("real Turn SSE flow supports tools, rewind versions, fork, and compact", as
   await expect(page.locator(".message.user").first()).toContainText("rewound hello");
 
   await page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }).click();
-  await expect(page.getByRole("button", { name: "Playwright Turn", exact: true })).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Playwright Turn", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Playwright Turn（分支）", exact: true })).toBeVisible();
   await expect(page.locator(".message.user").last()).toContainText("next turn");
 
   await page.getByLabel("聊天输入").fill("/compact");

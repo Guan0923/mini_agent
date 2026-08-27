@@ -197,17 +197,14 @@ describe("AgentApp new conversation initialization", () => {
     await expectKnownEmptySession("session-project-new");
   });
 
-  it("keeps the authoritative first-message title after the optimistic title is refreshed", async () => {
+  it("adopts the backend-generated first-message title on refresh", async () => {
     const initial = session("session-title");
     initial.thread_id = initial.session_id;
     api.listSessions.mockResolvedValue([initial]);
     await renderReady();
     await waitFor(() => expect(shell.props?.current?.id).toBe(initial.session_id));
 
-    act(() => {
-      shell.props!.onUpdate(initial.session_id, (current) => ({ ...current, title: "临时乐观标题" }));
-    });
-    await waitFor(() => expect(shell.props?.current?.title).toBe("临时乐观标题"));
+    expect(shell.props?.current?.title).toBe("新对话");
 
     api.listSessions.mockResolvedValue([{ ...initial, title: "第一条用户消息", title_is_custom: false }]);
     await act(async () => {
@@ -243,7 +240,7 @@ describe("AgentApp new conversation initialization", () => {
     expect(shell.props?.current?.messages.map((message) => message.content)).toEqual(["保留消息", "回答"]);
   });
 
-  it("lets the backend inherit the source title when the UI creates a fork", async () => {
+  it("uses the backend branch-suffixed title when the UI creates a fork", async () => {
     const source = { ...session("session-fork"), thread_id: "session-fork", title: "源对话标题" };
     api.listSessions.mockResolvedValue([source]);
     await renderReady();
@@ -268,7 +265,7 @@ describe("AgentApp new conversation initialization", () => {
       sidebar_thread: {
         thread_id: "thread-fork",
         session_id: source.session_id,
-        title: source.title,
+        title: `${source.title}（分支）`,
         created_at: "2026-08-26T00:00:00Z",
         updated_at: "2026-08-26T00:00:00Z",
         title_is_custom: false,
@@ -281,7 +278,7 @@ describe("AgentApp new conversation initialization", () => {
     });
 
     expect(api.forkTurn).toHaveBeenCalledWith("turn-source");
-    expect(shell.props?.current).toMatchObject({ id: "thread-fork", title: "源对话标题" });
+    expect(shell.props?.current).toMatchObject({ id: "thread-fork", title: "源对话标题（分支）" });
   });
 
   it("attaches exactly once to a running Turn loaded after refresh", async () => {

@@ -15,7 +15,7 @@ from backend.domain import (
     new_session_id,
 )
 from backend.jobs import JobRegistry, JobScope, JobScopeKind
-from backend.planning.base import ContextCompactor
+from backend.planning.base import ContextCompactor, TitleGenerator
 from backend.planning.context_management import ContextCompactionResult
 
 from ..core.config import RunnerSettings
@@ -216,6 +216,21 @@ class AgentRunner:
             message_count = len(runtime.state.messages)
             return ContextCompactionResult(False, message_count, message_count)
         return self.planner.compact_context(runtime)
+
+    def generate_title(self, runtime: AgentRuntime, first_user_text: str) -> str:
+        """Generate one isolated title after the conversation Turn has finished."""
+
+        self.bind(runtime)
+        if runtime.state.status == "running":
+            raise RuntimeError("Current turn is still running; its title cannot be generated.")
+        if runtime.state.current_run is None:
+            raise RuntimeError("Conversation title generation requires a completed run.")
+        if not isinstance(self.planner, TitleGenerator):
+            raise PlanningError("Conversation title generation requires the LLM planner.")
+        runtime.services.publish = RunEventPublisher(runtime)
+        title = self.planner.generate_title(runtime, first_user_text)
+        runtime.save()
+        return title
 
     def run(self, runtime: AgentRuntime) -> RunState:
         """Execute one turn using the single runtime parameter."""

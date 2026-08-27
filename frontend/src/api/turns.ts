@@ -13,14 +13,11 @@ export async function patchTurnCurrentData(turnId: string, currentDataIdx: numbe
   });
 }
 
-export async function forkTurn(
-  turnId: string,
-  title?: string,
-): Promise<{ turn: RuntimeStateNode; sidebar_thread: SidebarThread }> {
+export async function forkTurn(turnId: string): Promise<{ turn: RuntimeStateNode; sidebar_thread: SidebarThread }> {
   return requestJson(`/api/turns/${encodeURIComponent(turnId)}/fork`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title }),
+    body: JSON.stringify({}),
   });
 }
 

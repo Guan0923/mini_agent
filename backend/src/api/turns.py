@@ -103,7 +103,6 @@ class TurnConfigPatch(BaseModel):
 class ForkTurnRequest(BaseModel):
     id: str | None = Field(default=None, min_length=1, max_length=200)
     thread_id: str | None = Field(default=None, min_length=1, max_length=200)
-    title: str | None = Field(default=None, max_length=120)
 
 
 def _turn(store, turn_id: str) -> RuntimeState:
@@ -379,14 +378,13 @@ def fork_turn(
     if source_sidebar is None or source_sidebar.session_id != source.session_id:
         raise HTTPException(status_code=409, detail="源 SidebarThread 不可用。")
     thread_id = body.thread_id or new_thread_id()
-    explicit_title = body.title.strip() if body.title else ""
     try:
         forked = store.fork_turn_node(turn_id, new_turn_id=body.id, thread_id=thread_id)
         sidebar = store.create_sidebar_thread(
             session_id=source.session_id,
             thread_id=thread_id,
-            title=explicit_title or source_sidebar.title,
-            title_is_custom=bool(explicit_title),
+            title=f"{source_sidebar.title}（分支）",
+            title_is_custom=False,
         )
     except (ValueError, RuntimeStateValidationError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

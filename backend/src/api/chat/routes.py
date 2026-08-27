@@ -12,10 +12,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from backend.domain import FAILED_TERMINAL_MESSAGE, terminal_error_text
 from backend.domain.runtime_state import NodeFrame
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
+from backend.planning.llm.titles import normalize_conversation_title
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.sandbox import ApprovalStore, SandboxInitializationError
 from backend.storage.auth.crypto import SecretDecryptionError
+from backend.storage.codec import is_default_session_title
 
 from ..active_turn_stream import ActiveTurnStream
 from ..auth.types import UserIdentity
@@ -55,6 +57,55 @@ def _runtime_stream_lock_registry(state: object) -> dict[str, Any]:
         stream_locks = {"__lock__": threading.RLock(), "keys": set()}
         setattr(state, "active_runtime_stream_locks", stream_locks)
     return stream_locks
+
+
+def _first_main_user_text(store, session_id: str, turn_id: str) -> str:
+    """Return text only when ``turn_id`` is the Session main Thread's root Turn."""
+
+    root = next(
+        (
+            node
+            for node in store.load_nodes(session_id)
+            if node.id == turn_id and node.thread_id == session_id and not node.parent_id
+        ),
+        None,
+    )
+    if root is None:
+        return ""
+    content = root.user_message.get("content", [])
+    if not content or content[0].get("type") != "text":
+        return ""
+    text = content[0].get("text")
+    return text if isinstance(text, str) else ""
+
+
+def _auto_title_main_thread(
+    conversation,
+    store,
+    *,
+    session_id: str,
+    thread_id: str,
+    turn_id: str,
+) -> None:
+    """Name an untouched main Thread without affecting the completed chat result."""
+
+    if thread_id != session_id:
+        return
+    sidebar = store.get_sidebar_thread(thread_id)
+    if sidebar is None or sidebar.title_is_custom or not is_default_session_title(sidebar.title):
+        return
+    first_user_text = _first_main_user_text(store, session_id, turn_id)
+    fallback = normalize_conversation_title(first_user_text)
+    if not fallback:
+        return
+    try:
+        title = normalize_conversation_title(conversation.generate_title(first_user_text)) or fallback
+    except Exception:
+        title = fallback
+    latest = store.get_sidebar_thread(thread_id)
+    if latest is None or latest.title_is_custom or not is_default_session_title(latest.title):
+        return
+    store.update_sidebar_thread(thread_id, title=title, title_is_custom=False)
 
 
 class RuntimeModelRequest(BaseModel):
@@ -289,6 +340,7 @@ def _stream(
 
     def worker() -> None:
         app = None
+        conversation = None
         try:
             outer_job = job_holder["job"]
             job_parent_id = outer_job.info().id if outer_job is not None else None
@@ -457,6 +509,14 @@ def _stream(
                 if requested_status == "running":
                     pass
                 else:
+                    if conversation is not None and final_node is not None:
+                        _auto_title_main_thread(
+                            conversation,
+                            node_store,
+                            session_id=final_node.session_id,
+                            thread_id=final_node.thread_id,
+                            turn_id=final_node.id,
+                        )
                     terminal_type = _terminal_type_for_status(terminal_status, category)
                     enqueue_terminal(
                         terminal_type,

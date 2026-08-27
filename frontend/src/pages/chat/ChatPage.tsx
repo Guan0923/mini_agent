@@ -848,7 +848,6 @@ export default function ChatPage({
       const messages = [...visibleMessages, userMessage, assistantMessage];
       return {
         ...current,
-        title: current.title === "新对话" ? prompt.slice(0, 18) + (prompt.length > 18 ? "…" : "") : current.title,
         messageCount: messages.filter((message) => message.role === "user" || message.role === "assistant").length,
         messages,
         runtimeNodes,

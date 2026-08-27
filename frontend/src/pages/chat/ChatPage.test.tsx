@@ -219,11 +219,47 @@ function ConfigHarness() {
   );
 }
 
+function NewConversationTitleHarness({ onRun }: { onRun: ReturnType<typeof vi.fn> }) {
+  const [conversation, setConversation] = useState<Conversation>({
+    id: "session-title",
+    sessionId: "session-title",
+    threadId: "session-title",
+    title: "新对话",
+    runtimeNodes: [],
+    messagesLoaded: true,
+    messages: [],
+  });
+  return (
+    <AntApp>
+      <ChatPage
+        conversation={conversation}
+        onUpdate={(_id, updater) => setConversation((current) => updater(current))}
+        onNew={async () => conversation.id}
+        onNavigate={() => undefined}
+        onEnsureSession={async () => conversation.sessionId!}
+        onRun={async (request) => { onRun(request); }}
+      />
+      <output data-testid="conversation-title">{conversation.title}</output>
+    </AntApp>
+  );
+}
+
 describe("ChatPage rewind projection", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.mocked(compactTurn).mockReset();
     vi.mocked(patchRuntimeConfig).mockReset();
+  });
+
+  it("keeps the default title while the backend generates the first-message title", async () => {
+    const onRun = vi.fn();
+    render(<NewConversationTitleHarness onRun={onRun} />);
+
+    await userEvent.type(screen.getByLabelText("聊天输入"), "这是一个超过十八字符的首条用户消息内容");
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("conversation-title")).toHaveTextContent("新对话");
   });
 
   it("prunes descendants only when the edited message is submitted for rewind", async () => {

@@ -34,6 +34,7 @@ RuntimeOperation = Literal[
     "decision",
     "plan",
     "summarize",
+    "title",
     "finalize",
 ]
 OutputMode = Literal["text", "json", "tools"]

@@ -145,6 +145,13 @@ class ConversationService(ConversationSessionController):
             raise RuntimeError("The completed Compaction Turn is unavailable.")
         return compacted
 
+    def generate_title(self, first_user_text: str) -> str:
+        """Generate a title with the active conversation's completed runtime."""
+
+        if self.runtime is None:
+            raise RuntimeError("Conversation runtime is unavailable for title generation.")
+        return self.runner.generate_title(self.runtime, first_user_text)
+
     def _node_bridge_for_runtime(
         self,
         prompt: str,
