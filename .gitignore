@@ -1,105 +1,119 @@
-# Secrets and local environment files
+# Secrets and machine-local environment
 .env
 .env.*
 !.env.example
+.python-version
 
-# Python caches, virtual environments, packages and coverage
+# Python bytecode, tooling and test artifacts
 __pycache__/
 *.py[cod]
-*.egg-info/
-.python-version
-.venv/
-venv/
-env/
-build/
-dist/
-.tox/
-.nox/
-.hypothesis/
-.ruff_cache/
-.mypy_cache/
-.coverage
-coverage.xml
-htmlcov/
-
-# Python test artifacts
+*$py.class
 .pytest_cache/
 .pytest_tmp*/
 .pytest-*/
 pytest-of-*/
 pytest_*.txt
 *.out.txt
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.pyre/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
 
-# Local databases and runtime state
+# Python environments and build output
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+site/
+*.egg
+*.egg-info/
+.eggs/
+wheels/
+pip-wheel-metadata/
+
+# JavaScript, Vite and package-manager artifacts
+node_modules/
+.vite/
+.cache/
+.npm/
+.npm-cache/
+.pnpm-store/
+.nyc_output/
+coverage/
+*.tsbuildinfo
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Browser and end-to-end test output
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+frontend/.review-*.png
+
+# Local databases, runtime state and logs
 *.db
 *.db-*
 *.sqlite
-*.sqlite3
 *.sqlite-*
+*.sqlite3
+*.log
+*.jsonl
+logs/
+webapp-data/
+backend/webapp-data/
 /.mini_agent-cache/
 /.mini_agent/*
 !/.mini_agent/skills/
 !/.mini_agent/skills/**
-webapp-data/
-backend/webapp-data/
-logs/
-*.log
-*.jsonl
+/.mini_agent-local/
 
-# Local backend and sandbox launch output
+# Backend, frontend and benchmark run artifacts
 /backend_run*.log
 /backend_stdout.log
 /backend_stderr.log
 /.backend.restart-*.log
 /.frontend.restart-*.log
-
-# JavaScript and frontend artifacts
-node_modules/
-frontend/dist/
-frontend/.vite/
-frontend/.cache/
-frontend/.review-*.png
-.npm/
-.npm-cache/
-.pnpm-store/
-.pnpm-debug.log
-.nyc_output/
-coverage/
-frontend/coverage/
-
-# Browser and e2e test output
-playwright-report/
-test-results/
-blob-report/
-
-# Benchmark, uv and agent task caches
 benchmarks/output/
 benchmarks/artifacts/
-bt_*/
-/.tmp-*/
-/.tmp_*/
+
+# uv and temporary task caches
 /.uv-cache*/
 /.uv-python*/
-/.mini_agent-local/
+/bt_*/
+/.tmp-*/
+/.tmp_*/
 /.h-*/
 /.p-*/
 /.h[0-9]*/
 /.p[0-9]*/
 
-# Local editor and task metadata
-.reasonix/
-.dsh-token-usage.json
+# Editors, OS metadata and local agent state
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# Linked worktrees
-.worktrees/
-
-# Local agent metadata and private notes
+.reasonix/
+.dsh-token-usage.json
 .agents/
 .claude/
 .scripts/
 学习笔记.md
+
+# Linked worktrees
+.worktrees/
