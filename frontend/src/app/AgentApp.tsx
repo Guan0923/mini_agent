@@ -24,6 +24,7 @@ import type { QueuedMessage } from "./types";
 import { loadQueuedMessages, saveQueuedMessages } from "./queuedMessages";
 import { effectiveDisplayMode } from "./displayMode";
 import { projectTurnPath } from "./runtimeDetailProjection";
+import { isRuntimeTurnNode } from "./runtimeNodeNormalization";
 import type {
   ChatMessage,
   ChatMode,
@@ -31,15 +32,16 @@ import type {
   Page,
   DisplayMode,
   RuntimeStateNode,
+  RuntimeTreeNode,
 } from "../types";
 
 function withLoadedTurns(
   conversation: Conversation,
-  nodes: RuntimeStateNode[],
+  nodes: RuntimeTreeNode[],
   preferredActiveTurnId?: string,
 ): Conversation {
   const threadId = conversation.threadId ?? conversation.sessionId;
-  const threadNodes = nodes.filter((node) => node.thread_id === threadId);
+  const threadNodes = nodes.filter(isRuntimeTurnNode).filter((node) => node.thread_id === threadId);
   const selected = threadNodes.find((node) => node.id === (preferredActiveTurnId ?? conversation.activeTurnId));
   const parentIds = new Set(threadNodes.map((node) => node.parent_id).filter(Boolean));
   const leaves = threadNodes
@@ -312,11 +314,11 @@ function AgentApp() {
   }
 
   async function recoverConversation(conversationId: string, sessionId: string, turnId?: string): Promise<void> {
-    let nodes: RuntimeStateNode[] = [];
+    let nodes: RuntimeTreeNode[] = [];
     for (let attempt = 0; attempt < 40; attempt += 1) {
       nodes = await getSessionNodes(sessionId);
       const target = turnId ? nodes.find((node) => node.id === turnId) : undefined;
-      if (!target || target.status !== "running") break;
+      if (!target || !isRuntimeTurnNode(target) || target.status !== "running") break;
       await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 50));
     }
     updateConversation(conversationId, (conversation) => withLoadedTurns(conversation, nodes));
@@ -334,7 +336,9 @@ function AgentApp() {
   useEffect(() => {
     if (!current?.sessionId || !current.runtimeNodes || activeRunsRef.current.has(current.id)) return;
     const activeTurn = current.runtimeNodes.find(
-      (node) => node.id === current.activeTurnId && node.status === "running",
+      (node): node is RuntimeStateNode => isRuntimeTurnNode(node)
+        && node.id === current.activeTurnId
+        && node.status === "running",
     );
     if (!activeTurn) return;
     void runConversation({

@@ -2,7 +2,7 @@ import { act, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionInfo } from "../api";
 import type { ProjectInfo } from "../api/projects";
-import type { AuthUser, RuntimeStateNode } from "../types";
+import type { AuthUser, RuntimeRootNode, RuntimeStateNode } from "../types";
 import type { AgentShellProps } from "./AgentShell";
 import AgentApp from "./AgentApp";
 
@@ -88,7 +88,7 @@ function turn(
   sessionId: string,
   threadId: string,
   turnId: string,
-  parent?: RuntimeStateNode,
+  parent?: RuntimeStateNode | RuntimeRootNode,
   userText = "源消息",
 ): RuntimeStateNode {
   return {
@@ -197,17 +197,14 @@ describe("AgentApp new conversation initialization", () => {
     await expectKnownEmptySession("session-project-new");
   });
 
-  it("keeps the authoritative first-message title after the optimistic title is refreshed", async () => {
+  it("adopts the backend-generated first-message title on refresh", async () => {
     const initial = session("session-title");
     initial.thread_id = initial.session_id;
     api.listSessions.mockResolvedValue([initial]);
     await renderReady();
     await waitFor(() => expect(shell.props?.current?.id).toBe(initial.session_id));
 
-    act(() => {
-      shell.props!.onUpdate(initial.session_id, (current) => ({ ...current, title: "临时乐观标题" }));
-    });
-    await waitFor(() => expect(shell.props?.current?.title).toBe("临时乐观标题"));
+    expect(shell.props?.current?.title).toBe("新对话");
 
     api.listSessions.mockResolvedValue([{ ...initial, title: "第一条用户消息", title_is_custom: false }]);
     await act(async () => {
@@ -219,10 +216,15 @@ describe("AgentApp new conversation initialization", () => {
 
   it("keeps the active rewind boundary when sidebar summaries and the full Turn tree reload", async () => {
     const initial = { ...session("session-rewind"), thread_id: "session-rewind" };
-    const root = turn(initial.session_id, initial.thread_id, "turn-root", undefined, "保留消息");
+    const syntheticRoot: RuntimeRootNode = {
+      session_id: initial.session_id,
+      thread_id: initial.thread_id,
+      id: "turn-synthetic-root",
+    };
+    const root = turn(initial.session_id, initial.thread_id, "turn-root", syntheticRoot, "保留消息");
     const descendant = turn(initial.session_id, initial.thread_id, "turn-descendant", root, "应隐藏消息");
     api.listSessions.mockResolvedValue([initial]);
-    api.getSessionNodes.mockResolvedValue([root, descendant]);
+    api.getSessionNodes.mockResolvedValue([syntheticRoot, root, descendant]);
     await renderReady();
     await waitFor(() => expect(shell.props?.current?.activeTurnId).toBe(descendant.id));
 
@@ -239,11 +241,11 @@ describe("AgentApp new conversation initialization", () => {
     });
 
     expect(shell.props?.current?.activeTurnId).toBe(root.id);
-    expect(shell.props?.current?.runtimeNodes).toHaveLength(2);
+    expect(shell.props?.current?.runtimeNodes).toHaveLength(3);
     expect(shell.props?.current?.messages.map((message) => message.content)).toEqual(["保留消息", "回答"]);
   });
 
-  it("lets the backend inherit the source title when the UI creates a fork", async () => {
+  it("uses the backend branch-suffixed title when the UI creates a fork", async () => {
     const source = { ...session("session-fork"), thread_id: "session-fork", title: "源对话标题" };
     api.listSessions.mockResolvedValue([source]);
     await renderReady();
@@ -268,7 +270,7 @@ describe("AgentApp new conversation initialization", () => {
       sidebar_thread: {
         thread_id: "thread-fork",
         session_id: source.session_id,
-        title: source.title,
+        title: `${source.title}（分支）`,
         created_at: "2026-08-26T00:00:00Z",
         updated_at: "2026-08-26T00:00:00Z",
         title_is_custom: false,
@@ -281,7 +283,7 @@ describe("AgentApp new conversation initialization", () => {
     });
 
     expect(api.forkTurn).toHaveBeenCalledWith("turn-source");
-    expect(shell.props?.current).toMatchObject({ id: "thread-fork", title: "源对话标题" });
+    expect(shell.props?.current).toMatchObject({ id: "thread-fork", title: "源对话标题（分支）" });
   });
 
   it("attaches exactly once to a running Turn loaded after refresh", async () => {

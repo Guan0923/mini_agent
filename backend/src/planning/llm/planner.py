@@ -11,9 +11,10 @@ from .formats import FormatMixin
 from .repairs import RepairMixin
 from .requests import RequestMixin
 from .selection import SelectionMixin
+from .titles import TitleMixin
 
 
-class LLMPlanner(DecisionMixin, SelectionMixin, RepairMixin, RequestMixin, FormatMixin):
+class LLMPlanner(DecisionMixin, SelectionMixin, RepairMixin, RequestMixin, FormatMixin, TitleMixin):
     name = "llm"
     _MAX_INVALID_OUTPUT_PREVIEW_CHARS = 2_000
     _UNTRUSTED_TOOL_RESULT_POLICY = (

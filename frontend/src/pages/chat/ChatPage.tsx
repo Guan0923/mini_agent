@@ -29,7 +29,7 @@ import { messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "../
 import { leafNodes } from "../../app/runtimeNodeReducer";
 import type { QueuedMessage } from "../../app/types";
 import { mergeQueuedMessages } from "../../app/queuedMessages";
-import { DEFAULT_RUNTIME_NODE_MODEL, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
+import { DEFAULT_RUNTIME_NODE_MODEL, isRuntimeTurnNode, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
 import type {
   ChatMessage,
   ChatMode,
@@ -42,6 +42,7 @@ import type {
   ReasoningEffort,
   RuntimeNodeModel,
   RuntimeStateNode,
+  RuntimeTreeNode,
 } from "../../types";
 
 interface Props {
@@ -214,7 +215,7 @@ export default function ChatPage({
     );
     if (conversation?.activeTurnId) {
       const persisted = nodes.find((node) => node.id === conversation.activeTurnId);
-      if (persisted) return persisted;
+      if (persisted && isRuntimeTurnNode(persisted)) return persisted;
     }
     const sessionLeaves = leafNodes(nodes, conversation?.sessionId);
     if (!sessionLeaves.length) return undefined;
@@ -306,7 +307,10 @@ export default function ChatPage({
       const total = current.usage?.total_tokens;
       const context = current.model?.context_length;
       if (typeof total === "number" && typeof context === "number" && context > 0) return { total, context };
-      current = current.parent_id ? byKey.get(`${current.parent_session_id}:${current.parent_id}`) : undefined;
+      const parent: RuntimeTreeNode | undefined = current.parent_id
+        ? byKey.get(`${current.parent_session_id}:${current.parent_id}`)
+        : undefined;
+      current = parent && isRuntimeTurnNode(parent) ? parent : undefined;
     }
     return undefined;
   }
@@ -848,7 +852,6 @@ export default function ChatPage({
       const messages = [...visibleMessages, userMessage, assistantMessage];
       return {
         ...current,
-        title: current.title === "新对话" ? prompt.slice(0, 18) + (prompt.length > 18 ? "…" : "") : current.title,
         messageCount: messages.filter((message) => message.role === "user" || message.role === "assistant").length,
         messages,
         runtimeNodes,
@@ -1033,7 +1036,7 @@ export default function ChatPage({
   async function changeMessageVersion(message: ChatMessage, direction: -1 | 1) {
     if (!conversation || !message.nodeId || interactionBusy) return;
     const turn = conversation.runtimeNodes?.find((item) => item.id === message.nodeId);
-    if (!turn) return;
+    if (!turn || !isRuntimeTurnNode(turn)) return;
     const nextIndex = turn.current_data_idx + direction;
     if (nextIndex < 0 || nextIndex >= turn.data.length) return;
     try {
@@ -1051,7 +1054,7 @@ export default function ChatPage({
 
   function messageVersion(message: ChatMessage) {
     const turn = conversation?.runtimeNodes?.find((item) => item.id === message.nodeId);
-    return turn ? { index: turn.current_data_idx, total: turn.data.length } : undefined;
+    return turn && isRuntimeTurnNode(turn) ? { index: turn.current_data_idx, total: turn.data.length } : undefined;
   }
 
   function scrollToBottom() {

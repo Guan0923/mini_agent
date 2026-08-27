@@ -74,8 +74,10 @@ class DeterministicCompactionClient:
         return 100
 
     def run(self, runtime) -> PreparedResponse:
+        if runtime.exchange.operation == "title":
+            return PreparedResponse(AssistantMessage(content="“浏览器生成的新标题很长”"), {"total_tokens": 1})
         if runtime.exchange.operation != "summarize":
-            raise RuntimeError("The E2E model only supports compaction summaries.")
+            raise RuntimeError("The E2E model only supports title and compaction requests.")
         sleep(0.5)
         return PreparedResponse(AssistantMessage(content=STRUCTURED_CHECKPOINT), {"total_tokens": 1})
 

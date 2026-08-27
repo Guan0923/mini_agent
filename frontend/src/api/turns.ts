@@ -1,7 +1,7 @@
-import type { RuntimeStateNode, SidebarThread } from "../types";
+import type { RuntimeStateNode, RuntimeTreeNode, SidebarThread } from "../types";
 import { requestJson } from "./request";
 
-export async function listTurns(sessionId: string): Promise<RuntimeStateNode[]> {
+export async function listTurns(sessionId: string): Promise<RuntimeTreeNode[]> {
   return requestJson(`/api/turns?session_id=${encodeURIComponent(sessionId)}`);
 }
 
@@ -13,14 +13,11 @@ export async function patchTurnCurrentData(turnId: string, currentDataIdx: numbe
   });
 }
 
-export async function forkTurn(
-  turnId: string,
-  title?: string,
-): Promise<{ turn: RuntimeStateNode; sidebar_thread: SidebarThread }> {
+export async function forkTurn(turnId: string): Promise<{ turn: RuntimeStateNode; sidebar_thread: SidebarThread }> {
   return requestJson(`/api/turns/${encodeURIComponent(turnId)}/fork`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title }),
+    body: JSON.stringify({}),
   });
 }
 

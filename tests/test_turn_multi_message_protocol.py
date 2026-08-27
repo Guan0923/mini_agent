@@ -6,6 +6,7 @@ from backend.domain.runtime_state import (
     InMemoryNodeStore,
     NodeFrame,
     NodeWriter,
+    RuntimeRootState,
     RuntimeState,
     RuntimeStateValidationError,
 )
@@ -14,11 +15,12 @@ from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 
 
-def make_running_turn() -> RuntimeState:
+def make_running_turn(*, parent: RuntimeRootState | None = None) -> RuntimeState:
     return RuntimeState.create(
         session_id="session_1",
         thread_id="session_1",
         id="turn_1",
+        parent=parent,
         user_content=[{"type": "text", "text": "start", "status": "success"}],
         provider_name="local",
     )
@@ -44,8 +46,9 @@ def test_running_turn_may_end_in_user_but_terminal_turn_must_end_in_assistant() 
 
 def test_writer_emits_append_message_then_message_indexed_item_and_text_operations() -> None:
     frames: list[NodeFrame] = []
-    writer = NodeWriter(InMemoryNodeStore(), emit=frames.append)
-    turn = writer.create(make_running_turn())
+    store = InMemoryNodeStore()
+    writer = NodeWriter(store, emit=frames.append)
+    turn = writer.create(make_running_turn(parent=store.ensure_root_node("session_1", id="turn_root")))
     turn = writer.append_message(
         turn,
         {

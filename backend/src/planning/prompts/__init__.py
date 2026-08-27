@@ -9,7 +9,7 @@ from importlib.resources import files
 from backend.domain import PlanningError
 
 _MODE_SLOT = "{{MODE_PROMPT}}"
-_PROMPT_NAMES = ("instruction", "default", "plan", "agent")
+_PROMPT_NAMES = ("instruction", "default", "plan", "agent", "title")
 
 
 class PromptConfigurationError(PlanningError):
@@ -80,3 +80,10 @@ def compose_system_prompt(mode: str) -> str:
     """Return the complete main-loop system prompt for one runtime mode."""
 
     return load_prompt_templates().compose(mode)
+
+
+@lru_cache(maxsize=1)
+def load_title_prompt() -> str:
+    """Return the standalone conversation-title system prompt."""
+
+    return _read_prompt("title")
