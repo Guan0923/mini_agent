@@ -4,7 +4,9 @@ import type {
   ReasoningEffort,
   RuntimeNodeModel,
   RuntimeNodeUsage,
+  RuntimeRootNode,
   RuntimeStateNode,
+  RuntimeTreeNode,
   ThinkingMode,
 } from "../types";
 
@@ -71,22 +73,44 @@ export function normalizeRuntimeNodeModel(value: unknown): RuntimeNodeModel {
   };
 }
 
-export function normalizeRuntimeNode(node: RuntimeStateNode): RuntimeStateNode {
-  if (!node || typeof node !== "object" || node.version !== "0.0.1") {
+export function isRuntimeRootNode(node: unknown): node is RuntimeRootNode {
+  if (!node || typeof node !== "object" || Array.isArray(node)) return false;
+  const raw = node as Record<string, unknown>;
+  const keys = Object.keys(raw).sort();
+  return keys.length === 3
+    && keys[0] === "id"
+    && keys[1] === "session_id"
+    && keys[2] === "thread_id"
+    && typeof raw.id === "string" && raw.id.length > 0
+    && typeof raw.session_id === "string" && raw.session_id.length > 0
+    && raw.thread_id === raw.session_id;
+}
+
+export function isRuntimeTurnNode(node: RuntimeTreeNode): node is RuntimeStateNode {
+  return "version" in node;
+}
+
+export function normalizeRuntimeNode(node: RuntimeStateNode): RuntimeStateNode;
+export function normalizeRuntimeNode(node: RuntimeRootNode): RuntimeRootNode;
+export function normalizeRuntimeNode(node: RuntimeTreeNode): RuntimeTreeNode;
+export function normalizeRuntimeNode(node: RuntimeTreeNode): RuntimeTreeNode {
+  if (isRuntimeRootNode(node)) return structuredClone(node);
+  const turn = node as RuntimeStateNode;
+  if (!turn || typeof turn !== "object" || turn.version !== "0.0.1") {
     throw new Error("Unsupported Turn version");
   }
   for (const key of ["thread_id", "parent_thread_id", "session_id", "parent_session_id", "id", "parent_id", "user", "provider_name", "cwd", "timestamp"] as const) {
-    if (typeof node[key] !== "string") throw new Error(`Invalid Turn field: ${key}`);
+    if (typeof turn[key] !== "string") throw new Error(`Invalid Turn field: ${key}`);
   }
-  if (!node.thread_id || !node.session_id || !node.id || !node.provider_name) throw new Error("Turn identifiers are required");
-  if (!Number.isInteger(node.firstKeptItemSize) || node.firstKeptItemSize < 0) throw new Error("Invalid firstKeptItemSize");
-  if (typeof node.compactionId !== "string" || !node.compactionId) throw new Error("Invalid compactionId");
-  if (!["running", "success", "paused", "failed"].includes(node.status)) throw new Error("Invalid Turn status");
-  if (!PERMISSION_MODES.has(node.permission_mode) || !RUNNING_MODES.has(node.running_mode)) throw new Error("Invalid Turn mode");
-  if (!Array.isArray(node.data) || !Number.isInteger(node.current_data_idx) || !node.data[node.current_data_idx]) {
+  if (!turn.thread_id || !turn.session_id || !turn.id || !turn.provider_name) throw new Error("Turn identifiers are required");
+  if (!Number.isInteger(turn.firstKeptItemSize) || turn.firstKeptItemSize < 0) throw new Error("Invalid firstKeptItemSize");
+  if (typeof turn.compactionId !== "string" || !turn.compactionId) throw new Error("Invalid compactionId");
+  if (!["running", "success", "paused", "failed"].includes(turn.status)) throw new Error("Invalid Turn status");
+  if (!PERMISSION_MODES.has(turn.permission_mode) || !RUNNING_MODES.has(turn.running_mode)) throw new Error("Invalid Turn mode");
+  if (!Array.isArray(turn.data) || !Number.isInteger(turn.current_data_idx) || !turn.data[turn.current_data_idx]) {
     throw new Error("Invalid Turn data/current_data_idx");
   }
-  for (const version of node.data) {
+  for (const version of turn.data) {
     if (!Array.isArray(version) || version.length === 0) throw new Error("A Turn version must contain Messages");
     for (let index = 0; index < version.length; index += 1) {
       const message = version[index];
@@ -98,16 +122,16 @@ export function normalizeRuntimeNode(node: RuntimeStateNode): RuntimeStateNode {
         throw new Error("A user Message must contain one text Item");
       }
     }
-    if (node.status !== "running" && version[version.length - 1]?.role !== "assistant") throw new Error("A non-running Turn must end with assistant");
+    if (turn.status !== "running" && version[version.length - 1]?.role !== "assistant") throw new Error("A non-running Turn must end with assistant");
   }
-  const model = objectValue(node.model);
+  const model = objectValue(turn.model);
   const normalizedModel = normalizeRuntimeNodeModel(model);
   if (Object.keys(normalizedModel).some((key) => model[key] !== normalizedModel[key as keyof RuntimeNodeModel])) {
     throw new Error("Invalid Turn model");
   }
-  const usage = objectValue(node.usage);
+  const usage = objectValue(turn.usage);
   for (const key of ["input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "total_tokens"]) {
     if (!(key in usage) || (usage[key] !== null && tokenCount(usage[key]) === null)) throw new Error("Invalid Turn usage");
   }
-  return structuredClone(node);
+  return structuredClone(turn);
 }

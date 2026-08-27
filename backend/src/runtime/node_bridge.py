@@ -13,6 +13,7 @@ from backend.domain.runtime_state import (
     NodeStatus,
     NodeWriter,
     RuntimeNodeStore,
+    RuntimeRootState,
     RuntimeState,
     RuntimeStateTree,
     RuntimeStateValidationError,
@@ -87,7 +88,7 @@ class RuntimeEventNodeBridge:
         self.cwd = cwd
         self.references = [dict(item) for item in references or []]
         self.writer = NodeWriter(store, emit=emit)
-        self.parent: RuntimeState | None = None
+        self.parent: RuntimeState | RuntimeRootState | None = None
         self.assistant: RuntimeState | None = None
         self.last_node: RuntimeState | None = None
         self.assistant_blocks: list[dict[str, Any]] = []
@@ -136,13 +137,16 @@ class RuntimeEventNodeBridge:
         except KeyError:
             return target.clone()
 
-    def _latest_parent(self) -> RuntimeState | None:
+    def _latest_parent(self) -> RuntimeState | RuntimeRootState:
         nodes = [node for node in self.store.load_nodes(self.session_id) if node.thread_id == self.thread_id]
-        if not nodes:
-            return None
-        parent_keys = {(node.parent_session_id, node.parent_id) for node in nodes if node.parent_id}
-        leaves = [node for node in nodes if node.key not in parent_keys]
-        return max(leaves or nodes, key=lambda node: (node.timestamp, node.id))
+        turns = [node for node in nodes if isinstance(node, RuntimeState)]
+        if turns:
+            parent_keys = {(node.parent_session_id, node.parent_id) for node in turns if node.parent_id}
+            leaves = [node for node in turns if node.key not in parent_keys]
+            return max(leaves or turns, key=lambda node: (node.timestamp, node.id))
+        if self.thread_id != self.session_id:
+            raise RuntimeStateValidationError("A fork Thread must begin with a copied Turn.")
+        return self.store.ensure_root_node(self.session_id)
 
     def start(self) -> RuntimeState:
         if self.started:
@@ -154,6 +158,8 @@ class RuntimeEventNodeBridge:
             source = self.store.get_node(self.session_id, self.source_node_id)
             if source is None:
                 raise ValueError("Unknown source Turn.")
+            if isinstance(source, RuntimeRootState):
+                raise ValueError("A root Turn is only an ancestry anchor.")
             if source.session_id != self.session_id:
                 raise ValueError("A Turn cannot continue across Sessions.")
             if self.adopt_existing or not self.prompt:
@@ -253,6 +259,8 @@ class RuntimeEventNodeBridge:
             )
             if self.parent is None:
                 raise ValueError("Unknown source Turn.")
+            if isinstance(self.parent, RuntimeRootState):
+                raise ValueError("A root Turn is only an ancestry anchor.")
             if self.parent.status != "success":
                 raise ValueError("Only a successful Turn can be compacted.")
             self.thread_id = self.parent.thread_id

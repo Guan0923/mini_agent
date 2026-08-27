@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { Conversation, RuntimeNodeFrame, RuntimeStateNode } from "../types";
+import type { Conversation, RuntimeNodeFrame, RuntimeRootNode, RuntimeStateNode } from "../types";
 import { integrateRuntimeNodeUpdates, messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "./runtimeDetailProjection";
 import { applyRuntimeNodeFrame, runtimeNodeAccumulator } from "./runtimeNodeReducer";
+import { isRuntimeRootNode, normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
 function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
   return {
@@ -33,6 +34,76 @@ function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
 }
 
 describe("Turn protocol projection", () => {
+  it("accepts the strict three-field root and skips it during projection", () => {
+    const root: RuntimeRootNode = { session_id: "session_1", thread_id: "session_1", id: "turn_root" };
+    expect(isRuntimeRootNode(normalizeRuntimeNode(root))).toBe(true);
+    expect(() => normalizeRuntimeNode({ ...root, status: "success" } as unknown as RuntimeRootNode)).toThrow("Unsupported Turn version");
+
+    const first = turn({ parent_id: root.id, parent_session_id: root.session_id, parent_thread_id: root.thread_id });
+    const fork = turn({
+      id: "turn_fork",
+      thread_id: "thread_fork",
+      parent_id: root.id,
+      parent_session_id: root.session_id,
+      parent_thread_id: root.thread_id,
+      data: [[
+        { role: "user", content: [{ type: "text", text: "forked" }] },
+        { role: "assistant", content: [{ type: "text", text: "branch" }] },
+      ]],
+    });
+    const map = new Map([
+      ["session_1:turn_root", root],
+      ["session_1:turn_1", first],
+      ["session_1:turn_fork", fork],
+    ]);
+    expect(projectTurnPath(map, first.id).map((message) => message.content)).toEqual(["hello", "world"]);
+    expect(projectTurnPath(map, fork.id).map((message) => message.content)).toEqual(["forked", "branch"]);
+    expect(projectTurnPath(map, root.id)).toEqual([]);
+  });
+
+  it("reconstructs the shared root when the first SSE snapshot only contains a Turn", () => {
+    const conversation: Conversation = { id: "session_1", title: "x", messages: [], runtimeNodes: [] };
+    const first = turn({
+      parent_id: "turn_root",
+      parent_session_id: "session_1",
+      parent_thread_id: "session_1",
+    });
+
+    const created = integrateRuntimeNodeUpdates(conversation, [first], first.id, true);
+
+    expect(created.runtimeNodes).toEqual([
+      { session_id: "session_1", thread_id: "session_1", id: "turn_root" },
+      first,
+    ]);
+    expect(created.messages.map((message) => message.content)).toEqual(["hello", "world"]);
+    expect(created.activeTurnId).toBe(first.id);
+  });
+
+  it("still rejects a missing non-root ancestor", () => {
+    const root: RuntimeRootNode = { session_id: "session_1", thread_id: "session_1", id: "turn_root" };
+    const first = turn({
+      parent_id: root.id,
+      parent_session_id: root.session_id,
+      parent_thread_id: root.thread_id,
+    });
+    const conversation: Conversation = {
+      id: "session_1",
+      title: "x",
+      messages: [],
+      runtimeNodes: [root, first],
+    };
+    const child = turn({
+      id: "turn_child",
+      parent_id: "turn_missing",
+      parent_session_id: "session_1",
+      parent_thread_id: "session_1",
+    });
+
+    expect(() => integrateRuntimeNodeUpdates(conversation, [child], child.id, true)).toThrow(
+      "Turn ancestry is incomplete",
+    );
+  });
+
   it("applies exact text deltas without rebuilding the existing user message", () => {
     const conversation: Conversation = { id: "session_1", title: "x", messages: [], runtimeNodes: [] };
     const accumulator = runtimeNodeAccumulator();

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 10
-UNSUPPORTED_SCHEMA_MESSAGE = "Unsupported state.db schema v9; Mini-Agent requires v10 and left the database untouched."
+SCHEMA_VERSION = 11
+UNSUPPORTED_SCHEMA_MESSAGE = "Unsupported state.db schema; Mini-Agent requires v11 and left the database untouched."
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS store_metadata (
@@ -105,7 +105,7 @@ class SQLiteSchemaMixin:
 
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection) -> None:
-        """Validate v10; intentionally perform no migration or backfill."""
+        """Validate v11; intentionally perform no migration or backfill."""
 
         SQLiteSchemaMixin._assert_supported_schema(connection)
 

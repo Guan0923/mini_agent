@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.domain import FAILED_TERMINAL_MESSAGE, terminal_error_text
-from backend.domain.runtime_state import NodeFrame
+from backend.domain.runtime_state import NodeFrame, RuntimeRootState
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
 from backend.planning.llm.titles import normalize_conversation_title
 from backend.providers import ModelConfig, ModelConfigurationError
@@ -60,19 +60,23 @@ def _runtime_stream_lock_registry(state: object) -> dict[str, Any]:
 
 
 def _first_main_user_text(store, session_id: str, turn_id: str) -> str:
-    """Return text only when ``turn_id`` is the Session main Thread's root Turn."""
+    """Return text only when ``turn_id`` is the main Thread's first Turn below the synthetic root."""
 
-    root = next(
+    nodes = store.load_nodes(session_id)
+    first_turn = next(
         (
             node
-            for node in store.load_nodes(session_id)
-            if node.id == turn_id and node.thread_id == session_id and not node.parent_id
+            for node in nodes
+            if node.id == turn_id and not isinstance(node, RuntimeRootState) and node.thread_id == session_id
         ),
         None,
     )
-    if root is None:
+    if first_turn is None:
         return ""
-    content = root.user_message.get("content", [])
+    parent = next((node for node in nodes if node.id == first_turn.parent_id), None)
+    if not isinstance(parent, RuntimeRootState):
+        return ""
+    content = first_turn.user_message.get("content", [])
     if not content or content[0].get("type") != "text":
         return ""
     text = content[0].get("text")
