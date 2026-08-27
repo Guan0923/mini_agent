@@ -17,13 +17,10 @@ from pathlib import Path
 from backend.domain.skills import SkillSnapshot
 
 from .catalog import (
-    _ALLOWED_FRONTMATTER_KEYS,
-    _NAME_PATTERN,
     SkillConfigurationError,
     parse_manifest,
     read_manifest_bytes,
-    validate_allowed_tools,
-    validate_metadata,
+    select_frontmatter,
 )
 
 MAX_PROJECT_SKILLS = 64
@@ -169,38 +166,15 @@ def _scan_skill_directory(directory: Path, project_id: str) -> ProjectSkillDefin
         frontmatter, _body_lines = parse_manifest(raw, manifest)
     except SkillConfigurationError:
         return None
-    if not isinstance(frontmatter, dict):
-        return None
-    unknown = set(frontmatter) - _ALLOWED_FRONTMATTER_KEYS
-    if unknown:
-        return None
-    if "name" not in frontmatter or "description" not in frontmatter:
-        return None
-    name = frontmatter["name"]
-    description = frontmatter["description"]
-    if not isinstance(name, str) or not name.strip():
-        return None
-    if len(name) > 64 or _NAME_PATTERN.fullmatch(name) is None:
-        return None
-    if name != directory.name:
-        return None
-    if not isinstance(description, str) or not description.strip():
-        return None
-    try:
-        metadata = validate_metadata(frontmatter["metadata"], manifest) if "metadata" in frontmatter else ()
-        allowed_tools = (
-            validate_allowed_tools(frontmatter["allowed-tools"], manifest)
-            if "allowed-tools" in frontmatter
-            else ()
-        )
-    except SkillConfigurationError:
+    selected = select_frontmatter(manifest, directory.name, **frontmatter)
+    if selected is None:
         return None
 
     return ProjectSkillDefinition(
-        name=name,
-        description=description.strip(),
-        metadata=metadata,
-        allowed_tools=allowed_tools,
+        name=selected.name,
+        description=selected.description,
+        metadata=selected.metadata,
+        allowed_tools=selected.allowed_tools,
         project_id=project_id,
         tree_sha256=tree_sha256,
         root=directory.as_posix(),

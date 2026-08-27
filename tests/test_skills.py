@@ -154,34 +154,59 @@ def test_unknown_explicit_skill_is_rejected_when_catalog_is_empty() -> None:
     assert planner.decision_calls == 0
 
 
-@pytest.mark.parametrize(
-    ("manifest", "error"),
-    [
-        ("name: demo\ndescription: Demo\n", "start with YAML frontmatter"),
-        ("---\nname: demo\n---\nBody\n", "must contain 'name' and 'description'"),
-        ("---\nname: Demo\ndescription: Demo\n---\nBody\n", "lowercase letters"),
-        ("---\nname: demo\ndescription: ''\n---\nBody\n", "description must be"),
-        ("---\nname: demo\ndescription: Demo\nextra: true\n---\nBody\n", "unknown key"),
-    ],
-)
-def test_rejects_invalid_manifests(tmp_path: Path, manifest: str, error: str) -> None:
+def test_rejects_manifest_without_frontmatter(tmp_path: Path) -> None:
     directory = tmp_path / "skills" / "demo"
     directory.mkdir(parents=True)
-    (directory / "SKILL.md").write_text(manifest, encoding="utf-8")
+    (directory / "SKILL.md").write_text("name: demo\ndescription: Demo\n", encoding="utf-8")
 
-    with pytest.raises(SkillConfigurationError, match=error):
+    with pytest.raises(SkillConfigurationError, match="start with YAML frontmatter"):
         SkillCatalog.discover(tmp_path / "skills")
 
 
-def test_rejects_directory_name_mismatch(tmp_path: Path) -> None:
-    manifest = write_skill(tmp_path, "folder")
-    manifest.write_text(
-        "---\nname: other\ndescription: Demo\n---\nBody\n",
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        "name: demo",
+        "name: Demo\ndescription: Demo",
+        "name: demo\ndescription: ''",
+        "name: other\ndescription: Demo",
+    ],
+)
+def test_skips_skill_with_invalid_required_frontmatter(tmp_path: Path, frontmatter: str) -> None:
+    directory = tmp_path / "skills" / "demo"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(f"---\n{frontmatter}\n---\nBody\n", encoding="utf-8")
+    write_skill(tmp_path, "valid")
+
+    catalog = SkillCatalog.discover(tmp_path / "skills")
+
+    assert catalog.names() == ("valid",)
+
+
+def test_ignores_unknown_frontmatter_fields(tmp_path: Path) -> None:
+    directory = tmp_path / "skills" / "demo"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(
+        "---\n"
+        "name: demo\n"
+        "description: Demo\n"
+        "license: Complete terms in LICENSE.txt\n"
+        "origin: ECC\n"
+        "keywords:\n"
+        "  - workflow\n"
+        "keywards: legacy spelling\n"
+        "future-field:\n"
+        "  nested: true\n"
+        "---\nBody\n",
         encoding="utf-8",
     )
 
-    with pytest.raises(SkillConfigurationError, match="must match directory name"):
-        SkillCatalog.discover(tmp_path / "skills")
+    skill = SkillCatalog.discover(tmp_path / "skills").definitions()[0]
+
+    assert skill.name == "demo"
+    assert skill.metadata == ()
+    assert skill.allowed_tools == ()
+    assert skill.snapshot().instructions == "Body"
 
 
 def test_rejects_non_utf8_and_size_limits(tmp_path: Path) -> None:
@@ -502,28 +527,19 @@ def test_discovers_skill_with_optional_frontmatter(tmp_path: Path) -> None:
     assert skill.snapshot().instructions == "Body"
 
 
-def test_rejects_non_string_metadata_value(tmp_path: Path) -> None:
+def test_ignores_invalid_optional_frontmatter(tmp_path: Path) -> None:
     directory = tmp_path / "skills" / "demo"
     directory.mkdir(parents=True)
     (directory / "SKILL.md").write_text(
-        "---\nname: demo\ndescription: Demo\nmetadata:\n  owner: 42\n---\nBody\n",
+        "---\nname: demo\ndescription: Demo\nmetadata:\n  owner: 42\nallowed-tools:\n  - 42\n---\nBody\n",
         encoding="utf-8",
     )
 
-    with pytest.raises(SkillConfigurationError, match="metadata values must be strings"):
-        SkillCatalog.discover(tmp_path / "skills")
+    skill = SkillCatalog.discover(tmp_path / "skills").definitions()[0]
 
-
-def test_rejects_non_string_allowed_tools(tmp_path: Path) -> None:
-    directory = tmp_path / "skills" / "demo"
-    directory.mkdir(parents=True)
-    (directory / "SKILL.md").write_text(
-        "---\nname: demo\ndescription: Demo\nallowed-tools:\n  - 42\n---\nBody\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(SkillConfigurationError, match="allowed-tools must contain only non-empty strings"):
-        SkillCatalog.discover(tmp_path / "skills")
+    assert skill.metadata == ()
+    assert skill.allowed_tools == ()
+    assert skill.snapshot().instructions == "Body"
 
 
 def test_llm_skill_selection_sees_optional_frontmatter() -> None:
@@ -552,7 +568,9 @@ def test_explicit_skill_with_empty_instructions_fails_run(tmp_path: Path) -> Non
     assert planner.decision_calls == 0
 
 
-def _write_project_skill(workspace: Path, name: str, *, body: str = "Project body.", extra: dict[str, str] | None = None) -> Path:
+def _write_project_skill(
+    workspace: Path, name: str, *, body: str = "Project body.", extra: dict[str, str] | None = None
+) -> Path:
     directory = workspace / ".mini_agent" / "skills" / name
     directory.mkdir(parents=True)
     manifest = directory / "SKILL.md"
@@ -575,6 +593,38 @@ def test_project_skill_candidates_are_sorted_and_scanned(tmp_path: Path) -> None
     assert all(skill.project_id == "project_1" for skill in candidates)
     assert all(len(skill.tree_sha256) == 64 for skill in candidates)
     assert candidates[0].snapshot().instructions == "Project body."
+
+
+def test_project_skill_ignores_unknown_and_invalid_optional_frontmatter(tmp_path: Path) -> None:
+    manifest = _write_project_skill(tmp_path, "demo")
+    manifest.write_text(
+        "---\n"
+        "name: demo\n"
+        "description: Project demo.\n"
+        "license: Complete terms in LICENSE.txt\n"
+        "origin: ECC\n"
+        "metadata: 42\n"
+        "allowed-tools: read\n"
+        "---\nProject body.\n",
+        encoding="utf-8",
+    )
+
+    candidate = discover_project_skills(tmp_path, "project_1")[0]
+
+    assert candidate.name == "demo"
+    assert candidate.metadata == ()
+    assert candidate.allowed_tools == ()
+    assert candidate.snapshot().instructions == "Project body."
+
+
+def test_project_skill_skips_invalid_required_frontmatter(tmp_path: Path) -> None:
+    manifest = _write_project_skill(tmp_path, "bad")
+    manifest.write_text("---\nname: bad\ndescription: null\n---\nBody\n", encoding="utf-8")
+    _write_project_skill(tmp_path, "good")
+
+    candidates = discover_project_skills(tmp_path, "project_1")
+
+    assert [skill.name for skill in candidates] == ["good"]
 
 
 def test_project_skill_tree_hash_changes_when_any_file_changes(tmp_path: Path) -> None:
