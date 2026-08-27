@@ -1,5 +1,5 @@
-import type { RuntimeStateNode, SidebarThread } from "../types";
-import { normalizeRuntimeNode } from "../app/runtimeNodeNormalization";
+import type { RuntimeStateNode, RuntimeTreeNode, SidebarThread } from "../types";
+import { isRuntimeTurnNode, normalizeRuntimeNode } from "../app/runtimeNodeNormalization";
 import { requestJson } from "./request";
 import { archiveSidebarThread, createSidebarThread, deleteSidebarThread, listSidebarThreads, renameSidebarThread, restoreSidebarThread } from "./sidebarThreads";
 import { listTurns } from "./turns";
@@ -62,12 +62,12 @@ export async function deleteSession(threadId: string): Promise<SessionInfo> {
   return summary(await deleteSidebarThread(threadId));
 }
 
-export async function getSessionNodes(sessionId: string): Promise<RuntimeStateNode[]> {
+export async function getSessionNodes(sessionId: string): Promise<RuntimeTreeNode[]> {
   return (await listTurns(sessionId)).map(normalizeRuntimeNode);
 }
 
 export async function getSessionLeaves(sessionId: string): Promise<RuntimeStateNode[]> {
-  const nodes = await getSessionNodes(sessionId);
+  const nodes = (await getSessionNodes(sessionId)).filter(isRuntimeTurnNode);
   const parents = new Set(nodes.map((item) => `${item.parent_session_id}:${item.parent_id}`));
   return nodes.filter((item) => !parents.has(`${item.session_id}:${item.id}`));
 }

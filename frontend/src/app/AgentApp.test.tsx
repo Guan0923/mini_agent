@@ -2,7 +2,7 @@ import { act, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionInfo } from "../api";
 import type { ProjectInfo } from "../api/projects";
-import type { AuthUser, RuntimeStateNode } from "../types";
+import type { AuthUser, RuntimeRootNode, RuntimeStateNode } from "../types";
 import type { AgentShellProps } from "./AgentShell";
 import AgentApp from "./AgentApp";
 
@@ -88,7 +88,7 @@ function turn(
   sessionId: string,
   threadId: string,
   turnId: string,
-  parent?: RuntimeStateNode,
+  parent?: RuntimeStateNode | RuntimeRootNode,
   userText = "源消息",
 ): RuntimeStateNode {
   return {
@@ -219,10 +219,15 @@ describe("AgentApp new conversation initialization", () => {
 
   it("keeps the active rewind boundary when sidebar summaries and the full Turn tree reload", async () => {
     const initial = { ...session("session-rewind"), thread_id: "session-rewind" };
-    const root = turn(initial.session_id, initial.thread_id, "turn-root", undefined, "保留消息");
+    const syntheticRoot: RuntimeRootNode = {
+      session_id: initial.session_id,
+      thread_id: initial.thread_id,
+      id: "turn-synthetic-root",
+    };
+    const root = turn(initial.session_id, initial.thread_id, "turn-root", syntheticRoot, "保留消息");
     const descendant = turn(initial.session_id, initial.thread_id, "turn-descendant", root, "应隐藏消息");
     api.listSessions.mockResolvedValue([initial]);
-    api.getSessionNodes.mockResolvedValue([root, descendant]);
+    api.getSessionNodes.mockResolvedValue([syntheticRoot, root, descendant]);
     await renderReady();
     await waitFor(() => expect(shell.props?.current?.activeTurnId).toBe(descendant.id));
 
@@ -239,7 +244,7 @@ describe("AgentApp new conversation initialization", () => {
     });
 
     expect(shell.props?.current?.activeTurnId).toBe(root.id);
-    expect(shell.props?.current?.runtimeNodes).toHaveLength(2);
+    expect(shell.props?.current?.runtimeNodes).toHaveLength(3);
     expect(shell.props?.current?.messages.map((message) => message.content)).toEqual(["保留消息", "回答"]);
   });
 

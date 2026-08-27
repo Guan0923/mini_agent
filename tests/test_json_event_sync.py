@@ -1,4 +1,4 @@
-"""Focused acceptance tests for the v10 Turn/SidebarThread event protocol."""
+"""Focused acceptance tests for the v11 Turn/SidebarThread event protocol."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 
 from backend.configuration import ClientPaths
 from backend.domain import RunState, RuntimeMessage, UserMessage
-from backend.domain.runtime_state import NodeWriter
+from backend.domain.runtime_state import NodeWriter, RuntimeRootState
 from backend.domain.runtime_state import RuntimeState as TurnState
 from backend.runtime.core.context import RuntimeState
 from backend.storage.sqlite import SQLiteSessionStore
@@ -25,7 +25,7 @@ def test_local_store_uses_json_objects_and_small_immutable_events(tmp_path) -> N
     session = store.create_session()
     writer = NodeWriter(store)
     store.create_sidebar_thread(session_id=session.session_id, thread_id=session.session_id, title="main")
-    parent = None
+    parent = store.ensure_root_node(session.session_id, id="turn-root")
     for index in range(4):
         node = writer.create(
             TurnState.create(
@@ -57,7 +57,9 @@ def test_local_store_uses_json_objects_and_small_immutable_events(tmp_path) -> N
     assert max(len(payload) for _kind, payload in events) < 20_000
 
     restarted = _store(tmp_path / "one", "device-a")
-    assert [node.user_message["content"][0]["text"] for node in restarted.load_nodes(session.session_id)] == [
+    restarted_nodes = restarted.load_nodes(session.session_id)
+    assert isinstance(restarted_nodes[0], RuntimeRootState)
+    assert [node.user_message["content"][0]["text"] for node in restarted_nodes if isinstance(node, TurnState)] == [
         f"question {index}" for index in range(4)
     ]
     assert restarted.load_runtime(session.session_id) is not None
@@ -68,11 +70,13 @@ def test_baseline_delta_replay_is_ordered_and_idempotent(tmp_path) -> None:
     session = source.create_session("Sync me")
     writer = NodeWriter(source)
     source.create_sidebar_thread(session_id=session.session_id, thread_id=session.session_id, title="Sync me")
+    root = source.ensure_root_node(session.session_id, id="turn-root")
     node = writer.create(
         TurnState.create(
             session_id=session.session_id,
             thread_id=session.session_id,
             id="turn-1",
+            parent=root,
             user_content=[{"type": "text", "text": "hello"}],
         )
     )
@@ -90,7 +94,11 @@ def test_baseline_delta_replay_is_ordered_and_idempotent(tmp_path) -> None:
         },
         local_device_id="target-device",
     )
-    assert target.load_nodes(session.session_id)[0].user_message["content"][0]["text"] == "hello"
+    target_nodes = target.load_nodes(session.session_id)
+    assert isinstance(target_nodes[0], RuntimeRootState)
+    assert target_nodes[0].to_dict() == root.to_dict()
+    assert target_nodes[1].user_message["content"][0]["text"] == "hello"
+    assert target_nodes[1].parent_id == root.id
     assert (
         target.apply_sync_events(
             {
@@ -107,7 +115,10 @@ def test_baseline_delta_replay_is_ordered_and_idempotent(tmp_path) -> None:
     source.acknowledge_sync_operations(
         [{"session_id": session.session_id, "event_ids": [item["event_id"] for item in first["events"]], "revision": 1}]
     )
-    parent = max(source.load_nodes(session.session_id), key=lambda item: (item.timestamp, item.id))
+    parent = max(
+        (item for item in source.load_nodes(session.session_id) if isinstance(item, TurnState)),
+        key=lambda item: (item.timestamp, item.id),
+    )
     node = writer.create(
         TurnState.create(
             session_id=session.session_id,

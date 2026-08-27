@@ -171,9 +171,11 @@ class ConversationService(ConversationSessionController):
             latest = getter(session.session_id, source_node_id) if callable(getter) else None
             if latest is None:
                 raise ValueError("Unknown source Turn.")
+            if not isinstance(latest, RuntimeStateNode):
+                raise ValueError("A root Turn is only an ancestry anchor.")
         loader = getattr(store, "load_nodes", None)
         if latest is None and callable(loader):
-            nodes = list(loader(session.session_id))
+            nodes = [node for node in loader(session.session_id) if isinstance(node, RuntimeStateNode)]
             if nodes:
                 parent_keys = {(node.parent_session_id, node.parent_id) for node in nodes if node.parent_id}
                 leaves = [node for node in nodes if (node.session_id, node.id) not in parent_keys]

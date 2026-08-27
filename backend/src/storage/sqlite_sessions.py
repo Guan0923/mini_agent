@@ -9,6 +9,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 
 from backend.domain import Session, SessionSummary, message_from_dict, new_session_id
+from backend.domain.runtime_state import RuntimeState as TreeRuntimeState
 from backend.domain.state import utc_now
 
 from .codec import is_default_session_title, normalize_session_title
@@ -141,7 +142,11 @@ class SQLiteSessionMixin:
         session = self.get_session(session_id)
         if session is None:
             return None
-        nodes = [node for node in self.load_nodes(session_id) if node.session_id == session_id]
+        nodes = [
+            node
+            for node in self.load_nodes(session_id)
+            if node.session_id == session_id and isinstance(node, TreeRuntimeState)
+        ]
         messages = self._node_records(nodes)
         last_node = max(nodes, key=lambda item: (item.timestamp, item.id), default=None)
         with self._connection(session_id) as connection:
@@ -190,10 +195,10 @@ class SQLiteSessionMixin:
         return self.get_session(summaries[0].session_id) if summaries else None
 
     def load_conversation(self, session_id: str) -> list[dict[str, str]]:
-        return self._node_messages(self.load_nodes(session_id))
+        return self._node_messages([node for node in self.load_nodes(session_id) if isinstance(node, TreeRuntimeState)])
 
     def load_conversation_records(self, session_id: str) -> list[dict[str, str | int | None]]:
-        return self._node_records(self.load_nodes(session_id))
+        return self._node_records([node for node in self.load_nodes(session_id) if isinstance(node, TreeRuntimeState)])
 
     def find_session_by_client_id(self, client_id: str, *, include_deleted: bool = False) -> Session | None:
         if not client_id:

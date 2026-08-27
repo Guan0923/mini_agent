@@ -77,8 +77,15 @@ export interface TurnMessage {
   [key: string]: unknown;
 }
 
-/** Canonical persisted node shared by API, TUI and the web reducer. */
-export interface RuntimeStateNode {
+/** Synthetic Session root. Its wire shape intentionally contains identifiers only. */
+export interface RuntimeRootNode {
+  session_id: string;
+  thread_id: string;
+  id: string;
+}
+
+/** Canonical executable Turn shared by API, TUI and the web reducer. */
+export interface RuntimeTurnNode {
   thread_id: string;
   parent_thread_id: string;
   session_id: string;
@@ -100,6 +107,9 @@ export interface RuntimeStateNode {
   current_data_idx: number;
   data: TurnMessage[][];
 }
+
+export type RuntimeTreeNode = RuntimeRootNode | RuntimeTurnNode;
+export type RuntimeStateNode = RuntimeTurnNode;
 
 export type NodeFrameType = "turn.snapshot" | "turn.delta";
 
@@ -187,7 +197,7 @@ export interface Conversation {
   deletedAt?: string;
   messagesLoaded?: boolean;
   lastNodeId?: string;
-  runtimeNodes?: RuntimeStateNode[];
+  runtimeNodes?: RuntimeTreeNode[];
   threadId?: string;
   activeTurnId?: string;
   projectId?: string;

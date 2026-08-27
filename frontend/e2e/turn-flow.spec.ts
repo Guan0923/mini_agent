@@ -1,5 +1,36 @@
 import { expect, test } from "@playwright/test";
 
+interface RuntimeRootResponse {
+  session_id: string;
+  thread_id: string;
+  id: string;
+}
+
+interface RuntimeTurnResponse extends RuntimeRootResponse {
+  parent_id: string;
+  running_mode: "agent" | "plan";
+  status: string;
+  current_data_idx: number;
+  data: Array<Array<{
+    role: string;
+    steering_id?: string;
+    content: Array<Record<string, unknown> & { type: string; text?: string }>;
+  }>>;
+}
+
+function isRuntimeTurnResponse(node: RuntimeRootResponse | RuntimeTurnResponse): node is RuntimeTurnResponse {
+  return "data" in node;
+}
+
+async function fetchRuntimeNodes(
+  page: import("@playwright/test").Page,
+  sessionId: string,
+): Promise<Array<RuntimeRootResponse | RuntimeTurnResponse>> {
+  const response = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sessionId)}`);
+  expect(response.ok(), `${response.status()} ${await response.text()}`).toBeTruthy();
+  return response.json() as Promise<Array<RuntimeRootResponse | RuntimeTurnResponse>>;
+}
+
 async function send(page: import("@playwright/test").Page, text: string): Promise<void> {
   const editor = page.getByLabel("聊天输入");
   await editor.fill(text);
@@ -102,20 +133,17 @@ test("Plan Review compacts and implements as Plan, Compact, Agent Turns in one S
   );
   await expect(page.locator(".message.user").last()).toContainText("Compact implementation plan");
 
-  const turnsResponse = await page.request.get(
-    `/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`,
-  );
-  expect(turnsResponse.ok(), `${turnsResponse.status()} ${await turnsResponse.text()}`).toBeTruthy();
-  const turns = await turnsResponse.json() as Array<{
-    id: string;
-    parent_id: string;
-    running_mode: "agent" | "plan";
-    status: string;
-    current_data_idx: number;
-    data: Array<Array<{ role: string; content: Array<Record<string, unknown>> }>>;
-  }>;
+  const nodes = await fetchRuntimeNodes(page, sidebar.session_id);
+  expect(nodes).toHaveLength(4);
+  const root = nodes.find((node) => !isRuntimeTurnResponse(node));
+  expect(root).toEqual({
+    session_id: sidebar.session_id,
+    thread_id: sidebar.session_id,
+    id: expect.stringMatching(/^turn_/),
+  });
+  const turns = nodes.filter(isRuntimeTurnResponse);
   expect(turns).toHaveLength(3);
-  const plan = turns.find((turn) => !turn.parent_id);
+  const plan = turns.find((turn) => turn.parent_id === root?.id);
   expect(plan).toBeDefined();
   const compact = turns.find((turn) => turn.parent_id === plan?.id);
   expect(compact).toBeDefined();
@@ -175,13 +203,7 @@ test("refresh reattaches a running Turn and flushes the persisted queue as one m
   await expect(page.locator(".message.user").last()).toContainText("queued second");
 
   await expect.poll(async () => {
-    const response = await page.request.get(
-      `/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`,
-    );
-    const turns = await response.json() as Array<{
-      data: Array<Array<{ role: string; content: Array<{ type: string; text?: string }> }>>;
-      current_data_idx: number;
-    }>;
+    const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
     return turns.map((turn) => turn.data[turn.current_data_idx][0].content
       .filter((item) => item.type === "text")
       .map((item) => item.text ?? "")
@@ -208,8 +230,7 @@ test("a paused Turn resumes in place with the same id", async ({ page }) => {
   await page.getByRole("button", { name: "暂停" }).click();
   await expect(page.getByRole("button", { name: "继续" })).toBeVisible({ timeout: 15_000 });
 
-  const pausedTurnsResponse = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`);
-  const pausedTurns = await pausedTurnsResponse.json() as Array<{ id: string; status: string }>;
+  const pausedTurns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
   expect(pausedTurns).toHaveLength(1);
   expect(pausedTurns[0].status).toBe("paused");
   const originalTurnId = pausedTurns[0].id;
@@ -223,8 +244,7 @@ test("a paused Turn resumes in place with the same id", async ({ page }) => {
 
   await expect(page.locator(".message.assistant").last()).toContainText("Resumed the same Turn successfully.", { timeout: 15_000 });
   await expect(page.getByRole("button", { name: "发送" })).toBeVisible();
-  const resumedTurnsResponse = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`);
-  const resumedTurns = await resumedTurnsResponse.json() as Array<{ id: string; status: string }>;
+  const resumedTurns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
   expect(resumedTurns).toHaveLength(1);
   expect(resumedTurns[0]).toMatchObject({ id: originalTurnId, status: "success" });
 });
@@ -263,8 +283,7 @@ test("running Turn consumes FIFO steering as separate user Messages", async ({ p
   await expect(page.locator(".message.assistant").last()).toContainText("FIFO steering complete.");
   await expect(page.getByRole("button", { name: "Fork" })).toBeVisible();
 
-  const turnsResponse = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`);
-  const turns = await turnsResponse.json() as Array<{ current_data_idx: number; data: Array<Array<{ role: string; steering_id?: string }>> }>;
+  const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
   expect(turns).toHaveLength(1);
   expect(turns[0].data[turns[0].current_data_idx].map((message) => message.role)).toEqual([
     "user", "assistant", "user", "assistant", "user", "assistant",
@@ -294,11 +313,7 @@ test("steering waits for the active tool and skips the next stale tool", async (
   await expect(page.getByText("Forbidden tool executed.", { exact: false })).toHaveCount(0);
   await expect(page.locator(".message.user")).toHaveCount(2);
 
-  const turnsResponse = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`);
-  const turns = await turnsResponse.json() as Array<{
-    current_data_idx: number;
-    data: Array<Array<{ role: string; content: Array<Record<string, unknown>> }>>;
-  }>;
+  const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
   const firstAssistant = turns[0].data[turns[0].current_data_idx][1].content;
   expect(firstAssistant).toContainEqual(expect.objectContaining({
     type: "tool_result",
@@ -339,8 +354,7 @@ test("Pause merges the local queue into one same-Turn steering Message", async (
   await expect(page.locator(".message.user").last()).toContainText("merge second");
   await expect(page.locator(".message.assistant").last()).toContainText("Merged steering complete.");
 
-  const turnsResponse = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`);
-  const turns = await turnsResponse.json() as Array<{ status: string; current_data_idx: number; data: Array<Array<{ role: string }>> }>;
+  const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
   expect(turns).toHaveLength(1);
   expect(turns[0].status).toBe("success");
   expect(turns[0].data[turns[0].current_data_idx].map((message) => message.role)).toEqual([
@@ -464,8 +478,7 @@ test("tool approval shows one pending card and one allowed status", async ({ pag
   await expect(assistant.getByText("Call tool web_search?", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "发送" })).toBeVisible({ timeout: 15_000 });
 
-  const turnsResponse = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`);
-  const turns = await turnsResponse.json() as Array<{ current_data_idx: number; data: Array<Array<{ content: Array<Record<string, unknown>> }>> }>;
+  const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
   const content = turns[0].data[turns[0].current_data_idx][1].content;
   expect(content.filter((item) => item.type === "approval")).toEqual([
     expect.objectContaining({ event: "decision_requested", call_id: "approval_search", tool: "web_search" }),

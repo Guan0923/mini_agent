@@ -1,5 +1,5 @@
-import type { NodeFrameType, RuntimeNodeFrame, RuntimeStateNode, TurnItem } from "../types";
-import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
+import type { NodeFrameType, RuntimeNodeFrame, RuntimeStateNode, RuntimeTreeNode, TurnItem } from "../types";
+import { isRuntimeTurnNode, normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
 export interface RuntimeNodeAccumulator {
   nodes: Map<string, RuntimeStateNode>;
@@ -193,8 +193,8 @@ export function nodeFrame(message: RuntimeNodeFrame & { type: NodeFrameType }): 
   return message;
 }
 
-export function leafNodes(nodes: Iterable<RuntimeStateNode>, sessionId?: string): RuntimeStateNode[] {
-  const all = [...nodes].filter(
+export function leafNodes(nodes: Iterable<RuntimeTreeNode>, sessionId?: string): RuntimeStateNode[] {
+  const all = [...nodes].filter(isRuntimeTurnNode).filter(
     (node) => !sessionId || node.session_id === sessionId,
   );
   const parentKeys = new Set(all.map((node) => `${node.parent_session_id}:${node.parent_id}`));

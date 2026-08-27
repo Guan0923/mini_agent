@@ -1,7 +1,7 @@
-import type { RuntimeStateNode, SidebarThread } from "../types";
+import type { RuntimeStateNode, RuntimeTreeNode, SidebarThread } from "../types";
 import { requestJson } from "./request";
 
-export async function listTurns(sessionId: string): Promise<RuntimeStateNode[]> {
+export async function listTurns(sessionId: string): Promise<RuntimeTreeNode[]> {
   return requestJson(`/api/turns?session_id=${encodeURIComponent(sessionId)}`);
 }
 

@@ -1,7 +1,7 @@
-import type { ChatMessage, Conversation, DecisionRequest, FileReference, RuntimeStateNode, ToolEvent, TurnItem } from "../types";
-import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
+import type { ChatMessage, Conversation, DecisionRequest, FileReference, RuntimeStateNode, RuntimeTreeNode, ToolEvent, TurnItem } from "../types";
+import { isRuntimeTurnNode, normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
-const keyOf = (turn: RuntimeStateNode) => `${turn.session_id}:${turn.id}`;
+const keyOf = (turn: RuntimeTreeNode) => `${turn.session_id}:${turn.id}`;
 
 function text(value: unknown): string {
   if (typeof value === "string") return value;
@@ -165,15 +165,16 @@ export function projectRuntimeNode(turn: RuntimeStateNode, messageIdx = assistan
   };
 }
 
-function ancestry(nodes: Map<string, RuntimeStateNode>, active: RuntimeStateNode): RuntimeStateNode[] {
-  const path: RuntimeStateNode[] = [];
+function ancestry(nodes: Map<string, RuntimeTreeNode>, active: RuntimeStateNode): RuntimeTreeNode[] {
+  const path: RuntimeTreeNode[] = [];
   const seen = new Set<string>();
-  let current: RuntimeStateNode | undefined = active;
+  let current: RuntimeTreeNode | undefined = active;
   while (current) {
     const key = keyOf(current);
     if (seen.has(key)) throw new Error("Turn ancestry contains a cycle");
     seen.add(key);
     path.push(current);
+    if (!isRuntimeTurnNode(current)) break;
     if (!current.parent_id) break;
     current = nodes.get(`${current.parent_session_id}:${current.parent_id}`);
     if (!current) throw new Error("Turn ancestry is incomplete");
@@ -181,10 +182,11 @@ function ancestry(nodes: Map<string, RuntimeStateNode>, active: RuntimeStateNode
   return path.reverse();
 }
 
-export function projectTurnPath(nodes: Map<string, RuntimeStateNode>, activeTurnId: string): ChatMessage[] {
+export function projectTurnPath(nodes: Map<string, RuntimeTreeNode>, activeTurnId: string): ChatMessage[] {
   const active = [...nodes.values()].find((turn) => turn.id === activeTurnId);
-  if (!active) return [];
+  if (!active || !isRuntimeTurnNode(active)) return [];
   return ancestry(nodes, active).flatMap((turn) => {
+    if (!isRuntimeTurnNode(turn)) return [];
     const selected = turn.data[turn.current_data_idx];
     if (!selected) return [];
     const result: ChatMessage[] = [];
@@ -236,12 +238,13 @@ export function messagesBeforeRewind(messages: ChatMessage[], turnId: string): C
   return rewindIndex >= 0 ? messages.slice(0, rewindIndex) : messages;
 }
 
-export function pruneTurnDescendants(nodes: RuntimeStateNode[], turnId: string): RuntimeStateNode[] {
+export function pruneTurnDescendants(nodes: RuntimeTreeNode[], turnId: string): RuntimeTreeNode[] {
   const target = nodes.find((node) => node.id === turnId);
-  if (!target) return nodes;
+  if (!target || !isRuntimeTurnNode(target)) return nodes;
 
   const childrenByParent = new Map<string, RuntimeStateNode[]>();
   for (const node of nodes) {
+    if (!isRuntimeTurnNode(node)) continue;
     if (node.session_id !== target.session_id || node.thread_id !== target.thread_id || !node.parent_id) continue;
     const parentKey = `${node.parent_session_id}:${node.parent_id}`;
     const children = childrenByParent.get(parentKey);
@@ -272,9 +275,28 @@ export function integrateRuntimeNodeUpdates(
     const normalized = normalizeRuntimeNode(node);
     return [keyOf(normalized), normalized] as const;
   }));
-  for (const turn of turns) current.set(keyOf(turn), turn);
+  for (const turn of turns) {
+    const hasSessionTurn = [...current.values()].some((node) =>
+      isRuntimeTurnNode(node) && node.session_id === turn.session_id
+    );
+    const parentKey = `${turn.parent_session_id}:${turn.parent_id}`;
+    if (
+      !hasSessionTurn
+      && turn.parent_id
+      && turn.parent_session_id === turn.session_id
+      && turn.parent_thread_id === turn.session_id
+      && !current.has(parentKey)
+    ) {
+      current.set(parentKey, {
+        session_id: turn.parent_session_id,
+        thread_id: turn.parent_thread_id,
+        id: turn.parent_id,
+      });
+    }
+    current.set(keyOf(turn), turn);
+  }
   const activeTurn = [...current.values()].find((turn) => turn.id === activeTurnId);
-  if (!activeTurn) throw new Error("Active Turn is missing after applying an SSE frame");
+  if (!activeTurn || !isRuntimeTurnNode(activeTurn)) throw new Error("Active Turn is missing after applying an SSE frame");
 
   let messages: ChatMessage[];
   let assistantIndex = -1;
