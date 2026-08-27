@@ -64,6 +64,7 @@ def test_valid_plan_review_opens_existing_review_and_preserves_one_control_messa
     assert result.status == "completed"
     assert result.final_answer == PLAN
     assert result.handoff is not None
+    assert result.handoff.task == PLAN
     assert result.handoff.active_skills == (skill,)
     assert [request.kind for request in requests] == ["plan"]
     assert requests[0].data["plan"] == PLAN

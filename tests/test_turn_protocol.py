@@ -1116,7 +1116,7 @@ def test_fork_sidebar_title_always_appends_branch_suffix(tmp_path: Path) -> None
         assert explicit["title_is_custom"] is False
 
 
-def test_plan_handoff_creates_agent_child_with_raw_plan_message(tmp_path: Path) -> None:
+def test_plan_handoff_creates_agent_child_with_approved_plan_message(tmp_path: Path) -> None:
     class PlanHandoffPlanner:
         name = "plan-handoff"
 
@@ -1157,8 +1157,16 @@ def test_plan_handoff_creates_agent_child_with_raw_plan_message(tmp_path: Path) 
     assert agent.running_mode == "agent"
     assert agent.parent_id == plan.id
     assert plan.selected_messages[0]["content"] == [{"type": "text", "text": "plan the change", "status": "success"}]
+    assert any(
+        item.get("event") == "handoff_created" and item.get("text") == "Implement the reviewed change."
+        for item in plan.assistant_items
+    )
     assert agent.selected_messages[0]["content"] == [
-        {"type": "text", "text": "Implement the reviewed change.", "status": "success"}
+        {
+            "type": "text",
+            "text": "<approved_plan>\nImplement the reviewed change.\n</approved_plan>",
+            "status": "success",
+        }
     ]
     assert any(
         item.get("type") == "text" and item.get("text") == "Implemented from the reviewed plan."
@@ -1225,7 +1233,11 @@ def test_plan_compaction_handoff_emits_plan_compact_agent_nodes_in_one_stream(tm
     assert compact.assistant_items[0]["type"] == "compaction"
     assert compact.assistant_items[0]["summary"] == "deterministic compact summary"
     assert agent.selected_messages[0]["content"] == [
-        {"type": "text", "text": "Implement after a real compaction.", "status": "success"}
+        {
+            "type": "text",
+            "text": "<approved_plan>\nImplement after a real compaction.\n</approved_plan>",
+            "status": "success",
+        }
     ]
     assert [node.status for node in store.load_nodes(session.session_id) if isinstance(node, RuntimeState)] == [
         "success",
