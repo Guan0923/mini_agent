@@ -1,6 +1,6 @@
 import { Alert, BorderBeam, Collapse, App as AntApp, message as staticMessage } from "antd";
 import { BranchesOutlined, CopyOutlined, EditOutlined, FileTextOutlined, ToolOutlined } from "@ant-design/icons";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatMessage, DecisionRequest, DisplayMode, FileReference, ToolEvent, TurnItem } from "../../types";
 import { effectiveDisplayMode } from "../../app/displayMode";
 import { fileReferenceAvailable, sessionFileContentUrl } from "../../api";
@@ -111,20 +111,17 @@ function jsonText(value: unknown): string {
   }
 }
 
-export function summarizeThinking(value: string, limit = 100): string {
-  const paragraph = value
-    .split(/\r?\n\s*\r?\n/)
-    .map((item) => item.trim())
-    .find(Boolean) ?? "";
+export function summarizeReasoningTail(value: string, limit = 250): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
   const segmenterConstructor = (Intl as unknown as {
     Segmenter?: new (locale?: string, options?: { granularity: "grapheme" }) => {
       segment(input: string): Iterable<{ segment: string }>;
     };
   }).Segmenter;
   const characters = segmenterConstructor
-    ? Array.from(new segmenterConstructor(undefined, { granularity: "grapheme" }).segment(paragraph), (item) => item.segment)
-    : Array.from(paragraph);
-  return characters.length > limit ? `${characters.slice(0, limit).join("")}.....` : paragraph;
+    ? Array.from(new segmenterConstructor(undefined, { granularity: "grapheme" }).segment(normalized), (item) => item.segment)
+    : Array.from(normalized);
+  return characters.length > limit ? `…${characters.slice(-limit).join("")}` : normalized;
 }
 
 function callId(ev: ToolEvent): string {
@@ -187,19 +184,96 @@ export function ToolLine({ ev, display, active = false }: { ev: ToolEvent; displ
   return null;
 }
 
-function runtimeItemLabel(item: TurnItem): string {
-  if (item.type === "reasoning") return "思考";
-  if (item.type === "tool_call") return `调用 ${String(item.name ?? "工具")}`;
-  return `${String(item.tool ?? "工具")} 结果`;
+function runtimeToolName(item: TurnItem): string {
+  return String(item.type === "tool_call" ? item.name ?? "工具" : item.tool ?? "工具") || "工具";
+}
+
+function runtimeActiveLabel(item: TurnItem, minimal = false): string {
+  if (item.type === "reasoning") return minimal ? "思考中" : "正在思考中";
+  const tool = runtimeToolName(item);
+  return item.type === "tool_call" ? `正在调用 ${tool}` : `正在处理 ${tool} 结果`;
+}
+
+function runtimeCompletedLabel(item: TurnItem): string {
+  if (item.type === "reasoning") return "思考详情";
+  const tool = runtimeToolName(item);
+  if (item.type === "tool_call") return `调用 ${tool}`;
+  return item.status === "failed" ? `${tool} 失败` : `${tool} 结果`;
+}
+
+function RuntimeStatusDots() {
+  return (
+    <span className="runtime-status-dots" aria-hidden="true">
+      <span className="runtime-status-dot" />
+      <span className="runtime-status-dot" />
+      <span className="runtime-status-dot" />
+    </span>
+  );
+}
+
+function RuntimeStatusLabel({ text, shimmer = false }: { text: string; shimmer?: boolean }) {
+  return (
+    <span className="runtime-status-label">
+      {shimmer ? <ShimmerText active>{text}</ShimmerText> : <span className="runtime-status-text">{text}</span>}
+      <RuntimeStatusDots />
+    </span>
+  );
+}
+
+function alignRuntimeSummaryTail(viewport: HTMLSpanElement | null) {
+  if (!viewport) return;
+  viewport.scrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+}
+
+function RuntimeSummaryLabel({ text }: { text: string }) {
+  const viewportRef = useRef<HTMLSpanElement>(null);
+
+  useLayoutEffect(() => {
+    alignRuntimeSummaryTail(viewportRef.current);
+  }, [text]);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => alignRuntimeSummaryTail(viewport));
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <span className="runtime-summary-viewport" ref={viewportRef}>
+      <span className="runtime-summary-track">
+        <span className="runtime-summary-text">{text}</span>
+      </span>
+    </span>
+  );
+}
+
+function runtimeItemLabel(item: TurnItem, expanded: boolean, active: boolean) {
+  if (item.type !== "reasoning") {
+    const label = active ? runtimeActiveLabel(item) : runtimeCompletedLabel(item);
+    return active ? <RuntimeStatusLabel text={label} shimmer={!expanded} /> : <span className="runtime-static-label">{label}</span>;
+  }
+  if (expanded) {
+    return active
+      ? <RuntimeStatusLabel text={runtimeActiveLabel(item)} />
+      : <span className="runtime-static-label">{runtimeCompletedLabel(item)}</span>;
+  }
+  const summary = summarizeReasoningTail(String(item.text ?? ""));
+  if (summary) {
+    return <RuntimeSummaryLabel text={summary} />;
+  }
+  return active
+    ? <RuntimeStatusLabel text={runtimeActiveLabel(item)} shimmer />
+    : <span className="runtime-static-label">{runtimeCompletedLabel(item)}</span>;
 }
 
 function runtimeItemBody(item: TurnItem, display: DisplayMode, active: boolean) {
   if (item.type === "reasoning") {
     const raw = String(item.text ?? "");
-    const thought = display === "minimal" ? summarizeThinking(raw) : raw;
     return (
       <div className="thinking-content">
-        {display === "minimal" ? thought || "正在思考…" : <MarkdownContent text={thought || "正在思考…"} />}
+        <MarkdownContent text={raw || "正在思考…"} />
       </div>
     );
   }
@@ -221,16 +295,9 @@ function RuntimeItemCollapse({
   display: DisplayMode;
   active: boolean;
 }) {
-  const [expanded, setExpanded] = useState(active);
-  const previousActive = useRef(active);
+  const [expanded, setExpanded] = useState(false);
 
-  useEffect(() => {
-    if (previousActive.current === active) return;
-    setExpanded(active);
-    previousActive.current = active;
-  }, [active]);
-
-  const label = runtimeItemLabel(item);
+  const label = runtimeItemLabel(item, expanded, active);
   return (
     <Collapse
       className={`runtime-collapse runtime-item-collapse runtime-${item.type.replace("_", "-")}`}
@@ -241,10 +308,20 @@ function RuntimeItemCollapse({
       onChange={(keys) => setExpanded(Array.isArray(keys) ? keys.map(String).includes(itemKey) : String(keys) === itemKey)}
       items={[{
         key: itemKey,
-        label: <ShimmerText active={active}>{label}</ShimmerText>,
+        label,
         children: runtimeItemBody(item, display, active),
       }]}
     />
+  );
+}
+
+function MinimalRuntimeStatus({ item }: { item: TurnItem }) {
+  const label = runtimeActiveLabel(item, true);
+  return (
+    <div className="runtime-minimal-status" data-item-type={item.type} role="status" aria-label={label}>
+      <span className="runtime-status-text">{label}</span>
+      <RuntimeStatusDots />
+    </div>
   );
 }
 
@@ -274,6 +351,7 @@ function OrderedAssistantItems({
         const identity = `${msg.id}:${version}:${index}`;
         const active = Boolean(msg.running && index === items.length - 1);
         if (["reasoning", "tool_call", "tool_result"].includes(item.type)) {
+          if (display === "minimal") return active ? <MinimalRuntimeStatus key={identity} item={item} /> : null;
           return <RuntimeItemCollapse key={identity} item={item} itemKey={identity} display={display} active={active} />;
         }
         if (item.type === "text" || item.type === "bash") {

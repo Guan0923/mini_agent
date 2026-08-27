@@ -348,7 +348,7 @@ test("Pause merges the local queue into one same-Turn steering Message", async (
   ]);
 });
 
-test("assistant Items stay chronological and fold after the next Item arrives", async ({ page }) => {
+test("assistant Items stay chronological and runtime Collapse starts folded", async ({ page }) => {
   const guest = await page.request.post("/api/auth/guest");
   expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Ordered Items" } });
@@ -363,7 +363,28 @@ test("assistant Items stay chronological and fold after the next Item arrives", 
   await page.getByRole("button", { name: "发送" }).click();
 
   const assistant = page.locator(".message.assistant").last();
-  await expect(assistant.locator('.runtime-item-collapse[data-item-type="reasoning"] .shimmer-text.is-active')).toHaveText("思考");
+  const firstReasoning = assistant.locator('.runtime-item-collapse[data-item-type="reasoning"]').first();
+  await expect(firstReasoning.locator(".ant-collapse-item")).not.toHaveClass(/ant-collapse-item-active/);
+  await expect(firstReasoning.locator(".runtime-summary-text")).toContainText("右侧最新字符可见");
+  await expect(firstReasoning.locator(".runtime-status-dot")).toHaveCount(0);
+  await expect(firstReasoning.locator(".shimmer-text.is-active")).toHaveCount(0);
+
+  const activeTool = assistant.locator('.runtime-item-collapse[data-item-type="tool_call"]').first();
+  await expect(activeTool.locator(".ant-collapse-header")).toContainText("正在调用 slow_tool", { timeout: 15_000 });
+  await expect(activeTool.locator(".ant-collapse-item")).not.toHaveClass(/ant-collapse-item-active/);
+  await expect(activeTool.locator(".runtime-status-dot")).toHaveCount(3);
+  const toolShimmer = activeTool.locator(".shimmer-text.is-active");
+  await expect(toolShimmer).toHaveText("正在调用 slow_tool");
+  expect(await toolShimmer.evaluate((element) => element.getAnimations()
+    .filter((animation) => (animation as CSSAnimation).animationName === "runtime-summary-shimmer").length)).toBe(1);
+  expect(await activeTool.locator(".runtime-status-dot").evaluateAll((dots) => dots.filter((dot) => dot.getAnimations()
+    .some((animation) => (animation as CSSAnimation).animationName === "runtime-status-dot")).length)).toBe(3);
+  await activeTool.locator(".ant-collapse-header").click();
+  await expect(activeTool.locator(".ant-collapse-item")).toHaveClass(/ant-collapse-item-active/);
+  await expect(activeTool.locator(".shimmer-text.is-active")).toHaveCount(0);
+  await activeTool.locator(".ant-collapse-header").click();
+  await expect(activeTool.locator(".ant-collapse-item")).not.toHaveClass(/ant-collapse-item-active/);
+  await expect(activeTool.locator(".shimmer-text.is-active")).toHaveCount(1);
   expect((await responsePromise).ok()).toBeTruthy();
   await expect(assistant).toContainText("Ordered flow complete.", { timeout: 15_000 });
 
@@ -382,6 +403,37 @@ test("assistant Items stay chronological and fold after the next Item arrives", 
   ]);
   await expect(assistant.locator(".runtime-item-collapse .ant-collapse-item-active")).toHaveCount(0);
   await expect(assistant.locator(".shimmer-text.is-active")).toHaveCount(0);
+
+  const summaryViewport = firstReasoning.locator(".runtime-summary-viewport");
+  await expect(summaryViewport).toBeVisible();
+  const summaryMetrics = await summaryViewport.evaluate((element) => {
+    const viewport = element as HTMLElement;
+    const rect = viewport.getBoundingClientRect();
+    return {
+      left: rect.left,
+      right: rect.right,
+      clientWidth: viewport.clientWidth,
+      scrollWidth: viewport.scrollWidth,
+      scrollLeft: viewport.scrollLeft,
+    };
+  });
+  expect(summaryMetrics.scrollWidth).toBeGreaterThan(summaryMetrics.clientWidth);
+  expect(Math.abs(summaryMetrics.scrollLeft - (summaryMetrics.scrollWidth - summaryMetrics.clientWidth))).toBeLessThanOrEqual(1);
+  await expect(summaryViewport.locator(".shimmer-text")).toHaveCount(0);
+
+  await firstReasoning.locator(".ant-collapse-header").click();
+  await expect(firstReasoning.locator(".ant-collapse-item")).toHaveClass(/ant-collapse-item-active/);
+  const reasoningBody = firstReasoning.locator(".thinking-content");
+  await expect(reasoningBody).toBeVisible();
+  const bodyBounds = await reasoningBody.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { left: rect.left, right: rect.right };
+  });
+  expect(Math.abs(summaryMetrics.left - bodyBounds.left)).toBeLessThanOrEqual(1);
+  expect(Math.abs(summaryMetrics.right - bodyBounds.right)).toBeLessThanOrEqual(1);
+  await firstReasoning.locator(".ant-collapse-header").click();
+  await expect(firstReasoning.locator(".ant-collapse-item")).not.toHaveClass(/ant-collapse-item-active/);
+
   await expect(assistant.getByText("The first tool completed.", { exact: false })).toBeVisible();
   expect(await assistant.getByText("The first tool completed.", { exact: false }).evaluate((element) => element.closest(".runtime-collapse"))).toBeNull();
 });

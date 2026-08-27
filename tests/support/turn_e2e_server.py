@@ -62,6 +62,8 @@ PLAN_REVIEW_MARKDOWN = """# Compact implementation plan
 2. Compact the conversation context.
 3. Implement from this exact plan text."""
 
+ORDERED_REASONING = "推理内容持续更新并保持右侧最新字符可见。" * 12
+
 
 class DeterministicCompactionClient:
     """Local fake model that exercises the real non-streaming LLM summary path."""
@@ -156,13 +158,11 @@ class CooperativePausePlanner(LLMPlanner):
             model_turn = runtime.run.model_turns
             if model_turn == 1:
                 if runtime.exchange.on_reasoning is not None:
-                    runtime.exchange.on_reasoning("Inspect the first tool.")
+                    runtime.exchange.on_reasoning(ORDERED_REASONING)
                 sleep(1.0)
                 return AssistantMessage(
-                    reasoning="Inspect the first tool.",
-                    tool_messages=[
-                        ToolMessage(name="read_file", call_id="ordered_read", arguments={"path": "README.md"})
-                    ],
+                    reasoning=ORDERED_REASONING,
+                    tool_messages=[ToolMessage(name="slow_tool", call_id="ordered_read", arguments={})],
                 )
             if model_turn == 2:
                 if runtime.exchange.on_content is not None:
