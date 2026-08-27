@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 11
-UNSUPPORTED_SCHEMA_MESSAGE = "Unsupported state.db schema; Mini-Agent requires v11 and left the database untouched."
+SCHEMA_VERSION = 12
+UNSUPPORTED_SCHEMA_MESSAGE = "Unsupported state.db schema; Mini-Agent requires v12 and left the database untouched."
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS store_metadata (
     session_id TEXT PRIMARY KEY,
     schema_version INTEGER NOT NULL CHECK (schema_version = {SCHEMA_VERSION}),
-    local_revision INTEGER NOT NULL DEFAULT 0,
-    remote_revision INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -30,28 +28,7 @@ CREATE TABLE IF NOT EXISTS json_objects (
 CREATE INDEX IF NOT EXISTS json_objects_session_idx
     ON json_objects (session_id, namespace, updated_at, object_id);
 
-CREATE TABLE IF NOT EXISTS json_events (
-    session_id TEXT NOT NULL,
-    local_sequence INTEGER NOT NULL,
-    event_id TEXT NOT NULL UNIQUE,
-    base_revision INTEGER NOT NULL DEFAULT 0,
-    applied_revision INTEGER,
-    kind TEXT NOT NULL,
-    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-    checksum TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    acknowledged_at TEXT,
-    PRIMARY KEY (session_id, local_sequence)
-);
-CREATE INDEX IF NOT EXISTS json_events_pending_idx
-    ON json_events (session_id, acknowledged_at, local_sequence);
-CREATE UNIQUE INDEX IF NOT EXISTS json_events_remote_revision_idx
-    ON json_events (session_id, applied_revision, event_id)
-    WHERE applied_revision IS NOT NULL;
-
--- Workspace files, uploads, skills, plugins and MCP state are local-only
--- and never enter json_events or the cloud protocol.  This table is only a
--- content index; file bytes remain in the session workspace.
+-- This table is only a content index; file bytes remain in the session workspace.
 CREATE TABLE IF NOT EXISTS workspace_files (
     session_id TEXT NOT NULL,
     relative_path TEXT NOT NULL,
@@ -80,7 +57,7 @@ CREATE INDEX IF NOT EXISTS sandbox_approvals_session_idx
 
 
 class SQLiteSchemaMixin:
-    """Reject every pre-v10 database before executing schema DDL."""
+    """Reject every database that does not use the local-only v12 schema."""
 
     @staticmethod
     def _assert_supported_schema(connection: sqlite3.Connection) -> None:
@@ -91,21 +68,21 @@ class SQLiteSchemaMixin:
         tables = {str(row[0]) for row in cursor} if cursor is not None else set()
         if not tables:
             return
-        allowed = {"store_metadata", "json_objects", "json_events", "workspace_files", "sandbox_approvals"}
+        allowed = {"store_metadata", "json_objects", "workspace_files", "sandbox_approvals"}
         if not tables.issubset(allowed):
             raise RuntimeError(UNSUPPORTED_SCHEMA_MESSAGE)
         if "store_metadata" not in tables:
             raise RuntimeError(UNSUPPORTED_SCHEMA_MESSAGE)
         columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(store_metadata)")}
-        if not {"session_id", "schema_version", "local_revision", "remote_revision"}.issubset(columns):
+        if not {"session_id", "schema_version", "created_at", "updated_at"}.issubset(columns):
             raise RuntimeError(UNSUPPORTED_SCHEMA_MESSAGE)
         row = connection.execute("SELECT schema_version FROM store_metadata LIMIT 1").fetchone()
         if row is not None and int(row[0]) != SCHEMA_VERSION:
             raise RuntimeError(UNSUPPORTED_SCHEMA_MESSAGE)
 
     @staticmethod
-    def _migrate_schema(connection: sqlite3.Connection) -> None:
-        """Validate v11; intentionally perform no migration or backfill."""
+    def _validate_schema(connection: sqlite3.Connection) -> None:
+        """Validate v12; intentionally perform no migration or backfill."""
 
         SQLiteSchemaMixin._assert_supported_schema(connection)
 

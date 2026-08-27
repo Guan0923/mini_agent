@@ -31,7 +31,7 @@ def test_composes_agent_prompt_from_instruction_shared_and_agent_templates() -> 
     prompt = compose_system_prompt("agent")
 
     assert prompt.count("# Mini-Agent") == 1
-    assert prompt.count("# Shared Working Rules") == 1
+    assert prompt.count("# Working Rules") == 1
     assert prompt.count("# Agent Mode") == 1
     assert "# Plan Mode" not in prompt
     assert "{{MODE_PROMPT}}" not in prompt
@@ -41,11 +41,11 @@ def test_composes_plan_prompt_without_agent_only_capabilities() -> None:
     prompt = compose_system_prompt("plan")
 
     assert prompt.count("# Mini-Agent") == 1
-    assert prompt.count("# Shared Working Rules") == 1
+    assert prompt.count("# Working Rules") == 1
     assert prompt.count("# Plan Mode") == 1
     assert "# Agent Mode" not in prompt
     assert "does not require every response" in prompt
-    assert "Do not attempt commands, tests, builds" in prompt
+    assert "Do not implement the submitted plan" in prompt
 
 
 @pytest.mark.parametrize(

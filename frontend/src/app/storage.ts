@@ -64,10 +64,9 @@ export function loadConversations(key: string): Conversation[] {
   }
 }
 
-export function loadArchiveReadState(userId: string | undefined): ArchiveReadState {
-  if (!userId) return {};
+export function loadArchiveReadState(): ArchiveReadState {
   try {
-    const raw = localStorage.getItem(`${ARCHIVE_READ_KEY}:${userId}`);
+    const raw = localStorage.getItem(ARCHIVE_READ_KEY);
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};

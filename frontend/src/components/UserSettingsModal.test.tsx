@@ -16,16 +16,12 @@ const api = vi.hoisted(() => ({
   deleteProviderConfig: vi.fn(),
   discoverProviderModels: vi.fn(),
   setTimezone: vi.fn(),
-  getSyncStatus: vi.fn(),
-  getSyncJob: vi.fn(),
-  updateSyncPreferences: vi.fn(),
-  syncNow: vi.fn(),
 }));
 
 vi.mock("../api", () => api);
 
 const settings = {
-  profile: { email: "user@example.com", display_name: "旧名字", agent_preferences: "" },
+  profile: { display_name: "旧名字", agent_preferences: "" },
   agent_config: { tone: "balanced", verbosity: "balanced", initiative: "balanced", custom_instructions: "" },
   runtime_config: { max_tool_calls: 32, terminal_type: "cmd" as const },
   sandbox_config: {
@@ -74,40 +70,32 @@ const settings = {
   }],
   capability_config: {},
   timezone_options: [],
-  sync_preferences: { auto_save_enabled: false, auto_save_rule: "idle_5m" as const },
-  sync_state: {
-    local_revision: 2,
-    cloud_revision: 1,
-    status: "dirty" as const,
-    last_error: "",
-    updated_at: 1,
-  },
 };
 
-const authUser = { id: "u1", email: "user@example.com", kind: "account" as const, display_name: "user@example.com" };
+const localProfile = { display_name: "旧名字", agent_preferences: "" };
 
 function modalElement(
   open: boolean,
   onClose = vi.fn(),
-  onUserUpdate = vi.fn(),
+  onProfileChange = vi.fn(),
   onProviderConfigUpdate = vi.fn(),
 ) {
   return (
     <AntApp>
       <UserSettingsModal
         open={open}
-        user={authUser}
+        profile={localProfile}
         activeSessionId="session-current"
         onClose={onClose}
-        onUserUpdate={onUserUpdate}
+        onProfileChange={onProfileChange}
         onProviderConfigUpdate={onProviderConfigUpdate}
       />
     </AntApp>
   );
 }
 
-function renderModal(onClose = vi.fn(), onUserUpdate = vi.fn(), onProviderConfigUpdate = vi.fn()) {
-  return render(modalElement(true, onClose, onUserUpdate, onProviderConfigUpdate));
+function renderModal(onClose = vi.fn(), onProfileChange = vi.fn(), onProviderConfigUpdate = vi.fn()) {
+  return render(modalElement(true, onClose, onProfileChange, onProviderConfigUpdate));
 }
 
 describe("UserSettingsModal", () => {
@@ -121,22 +109,6 @@ describe("UserSettingsModal", () => {
     api.updateRuntimeConfig.mockResolvedValue(settings.runtime_config);
     api.updateProviderConfig.mockResolvedValue(settings.provider_config);
     api.discoverProviderModels.mockResolvedValue({ models: [] });
-    api.getSyncStatus.mockResolvedValue({
-      preferences: settings.sync_preferences,
-      state: settings.sync_state,
-      job: null,
-    });
-    api.updateSyncPreferences.mockImplementation(async (value) => value);
-    api.syncNow.mockResolvedValue({
-      id: "job-1",
-      kind: "sync",
-      status: "queued",
-      phase: "queued",
-      progress: 0,
-      error: "",
-      created_at: 1,
-      updated_at: 1,
-    });
   });
 
   it("renders the settings spinner inside the full content-area loading container", () => {
@@ -150,7 +122,7 @@ describe("UserSettingsModal", () => {
 
   it("switches among profile, agent, and provider sections", async () => {
     renderModal();
-    expect(await screen.findByDisplayValue("user@example.com")).toBeDisabled();
+    expect(await screen.findByDisplayValue("旧名字")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "用户名" })).toHaveValue("旧名字");
 
     await userEvent.click(screen.getByRole("menuitem", { name: "Agent 配置" }));
@@ -164,9 +136,7 @@ describe("UserSettingsModal", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
     expect(screen.getByText(/openai/)).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("menuitem", { name: "云同步" }));
-    expect(screen.getByRole("switch", { name: "自动保存到云端" })).not.toBeChecked();
-    expect(screen.getByRole("combobox", { name: "自动保存规则" })).toBeDisabled();
+    expect(screen.queryByRole("menuitem", { name: "云同步" })).not.toBeInTheDocument();
   });
 
   it("normalizes a legacy DeepSeek provider name to the neutral default", async () => {
@@ -182,7 +152,7 @@ describe("UserSettingsModal", () => {
     });
 
     renderModal();
-    await screen.findByDisplayValue("user@example.com");
+    await screen.findByDisplayValue("旧名字");
     await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
 
     expect(screen.getByText(/default · demo/)).toBeInTheDocument();
@@ -190,7 +160,7 @@ describe("UserSettingsModal", () => {
 
   it("shows detected terminals and saves the selected Ant Design option", async () => {
     renderModal();
-    await screen.findByDisplayValue("user@example.com");
+    await screen.findByDisplayValue("旧名字");
     await userEvent.click(screen.getByRole("menuitem", { name: "运行配置" }));
 
     const terminal = screen.getByRole("combobox", { name: "启动终端" });
@@ -207,25 +177,9 @@ describe("UserSettingsModal", () => {
 
   it("does not expose sandbox controls in user settings", async () => {
     renderModal();
-    await screen.findByDisplayValue("user@example.com");
+    await screen.findByDisplayValue("旧名字");
     expect(screen.queryByRole("menuitem", { name: "沙箱" })).not.toBeInTheDocument();
     expect(screen.queryByText("Windows 沙箱")).not.toBeInTheDocument();
-  });
-
-  it("saves cloud preferences and starts an incremental event sync", async () => {
-    renderModal();
-    await screen.findByDisplayValue("user@example.com");
-    await userEvent.click(screen.getByRole("menuitem", { name: "云同步" }));
-    await userEvent.click(screen.getByRole("switch", { name: "自动保存到云端" }));
-    await userEvent.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(api.updateSyncPreferences).toHaveBeenCalledWith({
-      auto_save_enabled: true,
-      auto_save_rule: "idle_5m",
-    }));
-    expect((await screen.findAllByText("保存成功")).length).toBeGreaterThanOrEqual(1);
-    await userEvent.click(screen.getByRole("button", { name: "立即同步" }));
-    await waitFor(() => expect(api.syncNow).toHaveBeenCalledWith(false));
-    expect(await screen.findByText("同步已启动")).toBeInTheDocument();
   });
 
   it("checks dirty state for mask and close button but keeps Escape disabled", async () => {
@@ -260,8 +214,8 @@ describe("UserSettingsModal", () => {
   });
 
   it("saves the profile and updates the sidebar user immediately", async () => {
-    const onUserUpdate = vi.fn();
-    renderModal(vi.fn(), onUserUpdate);
+    const onProfileChange = vi.fn();
+    renderModal(vi.fn(), onProfileChange);
     const name = await screen.findByDisplayValue("旧名字");
     await userEvent.clear(name);
     await userEvent.type(name, "新名字");
@@ -271,7 +225,7 @@ describe("UserSettingsModal", () => {
       display_name: "新名字",
       agent_preferences: "",
     }));
-    expect(onUserUpdate).toHaveBeenCalledWith({ display_name: "新名字", agent_preferences: "" });
+    expect(onProfileChange).toHaveBeenCalledWith({ display_name: "新名字", agent_preferences: "" });
     expect(screen.getByDisplayValue("新名字")).toBeInTheDocument();
     expect(await screen.findByText("保存成功")).toBeInTheDocument();
   });
@@ -306,7 +260,7 @@ describe("UserSettingsModal", () => {
     const onProviderConfigUpdate = vi.fn();
     renderModal(vi.fn(), vi.fn(), onProviderConfigUpdate);
 
-    await screen.findByDisplayValue("user@example.com");
+    await screen.findByDisplayValue("旧名字");
     await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
     await userEvent.click(screen.getByText(/anthropic · claude-settings/));
     await userEvent.click(screen.getByRole("button", { name: "设为当前使用" }));
@@ -325,7 +279,7 @@ describe("UserSettingsModal", () => {
     });
     renderModal();
 
-    await screen.findByDisplayValue("user@example.com");
+    await screen.findByDisplayValue("旧名字");
     await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
     await userEvent.click(screen.getByText(/openai · demo/));
     await userEvent.click(screen.getByRole("button", { name: "获取 /v1\/models" }));
@@ -368,7 +322,7 @@ describe("UserSettingsModal", () => {
       .mockRejectedValueOnce(new Error("密钥无效"));
     renderModal();
 
-    await screen.findByDisplayValue("user@example.com");
+    await screen.findByDisplayValue("旧名字");
     await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
     await userEvent.click(screen.getByText(/openai · demo/));
     await userEvent.click(screen.getByText(/anthropic · claude-settings/));
@@ -385,7 +339,7 @@ describe("UserSettingsModal", () => {
     api.discoverProviderModels.mockResolvedValueOnce({ models: ["alpha-model"] });
     const view = renderModal();
 
-    await screen.findByDisplayValue("user@example.com");
+    await screen.findByDisplayValue("旧名字");
     await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
     await userEvent.click(screen.getByText(/openai · demo/));
     await userEvent.click(screen.getByRole("button", { name: "获取 /v1\/models" }));

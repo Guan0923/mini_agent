@@ -21,7 +21,6 @@ import {
   EditOutlined,
   InboxOutlined,
   LoadingOutlined,
-  LogoutOutlined,
   MoreOutlined,
   PlusOutlined,
   BarChartOutlined,
@@ -34,11 +33,11 @@ import {
   MenuUnfoldOutlined,
 } from "@ant-design/icons";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import type { AuthUser, Conversation, Page } from "../types";
+import type { Conversation, LocalProfile, Page } from "../types";
 import type { ProjectInfo } from "../api";
 
 interface AppSidebarProps {
-  user: AuthUser | null;
+  profile: LocalProfile;
   conversations: Conversation[];
   archivedCount: number;
   currentId: string | null;
@@ -58,7 +57,6 @@ interface AppSidebarProps {
   onRename: (id: string, title: string) => Promise<void>;
   onArchive: (id: string) => Promise<void>;
   onDelete: (id: string) => void | Promise<void>;
-  onSignOut: () => void | Promise<void>;
   onProfileUpdate?: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
   onOpenSettings?: () => void;
   collapsed?: boolean;
@@ -67,7 +65,7 @@ interface AppSidebarProps {
 }
 
 interface ProfilePopoverProps {
-  user: AuthUser | null;
+  profile: LocalProfile;
   onSave?: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
 }
 
@@ -120,21 +118,21 @@ function ProfileLabel({ label }: { label: string }) {
   );
 }
 
-function ProfilePopover({ user, onSave }: ProfilePopoverProps) {
+function ProfilePopover({ profile, onSave }: ProfilePopoverProps) {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [draft, setDraft] = useState({ display_name: "", agent_preferences: "" });
-  const label = user?.display_name?.trim() || (user?.kind === "guest" ? "游客用户" : "用户");
+  const label = profile.display_name.trim() || "本地用户";
 
   useEffect(() => {
     if (!open) return;
     setDraft({
-      display_name: user?.display_name ?? "",
-      agent_preferences: user?.agent_preferences ?? "",
+      display_name: profile.display_name,
+      agent_preferences: profile.agent_preferences,
     });
     setError("");
-  }, [open, user?.display_name, user?.agent_preferences]);
+  }, [open, profile.display_name, profile.agent_preferences]);
 
   async function save() {
     if (!onSave) return;
@@ -539,7 +537,7 @@ function HistoryRow({ conversation, selected, onSelect, onRename, onArchive, onD
 }
 
 export default function AppSidebar({
-  user,
+  profile,
   conversations,
   archivedCount,
   currentId,
@@ -559,7 +557,6 @@ export default function AppSidebar({
   onRename,
   onArchive,
   onDelete,
-  onSignOut,
   onProfileUpdate,
   onOpenSettings,
   collapsed = false,
@@ -567,12 +564,12 @@ export default function AppSidebar({
   revealKey = 0,
 }: AppSidebarProps) {
   const { modal } = AntApp.useApp();
-  const projectStorageKey = `mini-agent-project-collapse:${user?.id ?? "anonymous"}`;
+  const projectStorageKey = "mini-agent-project-collapse";
   const [expandedProjectIds, setExpandedProjectIds] = useState<string[]>([]);
   const loadedProjectStorageKey = useRef<string | null>(null);
   const previousCurrentProjectId = useRef<string | undefined>(undefined);
   const currentProjectId = conversations.find((conversation) => conversation.id === currentId)?.projectId;
-  const displayName = user?.display_name?.trim() || (user?.kind === "guest" ? "游客用户" : "用户");
+  const displayName = profile.display_name.trim() || "本地用户";
 
   useEffect(() => {
     if (loadedProjectStorageKey.current !== projectStorageKey) return;
@@ -807,17 +804,8 @@ export default function AppSidebar({
                 <ProfileLabel label={displayName} />
               </Button>
             ) : (
-              <ProfilePopover user={user} onSave={onProfileUpdate} />
+              <ProfilePopover profile={profile} onSave={onProfileUpdate} />
             )}
-            <Button
-              type="text"
-              size="small"
-              icon={<LogoutOutlined />}
-              onClick={() => void onSignOut()}
-              aria-label="退出"
-            >
-              退出
-            </Button>
           </div>
         </div>
       </div>

@@ -1,7 +1,7 @@
 """Resource lanes, limit policies, admission policies, and slot leases.
 
 Lanes partition work by resource class (foreground, background, long-lived
-services); limits are applied per system, per user, and per runner scope.
+services); limits are applied per system, per session, and per thread scope.
 Slot leases are the internal bookkeeping that guarantees a slot is released
 exactly once when a job reaches a terminal state.
 """
@@ -48,15 +48,15 @@ class LaneLimits:
 
 @dataclass(frozen=True, slots=True)
 class JobLimitPolicy:
-    """Hierarchical limits per lane for system, user, and runner levels.
+    """Hierarchical limits per lane for system, session, and thread levels.
 
     These are deployment safety limits; ordinary users must never be able to
     raise them through ``runtime_config``.
     """
 
     system: Mapping[JobLane, LaneLimits]
-    user: Mapping[JobLane, LaneLimits]
-    runner: Mapping[JobLane, LaneLimits]
+    session: Mapping[JobLane, LaneLimits]
+    thread: Mapping[JobLane, LaneLimits]
 
     @classmethod
     def defaults(cls) -> JobLimitPolicy:
@@ -65,17 +65,17 @@ class JobLimitPolicy:
             JobLane.BACKGROUND: LaneLimits(max_running=2, max_queued=256),
             JobLane.SERVICE: LaneLimits(max_running=16, max_queued=256),
         }
-        user = {
+        session = {
             JobLane.FOREGROUND: LaneLimits(max_running=4, max_queued=32),
             JobLane.BACKGROUND: LaneLimits(max_running=1, max_queued=32),
             JobLane.SERVICE: LaneLimits(max_running=8, max_queued=32),
         }
-        runner = {
+        thread = {
             JobLane.FOREGROUND: LaneLimits(max_running=4, max_queued=16),
             JobLane.BACKGROUND: LaneLimits(max_running=2, max_queued=16),
             JobLane.SERVICE: LaneLimits(max_running=8, max_queued=16),
         }
-        return cls(system=system, user=user, runner=runner)
+        return cls(system=system, session=session, thread=thread)
 
     def running_limit(self, level: str, lane: JobLane) -> int:
         return getattr(self, level)[lane].max_running

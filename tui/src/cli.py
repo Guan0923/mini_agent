@@ -16,8 +16,8 @@ from backend.runtime import (
     RuntimeEvent,
     SessionStore,
     build_application,
-    log_full_messages_from_toml,
 )
+from backend.storage.local_settings import LocalSettingsStore
 from backend.tools import ToolError
 
 from .application.commands import CommandAppMixin
@@ -166,41 +166,41 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Run as a network client against a backend server (e.g. http://127.0.0.1:8000).",
     )
-    parser.add_argument(
-        "--logout",
-        action="store_true",
-        help="Revoke the saved browser-authorized device session (network mode only).",
-    )
     args = parser.parse_args(argv)
     tool_budget: dict[str, int] = {}
     if args.max_tool_calls is not None:
         tool_budget["max_tool_calls"] = args.max_tool_calls
     if args.server:
         return _run_network_task(args)
-    if args.logout:
-        parser.error("--logout requires --server.")
     workspace = args.workspace
     paths = ClientPaths.from_home()
     try:
         initialize_config(paths, workspace)
+        local_settings = LocalSettingsStore(paths.state_db, paths.config_file)
+        runtime_config = local_settings.runtime_config()
+        model_config = local_settings.model_config() if args.planner == "llm" else None
         settings = RunnerSettings(
             max_transport_retries=5,
             strategy=args.strategy,
-            **tool_budget,
-            log_full_messages=log_full_messages_from_toml(paths.config_file),
+            max_tool_calls=tool_budget.get("max_tool_calls", int(runtime_config["max_tool_calls"])),
+            log_full_messages=bool(runtime_config["log_full_messages"]),
         )
         application = build_application(
             workspace,
             args.planner,
             settings,
-            (),
+            paths=paths,
+            user_preferences=local_settings.agent_preferences(),
+            model_config=model_config,
+            config_override={"runtime": runtime_config, "sandbox_config": local_settings.sandbox_config()},
+            default_timezone=str(local_settings.agent_config()["timezone"]),
         )
         conversation = application.open_conversation(args.resume)
     except ModelConfigurationError as exc:
         parser.error(f"{exc} Use --planner rule for offline mode.")
     except (ToolError, ValueError) as exc:
         parser.error(str(exc))
-    app = TerminalApp(conversation, paths.logs_dir)
+    app = TerminalApp(conversation)
     try:
         app._run_trigger = "cli" if args.task else "tui"
         if args.task:
@@ -220,18 +220,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_network_task(args) -> int:
-    """Retain logout only; Turn streaming is a Web-only client feature."""
-    from .client import ApiError, MiniAgentClient
-
-    client = MiniAgentClient(args.server)
-
-    if args.logout:
-        try:
-            client.logout()
-            print("[client] logged out")
-            return 0
-        except ApiError as exc:
-            print(f"[client] error: {exc}")
-            return 1
+    """Explain the remaining network-client boundary."""
     print("[client] 网络 TUI 任务执行已移除；请使用 Web 客户端创建和运行 Turn。")
     return 1

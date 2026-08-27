@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Start the local client tiers independently. PostgreSQL + cloud can be
-# started with `docker compose up -d postgres cloud`.
+# Start the local client tiers independently.
 #
 #   scripts/dev.sh backend   # server  -> http://127.0.0.1:8000
-#   scripts/dev.sh cloud     # cloud   -> http://127.0.0.1:8100 (local dev)
 #   scripts/dev.sh frontend  # client  -> http://localhost:5173
-#   scripts/dev.sh tui       # client  -> terminal (needs backend running)
+#   scripts/dev.sh tui       # client  -> terminal
 #   scripts/dev.sh all       # backend + frontend together
 #
 # Model config defaults to ~/.mini_agent/config.toml; override with MINI_AGENT_CONFIG.
@@ -24,13 +22,8 @@ start_frontend() {
   (cd frontend && npm run dev)
 }
 
-start_cloud() {
-  echo "[dev] cloud API: http://127.0.0.1:8100 (PostgreSQL must be running)"
-  uv run --package mini-agent-cloud python -m cloud
-}
-
 start_tui() {
-  echo "[dev] tui client (network mode). Backend must be running first."
+  echo "[dev] local TUI client"
   uv run python run.py "$@"
 }
 
@@ -40,9 +33,6 @@ case "${1:-all}" in
     ;;
   frontend)
     start_frontend
-    ;;
-  cloud)
-    start_cloud
     ;;
   tui)
     shift
@@ -57,7 +47,7 @@ case "${1:-all}" in
     wait
     ;;
   *)
-    echo "usage: scripts/dev.sh [backend|cloud|frontend|tui|all]"
+    echo "usage: scripts/dev.sh [backend|frontend|tui|all]"
     exit 1
     ;;
 esac

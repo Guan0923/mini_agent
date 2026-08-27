@@ -1,9 +1,4 @@
-"""Shared validation and defaults for per-user agent settings.
-
-Both the local SQLite repository and the optional PostgreSQL repository use
-these values and validators. Keeping the contract here prevents the two
-adapters from silently accepting different settings.
-"""
+"""Validation and defaults for local profile and agent settings."""
 
 from __future__ import annotations
 
@@ -56,7 +51,7 @@ DEFAULT_SANDBOX_CONFIG: dict[str, object] = {
 
 
 def normalize_runtime_config(current: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:
-    """Merge and validate execution limits stored per authenticated user."""
+    """Merge and validate local execution limits."""
 
     raw = values.get("max_tool_calls", current.get("max_tool_calls", 32))
     if isinstance(raw, bool) or not isinstance(raw, int):
@@ -166,7 +161,7 @@ def normalize_provider_config(current: Mapping[str, object], values: Mapping[str
     if protocol not in {"chat_completions", "responses", "messages"}:
         raise ValueError("protocol must be chat_completions, responses, or messages")
     explicit_name = values.get("provider_name")
-    fallback_name = current.get("provider_name") or current.get("provider") or values.get("provider") or "default"
+    fallback_name = current.get("provider_name") or "default"
     provider_name = str(explicit_name if explicit_name is not None else fallback_name or "default").strip()
     if provider_name.casefold() == "deepseek":
         provider_name = "default"
@@ -174,9 +169,7 @@ def normalize_provider_config(current: Mapping[str, object], values: Mapping[str
         raise ValueError("provider_name is required")
     if len(provider_name) > 80:
         raise ValueError("provider_name exceeds 80 characters")
-    # ``provider``/``provider_type`` are legacy adapter-kind fields.  The
-    # protocol is now the sole adapter selector; keep the database column
-    # populated with that canonical value for old schema compatibility.
+    # ``provider`` is the runtime adapter kind; protocol is its canonical value.
     provider = protocol
     base_url = str(values.get("base_url", current.get("base_url", "")) or "").strip()
     model = str(values.get("model", current.get("model", "")) or "").strip()

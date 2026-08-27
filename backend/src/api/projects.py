@@ -9,18 +9,16 @@ import threading
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
-from backend.configuration import UserConfigStore
+from backend.configuration import LocalConfigStore
 from backend.skills.trust import ProjectSkillTrustStore
 from backend.storage.projects import Project, ProjectStore
 
-from .auth.dependencies import require_user
-from .auth.types import UserIdentity
 from .session_store import mutation_error as _mutation_error
 from .session_store import session_store as _store
-from .session_store import summary_payload as _summary_for_user
+from .session_store import summary_payload as _summary
 
 router = APIRouter(prefix="/api")
 _picker_lock = threading.Lock()
@@ -95,15 +93,15 @@ def _pick_directory(request: Request) -> Path | None:
         _picker_lock.release()
 
 
-def _project_store(request: Request, identity: UserIdentity) -> ProjectStore:
-    return request.app.state.web.projects(identity.id)
+def _project_store(request: Request) -> ProjectStore:
+    return request.app.state.web.projects
 
 
-def _ensure_project_idle(request: Request, identity: UserIdentity, project_id: str) -> None:
+def _ensure_project_idle(request: Request, project_id: str) -> None:
     """Reject project mutations that would invalidate a running cwd."""
 
-    projects = _project_store(request, identity)
-    session_store = _store(request.app.state.web, identity.id)
+    projects = _project_store(request)
+    session_store = _store(request.app.state.web)
     for summary in session_store.list_sessions(state="all"):
         bound = projects.session_project(summary.session_id, include_removed=False)
         if bound is None or bound.project_id != project_id:
@@ -130,17 +128,16 @@ def _ensure_project_idle(request: Request, identity: UserIdentity, project_id: s
 def list_projects(
     request: Request,
     state: Literal["active", "removed", "all"] = "active",
-    identity: UserIdentity = Depends(require_user),
 ) -> list[dict[str, object]]:
     try:
-        store = _project_store(request, identity)
+        store = _project_store(request)
         return [_project_payload(item, store) for item in store.list(state)]
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/projects", response_model=None)
-def create_project(request: Request, identity: UserIdentity = Depends(require_user)) -> Response | dict[str, object]:
+def create_project(request: Request) -> Response | dict[str, object]:
     try:
         selected = _pick_directory(request)
     except _PickerBusyError as exc:
@@ -149,14 +146,14 @@ def create_project(request: Request, identity: UserIdentity = Depends(require_us
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if selected is None:
         return Response(status_code=204)
-    store = _project_store(request, identity)
-    session_store = _store(request.app.state.web, identity.id)
+    store = _project_store(request)
+    session_store = _store(request.app.state.web)
     session = None
     project = None
     try:
         project = store.create(selected)
         try:
-            session = session_store.create_session("新对话", client_id=None, local_only=True)
+            session = session_store.create_session("新对话", client_id=None)
             session_store.create_sidebar_thread(
                 session_id=session.session_id,
                 thread_id=session.session_id,
@@ -173,7 +170,7 @@ def create_project(request: Request, identity: UserIdentity = Depends(require_us
             raise
         summary = session_store.get_session_summary(session.session_id)
         assert summary is not None
-        payload = _summary_for_user(request.app.state.web, identity.id, summary)
+        payload = _summary(request.app.state.web, summary)
         payload["project_id"] = project.project_id
         return {"project": _project_payload(project, store), "session": payload}
     except RuntimeError as exc:
@@ -189,11 +186,10 @@ def create_project_session(
     project_id: str,
     body: ProjectSessionRequest,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
     state = request.app.state.web
-    projects = _project_store(request, identity)
-    session_store = _store(state, identity.id)
+    projects = _project_store(request)
+    session_store = _store(state)
     try:
         project = projects.get(project_id)
         if project is None:
@@ -202,7 +198,7 @@ def create_project_session(
             raise RuntimeError("项目已移除，请从回收站恢复后重试。")
         if not project.available:
             raise RuntimeError("项目 cwd 不可访问，请恢复文件夹后重试。")
-        session = session_store.create_session(body.title, client_id=body.client_id, local_only=True)
+        session = session_store.create_session(body.title, client_id=body.client_id)
         session_store.create_sidebar_thread(
             session_id=session.session_id,
             thread_id=session.session_id,
@@ -216,7 +212,7 @@ def create_project_session(
             raise
         summary = session_store.get_session_summary(session.session_id)
         assert summary is not None
-        payload = _summary_for_user(state, identity.id, summary)
+        payload = _summary(state, summary)
         payload["project_id"] = project.project_id
         return {"project": _project_payload(project, projects), "session": payload}
     except RuntimeError as exc:
@@ -231,13 +227,12 @@ def create_project_session(
 def remove_project(
     project_id: str,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
-    projects = _project_store(request, identity)
+    projects = _project_store(request)
     project = projects.get(project_id, include_removed=False)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在或已移除。")
-    _ensure_project_idle(request, identity, project_id)
+    _ensure_project_idle(request, project_id)
     try:
         return _project_payload(projects.remove(project_id), projects)
     except Exception as exc:
@@ -249,11 +244,10 @@ def rename_project(
     project_id: str,
     body: ProjectRenameRequest,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
     try:
-        project = _project_store(request, identity).rename(project_id, body.name)
-        return _project_payload(project, _project_store(request, identity))
+        project = _project_store(request).rename(project_id, body.name)
+        return _project_payload(project, _project_store(request))
     except ValueError as exc:
         raise _mutation_error(exc) from exc
     except Exception as exc:
@@ -264,13 +258,12 @@ def rename_project(
 def change_project_path(
     project_id: str,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> Response | dict[str, object]:
-    store = _project_store(request, identity)
+    store = _project_store(request)
     project = store.get(project_id, include_removed=False)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在或已移除。")
-    _ensure_project_idle(request, identity, project_id)
+    _ensure_project_idle(request, project_id)
     try:
         selected = _pick_directory(request)
     except _PickerBusyError as exc:
@@ -279,7 +272,7 @@ def change_project_path(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if selected is None:
         return Response(status_code=204)
-    _ensure_project_idle(request, identity, project_id)
+    _ensure_project_idle(request, project_id)
     try:
         updated = store.update_cwd(project_id, selected)
         return _project_payload(updated, store)
@@ -293,10 +286,9 @@ def change_project_path(
 def restore_project(
     project_id: str,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
     try:
-        store = _project_store(request, identity)
+        store = _project_store(request)
         return _project_payload(store.restore(project_id), store)
     except Exception as exc:
         raise _mutation_error(exc) from exc
@@ -307,23 +299,21 @@ def _workspace_sha256(cwd: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _trust_store(request: Request, identity: UserIdentity) -> ProjectSkillTrustStore:
+def _trust_store(request: Request) -> ProjectSkillTrustStore:
     state = request.app.state.web
-    paths = state.user_paths(identity.id)
-    return ProjectSkillTrustStore(UserConfigStore(paths.config_file))
+    return ProjectSkillTrustStore(LocalConfigStore(state.paths.config_file))
 
 
 @router.get("/projects/{project_id}/skill-trust")
 def get_project_skill_trust(
     project_id: str,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
-    projects = _project_store(request, identity)
+    projects = _project_store(request)
     project = projects.get(project_id, include_removed=False)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在或已移除。")
-    trusted = _trust_store(request, identity).trusted_skills(project_id, _workspace_sha256(project.cwd))
+    trusted = _trust_store(request).trusted_skills(project_id, _workspace_sha256(project.cwd))
     return {
         "project_id": project_id,
         "workspace_sha256": _workspace_sha256(project.cwd),
@@ -335,12 +325,11 @@ def get_project_skill_trust(
 def revoke_project_skill_trust(
     project_id: str,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
-    projects = _project_store(request, identity)
+    projects = _project_store(request)
     project = projects.get(project_id, include_removed=False)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在或已移除。")
-    store = _trust_store(request, identity)
+    store = _trust_store(request)
     store.revoke_project(project_id)
     return {"project_id": project_id, "trusted_skills": {}}

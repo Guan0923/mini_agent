@@ -9,17 +9,6 @@ export class ApiError extends Error {
   }
 }
 
-let unauthorizedHandler: (() => void) | null = null;
-
-/** Register the app-level response to an expired/revoked browser session. */
-export function setUnauthorizedHandler(handler: (() => void) | null): void {
-  unauthorizedHandler = handler;
-}
-
-export function notifyUnauthorized(): void {
-  unauthorizedHandler?.();
-}
-
 export interface ApiErrorDetails {
   message: string;
   code?: string;
@@ -45,9 +34,8 @@ export async function errorFrom(res: Response): Promise<string> {
 }
 
 export async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(apiUrl(url), { credentials: "include", ...init });
+  const res = await fetch(apiUrl(url), init);
   if (!res.ok) {
-    if (res.status === 401) notifyUnauthorized();
     const details = await errorDetailsFrom(res);
     throw new ApiError(res.status, details.message, details.code);
   }

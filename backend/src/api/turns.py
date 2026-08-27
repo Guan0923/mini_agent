@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
@@ -21,8 +21,6 @@ from backend.domain.runtime_state import (
 from backend.sandbox import SandboxInitializationError
 
 from .active_turn_stream import ActiveTurnStream
-from .auth.dependencies import require_user
-from .auth.types import UserIdentity
 from .chat.routes import (
     RuntimeModelRequest,
     _model_config_snapshot,
@@ -31,7 +29,7 @@ from .chat.routes import (
     _stream,
 )
 from .session_store import require_active_session, session_store
-from .shared.runtime import build_user_application
+from .shared.runtime import build_local_application
 from .state import WebAppState
 
 router = APIRouter(prefix="/api/turns", tags=["turns"])
@@ -151,7 +149,6 @@ def _references(item: Mapping[str, object]) -> list[dict[str, str]]:
 
 def _stream_turn(
     state: WebAppState,
-    identity: UserIdentity,
     *,
     session_id: str,
     thread_id: str,
@@ -167,7 +164,6 @@ def _stream_turn(
     stream = _stream(
         state,
         prompt,
-        identity=identity,
         session_id=session_id,
         thread_id=thread_id,
         turn_id=turn_id,
@@ -179,8 +175,8 @@ def _stream_turn(
         provider_name=config.provider_name,
         model_snapshot=model.model_dump() if model is not None else None,
         request_model=model,
-        user_preferences=state.agent_preferences_for_user(identity.id),
-        model_config=_model_config_snapshot(state, identity.id),
+        user_preferences=state.agent_preferences(),
+        model_config=_model_config_snapshot(state),
         references=references,
         operation=operation,
     )
@@ -188,28 +184,24 @@ def _stream_turn(
 
 
 @router.get("")
-def list_turns(
-    session_id: str, request: Request, identity: UserIdentity = Depends(require_user)
-) -> list[dict[str, object]]:
-    store = session_store(request.app.state.web, identity.id)
+def list_turns(session_id: str, request: Request) -> list[dict[str, object]]:
+    store = session_store(request.app.state.web)
     require_active_session(store, session_id)
     return [item.to_dict() for item in store.load_nodes(session_id) if item.session_id == session_id]
 
 
 @router.get("/{turn_id}/stream")
-def stream_running_turn(
-    turn_id: str, request: Request, identity: UserIdentity = Depends(require_user)
-) -> StreamingResponse:
+def stream_running_turn(turn_id: str, request: Request) -> StreamingResponse:
     state: WebAppState = request.app.state.web
-    store = session_store(state, identity.id)
+    store = session_store(state)
     turn = _turn(store, turn_id)
     active_streams = getattr(state, "active_turn_streams", {})
     lock = getattr(state, "active_turn_streams_lock", None)
     if hasattr(lock, "__enter__"):
         with lock:
-            active_stream = active_streams.get((identity.id, turn_id))
+            active_stream = active_streams.get(turn_id)
     else:
-        active_stream = active_streams.get((identity.id, turn_id))
+        active_stream = active_streams.get(turn_id)
     if isinstance(active_stream, ActiveTurnStream):
         subscription = active_stream.subscribe(turn_id)
         return StreamingResponse(subscription.as_sse(), media_type="text/event-stream")
@@ -225,11 +217,9 @@ def stream_running_turn(
 
 
 @router.post("")
-async def create_turn(
-    body: CreateTurnRequest, request: Request, identity: UserIdentity = Depends(require_user)
-) -> StreamingResponse:
+async def create_turn(body: CreateTurnRequest, request: Request) -> StreamingResponse:
     state: WebAppState = request.app.state.web
-    store = session_store(state, identity.id)
+    store = session_store(state)
     require_active_session(store, body.session_id)
     sidebar = store.get_sidebar_thread(body.thread_id)
     if sidebar is None or sidebar.session_id != body.session_id or sidebar.state != "active":
@@ -250,7 +240,6 @@ async def create_turn(
     item = _user_item(body.message)
     return _stream_turn(
         state,
-        identity,
         session_id=body.session_id,
         thread_id=body.thread_id,
         turn_id=body.id,
@@ -262,11 +251,9 @@ async def create_turn(
 
 
 @router.post("/{turn_id}/rewind")
-async def rewind_turn(
-    turn_id: str, body: RewindTurnRequest, request: Request, identity: UserIdentity = Depends(require_user)
-) -> StreamingResponse:
+async def rewind_turn(turn_id: str, body: RewindTurnRequest, request: Request) -> StreamingResponse:
     state: WebAppState = request.app.state.web
-    store = session_store(state, identity.id)
+    store = session_store(state)
     source = _turn(store, turn_id)
     item = _user_item(body.message)
     try:
@@ -275,7 +262,6 @@ async def rewind_turn(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _stream_turn(
         state,
-        identity,
         session_id=source.session_id,
         thread_id=source.thread_id,
         turn_id=source.id,
@@ -288,11 +274,9 @@ async def rewind_turn(
 
 
 @router.post("/{turn_id}/resume")
-async def resume_turn(
-    turn_id: str, body: TurnExecutionConfig, request: Request, identity: UserIdentity = Depends(require_user)
-) -> StreamingResponse:
+async def resume_turn(turn_id: str, body: TurnExecutionConfig, request: Request) -> StreamingResponse:
     state: WebAppState = request.app.state.web
-    store = session_store(state, identity.id)
+    store = session_store(state)
     source = _turn(store, turn_id)
     if source.status != "paused":
         raise HTTPException(status_code=409, detail="只有 paused Turn 可以恢复。")
@@ -319,7 +303,6 @@ async def resume_turn(
 
     return _stream_turn(
         state,
-        identity,
         session_id=source.session_id,
         thread_id=source.thread_id,
         turn_id=source.id,
@@ -332,11 +315,11 @@ async def resume_turn(
 
 
 @router.post("/{turn_id}/pause")
-def pause_turn(turn_id: str, request: Request, identity: UserIdentity = Depends(require_user)) -> dict[str, object]:
+def pause_turn(turn_id: str, request: Request) -> dict[str, object]:
     state: WebAppState = request.app.state.web
-    store = session_store(state, identity.id)
+    store = session_store(state)
     source = _turn(store, turn_id)
-    controller = getattr(state, "active_turn_cancellations", {}).get((identity.id, turn_id))
+    controller = getattr(state, "active_turn_cancellations", {}).get(turn_id)
     request_pause = getattr(controller, "request_pause", None)
     if callable(request_pause):
         request_pause()
@@ -352,10 +335,9 @@ def steer_turn(
     turn_id: str,
     body: SteerTurnRequest,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, str]:
     state: WebAppState = request.app.state.web
-    store = session_store(state, identity.id)
+    store = session_store(state)
     source = _turn(store, turn_id)
     if source.status != "running":
         raise HTTPException(status_code=409, detail="只有 running Turn 可以接收新输入。")
@@ -371,17 +353,15 @@ def steer_turn(
             }
         ],
     }
-    inbox = getattr(state, "active_turn_steering", {}).get((identity.id, turn_id))
+    inbox = getattr(state, "active_turn_steering", {}).get(turn_id)
     if inbox is None or not inbox.put(body.steering_id, normalized_message):
         raise HTTPException(status_code=409, detail="Turn 执行流已经封闭。")
     return {"steering_id": body.steering_id, "status": "accepted"}
 
 
 @router.post("/{turn_id}/fork", status_code=201)
-def fork_turn(
-    turn_id: str, body: ForkTurnRequest, request: Request, identity: UserIdentity = Depends(require_user)
-) -> dict[str, object]:
-    store = session_store(request.app.state.web, identity.id)
+def fork_turn(turn_id: str, body: ForkTurnRequest, request: Request) -> dict[str, object]:
+    store = session_store(request.app.state.web)
     source = _turn(store, turn_id)
     source_sidebar = store.get_sidebar_thread(source.thread_id)
     if source_sidebar is None or source_sidebar.session_id != source.session_id:
@@ -404,10 +384,9 @@ def fork_turn(
 def compact_turn(
     turn_id: str,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
     state: WebAppState = request.app.state.web
-    store = session_store(state, identity.id)
+    store = session_store(state)
     source = _turn(store, turn_id)
     if source.status != "success":
         raise HTTPException(status_code=409, detail="只有 success Turn 可以压缩。")
@@ -415,7 +394,7 @@ def compact_turn(
     stream_locks = _runtime_stream_lock_registry(state)
     stream_lock = stream_locks["__lock__"]
     stream_keys = stream_locks["keys"]
-    stream_key = (identity.id, source.thread_id)
+    stream_key = source.thread_id
     with stream_lock:
         if stream_key in stream_keys:
             raise HTTPException(status_code=409, detail="当前 Thread 已有 running Turn。")
@@ -423,20 +402,15 @@ def compact_turn(
 
     app = None
     try:
-        workspace = state.session_workspace(identity.id, source.session_id)
-        bound_project = state.projects(identity.id).session_project(source.session_id, include_removed=False)
+        workspace = state.session_workspace(source.session_id)
+        bound_project = state.projects.session_project(source.session_id, include_removed=False)
         if bound_project is not None and not bound_project.available:
             raise HTTPException(status_code=409, detail="项目 cwd 不可访问，请恢复文件夹后重试。")
-        model_config = _model_config_snapshot(
+        model_config = _model_config_snapshot(state, provider_name=source.provider_name)
+        app = build_local_application(
             state,
-            identity.id,
-            provider_name=source.provider_name,
-        )
-        app = build_user_application(
-            state,
-            identity.id,
             session_id=source.session_id,
-            user_preferences=state.agent_preferences_for_user(identity.id),
+            user_preferences=state.agent_preferences(),
             model_config=model_config,
             load_model_config=False,
             workspace=workspace,
@@ -464,10 +438,8 @@ def compact_turn(
 
 
 @router.patch("/{turn_id}/current-data")
-def patch_current_data(
-    turn_id: str, body: CurrentDataRequest, request: Request, identity: UserIdentity = Depends(require_user)
-) -> dict[str, object]:
-    store = session_store(request.app.state.web, identity.id)
+def patch_current_data(turn_id: str, body: CurrentDataRequest, request: Request) -> dict[str, object]:
+    store = session_store(request.app.state.web)
     _turn(store, turn_id)
     try:
         return store.set_turn_current_data(turn_id, body.current_data_idx).to_dict()
@@ -478,11 +450,9 @@ def patch_current_data(
 
 
 @router.patch("/{turn_id}/config")
-def patch_turn_config(
-    turn_id: str, body: TurnConfigPatch, request: Request, identity: UserIdentity = Depends(require_user)
-) -> dict[str, object]:
+def patch_turn_config(turn_id: str, body: TurnConfigPatch, request: Request) -> dict[str, object]:
     state: WebAppState = request.app.state.web
-    store = session_store(state, identity.id)
+    store = session_store(state)
     node = _turn(store, turn_id)
     if node.status != "running":
         raise HTTPException(status_code=409, detail="只有 running Turn 可以修改运行配置。")
@@ -499,7 +469,7 @@ def patch_turn_config(
         changes["permission_mode"] = body.permission_mode
     if body.running_mode is not None:
         changes["running_mode"] = body.running_mode
-    bridge = getattr(state, "active_runtime_bridges", {}).get((identity.id, node.thread_id))
+    bridge = getattr(state, "active_runtime_bridges", {}).get(node.thread_id)
     try:
         updated = bridge.apply_runtime_config(changes) if bridge is not None else None
         if updated is None:

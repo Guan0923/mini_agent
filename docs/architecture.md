@@ -1,156 +1,80 @@
 # Architecture
 
-Mini-Agent keeps provider wire formats outside its execution model. Public pipeline methods accept one `AgentRuntime`; provider adapters translate between that runtime and vendor payloads.
+Mini-Agent 是纯本地单用户系统。浏览器和遗留 TUI 是客户端，本机 backend 是唯一服务端；仓库不包含账户服务、Cloud、同步或 PostgreSQL 部署层。
 
-## Four-layer layout (deployment boundaries)
-
-The deployable system has four responsibilities. The browser and terminal are clients; the backend is a loopback process on the user's computer; only the cloud process can reach PostgreSQL.
+## 部署边界
 
 ```text
-frontend/ ──HTTP/SSE──> local backend (127.0.0.1:8000)
-tui/      ──shared backend packages────┘
-                              │ HTTPS (optional)
-                              ▼
-                       cloud API (8100) ──> PostgreSQL
+frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
+tui/      ── shared Python packages ──┘
+                                  ├─ local model providers
+                                  ├─ tools / Skills / MCP / Sandbox
+                                  └─ ~/.mini_agent
 ```
 
-- `frontend/` is a browser client. It never imports Python and only calls the local backend contract. Vite proxies `/api` and `/benchmark` to port 8000 during development; a production backend may serve `frontend/dist`.
-- `backend/` owns the Agent Runtime, model/provider calls, tools, workspace, per-session SQLite, local settings, browser sessions and cloud synchronization jobs. It binds to loopback and has no PostgreSQL, SMTP or account-password authority.
-- `tui/` remains a deprecated terminal client that directly reuses the backend/domain/runtime packages. It is retained for compatibility and is not the Web API implementation.
-- `cloud/` is an independent FastAPI service for accounts, mail verification, device grants, bearer tokens, key envelopes and encrypted snapshot metadata/chunks. It owns `DATABASE_URL`, SMTP and the cloud master key; it must not import Agent Runtime modules.
-- `benchmarks/`, `docs/` and `scripts/` are support directories, not deployment layers.
+- `frontend/` 不导入 Python，只调用本地 backend API。
+- `backend/` 承载 Agent Runtime、模型 Provider、工具、项目、会话、设置和本地持久化。
+- `tui/` 复用同一份 `ClientPaths`、配置、Provider 和会话存储。
+- `domain` 不依赖外层；runtime 依赖 planner/tool 端口；provider 不依赖 storage；frontend 不绕过 API。
+
+## 前端入口
+
+`/` 直接渲染 `AgentApp` 和 Chat。认证页面、AuthProvider、账户状态和同步页面不存在；未知前端路径回到 `/`。Ant Design 的 `ConfigProvider` 与 `App` 外壳保留。
+
+## 本地 API 与 Origin 防护
+
+所有 Chat、Turn、项目和设置 API 都不要求 Cookie 或 Bearer token。已删除的 `/api/auth/*` 与 `/api/sync/*` 返回 404。
+
+浏览器写请求仍有独立安全边界：带 `Origin` 的非只读请求必须匹配配置的 loopback Origin，否则返回 403；无 `Origin` 的本地 CLI 请求可以使用。CORS 的 `allow_credentials` 为 false。
 
 ## Runtime
 
+`AgentRuntime` 分为三部分：
+
+- `RuntimeState`：可序列化消息、模型设置、活动 Run、工具进度和完成摘要。
+- `RuntimeServices`：planner、工具、持久化、审批、steering、Subagent、时钟和 ID 生成器；密钥与 callable 不序列化。
+- `RuntimeExchange`：一次瞬态模型操作的请求、响应、流和推理回调。
+
+每个 session 同时最多一个活动 Turn。稳定状态迁移会写入 SQLite；SSE 断线只取消订阅，不取消后台 worker。Job registry 按 system/session/thread/run/task 组织，不含账户 owner。
+
+## 工具、Skills、MCP 与 Sandbox
+
+- 工具参数始终按 schema 校验，并保持 workspace 边界和审批策略。
+- 全局 Skills 位于 `~/.mini_agent/skills/`；项目 Skills 位于 `<workspace>/.mini_agent/skills/`，按项目和树哈希审批。
+- 全局 MCP 位于 `~/.mini_agent/mcp/`；项目 MCP 输出仍视为不可信。
+- Subagent 只允许单层 delegation。
+- 严格 Sandbox Broker 未就绪时不得降级为普通进程。
+- Sandbox 内部 `user_id` 只是 Broker 账户池/资源隔离键，不表示应用登录身份。
+
+## 本地持久化
+
 ```text
-TUI -> ConversationService -> RuntimeRunner port -> AgentRunner(runtime) -> workflows -> planner / tools
-                              |                         |             |
-                              +-> RuntimeState          +-> RuntimeEvent / Skills / Subagents
-                              +-> RuntimeServices
-                              +-> RuntimeExchange
-
-MCP stdio      -> McpToolAdapter -> approval-free ToolRegistry subset
-HTTP transport <-> provider adapter prepare_request/prepare_response <-> AgentRuntime
-Per-session SQLite <-> RuntimeState, messages, audit events, checkpoints, and sync outbox
-Local backend `backend.cloud.CloudClient` <-> versioned cloud HTTPS API <-> PostgreSQL owner/revision metadata and ciphertext snapshots
+~/.mini_agent/
+├─ mcp/
+├─ plugins/
+├─ runtime/
+│  ├─ state.db
+│  ├─ projects.db
+│  └─ <session_id>/
+├─ skills/
+└─ config.toml
 ```
 
-## Runtime
+`config.toml` 仅保存非敏感本地设置。`runtime/state.db` 保存 Provider 元数据和密文 API Key；安装级密钥由 OS credential vault 管理。`runtime/projects.db` 保存项目索引；各 session 目录保存自己的 `state.db`、workspace 和 uploads。
 
-`AgentRuntime` is session-scoped and intentionally split into three parts:
+新实现不扫描、不导入、不迁移旧 UUID 用户目录、`user.db`、认证缓存、同步数据库或旧密文。
 
-- `RuntimeState` is JSON-serializable. It owns typed messages, safe model settings, tool specifications, the active `RunState`, latest usage, pending assistant/tool progress, and completed run summaries.
-- `RuntimeServices` contains process-local dependencies such as the planner, tool handlers, stores, event sinks, approval and steering callbacks, Subagent coordinator, the clock, and ID generation. Secrets and callables are never serialized.
-- `RuntimeServices` also owns the process-local `HookManager`. Synchronous run, model, and tool hooks are rebound after session restoration and never serialized into checkpoints.
-- `RuntimeExchange` contains one transient model operation: request mode, allowed tools, request payload, raw response or SSE iterator, prepared response, and reasoning callback.
+## 数据流
 
-The formal execution entry points (`AgentRunner.run`, planner capabilities, workflows, `ToolStepExecutor.execute`, and provider preparation functions) take only `AgentRuntime`. A deprecated `LegacyAgentRunner` and planner capability adapters isolate pre-Runtime embedding APIs.
-
-One session permits one active turn. Runtime snapshots are saved at stable transitions, including model responses, tool results, and turn completion. SSE reasoning deltas are merged into one ordered durable `thinking` message; raw HTTP objects remain transient.
-
-The runtime retains a non-blocking process-local steering callback for embedding callers. Workflows drain and merge steering only after model responses and before or after individual tool steps; an operation already in progress may finish before stale work is skipped and the new `UserMessage` is checkpointed. The Textual TUI does not bind running input to this callback: it keeps messages in a process-local next-turn queue and starts one merged follow-up run after the active run finishes or is cooperatively cancelled with Esc. Approval prompts remain the exclusive terminal input state while a review is pending.
-
-## Lifecycle Hooks
-
-Subclass `AgentHook` and inject instances at the composition boundary:
-
-```python
-from backend.runtime import AgentHook, ModelHookContext, build_application
-
-
-class TemperatureHook(AgentHook):
-    def before_model(self, context: ModelHookContext) -> None:
-        context.request_parameters["temperature"] = 0.2
-
-
-application = build_application(workspace, hooks=[TemperatureHook()])
+```text
+Browser request
+  -> Origin middleware
+  -> FastAPI route
+  -> local application/session service
+  -> AgentRuntime
+  -> planner/provider/tools
+  -> RuntimeEvent + SQLite checkpoint
+  -> SSE projection
 ```
 
-Available pairs are `before_run/after_run`, `before_model/after_model`, and `before_tool/after_tool`. Before hooks run in registration order and may call `context.cancel(reason)`; after hooks run in reverse order with a success, failure, or cancellation snapshot. Model contexts permit request message, tool, and parameter replacement. Tool contexts permit argument replacement, followed by schema validation and approval of the final arguments. Hook exceptions are fail-closed and produce `hook_failed` runtime events.
-
-## Messages
-
-Top-level history contains `SystemMessage`, `UserMessage`, and `AssistantMessage`. Every message has `name`, `role`, and `content`. Assistant messages additionally preserve reasoning, raw provider logprobs, and zero or more nested `ToolMessage` values.
-
-A ToolMessage owns the model's call ID, tool name, arguments, status, result or error content, and retryability. Pending tool calls live in `RuntimeState.active_message`; after every nested tool has a terminal result, the complete AssistantMessage moves into history.
-
-Each account or guest `~/.mini_agent/<user_id>/runtime/<session_id>/state.db` retains resumable runtime state, ordered runtime messages, checkpoints, and compact conversation projections. The same session directory owns an independent `workspace/` and `uploads/`; Web and network TUI do not receive separate directory layers. Usage is kept in its provider-native JSON shape and overwritten with the most recent completed turn's final model usage.
-
-## Plan Messages and Handoffs
-
-Plan mode is a read-only conversation workflow rather than an unconditional proposal generator. Plain assistant text completes with a `response` event. The built-in `request_user_input` control pauses for material clarification, while `request_plan_review` carries a non-empty Markdown plan into the existing `InterruptRequest(kind="plan")` review. Both controls are exposed beside read-only tools, must be called alone, and are not registered with `ToolRegistry` or listed by `/tools`. A submitted plan remains in the control ToolMessage arguments and becomes the run `final_answer` only after implementation approval, avoiding a duplicate proposal message in the same history.
-
-Review decisions behave as follows:
-
-- `Implement` completes the Plan run and creates a `RunHandoff(new_session=False)`. `ConversationService` starts a distinct Agent run in the current session with a new run ID, the complete Plan history, and an automatic `UserMessage(content="Implement the plan")`.
-- `Implement and Clear Session` completes and persists the Plan run, then follows `RunHandoff(new_session=True)` into a newly created, active session. The isolated context contains only `AssistantMessage(final_plan)` and the automatic implementation message.
-- `Cancel and Stay in plan mode` cancels the Plan run, preserves the complete Plan conversation, and leaves the TUI in Plan mode.
-
-The handoff is sequential rather than a mode mutation inside one run: the Plan run remains an auditable producer, while the Agent run is an independently checkpointed consumer in either the existing or a fresh session. The Agent prompt explicitly declares prior Plan-mode restrictions inactive, and the Agent run executes through the default decision workflow.
-
-Plan questions, Plan Review, and Tool Review intentionally use separate decision vocabularies. Questions return `answer` with an answer map (an empty list explicitly skips one question) or `cancel`; Plan Review accepts only the three choices above; Tool Review remains `Continue / Cancel / Supplement`, so tool feedback behavior is unchanged.
-
-## Layered Skills
-
-`SkillCatalog` discovers user Skills from `~/.mini_agent/<user_id>/skills` only. Project Skills from `<workspace>/.mini_agent/skills` are untrusted repository content: `discover_project_skills` scans them as candidates with per-Skill full-directory tree hashes (rejecting symlinks, reparse points, and path escapes, with per-Skill and per-project size caps), but no candidate name, description, or instruction reaches the model before approval. Discovery is fail-fast and validates UTF-8, bounded size and line count, exact metadata, directory-name equality, duplicates within each layer, and resolved path confinement. Optional resources remain ordinary files; Skills do not register tools or expand permissions.
-
-Trust is per Skill: `ProjectSkillGate` runs before activation, and for each candidate whose tree hash does not match `~/.mini_agent/<user_id>/config.toml`'s `[project_skill_trust]` record (keyed by project id, normalized workspace path hash, and Skill name), it raises one `InterruptRequest(kind="skill")` with the Skill name, description, path, and tree hash. The human chooses `trust` (persist this tree hash) or `skip` (leave the Skill invisible); without an interactive handler the gate fails closed and skips. `full_access` tool mode, benchmarks, and background runs never auto-trust project Skills. Only trusted project Skills are merged into the effective catalog (project overrides a same-named user Skill), so explicit `$name` references and LLM auto-selection see exactly the approved set; an explicit reference to an unapproved Skill fails clearly. Tree hashes cover every file under the Skill directory, so editing a manifest, script, reference, or resource invalidates that Skill's trust and triggers a new single-Skill approval; new Skills never inherit trust. Revocation is available per project from the Web project settings (`DELETE /api/projects/{id}/skill-trust`).
-
-`SkillActivator` runs before both Plan-mode dispatch and the default Agent execution workflow. With an LLM planner and a non-empty catalog, it claims one model turn and invokes the `SkillSelector` capability with metadata only. The runtime unions semantic selections with installed names explicitly referenced as `$name`, resolves them in stable catalog order, snapshots full instructions/root/hash into `RunState.active_skills`, and emits `skills_selected`. Empty catalogs add no request; planners without the capability retain normal behavior unless a known Skill was explicitly requested, which fails clearly.
-
-`LLMPlanner` appends active snapshots to each later operation's system message before context estimation. The appended policy keeps every preceding system constraint authoritative and cannot bypass tool schemas, workspace confinement, or approval. Checkpoints serialize snapshots directly, and Plan Review copies them into `RunHandoff`, so implementation uses the exact approved Skill version even across an isolated session. A later ordinary user turn starts with an empty active set and selects again.
-
-
-## Subagents
-
-`SubagentCoordinator` handles the runtime-only `delegate_tasks` and `get_subagent_results` tools. One parent call starts a thread-pool batch of independent child runs, each with a fresh session ID, standard tools, inherited cancellation, and approval requests routed through a bounded bridge that is drained by the parent invocation thread. Worker threads never mutate or publish through the parent Runtime directly. Child runners omit delegation tools, making the topology deliberately single-level.
-
-`RunState.subagent_batches` persists task order, status, clipped answers, and errors. A completed batch can be read in pages; recovery converts a still-running batch to `indeterminate` instead of replaying it. `WorkspaceWriteLock` permits unrelated file writes concurrently, serializes equal normalized paths, and makes commands exclusive with every file mutation. This is process-local coordination, not a distributed lock.
-
-## MCP Boundary
-
-`backend.mcp` is a separate adapter over the shared tool registry, not a second agent runtime. The stdio server derives MCP schemas from ToolSpecs and exposes only read-only tools that do not require confirmation: `read_file`, `glob`, `grep`, and `get_current_time`. Calls retain JSON Schema validation, bounded output, and workspace confinement. Mutation, command, and network tools are rejected because stdio has no interactive approval channel.
-
-The MCP server requires neither model credentials nor PostgreSQL. Separately, the client loads only the user-level `~/.mini_agent/<user_id>/mcp/servers.toml`; project `mcp.toml` files are no longer read. Each AgentRunner owns its own `ExternalMcpManager` and long-lived stdio sessions; imported tools are approval-gated mutations from the planner's perspective and are excluded from Plan mode. Initialization, calls, and shutdown have finite configured timeouts. User-owned sensitive environment values are stored only as `env://` or `keyring://` references and resolved at process start; plaintext secrets never enter snapshots, logs, audit records, or model context.
-
-## Local-first persistence and synchronization
-
-The backend composition root uses `LocalAuthStore(<data_root>/client.db)` plus `PerUserSettingsRepository(<data_root>/<user_id>/user.db)`. `client.db` contains only hashed local browser sessions, cached identity metadata and guest-import state; cloud access tokens are encrypted in the account's `user.db` with the OS credential-backed local key. Each session database is self-contained and stores an owner device ID, remote revision, read-only flag, schema version, full runtime history, and stable outbox operation IDs. Remote sessions owned by another device are imported read-only; `/fork` copies a terminal run into a new session and gives ownership to the current device.
-
-`SyncCoordinator` has one event-driven background worker. Startup, checkpoint notification, and normal shutdown trigger push-then-pull; there is no periodic polling. Network, authentication, and server failures are categorized without logging tokens or snapshots and leave the outbox for a later lifecycle retry.
-
-The deployable `cloud` FastAPI service is the only component that accesses PostgreSQL. It authenticates bearer tokens and derives the user from the token, serializes snapshot writes per user, enforces parent-head conflict rules, retains the latest three completed snapshots and validates ciphertext chunks. TLS terminates at the deployment layer; local clients reject non-HTTPS cloud endpoints (except loopback development hosts) and never receive database credentials. Guests never call cloud and remain fully usable offline; an account can continue locally while cloud requests are paused, with only an explicit 401 clearing its remote credential.
-
-## Provider Boundary
-
-`providers/client.py` exposes the provider-selecting `LLMClient` facade, while `providers/transport.py` owns the schema-neutral `JsonHttpTransport`. The facade selects a wire adapter from `ModelConfig.provider`, coordinates transport, and records request diagnostics:
-
-```python
-LLMClient.run(runtime: AgentRuntime) -> PreparedResponse
-ChatCompletions.prepare_request(runtime: AgentRuntime) -> dict[str, object]
-ChatCompletions.prepare_response(runtime: AgentRuntime) -> PreparedResponse
-```
-
-`JsonHttpTransport` owns HTTP status handling, JSON decoding, SSE event decoding, redirect policy, and response cleanup. `ChatCompletions` only expands active chat messages, constructs the protocol payload, validates tool-call arguments, aggregates streamed fragments, and converts the response back to provider-neutral messages. Artifact snapshots are not accepted at the provider boundary.
-
-Tool decisions use the selected protocol's native tool-call shape. A service using any supported protocol can be configured without changing domain messages or workflows.
-
-## Responsibilities
-
-- `domain` owns typed messages, ToolSpec, run values, and compatibility serialization.
-- `runtime` owns AgentRuntime, application composition, provider-neutral events, contracts, recovery, and Subagent coordination. Its root contains only lazy public exports. Implementations are grouped by responsibility: `core/` owns state, events, contracts, settings, and hooks; `application/` owns services and dependency composition; `execution/` owns runners, workflows, steps, and outcomes; `conversation/` owns session orchestration, steering, references, recovery, and user questions; `planning/` owns Plan mode and Plan Review; `persistence/` owns checkpoint ports and persistent-event conversion.
-- `ConversationService` and `AgentApplication` depend on the `RuntimeRunner` protocol; only the composition root selects `AgentRunner`.
-- `PlanModeWorkflow` owns final proposal recording, review, and handoff so the runner only dispatches run modes and strategies.
-- Lifecycle hooks use narrow provider-neutral contexts: before hooks may cancel, model hooks may replace messages/tools/request parameters, and tool hooks may replace arguments before validation and approval. After hooks receive snapshots in reverse registration order.
-- `planning` converts prepared model responses into decisions and plans through runtime-only capability protocols. Model
-  request lifecycle handling lives in `model_requests.py`, while structured output validation lives in `model_outputs.py`.
-- `tools` owns handlers, executable JSON Schema validation, registration, workspace confinement, and confirmation metadata.
-  `catalog.py` is a thin composition boundary; grouped default definitions live under `tools/default_tools/`.
-- `providers` owns `LLMClient` selection, generic JSON/SSE transport, and protocol-specific request/response adapters.
-- `storage.sqlite` persists local session state; `sync` owns snapshot packaging/jobs and the repository port, while `backend.cloud` owns the HTTPS adapter. PostgreSQL repositories and account authority exist only under `cloud/`.
-- `mcp` adapts the approval-free read-tool subset to stdio without depending on model or persistence services.
-- `tui` handles terminal commands, approval input, RuntimeEvent presentation, and the process-local full-screen transcript only. `application/` owns the CLI loop and command routing; `components/` owns completion and approvals; `screens/`, `rendering/`, `view_parts/`, and `widgets/` isolate Textual responsibilities. Worker threads enqueue display chunks; the Textual event loop owns all widget mutation and rendering.
-
-## Extension Rules
-
-Add a provider by implementing runtime-based request and response preparation in a new adapter, then register it with `LLMClient`; accept only active chat messages and reuse the generic transport rather than importing `requests` or storage in the adapter. Add a tool with an explicit ToolSpec schema and text-returning handler, then register it in a catalog. Add a workflow under `runtime/execution/` that consumes AgentRuntime and reuses ToolStepExecutor. New runtime implementation modules belong in the matching classified package instead of the runtime root. Storage adapters must persist RuntimeState without serializing RuntimeServices or RuntimeExchange.
+Provider wire formats只存在于 `backend/src/providers/`。Runtime 发布事件，UI 展示逻辑留在前端；本地 SQLite 不承担远端 revision、outbox 或同步投影。

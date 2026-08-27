@@ -33,14 +33,12 @@ def auto_approve(request: InterruptRequest) -> InterruptDecision:
 class _PendingDecision:
     def __init__(
         self,
-        owner_id: str | None = None,
         request_kind: str | None = None,
         approval_context: dict[str, str] | None = None,
         approval_store: ApprovalStore | None = None,
     ) -> None:
         self.event = threading.Event()
         self.result: dict[str, Any] = {}
-        self.owner_id = owner_id
         self.request_kind = request_kind
         self.approval_context = approval_context
         self.approval_store = approval_store
@@ -57,33 +55,25 @@ class DecisionRegistry:
     def register(
         self,
         decision_id: str,
-        owner_id: str | None = None,
         *,
         request_kind: str | None = None,
         approval_context: dict[str, str] | None = None,
         approval_store: ApprovalStore | None = None,
     ) -> _PendingDecision:
-        pending = _PendingDecision(owner_id, request_kind, approval_context, approval_store)
+        pending = _PendingDecision(request_kind, approval_context, approval_store)
         with self._lock:
             self._pending[decision_id] = pending
         return pending
 
-    def kind(self, decision_id: str, owner_id: str | None = None) -> str | None:
+    def kind(self, decision_id: str) -> str | None:
         with self._lock:
             pending = self._pending.get(decision_id)
-            if pending is None or (pending.owner_id is not None and pending.owner_id != owner_id):
-                return None
-            return pending.request_kind
+            return pending.request_kind if pending is not None else None
 
-    def resolve(self, decision_id: str, decision: dict[str, Any], owner_id: str | None = None) -> bool:
+    def resolve(self, decision_id: str, decision: dict[str, Any]) -> bool:
         with self._lock:
             pending = self._pending.get(decision_id)
             if pending is None:
-                return False
-            # Network approvals are scoped to the authenticated user.  The
-            # optional owner keeps the registry compatible with local/runtime
-            # callers that do not have a web identity.
-            if pending.owner_id is not None and pending.owner_id != owner_id:
                 return False
             self._pending.pop(decision_id, None)
         if pending is None:
@@ -116,7 +106,6 @@ def make_interactive_interrupt(
     timeout: float = 120.0,
     cancel_requested: Callable[[], bool] | None = None,
     auto_approve_tools: bool = False,
-    owner_id: str | None = None,
     approval_store: ApprovalStore | None = None,
 ):
     """Build an interrupt handler that pauses the run and asks the client."""
@@ -165,7 +154,6 @@ def make_interactive_interrupt(
         )
         pending = registry.register(
             decision_id,
-            owner_id,
             request_kind=request.kind,
             approval_context=approval_context,
             approval_store=active_approval_store,

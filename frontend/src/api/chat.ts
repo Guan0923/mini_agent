@@ -1,6 +1,6 @@
 import type { ChatMode, FileReference, PermissionMode, ReasoningEffort, RuntimeConfigModel, StreamMessage } from "../types";
 import { apiUrl } from "./base";
-import { ApiError, errorFrom, jsonBody, notifyUnauthorized } from "./request";
+import { ApiError, errorFrom, jsonBody } from "./request";
 import { requestJson } from "./request";
 
 export interface StreamOptions {
@@ -49,14 +49,12 @@ async function streamEndpoint(
       method: body ? "POST" : "GET",
       ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
       signal,
-      credentials: "include",
     });
   } catch (error) {
     if ((error as Error).name === "AbortError" || signal.aborted) return "aborted";
     throw error;
   }
   if (!response.ok || !response.body) {
-    if (response.status === 401) notifyUnauthorized();
     throw new ApiError(response.status, await errorFrom(response));
   }
   const reader = response.body.getReader();

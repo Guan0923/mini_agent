@@ -138,20 +138,26 @@ def test_cooperative_pause_is_cancelled_resumable_and_preserves_workflow_identit
     assert resumed is not None and resumed.status == "completed"
     assert resumed.provenance.workflow_id == workflow_id
     assert resumed.provenance.attempt == 2
+    import json
     import sqlite3
 
     with sqlite3.connect(store.paths.session_db(service.active_session.session_id)) as connection:
-        transition_reason = connection.execute(
-            "SELECT reason FROM checkpoints WHERE run_id = ? ORDER BY id DESC LIMIT 1",
-            (paused.run_id,),
-        ).fetchone()[0]
-        attempt_starts = connection.execute(
-            "SELECT started_at FROM session_runs WHERE workflow_id = ? ORDER BY attempt",
-            (workflow_id,),
+        rows = connection.execute(
+            "SELECT namespace,payload_json FROM json_objects WHERE namespace IN ('checkpoint','run')"
         ).fetchall()
-    assert transition_reason == "run_cancelled"
-    assert len(attempt_starts) == 2
-    assert attempt_starts[0][0] != attempt_starts[1][0]
+    objects = [(namespace, json.loads(payload)) for namespace, payload in rows]
+    checkpoint_reasons = {
+        payload["reason"]
+        for namespace, payload in objects
+        if namespace == "checkpoint" and payload.get("run_id") == paused.run_id
+    }
+    workflow_attempts = sorted(
+        int(payload["provenance"]["attempt"])
+        for namespace, payload in objects
+        if namespace == "run" and payload.get("provenance", {}).get("workflow_id") == workflow_id
+    )
+    assert "run_cancelled" in checkpoint_reasons
+    assert workflow_attempts == [1, 2]
 
 
 def test_plan_review_handoff_creates_new_workflow_with_parent_source(tmp_path: Path) -> None:

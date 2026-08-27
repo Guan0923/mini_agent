@@ -16,14 +16,13 @@ from backend.planning.llm.titles import normalize_conversation_title
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.sandbox import ApprovalStore, SandboxInitializationError
-from backend.storage.auth.crypto import SecretDecryptionError
 from backend.storage.codec import is_default_session_title
+from backend.storage.local_crypto import SecretDecryptionError
 
 from ..active_turn_stream import ActiveTurnStream
-from ..auth.types import UserIdentity
 from ..pause_control import TurnPauseController
 from ..session_store import session_store as _store
-from ..shared.runtime import build_user_application
+from ..shared.runtime import build_local_application
 from ..state import WebAppState
 from ..turn_steering import TurnSteeringInbox
 from .interrupts import make_interactive_interrupt
@@ -157,14 +156,13 @@ def _model_request_parameters(model: RuntimeModelRequest | None, fallback: Reaso
 
 def _model_config_snapshot(
     state: WebAppState,
-    user_id: str,
     *,
     provider_name: str | None = None,
 ) -> ModelConfig:
     try:
         if provider_name and provider_name != "unknown":
-            return state.model_config_for_provider_name(user_id, provider_name)
-        return state.model_config_for_user(user_id)
+            return state.model_config(provider_name)
+        return state.model_config()
     except SecretDecryptionError as exc:
         raise HTTPException(
             status_code=409,
@@ -178,7 +176,6 @@ def _stream(
     state: WebAppState,
     prompt: str,
     *,
-    identity: UserIdentity,
     session_id: str,
     turn_id: str,
     thread_id: str,
@@ -216,21 +213,16 @@ def _stream(
     # summary checks are advisory; this lock closes the two-window race where
     # both requests otherwise pass validation and create two running leaves.
     stream_locks = _runtime_stream_lock_registry(state)
-    stream_key = (identity.id, thread_id)
-    reserved_stream_keys: set[tuple[str, str]] = {stream_key}
+    stream_key = thread_id
+    reserved_stream_keys: set[str] = {stream_key}
     stream_lock = stream_locks["__lock__"]
     with stream_lock:
         if stream_key in stream_locks["keys"]:
             raise HTTPException(status_code=409, detail="当前 Thread 已有 running Turn。")
         stream_locks["keys"].add(stream_key)
 
-    owner_id = identity.id
-
-    def registry_key(active_thread_id: str) -> tuple[str, str]:
-        # Session ids are scoped to the authenticated user.  Include the
-        # owner in the process-local controller key to prevent cross-user
-        # mutation if two stores ever contain the same session id.
-        return owner_id, active_thread_id
+    def registry_key(active_thread_id: str) -> str:
+        return active_thread_id
 
     active_turn_streams = getattr(state, "active_turn_streams", None)
     if not isinstance(active_turn_streams, dict):
@@ -241,9 +233,9 @@ def _stream(
         active_turn_streams_lock = threading.RLock()
         setattr(state, "active_turn_streams_lock", active_turn_streams_lock)
     active_stream = ActiveTurnStream(turn_id)
-    active_stream_aliases: set[tuple[str, str]] = {(identity.id, turn_id)}
+    active_stream_aliases: set[str] = {turn_id}
     with active_turn_streams_lock:
-        active_turn_streams[(identity.id, turn_id)] = active_stream
+        active_turn_streams[turn_id] = active_stream
     original_subscription = active_stream.subscribe(turn_id)
     cancel_requested = threading.Event()
     pause_controller = TurnPauseController()
@@ -251,7 +243,7 @@ def _stream(
     if not isinstance(active_turn_cancellations, dict):
         active_turn_cancellations = {}
         setattr(state, "active_turn_cancellations", active_turn_cancellations)
-    cancellation_key = (identity.id, turn_id)
+    cancellation_key = turn_id
     active_turn_cancellations[cancellation_key] = pause_controller
     steering_inbox = TurnSteeringInbox()
     active_turn_steering[cancellation_key] = steering_inbox
@@ -326,7 +318,7 @@ def _stream(
         bridge = bridge_ref["bridge"]
         if bridge is None:
             return
-        alias = (identity.id, frame.turn_id)
+        alias = frame.turn_id
         with active_turn_streams_lock:
             active_turn_streams[alias] = active_stream
             active_stream_aliases.add(alias)
@@ -335,11 +327,10 @@ def _stream(
     def enqueue_terminal(terminal_type: str, terminal_id: str, message: str = "") -> None:
         active_stream.publish_terminal(terminal_type, terminal_id, message)
 
-    approval_store = ApprovalStore(_store(state, identity.id))
+    approval_store = ApprovalStore(_store(state))
     interrupt = make_interactive_interrupt(
         sink,
         cancel_requested=cancellation_requested,
-        owner_id=owner_id,
         approval_store=approval_store,
     )
 
@@ -351,19 +342,18 @@ def _stream(
         try:
             outer_job = job_holder["job"]
             job_parent_id = outer_job.info().id if outer_job is not None else None
-            workspace = state.session_workspace(identity.id, session_id)
-            bound_project = state.projects(identity.id).session_project(session_id, include_removed=False)
+            workspace = state.session_workspace(session_id)
+            bound_project = state.projects.session_project(session_id, include_removed=False)
             if bound_project is not None and not bound_project.available:
                 raise RuntimeError("项目 cwd 不可访问，请恢复文件夹后重试。")
             selected_model_config = model_config
             if provider_name:
                 try:
-                    selected_model_config = state.model_config_for_provider_name(identity.id, provider_name)
+                    selected_model_config = state.model_config(provider_name)
                 except (SecretDecryptionError, ModelConfigurationError) as exc:
                     raise ModelConfigurationError(str(exc)) from exc
-            app = build_user_application(
+            app = build_local_application(
                 state,
-                identity.id,
                 session_id=session_id,
                 user_preferences=user_preferences,
                 model_config=selected_model_config,
@@ -391,7 +381,7 @@ def _stream(
                         thread_id=thread_id or active_session.session_id,
                         source_node_id=source_node_id,
                         adopt_existing=adopt_existing,
-                        user=identity.id,
+                        user="",
                         provider=getattr(selected_model_config, "provider", "unknown")
                         if selected_model_config
                         else "unknown",
@@ -533,22 +523,6 @@ def _stream(
                     )
             else:
                 enqueue_terminal("failed", turn_id or "unknown", "Turn persistence is unavailable.")
-            if state.event_sync_manager is not None:
-                # Project conversations are local-only.  Their runtime writes
-                # are already excluded from the outbox; do not let the
-                # Generic end-of-run hook marks the account event stream dirty.
-                local_only = bool(getattr(active_session, "local_only", False))
-                if not local_only and session_id:
-                    session_store = getattr(app, "session_store", None)
-                    getter = getattr(session_store, "get_session", None)
-                    if callable(getter):
-                        try:
-                            persisted = getter(session_id)
-                            local_only = bool(getattr(persisted, "local_only", False))
-                        except Exception:
-                            pass
-                if not local_only:
-                    state.event_sync_manager.notify_run_finished(identity.id)
         except ModelConfigurationError as exc:
             if bridge_ref["bridge"] is not None:
                 error_message = f"模型未配置：{exc}"
@@ -599,14 +573,14 @@ def _stream(
 
     if job_registry is not None:
         parent_scope = getattr(state, "system_job_scope", job_registry.root_scope())
-        user_scope = parent_scope.child(
-            JobScopeKind.USER,
-            user_id=owner_id or None,
+        session_scope = parent_scope.child(
+            JobScopeKind.SESSION,
             session_id=session_id,
         )
+        thread_scope = session_scope.child(JobScopeKind.THREAD, thread_id=thread_id)
         job = ThreadJob(job_registry.new_job_id(), worker)
         job_holder["job"] = job
-        job_registry.submit(job, scope=user_scope, lane=JobLane.FOREGROUND, admission=AdmissionPolicy())
+        job_registry.submit(job, scope=thread_scope, lane=JobLane.FOREGROUND, admission=AdmissionPolicy())
     else:
         # Focused embedding tests may use a minimal state double.  Preserve a
         # self-contained fallback while production always supplies a registry.

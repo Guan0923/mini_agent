@@ -1,6 +1,6 @@
 import type { FileReference, FileSource, SessionFileInfo } from "../types";
 import { apiUrl } from "./base";
-import { ApiError, errorFrom, notifyUnauthorized } from "./request";
+import { ApiError, errorFrom } from "./request";
 
 /** Upload a batch of files; resolves to the stored file metadata. */
 export async function uploadSessionFiles(
@@ -16,7 +16,6 @@ export async function uploadSessionFiles(
     onProgress,
   );
   if (!response.ok) {
-    if (response.status === 401) notifyUnauthorized();
     throw new ApiError(response.status, await errorFrom(response));
   }
   return response.json() as Promise<SessionFileInfo[]>;
@@ -31,7 +30,6 @@ function fetchWithProgress(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
-    xhr.withCredentials = true;
     xhr.upload.onprogress = (event) => {
       if (onProgress && event.lengthComputable) {
         onProgress(Math.round((event.loaded / event.total) * 100));
@@ -59,16 +57,14 @@ export async function searchSessionFiles(
   const params = new URLSearchParams({ q, limit: String(limit) });
   const response = await fetch(
     apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/files?${params.toString()}`),
-    { credentials: "include" },
   );
   if (!response.ok) {
-    if (response.status === 401) notifyUnauthorized();
     throw new ApiError(response.status, await errorFrom(response));
   }
   return response.json() as Promise<SessionFileInfo[]>;
 }
 
-/** Build the authenticated content URL for preview/download. */
+/** Build the local content URL for preview/download. */
 export function sessionFileContentUrl(
   sessionId: string,
   source: FileSource,
@@ -88,10 +84,9 @@ export async function deleteSessionFile(
   const params = new URLSearchParams({ source, path });
   const response = await fetch(
     apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/files?${params.toString()}`),
-    { method: "DELETE", credentials: "include" },
+    { method: "DELETE" },
   );
   if (!response.ok) {
-    if (response.status === 401) notifyUnauthorized();
     throw new ApiError(response.status, await errorFrom(response));
   }
 }
@@ -100,7 +95,7 @@ export async function deleteSessionFile(
 export async function fileReferenceAvailable(reference: FileReference, sessionId: string): Promise<boolean> {
   const url = sessionFileContentUrl(sessionId, reference.source, reference.path);
   try {
-    const response = await fetch(url, { method: "HEAD", credentials: "include" });
+    const response = await fetch(url, { method: "HEAD" });
     return response.ok;
   } catch {
     return false;

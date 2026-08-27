@@ -17,21 +17,15 @@ class AgentApplication:
     runner: RuntimeRunner
     session_store: SessionStore
     task_preprocessor: TaskPreprocessor
-    sync_coordinator: object | None = None
     default_timezone: str = DEFAULT_TIME_ZONE
     session_provisioner: Callable[..., object] | None = None
     session_provisioner_cleanup: Callable[[str], None] | None = None
     project_id: str | None = None
 
     def close(self) -> None:
-        try:
-            close = getattr(self.sync_coordinator, "close", None)
-            if callable(close):
-                close(timeout=5.0)
-        finally:
-            runner_close = getattr(self.runner, "close", None)
-            if callable(runner_close):
-                runner_close()
+        runner_close = getattr(self.runner, "close", None)
+        if callable(runner_close):
+            runner_close()
 
     def open_conversation(self, session_id: str | None = None) -> ConversationService:
         return ConversationService(

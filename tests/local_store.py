@@ -8,10 +8,10 @@ from backend.configuration import ClientPaths
 from backend.storage.sqlite import SQLiteSessionStore
 
 
-def session_store(root: Path, device_id: str = "device_test") -> SQLiteSessionStore:
+def session_store(root: Path) -> SQLiteSessionStore:
     """Create an isolated local session store below a pytest temp directory."""
 
-    return SQLiteSessionStore(ClientPaths(Path(root)), device_id)
+    return SQLiteSessionStore(ClientPaths(Path(root)))
 
 
 __all__ = ["session_store"]

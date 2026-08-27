@@ -24,7 +24,7 @@ export async function listProjects(state: "active" | "removed" | "all" = "active
 }
 
 export async function createProject(): Promise<ProjectCreateResult | null> {
-  const response = await fetch("/api/projects", { method: "POST", credentials: "include" });
+  const response = await fetch("/api/projects", { method: "POST" });
   if (response.status === 204) return null;
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || `请求失败（${response.status}）`);
   return response.json() as Promise<ProjectCreateResult>;
@@ -53,7 +53,6 @@ export async function renameProject(projectId: string, name: string): Promise<Pr
 export async function changeProjectPath(projectId: string): Promise<ProjectInfo | null> {
   const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/path`, {
     method: "POST",
-    credentials: "include",
   });
   if (response.status === 204) return null;
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || `请求失败（${response.status}）`);

@@ -113,24 +113,6 @@
   overflow-x: auto;
 }
 
-.cloud-sync-settings {
-  display: grid;
-  gap: 14px;
-}
-
-.cloud-sync-job {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fafafa;
-}
-
-.cloud-sync-actions {
-  align-items: center;
-}
-
 @media (max-width: 640px) {
   .user-settings-modal {
     height: min(680px, calc(100vh - 16px));

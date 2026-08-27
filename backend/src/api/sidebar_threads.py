@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .auth.dependencies import require_user
-from .auth.types import UserIdentity
 from .session_store import session_store
 from .state import WebAppState
 
@@ -37,11 +35,10 @@ def _require(store, thread_id: str):
 def list_sidebar_threads(
     request: Request,
     state: str = "active",
-    identity: UserIdentity = Depends(require_user),
 ) -> list[dict[str, object]]:
     if state not in {"active", "archived", "deleted", "all"}:
         raise HTTPException(status_code=422, detail="无效的 SidebarThread 状态。")
-    store = session_store(request.app.state.web, identity.id)
+    store = session_store(request.app.state.web)
     return [_payload(item) for item in store.list_sidebar_threads(state=state)]
 
 
@@ -49,12 +46,11 @@ def list_sidebar_threads(
 def create_sidebar_thread(
     body: CreateSidebarThreadRequest,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
     state: WebAppState = request.app.state.web
-    store = session_store(state, identity.id)
+    store = session_store(state)
     session = store.create_session(body.title, client_id=body.client_id)
-    state.user_paths(identity.id).ensure_session(session.session_id)
+    state.paths.ensure_session(session.session_id)
     item = store.create_sidebar_thread(
         session_id=session.session_id,
         thread_id=session.session_id,
@@ -69,18 +65,15 @@ def rename_sidebar_thread(
     thread_id: str,
     body: RenameSidebarThreadRequest,
     request: Request,
-    identity: UserIdentity = Depends(require_user),
 ) -> dict[str, object]:
-    store = session_store(request.app.state.web, identity.id)
+    store = session_store(request.app.state.web)
     _require(store, thread_id)
     return _payload(store.update_sidebar_thread(thread_id, title=body.title.strip(), title_is_custom=True))
 
 
 @router.post("/{thread_id}/archive")
-def archive_sidebar_thread(
-    thread_id: str, request: Request, identity: UserIdentity = Depends(require_user)
-) -> dict[str, object]:
-    store = session_store(request.app.state.web, identity.id)
+def archive_sidebar_thread(thread_id: str, request: Request) -> dict[str, object]:
+    store = session_store(request.app.state.web)
     _require(store, thread_id)
     from backend.domain.state import utc_now
 
@@ -88,19 +81,15 @@ def archive_sidebar_thread(
 
 
 @router.post("/{thread_id}/restore")
-def restore_sidebar_thread(
-    thread_id: str, request: Request, identity: UserIdentity = Depends(require_user)
-) -> dict[str, object]:
-    store = session_store(request.app.state.web, identity.id)
+def restore_sidebar_thread(thread_id: str, request: Request) -> dict[str, object]:
+    store = session_store(request.app.state.web)
     _require(store, thread_id)
     return _payload(store.update_sidebar_thread(thread_id, archived_at=None, deleted_at=None))
 
 
 @router.delete("/{thread_id}")
-def delete_sidebar_thread(
-    thread_id: str, request: Request, identity: UserIdentity = Depends(require_user)
-) -> dict[str, object]:
-    store = session_store(request.app.state.web, identity.id)
+def delete_sidebar_thread(thread_id: str, request: Request) -> dict[str, object]:
+    store = session_store(request.app.state.web)
     _require(store, thread_id)
     from backend.domain.state import utc_now
 

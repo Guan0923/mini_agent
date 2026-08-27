@@ -6,10 +6,9 @@ inside handlers, so starting the chat backend never pulls in the benchmark code.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from ..auth.dependencies import require_user
 from ..state import WebAppState
 
 
@@ -25,24 +24,19 @@ class RunAllRequest(BaseModel):
 def _benchmark_sandbox(request: Request):
     """Create the benchmark sandbox once and cache it on the app state."""
     app = request.app
-    identity = getattr(request.state, "user", None)
-    if identity is None:
-        raise HTTPException(status_code=401, detail="请先登录。")
-    cached_by_user = getattr(app.state, "benchmark_by_user", {})
-    cached = cached_by_user.get(identity.id)
+    cached = getattr(app.state, "benchmark", None)
     if cached is not None:
         return cached
     from benchmarks.sandbox import Sandbox
 
     web: WebAppState = app.state.web
     try:
-        model_config = web.model_config_for_user(identity.id)
+        model_config = web.model_config()
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"模型未配置：{exc}") from exc
-    sandbox = Sandbox(web.user_benchmark_root(identity.id), model_config=model_config)
+    sandbox = Sandbox(web.benchmark_data_root(), model_config=model_config)
     sandbox.prepare()
-    cached_by_user[identity.id] = sandbox
-    app.state.benchmark_by_user = cached_by_user
+    app.state.benchmark = sandbox
     return sandbox
 
 
@@ -104,7 +98,7 @@ def run_all_benchmark(body: RunAllRequest, request: Request) -> list[dict]:
 
 
 def create_benchmark_app(web_state: WebAppState) -> FastAPI:
-    app = FastAPI(title="Mini-Agent Benchmark", version="0.0.1", dependencies=[Depends(require_user)])
+    app = FastAPI(title="Mini-Agent Benchmark", version="0.0.1")
     app.state.web = web_state
     app.include_router(router)
     return app

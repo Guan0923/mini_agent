@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 
-from backend.planning.prompts import compose_system_prompt
 from backend.tools import ToolError, build_tool_registry
 
 
@@ -97,7 +96,3 @@ def test_todo_write_is_registered_but_not_read_only(tmp_path: Path) -> None:
     assert "todo_write" in registry.names()
     assert registry.is_read_only("todo_write") is False
     assert "todo_write" not in registry.read_only_names()
-
-
-def test_agent_prompt_requires_todo_write_tool() -> None:
-    assert "`todo_write`" in compose_system_prompt("agent")

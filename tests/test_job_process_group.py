@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -54,6 +55,14 @@ def _retry_until(lambda_):  # noqa: ANN001
             return True
         time.sleep(0.05)
     return False
+
+
+def _read_pid_file(path: Path) -> int | None:
+    try:
+        value = int(path.read_text(encoding="ascii").strip())
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -408,10 +417,13 @@ def test_terminate_kills_whole_tree_windows(tmp_path) -> None:
     env = make_env(tmp_path)
     group = ProcessGroup(argv, env, cwd=str(tmp_path))
     pid = group.start()
-    assert _retry_until(child_pid_file.exists), "child pid file was never written"
-    child_pid = int(child_pid_file.read_text(encoding="ascii").strip())
-    assert child_pid != pid
-    group.terminate()
+    child_pid = None
+    try:
+        assert _retry_until(lambda: _read_pid_file(child_pid_file) is not None), "child pid file was never written"
+        child_pid = _read_pid_file(child_pid_file)
+        assert child_pid is not None and child_pid != pid
+    finally:
+        group.terminate()
     # Root is Popen-held → authoritative via poll(); child is probed via tasklist.
     root_gone = _retry_until(lambda: group.poll() is not None)
     assert root_gone, f"root pid {pid} still running after terminate"
@@ -429,10 +441,14 @@ def test_terminate_kills_whole_tree_posix(tmp_path) -> None:
     env = make_env(tmp_path)
     group = ProcessGroup(argv, env, cwd=str(tmp_path))
     pid = group.start()
-    assert _retry_until(child_pid_file.exists), "child pid file was never written"
-    child_pid = int(child_pid_file.read_text(encoding="ascii").strip())
-    assert child_pid != pid
-    group.terminate()
+    child_pid = None
+    try:
+        assert _retry_until(lambda: _read_pid_file(child_pid_file) is not None), "child pid file was never written"
+        child_pid = _read_pid_file(child_pid_file)
+        assert child_pid is not None and child_pid != pid
+    finally:
+        group.terminate()
+    assert child_pid is not None
     assert _retry_until(lambda: group.poll() is not None), f"root pid {pid} still running"
     assert _retry_until(lambda: not _pid_alive(child_pid)), f"child pid {child_pid} still alive after terminate"
 

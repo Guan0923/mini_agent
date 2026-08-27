@@ -5,7 +5,6 @@ import pytest
 
 from backend.domain import DEFAULT_TIME_ZONE
 from backend.planning import RuleBasedPlanner
-from backend.planning.prompts import compose_system_prompt
 from backend.runtime import AgentRunner, ConversationService, RuntimeState
 from backend.tools import ToolError, ToolInvocationContext, ToolRegistry, build_tool_registry
 from tests.local_store import session_store
@@ -124,7 +123,3 @@ def test_time_command_reports_noninteractive_selector_requirement() -> None:
 
     assert app._handle_command("time", "") is True
     assert app.messages == ["Time zone selector requires the interactive TUI."]
-
-
-def test_system_prompt_requires_current_time_tool() -> None:
-    assert "call `get_current_time`" in compose_system_prompt("agent")

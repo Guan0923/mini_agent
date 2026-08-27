@@ -15,6 +15,7 @@ from backend.jobs import (
     JobKind,
     JobLane,
     JobLimitPolicy,
+    JobQuery,
     JobRegistry,
     JobScopeKind,
     JobState,
@@ -222,15 +223,11 @@ def test_command_output_uses_one_shared_limit_and_preserves_both_streams(tmp_pat
 
 def test_command_job_reuses_parent_slot_and_is_visible_in_shared_registry(tmp_path: Path) -> None:
     limits = {lane: LaneLimits(max_running=1, max_queued=1) for lane in JobLane}
-    registry = JobRegistry(policy=JobLimitPolicy(system=limits, user=limits, runner=limits))
-    user_scope = registry.root_scope().child(
-        JobScopeKind.USER,
-        user_id="user-1",
-        session_id="session-1",
-    )
-    runner_scope = user_scope.child(JobScopeKind.RUNNER)
+    registry = JobRegistry(policy=JobLimitPolicy(system=limits, session=limits, thread=limits))
+    session_scope = registry.root_scope().child(JobScopeKind.SESSION, session_id="session-1")
+    thread_scope = session_scope.child(JobScopeKind.THREAD, thread_id="thread-1")
     parent_job_id = registry.new_job_id()
-    run_scope = runner_scope.child(
+    run_scope = thread_scope.child(
         JobScopeKind.RUN,
         run_id="run-1",
         parent_job_id=parent_job_id,
@@ -258,7 +255,7 @@ def test_command_job_reuses_parent_slot_and_is_visible_in_shared_registry(tmp_pa
     parent_job = ThreadJob(parent_job_id, invoke_command)
     registry.submit(
         parent_job,
-        scope=user_scope,
+        scope=thread_scope,
         lane=JobLane.FOREGROUND,
         admission=AdmissionPolicy(),
     )
@@ -267,9 +264,7 @@ def test_command_job_reuses_parent_slot_and_is_visible_in_shared_registry(tmp_pa
     assert parent_job.info().state is JobState.SUCCEEDED
     assert result["output"] == "stdout:\nmanaged\n"
     command_records = [
-        item
-        for item in registry.list_for_user("user-1", session_id="session-1")
-        if item.info.kind is JobKind.SUBPROCESS
+        item for item in registry.list(JobQuery(session_id="session-1")) if item.info.kind is JobKind.SUBPROCESS
     ]
     assert len(command_records) == 1
     assert command_records[0].parent_job_id == parent_job_id

@@ -422,7 +422,7 @@ class StructuredCompactionClient:
 
 
 def test_conversation_compact_turn_uses_llm_summary_and_finalizes_exact_source(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
     client = StructuredCompactionClient()
     service = ConversationService(
         AgentRunner(LLMPlanner(client, [], []), ToolRegistry(tmp_path / "workspace")),

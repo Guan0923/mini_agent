@@ -21,17 +21,9 @@ export interface SessionFileInfo {
   is_image: boolean;
 }
 
-export interface AuthUser {
-  id: string;
-  email: string | null;
-  kind?: "account" | "guest";
-  guest_import?: { guest_id: string; status: "pending"; created_at: number; updated_at: number } | null;
+export interface LocalProfile {
   display_name: string;
-  agent_preferences?: string;
-}
-
-export interface AuthResponse {
-  user: AuthUser;
+  agent_preferences: string;
 }
 
 export interface ToolEvent {

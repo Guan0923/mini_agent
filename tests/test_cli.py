@@ -59,7 +59,7 @@ class StubTerminalApp:
     result: RunState | None = None
     started = False
 
-    def __init__(self, conversation, log_dir: Path) -> None:
+    def __init__(self, conversation, log_dir: Path | None = None) -> None:
         self.conversation = conversation
         self.log_dir = log_dir
 
@@ -75,7 +75,7 @@ class StubTerminalApp:
 def stub_cli(monkeypatch):
     sanitize_deprecated_settings(monkeypatch)
     application = SimpleNamespace(open_conversation=lambda session_id: object())
-    monkeypatch.setattr(cli, "build_application", lambda *args: application)
+    monkeypatch.setattr(cli, "build_application", lambda *args, **kwargs: application)
     monkeypatch.setattr(cli, "TerminalApp", StubTerminalApp)
     StubTerminalApp.result = None
     StubTerminalApp.started = False
@@ -99,7 +99,7 @@ def test_main_resumes_idle_session_before_running_positional_task(tmp_path, monk
         prepare_resume=lambda _session_id: SimpleNamespace(requires_action=False),
     )
     application = SimpleNamespace(open_conversation=lambda session_id: opened.append(session_id) or conversation)
-    monkeypatch.setattr(cli, "build_application", lambda *args: application)
+    monkeypatch.setattr(cli, "build_application", lambda *args, **kwargs: application)
     monkeypatch.setattr(cli, "TerminalApp", StubTerminalApp)
     StubTerminalApp.result = RunState(task="next", mode="agent", status="completed")
 
@@ -115,7 +115,7 @@ def test_main_refuses_positional_task_until_resumable_workflow_is_handled(tmp_pa
         prepare_resume=lambda _session_id: SimpleNamespace(requires_action=True),
     )
     application = SimpleNamespace(open_conversation=lambda _session_id: conversation)
-    monkeypatch.setattr(cli, "build_application", lambda *args: application)
+    monkeypatch.setattr(cli, "build_application", lambda *args, **kwargs: application)
     monkeypatch.setattr(cli, "TerminalApp", StubTerminalApp)
 
     with pytest.raises(SystemExit) as exc_info:

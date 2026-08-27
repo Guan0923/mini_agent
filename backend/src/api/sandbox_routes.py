@@ -1,4 +1,4 @@
-"""Authenticated Windows Sandbox Broker control-plane endpoints."""
+"""Local Windows Sandbox Broker control-plane endpoints."""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from backend.sandbox.errors import BrokerInstallationError
-
-from .auth.routes import _broker_payload, _origin_guard
 
 router = APIRouter(prefix="/api/sandbox", tags=["sandbox"])
 logger = logging.getLogger(__name__)
@@ -29,7 +27,6 @@ def status(request: Request) -> dict[str, object]:
 
 @router.post("/install", response_model=None)
 def install(request: Request) -> dict[str, object] | JSONResponse:
-    _origin_guard(request)
     try:
         return _broker_payload(_broker(request).install())
     except BrokerInstallationError as exc:
@@ -48,7 +45,6 @@ def install(request: Request) -> dict[str, object] | JSONResponse:
 
 @router.post("/repair", response_model=None)
 def repair(request: Request) -> dict[str, object] | JSONResponse:
-    _origin_guard(request)
     try:
         return _broker_payload(_broker(request).repair())
     except BrokerInstallationError as exc:
@@ -66,3 +62,11 @@ def repair(request: Request) -> dict[str, object] | JSONResponse:
 
 
 __all__ = ["router"]
+
+
+def _broker_payload(value: object) -> dict[str, object]:
+    if callable(getattr(value, "to_dict", None)):
+        return dict(value.to_dict())
+    if isinstance(value, dict):
+        return dict(value)
+    return {"installed": False, "healthy": False, "detail": "Broker returned an invalid status"}

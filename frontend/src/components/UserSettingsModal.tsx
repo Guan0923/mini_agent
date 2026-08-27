@@ -9,7 +9,6 @@ import {
   InputNumber,
   Menu,
   Modal,
-  Progress,
   Select,
   Space,
   Spin,
@@ -24,24 +23,19 @@ import {
   activateProviderConfig,
   deleteProviderConfig,
   discoverProviderModels,
-  getSyncJob,
-  getSyncStatus,
-  syncNow,
   setTimezone,
   updateAgentConfig,
   updateProfile,
   updateRuntimeConfig,
   updateProviderConfigById,
-  updateSyncPreferences,
   type AgentConfig,
   type ProviderConfig,
   type UserSettings,
   type RuntimeConfig,
   type SandboxConfig,
-  type SyncJob,
 } from "../api";
-import type { AuthUser } from "../types";
-type SettingsSection = "profile" | "agent" | "runtime" | "provider_add" | "provider_manage" | "cloud";
+import type { LocalProfile } from "../types";
+type SettingsSection = "profile" | "agent" | "runtime" | "provider_add" | "provider_manage";
 
 type ProviderDraft = {
   provider_name: string;
@@ -61,12 +55,12 @@ type ProviderModelFeedback = {
 
 interface UserSettingsModalProps {
   open: boolean;
-  user: AuthUser | null;
+  profile: LocalProfile;
   onClose: () => void;
   activeSessionId?: string;
   onAgentConfigUpdate?: (config: AgentConfig) => void;
   onProviderConfigUpdate?: (config: ProviderConfig) => void;
-  onUserUpdate: (user: Partial<AuthUser>) => void;
+  onProfileChange: (profile: LocalProfile) => void;
 }
 
 const defaultAgent: AgentConfig = {
@@ -103,20 +97,6 @@ const defaultProviderDraft: ProviderDraft = {
   api_key: "",
 };
 
-const defaultSyncPreferences = {
-  auto_save_enabled: false,
-  auto_save_rule: "idle_5m" as const,
-};
-
-const defaultSyncState = {
-  local_revision: 0,
-  cloud_revision: 0,
-  pending_event_count: 0,
-  status: "local_only" as const,
-  last_error: "",
-  updated_at: null,
-};
-
 const defaultSandboxConfig: SandboxConfig = {
   enabled: true,
   file_mode: "read_only",
@@ -145,9 +125,9 @@ function formatBytes(value: number): string {
 
 export default function UserSettingsModal({
   open,
-  user,
+  profile,
   onClose,
-  onUserUpdate,
+  onProfileChange,
   activeSessionId,
   onAgentConfigUpdate,
   onProviderConfigUpdate,
@@ -169,8 +149,6 @@ export default function UserSettingsModal({
   const [managedModelQueries, setManagedModelQueries] = useState<Record<string, string>>({});
   const [managedModelOpen, setManagedModelOpen] = useState<Record<string, boolean>>({});
   const [managedModelFeedback, setManagedModelFeedback] = useState<Record<string, ProviderModelFeedback>>({});
-  const [syncJob, setSyncJob] = useState<SyncJob | null>(null);
-  const [cloudLoading, setCloudLoading] = useState(false);
   const settingsOpenRef = useRef(open);
 
   useEffect(() => {
@@ -207,8 +185,6 @@ export default function UserSettingsModal({
           ...next,
           provider_config: currentProvider,
           provider_configs: providers,
-          sync_preferences: next.sync_preferences ?? defaultSyncPreferences,
-          sync_state: next.sync_state ?? defaultSyncState,
           runtime_config: {
             ...(next.runtime_config ?? { max_tool_calls: 32, terminal_type: "cmd" }),
             terminal_type: next.runtime_config?.terminal_type ?? "cmd",
@@ -233,15 +209,13 @@ export default function UserSettingsModal({
         setManagedModelQueries({});
         setManagedModelOpen({});
         setManagedModelFeedback({});
-        if ((next.cloud_sync_available ?? user?.kind !== "guest") && user?.kind !== "guest") void refreshCloud();
       })
       .catch((cause) => {
         if (!mounted) return;
         const fallback: UserSettings = {
           profile: {
-            email: user?.email ?? "",
-            display_name: user?.display_name ?? "",
-            agent_preferences: user?.agent_preferences ?? "",
+            display_name: profile.display_name,
+            agent_preferences: profile.agent_preferences,
           },
           agent_config: defaultAgent,
           provider_config: defaultProvider,
@@ -252,8 +226,6 @@ export default function UserSettingsModal({
           terminal_options: [],
           terminal_notice: null,
           timezone_options: [],
-          sync_preferences: defaultSyncPreferences,
-          sync_state: defaultSyncState,
         };
         setSettings(fallback);
         setSaved(fallback);
@@ -272,40 +244,7 @@ export default function UserSettingsModal({
     return () => {
       mounted = false;
     };
-  }, [open, user?.display_name, user?.agent_preferences, user?.email]);
-
-  useEffect(() => {
-    if (!open || !syncJob || !["queued", "running"].includes(syncJob.status)) return;
-    const timer = window.setInterval(() => {
-      void getSyncJob(syncJob.id)
-        .then((job) => {
-          setSyncJob(job);
-          if (!["queued", "running"].includes(job.status)) void refreshCloud();
-        })
-        .catch((cause) => setError(cause instanceof Error ? cause.message : "读取云同步任务失败。"));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [open, syncJob?.id, syncJob?.status]);
-
-  async function refreshCloud(): Promise<void> {
-    if (user?.kind === "guest") return;
-    try {
-      const status = await getSyncStatus();
-      setSyncJob(status.job);
-      setSettings((current) => current ? {
-        ...current,
-        sync_preferences: status.preferences,
-        sync_state: status.state,
-      } : current);
-      setSaved((current) => current ? {
-        ...current,
-        sync_preferences: status.preferences,
-        sync_state: status.state,
-      } : current);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "云同步状态加载失败。");
-    }
-  }
+  }, [open, profile.display_name, profile.agent_preferences]);
 
   const dirty = useMemo(
     () => snapshot({ settings, providerAddDraft, providerDrafts }) !== snapshot({
@@ -315,7 +254,6 @@ export default function UserSettingsModal({
     }),
     [saved, savedProviderAddDraft, settings, providerAddDraft, providerDrafts, savedProviderDrafts],
   );
-  const cloudAvailable = user?.kind !== "guest" && settings?.cloud_sync_available !== false;
 
   function matchingModels(id: string, input: string): { value: string }[] {
     const query = input.trim().toLowerCase();
@@ -389,7 +327,7 @@ export default function UserSettingsModal({
         });
         updateSettings({ profile: { ...settings.profile, ...profile } });
         setSaved((current) => (current ? { ...current, profile: { ...current.profile, ...profile } } : current));
-        onUserUpdate(profile);
+        onProfileChange(profile);
       } else if (section === "agent") {
         const agent = await updateAgentConfig(settings.agent_config);
         if (activeSessionId && saved?.agent_config.timezone !== settings.agent_config.timezone) {
@@ -431,11 +369,6 @@ export default function UserSettingsModal({
           delete next.new;
           return next;
         });
-      } else if (section === "cloud") {
-        if (!cloudAvailable) return;
-        const preferences = await updateSyncPreferences(settings.sync_preferences);
-        updateSettings({ sync_preferences: preferences });
-        setSaved((current) => current ? { ...current, sync_preferences: preferences } : current);
       } else {
         return;
       }
@@ -446,23 +379,6 @@ export default function UserSettingsModal({
       setSaving(false);
     }
   }
-
-  async function startCloudSave(force = false): Promise<void> {
-    if (!cloudAvailable) return;
-    setCloudLoading(true);
-    setError("");
-    try {
-      const job = await syncNow(force);
-      setSyncJob(job);
-      await refreshCloud();
-      message.success("同步已启动");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "启动云端同步失败。");
-    } finally {
-      setCloudLoading(false);
-    }
-  }
-
 
   function updateProviderDraft(id: string, patch: Partial<{ provider_name: string; model: string; api_key: string }>) {
     setProviderDrafts((current) => ({ ...current, [id]: { ...(current[id] ?? { provider_name: "", model: "", api_key: "" }), ...patch } }));
@@ -594,7 +510,6 @@ export default function UserSettingsModal({
     { key: "runtime", label: "运行配置" },
     { key: "provider_add", label: "添加提供商" },
     { key: "provider_manage", label: "Provider 与模型" },
-    { key: "cloud", label: "云同步" },
   ];
 
   const body = loading || !settings ? (
@@ -613,9 +528,6 @@ export default function UserSettingsModal({
         {section === "profile" && (
           <Form layout="vertical">
             <Typography.Title level={4}>个人简介</Typography.Title>
-            <Form.Item label="邮箱">
-              <Input value={settings.profile.email} disabled />
-            </Form.Item>
             <Form.Item label="用户名">
               <Input
                 aria-label="用户名"
@@ -918,90 +830,6 @@ export default function UserSettingsModal({
             )}
           </div>
         )}
-        {section === "cloud" && (
-          <div className="cloud-sync-settings">
-            <Typography.Title level={4}>云同步</Typography.Title>
-            {user?.kind === "guest" ? (
-              <Alert
-                type="info"
-                showIcon
-                title="游客数据仅保存在本机"
-                description="登录正式账户后才能同步加密的会话事件。"
-              />
-            ) : null}
-            <Typography.Paragraph type="secondary">
-              云端只同步加密的日志、消息、运行状态、checkpoint 和同步元数据；workspace、上传文件、Skills、插件与 MCP 始终保留在本机。
-            </Typography.Paragraph>
-            <Form layout="vertical" disabled={!cloudAvailable}>
-              <Form.Item label="自动保存">
-                <Switch
-                  aria-label="自动保存到云端"
-                  checked={settings.sync_preferences.auto_save_enabled}
-                  onChange={(auto_save_enabled) => updateSettings({
-                    sync_preferences: { ...settings.sync_preferences, auto_save_enabled },
-                  })}
-                />
-              </Form.Item>
-              <Form.Item label="自动保存规则">
-                <Select
-                  aria-label="自动保存规则"
-                  disabled={!settings.sync_preferences.auto_save_enabled}
-                  value={settings.sync_preferences.auto_save_rule}
-                  options={[
-                    { value: "idle_5m", label: "本地变化后空闲 5 分钟" },
-                    { value: "after_run", label: "每次 Agent 运行结束后" },
-                    { value: "hourly", label: "有修改时每小时" },
-                  ]}
-                  onChange={(auto_save_rule) => updateSettings({
-                    sync_preferences: { ...settings.sync_preferences, auto_save_rule },
-                  })}
-                />
-              </Form.Item>
-            </Form>
-
-            {cloudAvailable && (settings.sync_state.status === "conflict" || syncJob?.status === "conflict") ? (
-              <Alert
-                type="warning"
-                showIcon
-                title="本地数据与云端最新版本冲突"
-                 description="同步会保留完整事件历史；请先拉取远端增量后再重试。"
-                 action={<Space wrap>
-                   <Button onClick={() => void startCloudSave(true)}>重试同步</Button>
-                 </Space>}
-              />
-            ) : null}
-
-            {cloudAvailable && syncJob ? (
-              <div className="cloud-sync-job" aria-live="polite">
-                <Space>
-                  <Tag color={syncJob.status === "complete" ? "green" : syncJob.status === "failed" ? "red" : "blue"}>
-                    同步
-                  </Tag>
-                  <Typography.Text>{syncJob.phase}</Typography.Text>
-                </Space>
-                <Progress
-                  percent={syncJob.progress}
-                  status={syncJob.status === "failed" ? "exception" : syncJob.status === "complete" ? "success" : "active"}
-                />
-                {syncJob.error ? <Typography.Text type="danger">{syncJob.error}</Typography.Text> : null}
-              </div>
-            ) : null}
-
-            {cloudAvailable ? <Space wrap className="cloud-sync-actions">
-              <Button
-                type="primary"
-                loading={cloudLoading || syncJob?.status === "queued" || syncJob?.status === "running"}
-                onClick={() => void startCloudSave(false)}
-              >
-                立即同步
-              </Button>
-              <Typography.Text type="secondary">
-                状态：{settings.sync_state.status} · 本地 revision {settings.sync_state.local_revision} · 云端 revision {settings.sync_state.cloud_revision} · 待同步事件 {settings.sync_state.pending_event_count}
-              </Typography.Text>
-            </Space> : null}
-
-          </div>
-        )}
         {error ? <Typography.Text type="danger">{error}</Typography.Text> : null}
       </section>
     </div>
@@ -1023,7 +851,7 @@ export default function UserSettingsModal({
             type="primary"
             aria-label="保存"
             loading={saving}
-            disabled={loading || !settings || (section === "cloud" && !cloudAvailable)}
+            disabled={loading || !settings}
             onClick={() => void saveCurrent()}
           >
             保存

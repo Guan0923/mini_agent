@@ -2,7 +2,7 @@ import { act, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionInfo } from "../api";
 import type { ProjectInfo } from "../api/projects";
-import type { AuthUser, RuntimeRootNode, RuntimeStateNode } from "../types";
+import type { RuntimeRootNode, RuntimeStateNode } from "../types";
 import type { AgentShellProps } from "./AgentShell";
 import AgentApp from "./AgentApp";
 
@@ -35,22 +35,10 @@ const projectsApi = vi.hoisted(() => ({
   revokeProjectSkillTrust: vi.fn(),
 }));
 
-const auth = vi.hoisted(() => ({
-  user: {
-    id: "user-1",
-    email: "user@example.com",
-    kind: "account",
-    display_name: "User",
-  } as AuthUser,
-  setUser: vi.fn(),
-  signOut: vi.fn(),
-}));
-
 const shell = vi.hoisted(() => ({ props: null as AgentShellProps | null }));
 
 vi.mock("../api", () => api);
 vi.mock("../api/projects", () => projectsApi);
-vi.mock("../auth/AuthProvider", () => ({ useAuth: () => auth }));
 vi.mock("./AgentShell", () => ({
   default: (props: AgentShellProps) => {
     shell.props = props;

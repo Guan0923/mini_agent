@@ -23,10 +23,9 @@ function validQueuedMessage(value: unknown): value is QueuedMessage {
       || (Array.isArray(candidate.references) && candidate.references.every(validReference)));
 }
 
-export function loadQueuedMessages(storage: Storage, userId: string | undefined): Map<string, QueuedMessage[]> {
-  if (!userId) return new Map();
+export function loadQueuedMessages(storage: Storage): Map<string, QueuedMessage[]> {
   try {
-    const raw = storage.getItem(`${QUEUED_MESSAGES_STORAGE_KEY}:${userId}`);
+    const raw = storage.getItem(QUEUED_MESSAGES_STORAGE_KEY);
     if (!raw) return new Map();
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
@@ -43,11 +42,9 @@ export function loadQueuedMessages(storage: Storage, userId: string | undefined)
 
 export function saveQueuedMessages(
   storage: Storage,
-  userId: string | undefined,
   queues: ReadonlyMap<string, QueuedMessage[]>,
 ): void {
-  if (!userId) return;
-  const key = `${QUEUED_MESSAGES_STORAGE_KEY}:${userId}`;
+  const key = QUEUED_MESSAGES_STORAGE_KEY;
   if (queues.size === 0) {
     storage.removeItem(key);
     return;

@@ -29,7 +29,6 @@ dependencies = [
 
 [project.optional-dependencies]
 web = []
-sync = []
 
 [project.scripts]
 mini-agent-mcp = "backend.mcp.cli:main"

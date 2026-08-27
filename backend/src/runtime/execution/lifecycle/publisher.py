@@ -144,7 +144,7 @@ class RunEventPublisher:
         durable = runtime.run.add_runtime_message(kind, message, timestamp=timestamp, data=data)
         store = runtime.services.runtime_store
         if store is runtime.services.checkpoint_store and kind in CHECKPOINT_EVENT_KINDS:
-            # The shared PostgreSQL store writes this message with the checkpoint,
+            # A shared local store writes this message with the checkpoint,
             # session runtime, and run status in one transaction.
             return
         append = getattr(store, "append_runtime_message", None)

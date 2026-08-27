@@ -47,7 +47,6 @@ from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from backend.sandbox import SandboxInitializationError
-from backend.storage.auth import LocalAuthStore
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.storage.sqlite_schema import SCHEMA, SQLiteSchemaMixin
 from backend.tools import ToolRegistry
@@ -73,7 +72,7 @@ def make_turn(
 def test_first_main_turn_persistence_leaves_sidebar_title_for_post_run_model_request(
     tmp_path: Path, monkeypatch
 ) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
     session = store.create_session("新对话")
     store.create_sidebar_thread(
         session_id=session.session_id,
@@ -90,38 +89,30 @@ def test_first_main_turn_persistence_leaves_sidebar_title_for_post_run_model_req
         user_content=[{"type": "text", "text": prompt}],
     )
 
-    original_append_event = store._append_event
+    original_put_json_object = store._put_json_object
 
-    def fail_turn_event(connection, session_id, *, kind, payload):
-        if kind == "turn_upserted":
-            raise RuntimeError("turn event failed")
-        return original_append_event(connection, session_id, kind=kind, payload=payload)
+    def fail_turn_object(connection, session_id, namespace, object_id, payload, updated_at):
+        if namespace == "runtime_node" and object_id == turn.id:
+            raise RuntimeError("turn object failed")
+        return original_put_json_object(connection, session_id, namespace, object_id, payload, updated_at)
 
-    monkeypatch.setattr(store, "_append_event", fail_turn_event)
-    with pytest.raises(RuntimeError, match="turn event failed"):
+    monkeypatch.setattr(store, "_put_json_object", fail_turn_object)
+    with pytest.raises(RuntimeError, match="turn object failed"):
         store.create_node(turn)
 
     assert store.get_sidebar_thread(session.session_id).title == "新对话"
     assert store.load_nodes(session.session_id) == [root]
 
-    monkeypatch.setattr(store, "_append_event", original_append_event)
+    monkeypatch.setattr(store, "_put_json_object", original_put_json_object)
     store.create_node(turn)
     sidebar = store.get_sidebar_thread(session.session_id)
     assert sidebar is not None
     assert sidebar.title == "新对话"
     assert sidebar.title_is_custom is False
-    with sqlite3.connect(store.paths.session_db(session.session_id)) as connection:
-        events = connection.execute("SELECT kind FROM json_events ORDER BY local_sequence").fetchall()
-    assert [kind for (kind,) in events] == [
-        "baseline",
-        "sidebar_thread_upserted",
-        "turn_upserted",
-        "turn_upserted",
-    ]
 
 
 def test_turn_persistence_never_owns_sidebar_auto_titles(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
 
     manual = store.create_session("手工标题")
     store.create_sidebar_thread(
@@ -176,7 +167,7 @@ def test_turn_persistence_never_owns_sidebar_auto_titles(tmp_path: Path) -> None
 
 
 def test_post_run_auto_title_falls_back_once_and_skips_reference_only_or_custom_threads(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
 
     class FailingConversation:
         def __init__(self) -> None:
@@ -291,7 +282,7 @@ def test_post_run_auto_title_falls_back_once_and_skips_reference_only_or_custom_
 
 
 def test_post_run_auto_title_preserves_manual_rename_during_model_request(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
     session = store.create_session("新对话")
     store.create_sidebar_thread(session_id=session.session_id, thread_id=session.session_id, title="新对话")
     writer = NodeWriter(store)
@@ -325,7 +316,7 @@ def test_post_run_auto_title_preserves_manual_rename_during_model_request(tmp_pa
 
 
 def test_post_run_auto_title_does_not_retry_after_the_root_turn(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
     session = store.create_session("新对话")
     store.create_sidebar_thread(session_id=session.session_id, thread_id=session.session_id, title="新对话")
     writer = NodeWriter(store)
@@ -641,12 +632,11 @@ def test_active_turn_stream_unsubscribe_does_not_close_other_subscribers() -> No
 
 
 def test_turn_stream_endpoint_returns_terminal_snapshot_and_rejects_missing_turn(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    state = WebAppState(tmp_path / "web")
     with TestClient(create_app(state)) as client:
-        assert client.get("/api/turns/anything/stream").status_code == 401
-        identity = client.post("/api/auth/guest").json()["user"]
+        assert client.get("/api/turns/anything/stream").status_code == 404
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        store = session_store(state, identity["id"])
+        store = session_store(state)
         writer = NodeWriter(store)
         turn = writer.create(
             RuntimeState.create(
@@ -667,12 +657,10 @@ def test_turn_stream_endpoint_returns_terminal_snapshot_and_rejects_missing_turn
 
 
 def test_root_turn_is_listed_but_rejects_every_turn_operation(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    state = WebAppState(tmp_path / "web")
     with TestClient(create_app(state)) as client:
-        assert client.post("/api/auth/guest").status_code == 200
-        identity = client.get("/api/auth/me").json()
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        store = session_store(state, identity["id"])
+        store = session_store(state)
         assert store.load_nodes(sidebar["session_id"]) == []
         root = store.ensure_root_node(sidebar["session_id"], id="turn_root_operations")
         assert store.ensure_root_node(sidebar["session_id"], id="turn_ignored") == root
@@ -953,7 +941,7 @@ def test_one_running_turn_per_thread_but_parallel_threads_are_allowed() -> None:
 
 
 def test_sqlite_rewind_fork_and_compact_are_atomic(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
     session = store.create_session("main")
     store.create_sidebar_thread(session_id=session.session_id, thread_id=session.session_id, title="main")
     writer = NodeWriter(store)
@@ -1020,8 +1008,8 @@ def test_missing_ancestor_and_bad_version_index_are_rejected() -> None:
         RuntimeStateTree([root, first, RuntimeState.from_dict(cross_session)]).ancestors(("session_2", "turn_2"))
 
 
-@pytest.mark.parametrize("schema_version", [9, 10])
-def test_pre_v11_database_is_rejected_without_migration_or_deletion(tmp_path: Path, schema_version: int) -> None:
+@pytest.mark.parametrize("schema_version", [9, 10, 11])
+def test_pre_v12_database_is_rejected_without_migration_or_deletion(tmp_path: Path, schema_version: int) -> None:
     path = tmp_path / f"v{schema_version}.db"
     connection = sqlite3.connect(path)
     connection.executescript(SCHEMA)
@@ -1031,20 +1019,18 @@ def test_pre_v11_database_is_rejected_without_migration_or_deletion(tmp_path: Pa
         (schema_version,),
     )
     connection.commit()
-    with pytest.raises(RuntimeError, match="requires v11"):
+    with pytest.raises(RuntimeError, match="requires v12"):
         SQLiteSchemaMixin._assert_supported_schema(connection)
     assert path.exists()
     connection.close()
 
 
 def test_pause_targets_only_the_requested_turn_in_parallel_threads(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    state = WebAppState(tmp_path / "web")
     with TestClient(create_app(state)) as client:
-        assert client.post("/api/auth/guest").status_code == 200
-        identity = client.get("/api/auth/me").json()
         sidebar = client.post("/api/sidebar-threads", json={}).json()
         assert client.get("/api/turns", params={"session_id": sidebar["session_id"]}).json() == []
-        store = session_store(state, identity["id"])
+        store = session_store(state)
         writer = NodeWriter(store)
         original = writer.create(
             RuntimeState.create(
@@ -1068,8 +1054,8 @@ def test_pause_targets_only_the_requested_turn_in_parallel_threads(tmp_path: Pat
         main_pause = TurnPauseController()
         fork_pause = TurnPauseController()
         state.active_turn_cancellations = {
-            (identity["id"], "turn_main"): main_pause,
-            (identity["id"], "turn_fork"): fork_pause,
+            "turn_main": main_pause,
+            "turn_fork": fork_pause,
         }
         response = client.post("/api/turns/turn_main/pause")
         assert response.status_code == 200
@@ -1080,12 +1066,10 @@ def test_pause_targets_only_the_requested_turn_in_parallel_threads(tmp_path: Pat
 
 
 def test_fork_sidebar_title_always_appends_branch_suffix(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    state = WebAppState(tmp_path / "web")
     with TestClient(create_app(state)) as client:
-        assert client.post("/api/auth/guest").status_code == 200
-        identity = client.get("/api/auth/me").json()
         source_sidebar = client.post("/api/sidebar-threads", json={}).json()
-        store = session_store(state, identity["id"])
+        store = session_store(state)
         writer = NodeWriter(store)
         source = writer.create(
             RuntimeState.create(
@@ -1149,7 +1133,7 @@ def test_plan_handoff_creates_agent_child_with_raw_plan_message(tmp_path: Path) 
                 )
             return AssistantMessage(content="Implemented from the reviewed plan.")
 
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
     service = ConversationService(
         AgentRunner(PlanHandoffPlanner(), ToolRegistry()),
         store,
@@ -1211,7 +1195,7 @@ def test_plan_compaction_handoff_emits_plan_compact_agent_nodes_in_one_stream(tm
             return ContextCompactionResult(True, 2, 1, "deterministic compact summary")
 
     frames: list[NodeFrame] = []
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
     service = ConversationService(AgentRunner(CompactingPlanPlanner(), ToolRegistry()), store)
     session = service.new_session("Plan compaction")
     bridge = RuntimeEventNodeBridge(
@@ -1276,7 +1260,7 @@ def test_plan_compaction_failure_keeps_successful_plan_and_records_redacted_reas
             )
             raise PlanningError("summary provider unavailable; api_key=super-secret")
 
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
     service = ConversationService(AgentRunner(FailingCompactionPlanner(), ToolRegistry()), store)
 
     result = service.run_task(
@@ -1311,16 +1295,17 @@ def test_sandbox_startup_failure_message_explains_fail_closed_behavior() -> None
 
 
 def test_http_sse_surfaces_sandbox_failure_before_turn_baseline(tmp_path: Path, monkeypatch) -> None:
-    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
-    state.model_config_for_user = lambda _user_id: None
+    state = WebAppState(tmp_path / "web")
+    monkeypatch.setattr(
+        state, "model_config", lambda *_args, **_kwargs: ModelConfig("test", "https://example.test/v1", "test")
+    )
 
     def fail_sandbox_startup(*_args, **_kwargs):
         raise SandboxInitializationError("Windows Sandbox Broker 已安装，但健康检查未通过。")
 
-    monkeypatch.setattr(chat_routes, "build_user_application", fail_sandbox_startup)
+    monkeypatch.setattr(chat_routes, "build_local_application", fail_sandbox_startup)
 
     with TestClient(create_app(state)) as client:
-        assert client.post("/api/auth/guest").status_code == 200
         sidebar = client.post("/api/sidebar-threads", json={}).json()
         turn_id = "turn_sandbox_startup_failure"
         response = client.post(
@@ -1368,16 +1353,15 @@ class HttpCompactionClient:
 
 
 def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_path: Path, monkeypatch) -> None:
-    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    state = WebAppState(tmp_path / "web")
     model_config = ModelConfig("secret", "https://example.test/v1", "checkpoint-model")
     resolved_provider_names: list[str | None] = []
 
-    def resolve_provider(_user_id: str, provider_name: str | None):
+    def resolve_provider(provider_name: str | None = None):
         resolved_provider_names.append(provider_name)
         return model_config
 
-    state.model_config_for_user = lambda _user_id: model_config
-    state.model_config_for_provider_name = resolve_provider
+    state.model_config = resolve_provider
     summary = """## Primary Request and Intent
 - Preserve the HTTP request.
 
@@ -1404,14 +1388,10 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
     llm_client = HttpCompactionClient(summary)
 
     with TestClient(create_app(state)) as client:
-        assert client.post("/api/auth/guest").status_code == 200
-        identity = client.get("/api/auth/me").json()
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        store = session_store(state, identity["id"])
+        store = session_store(state)
         seed_service = ConversationService(
-            AgentRunner(
-                RuleBasedPlanner(), ToolRegistry(state.session_workspace(identity["id"], sidebar["session_id"]))
-            ),
+            AgentRunner(RuleBasedPlanner(), ToolRegistry(state.session_workspace(sidebar["session_id"]))),
             store,
             session_id=sidebar["session_id"],
         )
@@ -1422,16 +1402,14 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
         newer = seed_service.run_task("newer branch must not replace the requested source", mode="agent")
         assert newer.status == "completed"
 
-        def compact_application(_state, user_id: str, **_kwargs):
+        def compact_application(_state, **_kwargs):
             return AgentApplication(
-                AgentRunner(
-                    LLMPlanner(llm_client, [], []), ToolRegistry(state.session_workspace(user_id, source.session_id))
-                ),
-                session_store(state, user_id),
+                AgentRunner(LLMPlanner(llm_client, [], []), ToolRegistry(state.session_workspace(source.session_id))),
+                session_store(state),
                 None,
             )
 
-        monkeypatch.setattr(turn_routes, "build_user_application", compact_application)
+        monkeypatch.setattr(turn_routes, "build_local_application", compact_application)
         compact_operation = client.get("/openapi.json").json()["paths"]["/api/turns/{turn_id}/compact"]["post"]
         assert "requestBody" not in compact_operation
         response = client.post(
@@ -1455,17 +1433,17 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
         node_count = len(store.load_nodes(source.session_id))
         failing_client = HttpCompactionClient("", failure="summary provider failed")
 
-        def failing_application(_state, user_id: str, **_kwargs):
+        def failing_application(_state, **_kwargs):
             return AgentApplication(
                 AgentRunner(
                     LLMPlanner(failing_client, [], []),
-                    ToolRegistry(state.session_workspace(user_id, source.session_id)),
+                    ToolRegistry(state.session_workspace(source.session_id)),
                 ),
-                session_store(state, user_id),
+                session_store(state),
                 None,
             )
 
-        monkeypatch.setattr(turn_routes, "build_user_application", failing_application)
+        monkeypatch.setattr(turn_routes, "build_local_application", failing_application)
         failed = client.post(f"/api/turns/{compacted['id']}/compact")
         assert failed.status_code == 502
         assert failed.json()["detail"] == "上下文压缩失败，请稍后重试。"
@@ -1473,7 +1451,7 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
 
         state.active_runtime_stream_locks = {
             "__lock__": threading.RLock(),
-            "keys": {(identity["id"], source.thread_id)},
+            "keys": {source.thread_id},
         }
         conflict = client.post(f"/api/turns/{source.id}/compact")
         assert conflict.status_code == 409
@@ -1482,23 +1460,21 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
         state.active_runtime_stream_locks["keys"].clear()
         node_count = len(store.load_nodes(source.session_id))
 
-        def missing_model(_user_id: str):
+        def missing_model(_provider_name: str | None = None):
             raise ModelConfigurationError("model is missing")
 
-        state.model_config_for_user = missing_model
-        state.model_config_for_provider_name = lambda _user_id, _provider_name: missing_model(_user_id)
+        state.model_config = missing_model
         missing = client.post(f"/api/turns/{source.id}/compact")
         assert missing.status_code == 422
         assert missing.json()["detail"] == "模型未配置：model is missing"
         assert len(store.load_nodes(source.session_id)) == node_count
 
-        state.model_config_for_user = lambda _user_id: model_config
-        state.model_config_for_provider_name = resolve_provider
+        state.model_config = resolve_provider
 
         def sandbox_failure(*_args, **_kwargs):
             raise SandboxInitializationError("Broker unavailable")
 
-        monkeypatch.setattr(turn_routes, "build_user_application", sandbox_failure)
+        monkeypatch.setattr(turn_routes, "build_local_application", sandbox_failure)
         unavailable = client.post(f"/api/turns/{source.id}/compact")
         assert unavailable.status_code == 503
         assert unavailable.json()["detail"] == ("Sandbox 初始化失败：Broker unavailable Agent 已停止，未降级执行。")
@@ -1508,20 +1484,21 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
 def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_deltas(
     tmp_path: Path, monkeypatch
 ) -> None:
-    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
-    state.model_config_for_user = lambda _user_id: None
+    state = WebAppState(tmp_path / "web")
+    monkeypatch.setattr(
+        state, "model_config", lambda *_args, **_kwargs: ModelConfig("test", "https://example.test/v1", "test")
+    )
 
-    def local_application(_state, user_id: str, *, session_id: str, workspace=None, **_kwargs):
+    def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
         return build_application(
-            workspace or state.session_workspace(user_id, session_id),
+            workspace or state.session_workspace(session_id),
             planner_name="rule",
-            paths=state.user_paths(user_id),
+            paths=state.paths,
         )
 
-    monkeypatch.setattr(chat_routes, "build_user_application", local_application)
+    monkeypatch.setattr(chat_routes, "build_local_application", local_application)
 
     with TestClient(create_app(state)) as client:
-        assert client.post("/api/auth/guest").status_code == 200
         sidebar = client.post("/api/sidebar-threads", json={}).json()
         assert client.get("/api/turns", params={"session_id": sidebar["session_id"]}).json() == []
         turn_id = "turn_http_sse"
@@ -1593,8 +1570,10 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
 
 
 def test_real_http_sse_generates_title_with_isolated_model_request(tmp_path: Path, monkeypatch) -> None:
-    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
-    state.model_config_for_user = lambda _user_id: None
+    state = WebAppState(tmp_path / "web")
+    monkeypatch.setattr(
+        state, "model_config", lambda *_args, **_kwargs: ModelConfig("test", "https://example.test/v1", "test")
+    )
 
     class DedicatedTitleClient:
         def __init__(self) -> None:
@@ -1616,11 +1595,11 @@ def test_real_http_sse_generates_title_with_isolated_model_request(tmp_path: Pat
 
     title_client = DedicatedTitleClient()
 
-    def local_application(_state, user_id: str, *, session_id: str, workspace=None, **_kwargs):
+    def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
         application = build_application(
-            workspace or state.session_workspace(user_id, session_id),
+            workspace or state.session_workspace(session_id),
             planner_name="rule",
-            paths=state.user_paths(user_id),
+            paths=state.paths,
         )
         application.runner.planner = LLMPlanner(
             title_client,
@@ -1630,10 +1609,9 @@ def test_real_http_sse_generates_title_with_isolated_model_request(tmp_path: Pat
         )
         return application
 
-    monkeypatch.setattr(chat_routes, "build_user_application", local_application)
+    monkeypatch.setattr(chat_routes, "build_local_application", local_application)
 
     with TestClient(create_app(state)) as client:
-        assert client.post("/api/auth/guest").status_code == 200
         sidebar = client.post("/api/sidebar-threads", json={}).json()
         response = client.post(
             "/api/turns",

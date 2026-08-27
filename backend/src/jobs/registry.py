@@ -48,6 +48,7 @@ class JobQuery:
 
     lanes: tuple[JobLane, ...] | None = None
     states: tuple[JobState, ...] | None = None
+    session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,12 +124,12 @@ class JobRegistry(JobStateListener):
         policy: JobLimitPolicy | None = None,
         clock: Any | None = None,
         history_limit: int = 1000,
-        user_history_limit: int = 100,
+        session_history_limit: int = 100,
     ) -> None:
         self._policy = policy or JobLimitPolicy.defaults()
         self._clock = clock or (lambda: datetime.now(UTC))
         self._history_limit = history_limit
-        self._user_history_limit = user_history_limit
+        self._session_history_limit = session_history_limit
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._id_seq = 0
@@ -138,8 +139,8 @@ class JobRegistry(JobStateListener):
         self._closed_scopes: set[str] = set()
         self._queues: dict[JobLane, deque[str]] = {lane: deque() for lane in JobLane}
         self._running: dict[JobLane, int] = {lane: 0 for lane in JobLane}
-        self._running_by_user: dict[tuple[str, JobLane], int] = {}
-        self._running_by_runner: dict[tuple[str, JobLane], int] = {}
+        self._running_by_session: dict[tuple[str, JobLane], int] = {}
+        self._running_by_thread: dict[tuple[str, JobLane], int] = {}
         self._root = JobScope(self, self._next_scope_id(), JobScopeKind.SYSTEM, None, None, JobOwner())
         self._scopes[self._root.scope_id] = self._root
 
@@ -235,39 +236,9 @@ class JobRegistry(JobStateListener):
             record = self._records.get(job_id)
             return self._build_info(record) if record is not None else None
 
-    def get_for_user(self, user_id: str, job_id: str) -> ScopedJobInfo | None:
-        """Return a job only when its inherited owner belongs to ``user_id``."""
-        with self._lock:
-            record = self._records.get(job_id)
-            if record is None or record.owner.user_id != user_id:
-                return None
-            return self._build_info(record)
-
     def list(self, query: JobQuery | None = None) -> tuple[ScopedJobInfo, ...]:
         with self._lock:
             return tuple(self._build_info(record) for record in self._records.values() if self._matches(record, query))
-
-    def list_for_user(
-        self, user_id: str, query: JobQuery | None = None, *, session_id: str | None = None
-    ) -> tuple[ScopedJobInfo, ...]:
-        """List only jobs whose effective owner is ``user_id``."""
-        with self._lock:
-            return tuple(
-                self._build_info(record)
-                for record in self._records.values()
-                if record.owner.user_id == user_id
-                and (session_id is None or record.owner.session_id == session_id)
-                and self._matches(record, query)
-            )
-
-    def cancel_for_user(self, user_id: str, job_id: str) -> bool:
-        """Request cancellation after enforcing the owner boundary."""
-        with self._lock:
-            record = self._records.get(job_id)
-            if record is None or record.owner.user_id != user_id:
-                return False
-            job = record.job
-        return job.cancel("user requested cancellation")
 
     def active_count(self, *, lane: JobLane | None = None, scope: JobScope | None = None) -> int:
         """Count pending and running jobs, optionally filtered."""
@@ -301,8 +272,8 @@ class JobRegistry(JobStateListener):
         parent: JobScope,
         kind: JobScopeKind,
         *,
-        user_id: str | None,
         session_id: str | None,
+        thread_id: str | None,
         run_id: str | None,
         parent_job_id: str | None,
     ) -> JobScope:
@@ -310,7 +281,7 @@ class JobRegistry(JobStateListener):
             raise ValueError("only the registry root may be a system scope")
         with self._lock:
             self._require_open_scope_locked(parent)
-            owner = _merge_owner(parent.owner, user_id=user_id, session_id=session_id, run_id=run_id)
+            owner = _merge_owner(parent.owner, session_id=session_id, thread_id=thread_id, run_id=run_id)
             scope = JobScope(self, self._next_scope_id(), kind, parent, parent_job_id, owner)
             self._scopes[scope.scope_id] = scope
             return scope
@@ -498,15 +469,15 @@ class JobRegistry(JobStateListener):
         lane = record.lane
         if self._running[lane] >= self._policy.system[lane].max_running:
             return False
-        user = record.owner.user_id
-        if user is not None:
-            key = (user, lane)
-            if self._running_by_user.get(key, 0) >= self._policy.user[lane].max_running:
+        session = record.owner.session_id
+        if session is not None:
+            key = (session, lane)
+            if self._running_by_session.get(key, 0) >= self._policy.session[lane].max_running:
                 return False
-        runner_key = self._runner_key_locked(record.scope)
-        if runner_key is not None:
-            key = (runner_key, lane)
-            if self._running_by_runner.get(key, 0) >= self._policy.runner[lane].max_running:
+        thread_key = self._thread_key_locked(record.scope)
+        if thread_key is not None:
+            key = (thread_key, lane)
+            if self._running_by_thread.get(key, 0) >= self._policy.thread[lane].max_running:
                 return False
         return True
 
@@ -515,21 +486,21 @@ class JobRegistry(JobStateListener):
         queue = self._queues[lane]
         if len(queue) >= self._policy.system[lane].max_queued:
             raise JobQueueFull(record.job.info().id)
-        user = record.owner.user_id
-        if user is not None:
-            queued_by_user = sum(
-                1 for job_id in queue if (r := self._records.get(job_id)) is not None and r.owner.user_id == user
+        session = record.owner.session_id
+        if session is not None:
+            queued_by_session = sum(
+                1 for job_id in queue if (r := self._records.get(job_id)) is not None and r.owner.session_id == session
             )
-            if queued_by_user >= self._policy.user[lane].max_queued:
+            if queued_by_session >= self._policy.session[lane].max_queued:
                 raise JobQueueFull(record.job.info().id)
-        runner_key = self._runner_key_locked(record.scope)
-        if runner_key is not None:
-            queued_by_runner = sum(
+        thread_key = self._thread_key_locked(record.scope)
+        if thread_key is not None:
+            queued_by_thread = sum(
                 1
                 for job_id in queue
-                if (r := self._records.get(job_id)) is not None and self._runner_key_locked(r.scope) == runner_key
+                if (r := self._records.get(job_id)) is not None and self._thread_key_locked(r.scope) == thread_key
             )
-            if queued_by_runner >= self._policy.runner[lane].max_queued:
+            if queued_by_thread >= self._policy.thread[lane].max_queued:
                 raise JobQueueFull(record.job.info().id)
 
     def _admit_locked(self, record: _Record) -> None:
@@ -545,14 +516,14 @@ class JobRegistry(JobStateListener):
             record.lease = SlotLease(lane, counted=counted)
             if counted:
                 self._running[lane] += 1
-                user = record.owner.user_id
-                if user is not None:
-                    key = (user, lane)
-                    self._running_by_user[key] = self._running_by_user.get(key, 0) + 1
-                runner_key = self._runner_key_locked(record.scope)
-                if runner_key is not None:
-                    key = (runner_key, lane)
-                    self._running_by_runner[key] = self._running_by_runner.get(key, 0) + 1
+                session = record.owner.session_id
+                if session is not None:
+                    key = (session, lane)
+                    self._running_by_session[key] = self._running_by_session.get(key, 0) + 1
+                thread_key = self._thread_key_locked(record.scope)
+                if thread_key is not None:
+                    key = (thread_key, lane)
+                    self._running_by_thread[key] = self._running_by_thread.get(key, 0) + 1
 
     def _inherited_lease_locked(self, record: _Record) -> SlotLease | None:
         current = record.parent_job_id
@@ -566,10 +537,10 @@ class JobRegistry(JobStateListener):
             current = parent.parent_job_id
         return None
 
-    def _runner_key_locked(self, scope: JobScope) -> str | None:
+    def _thread_key_locked(self, scope: JobScope) -> str | None:
         current = scope
         while current is not None:
-            if current.kind is JobScopeKind.RUNNER:
+            if current.kind is JobScopeKind.THREAD:
                 return current.scope_id
             current = current.parent
         return None
@@ -577,20 +548,20 @@ class JobRegistry(JobStateListener):
     def _drain_queue_locked(self, lane: JobLane) -> list[Job]:
         queue = self._queues[lane]
         to_start: list[Job] = []
-        admitted_users: set[str] = set()
-        admitted_runners: set[str] = set()
+        admitted_sessions: set[str] = set()
+        admitted_threads: set[str] = set()
         remaining: deque[str] = deque()
         while queue:
             job_id = queue.popleft()
             record = self._records.get(job_id)
             if record is None or record.job.info().state is not JobState.PENDING:
                 continue
-            user = record.owner.user_id
-            if user is not None and user in admitted_users:
+            session = record.owner.session_id
+            if session is not None and session in admitted_sessions:
                 remaining.append(job_id)
                 continue
-            runner_key = self._runner_key_locked(record.scope)
-            if runner_key is not None and runner_key in admitted_runners:
+            thread_key = self._thread_key_locked(record.scope)
+            if thread_key is not None and thread_key in admitted_threads:
                 remaining.append(job_id)
                 continue
             if not self._can_admit_locked(record):
@@ -598,10 +569,10 @@ class JobRegistry(JobStateListener):
                 continue
             self._admit_locked(record)
             to_start.append(record.job)
-            if user is not None:
-                admitted_users.add(user)
-            if runner_key is not None:
-                admitted_runners.add(runner_key)
+            if session is not None:
+                admitted_sessions.add(session)
+            if thread_key is not None:
+                admitted_threads.add(thread_key)
         self._queues[lane] = remaining
         return to_start
 
@@ -623,14 +594,14 @@ class JobRegistry(JobStateListener):
             lease = record.lease
             if lease is not None and lease.release() and lease.counted:
                 self._running[record.lane] -= 1
-                user = record.owner.user_id
-                if user is not None:
-                    key = (user, record.lane)
-                    self._running_by_user[key] -= 1
-                runner_key = self._runner_key_locked(record.scope)
-                if runner_key is not None:
-                    key = (runner_key, record.lane)
-                    self._running_by_runner[key] -= 1
+                session = record.owner.session_id
+                if session is not None:
+                    key = (session, record.lane)
+                    self._running_by_session[key] -= 1
+                thread_key = self._thread_key_locked(record.scope)
+                if thread_key is not None:
+                    key = (thread_key, record.lane)
+                    self._running_by_thread[key] -= 1
             self._prune_history_locked()
             to_start = self._drain_queue_locked(record.lane)
             self._cond.notify_all()
@@ -659,14 +630,14 @@ class JobRegistry(JobStateListener):
             for record in ordered[: len(terminal) - self._history_limit]:
                 del self._records[record.job.info().id]
                 record.job.remove_listener(self)
-        by_user: dict[str, list[_Record]] = {}
+        by_session: dict[str, list[_Record]] = {}
         for record in self._records.values():
-            if record.terminal and record.owner.user_id is not None:
-                by_user.setdefault(record.owner.user_id, []).append(record)
-        for records in by_user.values():
-            if len(records) > self._user_history_limit:
+            if record.terminal and record.owner.session_id is not None:
+                by_session.setdefault(record.owner.session_id, []).append(record)
+        for records in by_session.values():
+            if len(records) > self._session_history_limit:
                 ordered = sorted(records, key=lambda record: record.queued_at or datetime.min.replace(tzinfo=UTC))
-                for record in ordered[: len(records) - self._user_history_limit]:
+                for record in ordered[: len(records) - self._session_history_limit]:
                     del self._records[record.job.info().id]
                     record.job.remove_listener(self)
 
@@ -692,6 +663,8 @@ class JobRegistry(JobStateListener):
         if query.lanes is not None and record.lane not in query.lanes:
             return False
         if query.states is not None and record.job.info().state not in query.states:
+            return False
+        if query.session_id is not None and record.owner.session_id != query.session_id:
             return False
         return True
 

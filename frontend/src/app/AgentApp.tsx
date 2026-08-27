@@ -14,7 +14,6 @@ import {
   type SessionInfo,
 } from "../api";
 import { changeProjectPath, createProject, createProjectSession, listProjects, removeProject, renameProject, restoreProject, revokeProjectSkillTrust, type ProjectInfo } from "../api/projects";
-import { useAuth } from "../auth/AuthProvider";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
 import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnreadArchived, summaryToConversation, STORAGE_KEY, ARCHIVE_READ_KEY } from "./storage";
 import type { ArchiveReadState } from "./storage";
@@ -33,6 +32,7 @@ import type {
   DisplayMode,
   RuntimeStateNode,
   RuntimeTreeNode,
+  LocalProfile,
 } from "../types";
 
 function withLoadedTurns(
@@ -61,11 +61,11 @@ function withLoadedTurns(
 }
 
 function AgentApp() {
-  const { user, setUser, signOut } = useAuth();
+  const [profile, setProfile] = useState<LocalProfile>({ display_name: "本地用户", agent_preferences: "" });
   const [page, setPage] = useState<Page>("chat");
-  const storageKey = `${STORAGE_KEY}:${user?.id ?? "anonymous"}`;
+  const storageKey = STORAGE_KEY;
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations(storageKey));
-  const [archiveReadState, setArchiveReadState] = useState<ArchiveReadState>(() => loadArchiveReadState(user?.id));
+  const [archiveReadState, setArchiveReadState] = useState<ArchiveReadState>(() => loadArchiveReadState());
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [modeBySession, setModeBySession] = useState<Record<string, ChatMode>>(() => loadSessionModes(localStorage));
@@ -80,47 +80,35 @@ function AgentApp() {
   const [projectLoading, setProjectLoading] = useState(false);
   const activeRunsRef = useRef(new Map<string, import("./types").ActiveRun>());
   const [queuedMessages, setQueuedMessages] = useState(
-    () => loadQueuedMessages(localStorage, user?.id),
+    () => loadQueuedMessages(localStorage),
   );
 
   useEffect(() => {
-    if (!user?.id) {
-      setDisplayMode("medium");
-      setProviderConfig(null);
-      return undefined;
-    }
     let active = true;
     void getSettings()
       .then((settings) => {
         if (active) {
           setDisplayMode(effectiveDisplayMode(settings.agent_config.display_mode));
           setProviderConfig(settings.provider_config?.id ? settings.provider_config : null);
-          if (user) {
-            const profileName = settings.profile.display_name.trim()
-              || user.display_name?.trim()
-              || (user.kind === "guest" ? "游客用户" : "用户");
-            setUser({
-              ...user,
-              display_name: profileName,
-              agent_preferences: settings.profile.agent_preferences,
-            });
-          }
+          setProfile({
+            display_name: settings.profile.display_name.trim() || "本地用户",
+            agent_preferences: settings.profile.agent_preferences,
+          });
         }
       })
       .catch(() => undefined);
     return () => {
       active = false;
     };
-  }, [user?.id]);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(storageKey, JSON.stringify(conversations));
   }, [conversations, storageKey]);
 
   useEffect(() => {
-    if (!user?.id) return;
-    localStorage.setItem(`${ARCHIVE_READ_KEY}:${user.id}`, JSON.stringify(archiveReadState));
-  }, [archiveReadState, user?.id]);
+    localStorage.setItem(ARCHIVE_READ_KEY, JSON.stringify(archiveReadState));
+  }, [archiveReadState]);
 
   useEffect(() => {
     saveSessionModes(localStorage, modeBySession);
@@ -168,7 +156,7 @@ function AgentApp() {
       // The browser cache can predate project metadata.  The project index is
       // authoritative for session membership, so use its binding list to
       // prevent a hidden project session from being re-imported as an
-      // ordinary cloud-synced conversation.
+      // ordinary local conversation.
       const byClient = new Map<string, SessionInfo>();
       const bySession = new Map<string, SessionInfo>();
       const deletedByClient = new Map<string, SessionInfo>();
@@ -202,7 +190,7 @@ function AgentApp() {
         if (conversation.sessionId && projectSessionIds.has(conversation.sessionId)) continue;
 
         // A stale browser copy of a project conversation must never be
-        // re-imported as an ordinary cloud-synced conversation.
+        // re-imported as an ordinary local conversation.
         if (conversation.projectId || conversation.localOnly) continue;
 
         if (conversation.messages.length > 0) {
@@ -287,7 +275,7 @@ function AgentApp() {
       const next = updater(previous.get(conversationId) ?? []);
       if (next.length > 0) queues.set(conversationId, next);
       else queues.delete(conversationId);
-      saveQueuedMessages(localStorage, user?.id, queues);
+      saveQueuedMessages(localStorage, queues);
       return queues;
     });
   }
@@ -684,7 +672,7 @@ function AgentApp() {
 
   return (
     <AgentShell
-      user={user}
+      profile={profile}
       page={page}
       current={current}
       activeConversations={activeConversations}
@@ -701,7 +689,7 @@ function AgentApp() {
       actionError={actionError}
       settingsOpen={settingsOpen}
       setSettingsOpen={setSettingsOpen}
-      onUserUpdate={(patch) => setUser(user ? { ...user, ...patch } : user)}
+      onProfileChange={setProfile}
       onNew={newConversation}
       onNewProject={newProject}
       onNewProjectConversation={newProjectConversation}
@@ -716,10 +704,9 @@ function AgentApp() {
       onArchive={archiveConversation}
       onDelete={deleteConversation}
       onRestore={restoreConversation}
-      onSignOut={signOut}
       onProfileUpdate={async (profile) => {
         const updated = await updateProfile(profile);
-        if (user) setUser({ ...user, ...updated });
+        setProfile(updated);
       }}
       onUpdate={updateConversation}
       onModeChange={(mode) => setConversationMode(current, mode)}

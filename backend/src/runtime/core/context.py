@@ -350,9 +350,9 @@ class RuntimeServices:
     sandbox_launcher: object | None = None
     sandbox_config: Mapping[str, Any] | None = None
     sandbox_user_id: str | None = None
-    # Optional authenticated-provider resolver.  It deliberately lives on the
+    # Optional local-provider resolver. It deliberately lives on the
     # non-serializable service bundle so provider credentials never enter a
-    # RuntimeState/node or a sync snapshot.
+    # RuntimeState or persisted node.
     provider_config_resolver: Callable[[str], object] | None = None
     pending_runtime_config: dict[str, Any] | None = None
     # Canonical message-tree context provider.  It is deliberately a callback
@@ -507,7 +507,7 @@ class AgentRuntime:
                     if isinstance(config_output, int) and config_output > 0:
                         self.state.model_snapshot["output_length"] = config_output
             elif provider_changed:
-                # Without an authenticated resolver there is no provider
+                # Without a configured resolver there is no provider
                 # record to load, but stale model fields still must not leak
                 # across a named-provider switch.
                 self.state.model_snapshot = {

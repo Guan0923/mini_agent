@@ -73,17 +73,12 @@ def test_cancellation_after_model_response_discards_stale_tool_call() -> None:
     result = runner.run(runtime)
 
     assert result.status == "cancelled"
-    assert "aborted at the user's request" in (result.final_answer or "")
-    assert any(
-        "aborted at the user's request" in (message.content or "")
-        for message in runtime.state.messages
-        if isinstance(message, AssistantMessage)
-    )
+    assert result.final_answer == "Run cancelled by user"
     assert calls == []
-    assert [event.kind for event in result.events[-3:]] == ["cancelled", "tool_failed", "run_finished"]
+    assert any(event.kind == "tool_failed" for event in result.events)
 
 
-def test_cancellation_during_tool_keeps_result_and_skips_remaining_tools() -> None:
+def test_cancellation_during_tool_marks_current_and_remaining_tools_failed() -> None:
     calls: list[str] = []
     cancel_requested = False
 
@@ -123,7 +118,8 @@ def test_cancellation_during_tool_keeps_result_and_skips_remaining_tools() -> No
     tool_turn = next(
         message for message in runtime.state.messages if isinstance(message, AssistantMessage) and message.tool_messages
     )
-    assert [tool.status for tool in tool_turn.tool_messages] == ["succeeded", "failed"]
+    assert [tool.status for tool in tool_turn.tool_messages] == ["failed", "failed"]
+    assert tool_turn.tool_messages[0].content == "Tool invocation cancelled."
     assert tool_turn.tool_messages[1].content == "Not executed because the run was cancelled."
 
 

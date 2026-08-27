@@ -4,7 +4,7 @@ A scope is the in-process ownership and access unit for jobs.  Scopes form a
 tree rooted at one system scope per registry; children inherit the parent
 owner and may only fill empty owner fields.  Scopes and owners are control
 plane information only — they are never persisted into sessions, runtime
-state, or sync snapshots.
+state.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ class JobScopeKind(StrEnum):
     """Type of an ownership scope. Values are stable wire strings."""
 
     SYSTEM = "system"
-    USER = "user"
-    RUNNER = "runner"
+    SESSION = "session"
+    THREAD = "thread"
     RUN = "run"
     TASK = "task"
 
@@ -34,27 +34,27 @@ class JobScopeKind(StrEnum):
 class JobOwner:
     """Owner identity of a scope; empty fields are inherited from parents."""
 
-    user_id: str | None = None
     session_id: str | None = None
+    thread_id: str | None = None
     run_id: str | None = None
 
 
 def _merge_owner(
     parent: JobOwner,
     *,
-    user_id: str | None,
     session_id: str | None,
+    thread_id: str | None,
     run_id: str | None,
 ) -> JobOwner:
-    if user_id is not None and parent.user_id not in (None, user_id):
-        raise ValueError(f"cannot override inherited user {parent.user_id!r} with {user_id!r}")
     if session_id is not None and parent.session_id not in (None, session_id):
         raise ValueError(f"cannot override inherited session {parent.session_id!r} with {session_id!r}")
+    if thread_id is not None and parent.thread_id not in (None, thread_id):
+        raise ValueError(f"cannot override inherited thread {parent.thread_id!r} with {thread_id!r}")
     if run_id is not None and parent.run_id not in (None, run_id):
         raise ValueError(f"cannot override inherited run {parent.run_id!r} with {run_id!r}")
     return JobOwner(
-        user_id=parent.user_id if user_id is None else user_id,
         session_id=parent.session_id if session_id is None else session_id,
+        thread_id=parent.thread_id if thread_id is None else thread_id,
         run_id=parent.run_id if run_id is None else run_id,
     )
 
@@ -129,8 +129,8 @@ class JobScope:
         self,
         kind: JobScopeKind,
         *,
-        user_id: str | None = None,
         session_id: str | None = None,
+        thread_id: str | None = None,
         run_id: str | None = None,
         parent_job_id: str | None = None,
     ) -> JobScope:
@@ -138,8 +138,8 @@ class JobScope:
         return self._registry._create_scope(
             self,
             kind,
-            user_id=user_id,
             session_id=session_id,
+            thread_id=thread_id,
             run_id=run_id,
             parent_job_id=parent_job_id,
         )

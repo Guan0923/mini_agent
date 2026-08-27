@@ -65,7 +65,7 @@ class LLMClient:
         return estimate(messages, tools, request_parameters)
 
     def set_config_resolver(self, resolver: Callable[[str], ModelConfig] | None) -> None:
-        """Attach the authenticated provider lookup used by dynamic runs."""
+        """Attach the local provider lookup used by dynamic runs."""
 
         self._config_resolver = resolver
 

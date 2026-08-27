@@ -57,7 +57,6 @@ class Session:
     client_id: str | None = None
     archived_at: str | None = None
     deleted_at: str | None = None
-    local_only: bool = False
     title_is_custom: bool = False
 
 
@@ -77,7 +76,6 @@ class SessionSummary:
     archived_at: str | None = None
     deleted_at: str | None = None
     last_node_id: str | None = None
-    local_only: bool = False
     title_is_custom: bool = False
 
     @property

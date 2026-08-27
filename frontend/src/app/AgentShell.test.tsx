@@ -26,7 +26,7 @@ afterEach(() => {
 
 function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
   return {
-    user: null,
+    profile: { display_name: "本地用户", agent_preferences: "" },
     page: "chat",
     current: null,
     activeConversations: [],
@@ -41,7 +41,7 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     actionError: null,
     settingsOpen: false,
     setSettingsOpen: vi.fn(),
-    onUserUpdate: vi.fn(),
+    onProfileChange: vi.fn(),
     onNew: vi.fn().mockResolvedValue("new"),
     onNewProject: vi.fn().mockResolvedValue(undefined),
     onNewProjectConversation: vi.fn().mockResolvedValue(undefined),
@@ -56,7 +56,6 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     onArchive: vi.fn().mockResolvedValue(undefined),
     onDelete: vi.fn().mockResolvedValue(undefined),
     onRestore: vi.fn().mockResolvedValue(undefined),
-    onSignOut: vi.fn().mockResolvedValue(undefined),
     onProfileUpdate: vi.fn().mockResolvedValue(undefined),
     onUpdate: vi.fn(),
     onModeChange: vi.fn(),

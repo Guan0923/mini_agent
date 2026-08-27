@@ -45,8 +45,6 @@ async function send(page: import("@playwright/test").Page, text: string): Promis
 }
 
 test("first main Turn receives a dedicated model-generated title", async ({ page }) => {
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebar = await page.request.post("/api/sidebar-threads", { data: {} });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();
 
@@ -58,8 +56,6 @@ test("first main Turn receives a dedicated model-generated title", async ({ page
 });
 
 test("real Turn SSE flow supports tools, rewind versions, fork, and compact", async ({ page }) => {
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Playwright Turn" } });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();
 
@@ -114,8 +110,6 @@ test("real Turn SSE flow supports tools, rewind versions, fork, and compact", as
 });
 
 test("Plan Review compacts and implements as Plan, Compact, Agent Turns in one SSE flow", async ({ page }) => {
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", {
     data: { title: "Plan Review Compact" },
   });
@@ -178,8 +172,6 @@ test("Plan Review compacts and implements as Plan, Compact, Agent Turns in one S
 });
 
 test("refresh reattaches a running Turn and flushes the persisted queue as one message", async ({ page }) => {
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", {
     data: { title: "Reconnect Queue" },
   });
@@ -227,8 +219,6 @@ test("refresh reattaches a running Turn and flushes the persisted queue as one m
 });
 
 test("a paused Turn resumes in place with the same id", async ({ page }) => {
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Pause Resume" } });
   expect(sidebarResponse.ok(), String(sidebarResponse.status())).toBeTruthy();
   const sidebar = await sidebarResponse.json() as { session_id: string };
@@ -274,8 +264,6 @@ test("a paused Turn resumes in place with the same id", async ({ page }) => {
 });
 
 test("running Turn consumes FIFO steering as separate user Messages", async ({ page }) => {
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "FIFO Steering" } });
   expect(sidebarResponse.ok(), String(sidebarResponse.status())).toBeTruthy();
   const sidebar = await sidebarResponse.json() as { session_id: string };
@@ -315,8 +303,6 @@ test("running Turn consumes FIFO steering as separate user Messages", async ({ p
 });
 
 test("steering waits for the active tool and skips the next stale tool", async ({ page }) => {
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Tool Steering" } });
   expect(sidebarResponse.ok(), String(sidebarResponse.status())).toBeTruthy();
   const sidebar = await sidebarResponse.json() as { session_id: string };
@@ -357,8 +343,6 @@ test("Pause merges the local queue into one same-Turn steering Message", async (
   page.on("request", (request) => {
     if (request.method() === "POST" && request.url().endsWith("/pause")) pauseRequests += 1;
   });
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Merged Steering" } });
   expect(sidebarResponse.ok(), String(sidebarResponse.status())).toBeTruthy();
   const sidebar = await sidebarResponse.json() as { session_id: string };
@@ -392,8 +376,6 @@ test("Pause merges the local queue into one same-Turn steering Message", async (
 });
 
 test("assistant Items stay chronological and runtime Collapse starts folded", async ({ page }) => {
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Ordered Items" } });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();
 
@@ -482,8 +464,6 @@ test("assistant Items stay chronological and runtime Collapse starts folded", as
 });
 
 test("tool approval shows one pending card and one allowed status", async ({ page }) => {
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Approval Allowed" } });
   expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
   const sidebar = await sidebarResponse.json() as { session_id: string };
@@ -515,8 +495,6 @@ test("tool approval shows one pending card and one allowed status", async ({ pag
 });
 
 test("denied tool approval shows one static denied status", async ({ page }) => {
-  const guest = await page.request.post("/api/auth/guest");
-  expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Approval Denied" } });
   expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
 

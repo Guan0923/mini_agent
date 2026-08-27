@@ -19,16 +19,20 @@ from backend.api.chat import routes as chat_routes  # noqa: E402
 from backend.api.state import WebAppState  # noqa: E402
 from backend.domain import AssistantMessage, ToolMessage  # noqa: E402
 from backend.planning import LLMPlanner, RuleBasedPlanner  # noqa: E402
+from backend.providers import ModelConfig  # noqa: E402
 from backend.runtime import build_application  # noqa: E402
 from backend.runtime.core.context import PreparedResponse  # noqa: E402
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME  # noqa: E402
-from backend.storage.auth import LocalAuthStore  # noqa: E402
 from backend.tools import Tool, ToolRegistry  # noqa: E402
 
 _temporary_root = tempfile.TemporaryDirectory(prefix="mini-agent-turn-e2e-")
 _root = Path(_temporary_root.name)
-state = WebAppState(_root / "web", auth_repository=LocalAuthStore(_root / "client.db"))
-state.model_config_for_user = lambda _user_id: None
+state = WebAppState(_root / "web")
+state.model_config = lambda _provider_name=None: ModelConfig(
+    "test-key",
+    "https://example.test/v1",
+    "deterministic-e2e",
+)
 
 
 STRUCTURED_CHECKPOINT = """## Primary Request and Intent
@@ -197,8 +201,8 @@ class CooperativePausePlanner(LLMPlanner):
         return AssistantMessage(content="Pause request timed out.")
 
 
-def local_application(_state, user_id: str, *, session_id: str, workspace=None, **_kwargs):
-    resolved_workspace = Path(workspace or state.session_workspace(user_id, session_id))
+def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
+    resolved_workspace = Path(workspace or state.session_workspace(session_id))
     resolved_workspace.mkdir(parents=True, exist_ok=True)
     (resolved_workspace / "README.md").write_text(
         "Mini-Agent is a local-first Agent application.\n",
@@ -207,7 +211,7 @@ def local_application(_state, user_id: str, *, session_id: str, workspace=None, 
     application = build_application(
         resolved_workspace,
         planner_name="rule",
-        paths=state.user_paths(user_id),
+        paths=state.paths,
     )
     application.runner.planner = CooperativePausePlanner()
 
@@ -242,8 +246,8 @@ def local_application(_state, user_id: str, *, session_id: str, workspace=None, 
     return application
 
 
-chat_routes.build_user_application = local_application
-turn_routes.build_user_application = local_application
+chat_routes.build_local_application = local_application
+turn_routes.build_local_application = local_application
 app = create_app(state)
 
 

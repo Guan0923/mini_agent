@@ -1,7 +1,7 @@
 import { Alert, Button, Drawer, Grid, Layout } from "antd";
 import { CloseOutlined, MenuOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
-import type { AuthUser } from "../types";
+import type { LocalProfile } from "../types";
 import type { AgentConfig, ProviderConfig } from "../api";
 import type { ChatRunRequest } from "./types";
 import type { ChatMode, Conversation, DisplayMode, Page } from "../types";
@@ -15,7 +15,7 @@ import UserSettingsModal from "../components/UserSettingsModal";
 import IconAction from "../components/IconAction";
 
 export interface AgentShellProps {
-  user: AuthUser | null;
+  profile: LocalProfile;
   page: Page;
   current: Conversation | null;
   activeConversations: Conversation[];
@@ -32,7 +32,7 @@ export interface AgentShellProps {
   actionError: string | null;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
-  onUserUpdate: (patch: Partial<AuthUser>) => void;
+  onProfileChange: (profile: LocalProfile) => void;
   onNew: (title?: string) => Promise<string>;
   onNewProject: () => Promise<void>;
   onNewProjectConversation: (projectId: string) => Promise<void>;
@@ -47,7 +47,6 @@ export interface AgentShellProps {
   onArchive: (id: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onRestore: (id: string) => Promise<void>;
-  onSignOut: () => Promise<void>;
   onProfileUpdate: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
   onUpdate: (id: string, updater: (conversation: Conversation) => Conversation) => void;
   onModeChange: (mode: ChatMode) => void;
@@ -108,7 +107,7 @@ export default function AgentShell(props: AgentShellProps) {
   };
   const sidebar = (
     <AppSidebar
-      user={props.user}
+      profile={props.profile}
       conversations={props.activeConversations}
       projects={props.projects}
       projectsLoaded={props.projectsLoaded}
@@ -128,10 +127,6 @@ export default function AgentShell(props: AgentShellProps) {
       onRename={props.onRename}
       onArchive={props.onArchive}
       onDelete={props.onDelete}
-      onSignOut={async () => {
-        closeMobile();
-        await props.onSignOut();
-      }}
       onProfileUpdate={props.onProfileUpdate}
       onOpenSettings={() => props.setSettingsOpen(true)}
       collapsed={sidebarCollapsed}
@@ -178,9 +173,9 @@ export default function AgentShell(props: AgentShellProps) {
       </Layout>
       <UserSettingsModal
         open={props.settingsOpen}
-        user={props.user}
+        profile={props.profile}
         onClose={() => props.setSettingsOpen(false)}
-        onUserUpdate={props.onUserUpdate}
+        onProfileChange={props.onProfileChange}
         activeSessionId={props.current?.sessionId}
         onAgentConfigUpdate={props.onDisplayModeUpdate}
         onProviderConfigUpdate={props.onProviderConfigUpdate}

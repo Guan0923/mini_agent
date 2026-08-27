@@ -1,6 +1,6 @@
-# Workspace root for the four-layer mini-agent: local backend, TUI/frontend clients, and cloud control plane.
+# Workspace root for the local backend and TUI client.
 [tool.uv.workspace]
-members = ["backend", "tui", "cloud"]
+members = ["backend", "tui"]
 
 [tool.uv.sources]
 mini-agent-backend = { workspace = true }

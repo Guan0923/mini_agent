@@ -85,8 +85,9 @@ describe("Turn SSE contract", () => {
     )).resolves.toBe("completed");
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/api/turns/turn_1/stream"),
-      expect.objectContaining({ method: "GET", credentials: "include" }),
+      expect.objectContaining({ method: "GET" }),
     );
+    expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty("credentials");
   });
 
   it("rejects a stream that ends without a terminal envelope", async () => {

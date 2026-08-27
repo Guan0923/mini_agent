@@ -8,7 +8,7 @@ import {
 } from "./queuedMessages";
 
 describe("queued message persistence and merging", () => {
-  it("round-trips queues per user and rejects invalid stored values", () => {
+  it("round-trips installation queues and rejects invalid stored values", () => {
     const storage = localStorage;
     storage.clear();
     const queues = new Map([
@@ -16,13 +16,12 @@ describe("queued message persistence and merging", () => {
         { id: "one", content: "第一条", references: [{ source: "project" as const, path: "README.md" }] },
       ]],
     ]);
-    saveQueuedMessages(storage, "user-1", queues);
+    saveQueuedMessages(storage, queues);
 
-    expect(loadQueuedMessages(storage, "user-1")).toEqual(queues);
-    expect(loadQueuedMessages(storage, "user-2")).toEqual(new Map());
+    expect(loadQueuedMessages(storage)).toEqual(queues);
 
-    storage.setItem(`${QUEUED_MESSAGES_STORAGE_KEY}:user-1`, '{"conversation-1":[{"id":1}]}');
-    expect(loadQueuedMessages(storage, "user-1")).toEqual(new Map());
+    storage.setItem(QUEUED_MESSAGES_STORAGE_KEY, '{"conversation-1":[{"id":1}]}');
+    expect(loadQueuedMessages(storage)).toEqual(new Map());
   });
 
   it("joins FIFO text with blank lines and deduplicates references in first-seen order", () => {

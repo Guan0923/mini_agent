@@ -56,7 +56,6 @@ class SQLiteRuntimeMixin:
             timestamp = utc_iso()
             self._put_json_object(connection, session_id, "runtime_node", root.id, root.to_dict(), timestamp)
             self._touch_session(connection, session_id, timestamp)
-            self._append_event(connection, session_id, kind="turn_upserted", payload={"turn": root.to_dict()})
             return root
 
     def create_node(self, node: TreeRuntimeState) -> None:
@@ -82,7 +81,6 @@ class SQLiteRuntimeMixin:
                 raise ValueError("A thread may have only one running Turn.")
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
             self._touch_session(connection, node.session_id, node.timestamp)
-            self._append_event(connection, node.session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
 
     def update_node(self, node: TreeRuntimeState) -> None:
         with self._connection(node.session_id) as connection:
@@ -92,7 +90,6 @@ class SQLiteRuntimeMixin:
                 raise KeyError(node.id)
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
             self._touch_session(connection, node.session_id, utc_now())
-            self._append_event(connection, node.session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
 
     def create_finalized_nodes(self, nodes: list[TreeRuntimeState] | tuple[TreeRuntimeState, ...]) -> None:
         """Atomically append an ordered batch of terminal canonical nodes."""
@@ -126,7 +123,6 @@ class SQLiteRuntimeMixin:
             timestamp = nodes[-1].timestamp
             for node in nodes:
                 self._put_json_object(connection, session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
-                self._append_event(connection, session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
             self._touch_session(connection, session_id, timestamp)
 
     def get_node(self, session_id: str, node_id: str) -> RuntimeNode | None:
@@ -179,7 +175,6 @@ class SQLiteRuntimeMixin:
                 raise ValueError("A Turn can only be finalized as success, paused, or failed.")
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
             self._touch_session(connection, node.session_id, node.timestamp)
-            self._append_event(connection, node.session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
 
     def append_turn_version(self, turn_id: str, user_item: Mapping[str, object]) -> TreeRuntimeState:
         """Atomically rewind one Turn by appending a new selected version."""
@@ -214,7 +209,6 @@ class SQLiteRuntimeMixin:
                 connection, stored.session_id, "runtime_node", stored.id, stored.to_dict(), stored.timestamp
             )
             self._touch_session(connection, stored.session_id, stored.timestamp)
-            self._append_event(connection, stored.session_id, kind="turn_upserted", payload={"turn": stored.to_dict()})
         return stored
 
     def set_turn_current_data(self, turn_id: str, current_data_idx: int) -> TreeRuntimeState:
@@ -266,7 +260,6 @@ class SQLiteRuntimeMixin:
             node = TreeRuntimeState.from_dict(node.to_dict())
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), utc_iso())
             self._touch_session(connection, node.session_id, utc_iso())
-            self._append_event(connection, node.session_id, kind="turn_upserted", payload={"turn": node.to_dict()})
         return node
 
     def fork_turn_node(
@@ -291,14 +284,6 @@ class SQLiteRuntimeMixin:
         )
         self.create_node(compacted)
         return compacted
-
-    def runtime_state_document(self, session_id: str) -> dict[str, object]:
-        session = self.get_session(session_id)
-        if session is None:
-            raise ValueError(f"Unknown session: {session_id}")
-        if session.local_only:
-            raise ValueError("Local-only sessions are excluded from cloud sync.")
-        return self._build_baseline_for_runtime(session_id)
 
     def start_turn(
         self,
@@ -329,27 +314,9 @@ class SQLiteRuntimeMixin:
                 "updated_at": timestamp,
             }
             self._put_json_object(connection, session_id, "run", run_id, run, timestamp)
-            self._append_event(connection, session_id, kind="run_upserted", payload={"run": run})
             if append_user_message:
                 self._append_turn_message(connection, session_id, run_id, "user", task, timestamp)
             self._write_session_document(connection, session_id, document)
-            self._append_event(
-                connection,
-                session_id,
-                kind="turn_started",
-                payload={
-                    "run_id": run_id,
-                    "task": task,
-                    "provenance": {
-                        "workflow_id": origin.workflow_id,
-                        "attempt": origin.attempt,
-                        "trigger": origin.trigger,
-                        "source_session_id": origin.source_session_id,
-                        "source_run_id": origin.source_run_id,
-                    },
-                    "append_user_message": append_user_message,
-                },
-            )
 
     @staticmethod
     def _session_has_turn(connection: sqlite3.Connection) -> bool:
@@ -358,8 +325,9 @@ class SQLiteRuntimeMixin:
         return (
             connection.execute(
                 "SELECT 1 FROM json_objects "
-                "WHERE namespace='runtime_node' "
-                "AND json_extract(payload_json,'$.data[0][0].role')='user' "
+                "WHERE (namespace='runtime_node' "
+                "AND json_extract(payload_json,'$.data[0][0].role')='user') "
+                "OR (namespace='turn_message' AND json_extract(payload_json,'$.role')='user') "
                 "LIMIT 1"
             ).fetchone()
             is not None
@@ -373,12 +341,6 @@ class SQLiteRuntimeMixin:
             timestamp = utc_now()
             self._append_turn_message(connection, session_id, run_id, "user", content, timestamp)
             self._touch_session(connection, session_id, timestamp)
-            self._append_event(
-                connection,
-                session_id,
-                kind="turn_input_appended",
-                payload={"run_id": run_id, "role": "user", "content": content, "created_at": timestamp},
-            )
 
     def finish_turn(self, session_id: str, run_id: str, status: RunStatus, answer: str | None) -> None:
         timestamp = utc_now()
@@ -390,33 +352,23 @@ class SQLiteRuntimeMixin:
             content = assistant_content(status, answer)
             run.update({"status": str(status), "updated_at": timestamp})
             self._put_json_object(connection, session_id, "run", run_id, run, timestamp)
-            self._append_event(connection, session_id, kind="run_upserted", payload={"run": run})
             self._append_turn_message(
                 connection, session_id, run_id, "assistant", content, timestamp, data={"status": str(status)}
             )
             self._touch_session(connection, session_id, timestamp)
-            self._append_event(
-                connection,
-                session_id,
-                kind="turn_finished",
-                payload={"run_id": run_id, "status": str(status), "content": content, "created_at": timestamp},
-            )
 
     def save(self, runtime, reason: str) -> None:
         self._save_state(runtime.state, reason)
-        if self._sync_listener is not None and not self._is_local_only(runtime.state.session_id):
-            self._sync_listener()
 
     def save_runtime(self, state: RuntimeState) -> None:
         self._save_state(state, "runtime")
 
     def _save_state(self, state: RuntimeState, reason: str) -> None:
         timestamp = utc_now()
-        full_payload = state.to_dict(include_runtime_messages=True)
-        previous_payload: dict[str, object] = {}
+        full_payload = state.to_dict(include_runtime_messages=False)
         reduced_payload = state.to_dict(include_runtime_messages=False)
-        # Messages and runtime messages have independent append-only objects;
-        # the state event is deliberately not an ever-growing transcript.
+        # Messages and runtime messages have independent local objects, so a
+        # checkpoint does not duplicate the growing transcript.
         reduced_payload.pop("messages", None)
         reduced_payload.pop("run_history", None)
         if reduced_payload.get("current_run"):
@@ -425,7 +377,6 @@ class SQLiteRuntimeMixin:
         with self._connection(state.session_id) as connection:
             self._assert_writable(connection)
             self._session_document(connection, state.session_id)
-            previous_payload = self._json_object(connection, state.session_id, "runtime_state", state.session_id) or {}
             self._put_json_object(
                 connection, state.session_id, "runtime_state", state.session_id, full_payload, timestamp
             )
@@ -436,29 +387,9 @@ class SQLiteRuntimeMixin:
                     {"run_id": run.run_id, "task": run.task, "status": run.status, "updated_at": timestamp}
                 )
                 self._put_json_object(connection, state.session_id, "run", run.run_id, run_payload, timestamp)
-                previous_run = previous_payload.get("current_run")
-                previous_messages = (
-                    previous_run.get("runtime_messages", [])
-                    if isinstance(previous_run, dict) and isinstance(previous_run.get("runtime_messages"), list)
-                    else []
-                )
-                previous_sequences = {
-                    int(item.get("sequence", 0)) for item in previous_messages if isinstance(item, dict)
-                }
                 for message in run.runtime_messages:
-                    if message.sequence in previous_sequences:
-                        continue
                     self._put_runtime_message(connection, state.session_id, run.run_id, message)
             self._touch_session(connection, state.session_id, timestamp)
-            self._append_event(
-                connection,
-                state.session_id,
-                kind="runtime_state_saved",
-                payload={"reason": reason, "state": reduced_payload, "run_id": run.run_id if run else None},
-            )
-            delta = self._runtime_state_delta(previous_payload, full_payload, run.run_id if run else None)
-            if delta:
-                self._append_event(connection, state.session_id, kind="runtime_state_delta", payload=delta)
             if run is not None:
                 checkpoint = {"run_id": run.run_id, "reason": reason, "state": reduced_payload, "created_at": timestamp}
                 self._put_json_object(
@@ -469,41 +400,6 @@ class SQLiteRuntimeMixin:
                     checkpoint,
                     timestamp,
                 )
-                self._append_event(
-                    connection,
-                    state.session_id,
-                    kind="checkpoint_recorded",
-                    payload=checkpoint,
-                )
-
-    @staticmethod
-    def _runtime_state_delta(
-        previous: dict[str, object], current: dict[str, object], run_id: str | None
-    ) -> dict[str, object] | None:
-        """Return only newly appended runtime history for cloud replay."""
-
-        delta: dict[str, object] = {"run_id": run_id}
-        old_history = previous.get("run_history") if isinstance(previous.get("run_history"), list) else []
-        new_history = current.get("run_history") if isinstance(current.get("run_history"), list) else []
-        if len(new_history) > len(old_history):
-            delta["run_history_append"] = new_history[len(old_history) :]
-        old_run = previous.get("current_run") if isinstance(previous.get("current_run"), dict) else {}
-        new_run = current.get("current_run") if isinstance(current.get("current_run"), dict) else {}
-        for field in ("history", "actions", "events"):
-            old_values = old_run.get(field) if isinstance(old_run.get(field), list) else []
-            new_values = new_run.get(field) if isinstance(new_run.get(field), list) else []
-            common = 0
-            while common < len(old_values) and common < len(new_values) and old_values[common] == new_values[common]:
-                common += 1
-            if common < len(new_values):
-                delta[f"{field}_from"] = common
-                delta[f"{field}_values"] = new_values[common:]
-        old_batches = old_run.get("subagent_batches") if isinstance(old_run.get("subagent_batches"), dict) else {}
-        new_batches = new_run.get("subagent_batches") if isinstance(new_run.get("subagent_batches"), dict) else {}
-        changed_batches = {str(key): value for key, value in new_batches.items() if old_batches.get(key) != value}
-        if changed_batches:
-            delta["subagent_batches_upsert"] = changed_batches
-        return delta if len(delta) > 1 else None
 
     def load_runtime(self, session_id: str) -> RuntimeState | None:
         with self._connection(session_id) as connection:
@@ -564,8 +460,15 @@ class SQLiteRuntimeMixin:
         data: dict[str, object] | None = None,
     ) -> None:
         existing = self._json_values(connection, session_id, "turn_message")
-        sequence = 1 + max(
-            (int(item.get("sequence", 0)) for item in existing if str(item.get("run_id") or "") == run_id), default=0
+        run_messages = [item for item in existing if str(item.get("run_id") or "") == run_id]
+        prior_assistant = next(
+            (item for item in run_messages if role == "assistant" and item.get("role") == "assistant"),
+            None,
+        )
+        sequence = (
+            int(prior_assistant.get("sequence", 0))
+            if prior_assistant is not None
+            else 1 + max((int(item.get("sequence", 0)) for item in run_messages), default=0)
         )
         payload = {
             "run_id": run_id,
@@ -576,19 +479,6 @@ class SQLiteRuntimeMixin:
             "created_at": timestamp,
         }
         self._put_json_object(connection, session_id, "turn_message", f"{run_id}:{sequence}", payload, timestamp)
-        self._append_event(
-            connection,
-            session_id,
-            kind="runtime_message_appended",
-            payload={
-                "run_id": run_id,
-                "sequence": sequence,
-                "kind": role,
-                "message": content,
-                "data": data or {},
-                "created_at": timestamp,
-            },
-        )
 
     def _put_runtime_message(
         self, connection: sqlite3.Connection, session_id: str, run_id: str, message: RuntimeMessage
@@ -608,7 +498,6 @@ class SQLiteRuntimeMixin:
                 return
             raise ValueError("Runtime messages are immutable and cannot be replaced.")
         self._put_json_object(connection, session_id, "runtime_message", object_id, payload, message.timestamp)
-        self._append_event(connection, session_id, kind="runtime_message_appended", payload=payload)
 
     def _touch_session(self, connection: sqlite3.Connection, session_id: str, timestamp: str) -> None:
         document = self._session_document(connection, session_id)
@@ -661,10 +550,8 @@ class SQLiteRuntimeMixin:
         return dict(value) if isinstance(value, dict) else None
 
     @staticmethod
-    def _assert_writable(connection: sqlite3.Connection) -> None:
-        row = connection.execute("SELECT payload_json FROM json_objects WHERE namespace='session' LIMIT 1").fetchone()
-        if row is not None and bool(json.loads(str(row[0])).get("read_only", False)):
-            raise PermissionError("Remote sessions are read-only; fork the session before writing.")
+    def _assert_writable(_connection: sqlite3.Connection) -> None:
+        """All v12 sessions are local and writable after lifecycle checks."""
 
 
 __all__ = ["SQLiteRuntimeMixin"]

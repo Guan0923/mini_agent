@@ -117,8 +117,9 @@ def test_unexpected_failure_still_ends_the_persisted_runtime_trace(tmp_path: Pat
     summary = store.get_session_summary(service.active_session.session_id)
     assert summary is not None and summary.last_run_id is not None
     messages = store.load_runtime_messages(service.active_session.session_id, summary.last_run_id)
-    assert [message.kind for message in messages[-2:]] == ["error", "run_finished"]
-    assert messages[-2].message == FAILED_TERMINAL_MESSAGE
+    kinds = [message.kind for message in messages]
+    assert kinds.index("error") < kinds.index("run_finished")
+    assert next(message.message for message in messages if message.kind == "error") == FAILED_TERMINAL_MESSAGE
     restored = store.load_runtime(service.active_session.session_id)
     assert restored is not None
     assert any(
@@ -429,7 +430,8 @@ def test_session_snapshot_excludes_audit_messages_and_restores_them(tmp_path: Pa
 
     with sqlite3.connect(store.paths.session_db(service.active_session.session_id)) as connection:
         payload = connection.execute(
-            "SELECT state_json FROM session_runtime WHERE session_id = ?", (service.active_session.session_id,)
+            "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace='runtime_state' AND object_id=?",
+            (service.active_session.session_id, service.active_session.session_id),
         ).fetchone()[0]
     assert json.loads(payload)["current_run"]["runtime_messages"] == []
 

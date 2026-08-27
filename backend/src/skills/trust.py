@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from backend.configuration import ConfigurationError, UserConfigStore
+from backend.configuration import ConfigurationError, LocalConfigStore
 from backend.runtime.core.contracts import InterruptDecision, InterruptRequest
 
 from .project import ProjectSkillDefinition, discover_project_skills
@@ -32,7 +32,7 @@ def workspace_sha256(cwd: Path) -> str:
 class ProjectSkillTrustStore:
     """Read/write per-Skill trust records inside one user's config.toml."""
 
-    def __init__(self, config_store: UserConfigStore) -> None:
+    def __init__(self, config_store: LocalConfigStore) -> None:
         self._config = config_store
 
     # -- reads -------------------------------------------------------------

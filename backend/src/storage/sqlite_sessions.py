@@ -22,7 +22,6 @@ class SQLiteSessionMixin:
         title: str | None = None,
         *,
         client_id: str | None = None,
-        local_only: bool = False,
         title_is_custom: bool | None = None,
     ) -> Session:
         cleaned = normalize_session_title(title)
@@ -34,13 +33,12 @@ class SQLiteSessionMixin:
             timestamp,
             timestamp,
             client_id=client_id,
-            local_only=local_only,
             title_is_custom=custom,
         )
         root_path = self.paths.session_root(session.session_id)
         root_existed = root_path.exists()
         root = self.paths.ensure_session(session.session_id)
-        document = self._session_payload(session, owner_device_id=self.device_id, read_only=False)
+        document = self._session_payload(session)
         try:
             with self._connection(session.session_id) as connection:
                 connection.execute(
@@ -50,24 +48,6 @@ class SQLiteSessionMixin:
                 self._put_json_object(
                     connection, session.session_id, "session", session.session_id, document, timestamp
                 )
-                # The initial batch is the baseline.  Every later mutation is
-                # represented by a small immutable event.
-                self._append_event(
-                    connection,
-                    session.session_id,
-                    kind="baseline",
-                    payload={
-                        "schema_version": SCHEMA_VERSION,
-                        "objects": [
-                            {
-                                "namespace": "session",
-                                "object_id": session.session_id,
-                                "payload": document,
-                                "updated_at": timestamp,
-                            },
-                        ],
-                    },
-                )
         except Exception:
             if not root_existed:
                 shutil.rmtree(root, ignore_errors=True)
@@ -75,7 +55,7 @@ class SQLiteSessionMixin:
         return session
 
     @staticmethod
-    def _session_payload(session: Session, *, owner_device_id: str, read_only: bool) -> dict[str, object]:
+    def _session_payload(session: Session) -> dict[str, object]:
         return {
             "session_id": session.session_id,
             "title": session.title,
@@ -84,10 +64,7 @@ class SQLiteSessionMixin:
             "client_id": session.client_id,
             "archived_at": session.archived_at,
             "deleted_at": session.deleted_at,
-            "local_only": session.local_only,
             "title_is_custom": session.title_is_custom,
-            "owner_device_id": owner_device_id,
-            "read_only": read_only,
         }
 
     @staticmethod
@@ -100,7 +77,6 @@ class SQLiteSessionMixin:
             str(payload["client_id"]) if payload.get("client_id") is not None else None,
             str(payload["archived_at"]) if payload.get("archived_at") is not None else None,
             str(payload["deleted_at"]) if payload.get("deleted_at") is not None else None,
-            bool(payload.get("local_only", False)),
             bool(payload.get("title_is_custom", False)),
         )
 
@@ -147,7 +123,7 @@ class SQLiteSessionMixin:
             for node in self.load_nodes(session_id)
             if node.session_id == session_id and isinstance(node, TreeRuntimeState)
         ]
-        messages = self._node_records(nodes)
+        messages = self.load_conversation_records(session_id)
         last_node = max(nodes, key=lambda item: (item.timestamp, item.id), default=None)
         with self._connection(session_id) as connection:
             rows = connection.execute(
@@ -168,7 +144,6 @@ class SQLiteSessionMixin:
             archived_at=session.archived_at,
             deleted_at=session.deleted_at,
             last_node_id=last_node.id if last_node is not None else None,
-            local_only=session.local_only,
             title_is_custom=session.title_is_custom,
         )
 
@@ -195,10 +170,34 @@ class SQLiteSessionMixin:
         return self.get_session(summaries[0].session_id) if summaries else None
 
     def load_conversation(self, session_id: str) -> list[dict[str, str]]:
-        return self._node_messages([node for node in self.load_nodes(session_id) if isinstance(node, TreeRuntimeState)])
+        return [
+            {"role": str(item["role"]), "content": str(item["content"])}
+            for item in self.load_conversation_records(session_id)
+        ]
 
     def load_conversation_records(self, session_id: str) -> list[dict[str, str | int | None]]:
-        return self._node_records([node for node in self.load_nodes(session_id) if isinstance(node, TreeRuntimeState)])
+        records = self._node_records(
+            [node for node in self.load_nodes(session_id) if isinstance(node, TreeRuntimeState)]
+        )
+        if records:
+            return records
+        with self._connection(session_id) as connection:
+            rows = connection.execute(
+                "SELECT object_id,payload_json,updated_at FROM json_objects "
+                "WHERE session_id=? AND namespace='turn_message' ORDER BY updated_at,object_id",
+                (session_id,),
+            ).fetchall()
+        return [
+            {
+                "id": str(row[0]),
+                "run_id": str(payload.get("run_id") or "") or None,
+                "role": str(payload.get("role") or ""),
+                "content": str(payload.get("content") or ""),
+                "created_at": str(payload.get("created_at") or row[2]),
+            }
+            for row in rows
+            if isinstance(payload := json.loads(str(row[1])), dict) and payload.get("role") in {"user", "assistant"}
+        ]
 
     def find_session_by_client_id(self, client_id: str, *, include_deleted: bool = False) -> Session | None:
         if not client_id:
@@ -217,12 +216,6 @@ class SQLiteSessionMixin:
         timestamp = str(values.get("updated_at") or utc_now())
         document["updated_at"] = timestamp
         self._write_session_document(connection, session_id, document)
-        self._append_event(
-            connection,
-            session_id,
-            kind="session_metadata_updated",
-            payload={**values, "updated_at": timestamp},
-        )
 
     def set_client_id(self, session_id: str, client_id: str | None) -> Session:
         with self._connection_for_existing(session_id) as connection:
@@ -234,13 +227,6 @@ class SQLiteSessionMixin:
             self._update_session(connection, session_id, client_id=client_id)
         return self._required_session(session_id)
 
-    def mark_local_only(self, session_id: str) -> Session:
-        with self._connection_for_existing(session_id) as connection:
-            document = self._session_document(connection, session_id)
-            document["local_only"] = True
-            self._write_session_document(connection, session_id, document)
-        return self._required_session(session_id)
-
     def import_conversation(
         self,
         title: str | None,
@@ -248,7 +234,6 @@ class SQLiteSessionMixin:
         *,
         client_id: str | None = None,
         force_new: bool = False,
-        local_only: bool = False,
         title_is_custom: bool | None = None,
     ) -> Session:
         if client_id and not force_new:
@@ -265,7 +250,6 @@ class SQLiteSessionMixin:
         session = self.create_session(
             title,
             client_id=client_id,
-            local_only=local_only,
             title_is_custom=title_is_custom,
         )
         try:
@@ -273,7 +257,7 @@ class SQLiteSessionMixin:
                 from backend.domain.runtime_state import NodeWriter, RuntimeState
 
                 writer = NodeWriter(self)
-                parent = None
+                parent = self.ensure_root_node(session.session_id)
                 index = 0
                 while index < len(parsed):
                     user_message = parsed[index]
@@ -347,10 +331,7 @@ class SQLiteSessionMixin:
             document = self._session_document(connection, session_id)
             if document.get("deleted_at") is None:
                 raise ValueError("Only deleted sessions can be permanently removed.")
-        local_only = self._is_local_only(session_id)
         shutil.rmtree(self.paths.session_root(session_id), ignore_errors=False)
-        if self._sync_listener is not None and not local_only:
-            self._sync_listener()
 
     def _set_lifecycle(
         self, session_id: str, *, archived_at: str | None = None, deleted_at: str | None = None
@@ -420,6 +401,8 @@ class SQLiteSessionMixin:
                     for block in content
                     if isinstance(block, Mapping) and block.get("type") in {"text", "reasoning", "bash", "error"}
                 )
+                if role == "assistant" and not text:
+                    continue
                 result.append(
                     {
                         "id": f"{node.session_id}:{node.id}:{role}",

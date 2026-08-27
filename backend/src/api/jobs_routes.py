@@ -1,17 +1,15 @@
-"""Authenticated control-plane API for process-local Jobs."""
+"""Local control-plane API for process-local Jobs."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from backend.jobs import TERMINAL_STATES, JobLane, JobQuery, JobState
 from backend.sandbox import SandboxLimits
 
-from .auth.dependencies import require_user
-from .auth.types import UserIdentity
 from .state import WebAppState
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -25,7 +23,7 @@ def _registry(request: Request):
     return registry
 
 
-def _parse_query(state: str | None, lane: str | None) -> JobQuery | None:
+def _parse_query(state: str | None, lane: str | None, session_id: str | None = None) -> JobQuery | None:
     states = None
     lanes = None
     if state is not None:
@@ -38,9 +36,9 @@ def _parse_query(state: str | None, lane: str | None) -> JobQuery | None:
             lanes = (JobLane(lane),)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="无效的 Job 资源池。") from exc
-    if states is None and lanes is None:
+    if states is None and lanes is None and session_id is None:
         return None
-    return JobQuery(states=states, lanes=lanes)
+    return JobQuery(states=states, lanes=lanes, session_id=session_id)
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -95,37 +93,37 @@ def list_jobs(
     state: str | None = None,
     lane: str | None = None,
     session_id: str | None = None,
-    identity: UserIdentity = Depends(require_user),
 ) -> list[dict[str, object]]:
-    query = _parse_query(state, lane)
+    query = _parse_query(state, lane, session_id)
     registry = _registry(request)
-    records = registry.list_for_user(identity.id, query, session_id=session_id)
+    records = registry.root_scope().list(query)
     return [_public(item) for item in records]
 
 
 @router.get("/{job_id}")
-def get_job(job_id: str, request: Request, identity: UserIdentity = Depends(require_user)) -> dict[str, object]:
-    record = _registry(request).get_for_user(identity.id, job_id)
+def get_job(job_id: str, request: Request) -> dict[str, object]:
+    record = _registry(request).root_scope().get(job_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Job 不存在。")
     return _public(record)
 
 
 @router.post("/{job_id}/cancel", status_code=202)
-def cancel_job(job_id: str, request: Request, identity: UserIdentity = Depends(require_user)) -> dict[str, object]:
+def cancel_job(job_id: str, request: Request) -> dict[str, object]:
     registry = _registry(request)
-    record = registry.get_for_user(identity.id, job_id)
+    scope = registry.root_scope()
+    record = scope.get(job_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Job 不存在。")
     if record.info.state in TERMINAL_STATES:
         raise HTTPException(status_code=409, detail="Job 已经结束，无法取消。")
-    if not registry.cancel_for_user(identity.id, job_id):
-        refreshed = registry.get_for_user(identity.id, job_id)
+    if not scope.cancel(job_id):
+        refreshed = scope.get(job_id)
         if refreshed is None:
             raise HTTPException(status_code=404, detail="Job 不存在。")
         if refreshed.info.state in TERMINAL_STATES:
             raise HTTPException(status_code=409, detail="Job 已经结束，无法取消。")
-    refreshed = registry.get_for_user(identity.id, job_id)
+    refreshed = scope.get(job_id)
     if refreshed is None:
         raise HTTPException(status_code=404, detail="Job 不存在。")
     return _public(refreshed)

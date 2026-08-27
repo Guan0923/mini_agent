@@ -16,12 +16,18 @@ from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from backend.tools import ToolRegistry
 
 
-def test_runner_executes_command(tmp_path: Path) -> None:
+def test_runner_refuses_command_when_strict_sandbox_is_unhealthy(tmp_path: Path) -> None:
     events = []
-    state = AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)).run("run command echo 96", lambda _: True, on_event=events.append)
+    state = AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)).run(
+        "run command echo 96", lambda _: True, on_event=events.append
+    )
 
-    assert state.status == "completed"
-    assert state.final_answer is not None and "96" in state.final_answer
+    assert state.status == "cancelled"
+    assert any(
+        event.kind == "run_segment"
+        and any("Sandbox runtime is not healthy" in str(tool.get("error", "")) for tool in event.data.get("tools", []))
+        for event in events
+    )
 
 
 class ProviderFailurePlanner:

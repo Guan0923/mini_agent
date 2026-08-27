@@ -78,7 +78,7 @@ class AgentRunner:
         self.provider_config_resolver = provider_config_resolver
         self.job_registry = job_registry or JobRegistry()
         self._owns_job_registry = job_registry is None
-        self.job_scope = job_scope or self.job_registry.root_scope().child(JobScopeKind.RUNNER)
+        self.job_scope = job_scope or self.job_registry.root_scope().child(JobScopeKind.THREAD)
         self._parent_job_id = parent_job_id
         self._closed = False
         self.settings = RunnerSettings(

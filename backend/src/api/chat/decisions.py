@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..auth.dependencies import require_user
-from ..auth.types import UserIdentity
 from .interrupts import registry
 
 router = APIRouter(prefix="/api")
@@ -22,10 +18,7 @@ class DecisionBody(BaseModel):
 
 
 @router.post("/decisions")
-def submit_decision(
-    body: DecisionBody,
-    identity: Annotated[UserIdentity, Depends(require_user)],
-) -> dict:
+def submit_decision(body: DecisionBody) -> dict:
     allowed = {
         "continue",
         "cancel",
@@ -41,7 +34,7 @@ def submit_decision(
     }
     if body.choice not in allowed:
         raise HTTPException(status_code=422, detail=f"不支持的决策：{body.choice}")
-    if registry.kind(body.decision_id, identity.id) == "plan" and body.choice not in {
+    if registry.kind(body.decision_id) == "plan" and body.choice not in {
         "implement",
         "implement_and_compaction",
         "stay_in_plan_mode",
@@ -51,11 +44,7 @@ def submit_decision(
         raise HTTPException(status_code=422, detail="补充说明不能为空")
     if body.choice == "answer" and body.answers is None:
         raise HTTPException(status_code=422, detail="问题决策需要 answers")
-    resolved = registry.resolve(
-        body.decision_id,
-        body.model_dump(exclude={"decision_id"}),
-        owner_id=identity.id,
-    )
+    resolved = registry.resolve(body.decision_id, body.model_dump(exclude={"decision_id"}))
     if not resolved:
         raise HTTPException(status_code=404, detail="未知或已过期的决策")
     return {"ok": True}

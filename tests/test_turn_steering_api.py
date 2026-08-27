@@ -9,7 +9,6 @@ from backend.api.session_store import session_store
 from backend.api.state import WebAppState
 from backend.api.turn_steering import TurnSteeringInbox
 from backend.domain.runtime_state import RuntimeState
-from backend.storage.auth import LocalAuthStore
 
 
 def test_turn_steering_inbox_consumes_one_fifo_entry_per_boundary() -> None:
@@ -25,22 +24,22 @@ def test_turn_steering_inbox_consumes_one_fifo_entry_per_boundary() -> None:
 
 
 def test_steer_endpoint_accepts_only_an_active_running_turn_and_normalizes_references(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    state = WebAppState(tmp_path / "web")
     with TestClient(create_app(state)) as client:
-        assert client.post("/api/auth/guest").status_code == 200
-        user_id = client.get("/api/auth/me").json()["id"]
         sidebar = client.post("/api/sidebar-threads", json={}).json()
+        store = session_store(state)
         turn = RuntimeState.create(
             session_id=sidebar["session_id"],
             thread_id=sidebar["thread_id"],
             id="turn_running",
+            parent=store.ensure_root_node(sidebar["session_id"]),
             user_content=[{"type": "text", "text": "start"}],
-            user=user_id,
+            user="",
             provider_name="local",
         )
-        session_store(state, user_id).create_node(turn)
+        store.create_node(turn)
         inbox = TurnSteeringInbox()
-        state.active_turn_steering = {(user_id, turn.id): inbox}
+        state.active_turn_steering = {turn.id: inbox}
 
         response = client.post(
             f"/api/turns/{turn.id}/steer",
@@ -89,8 +88,8 @@ def test_steer_endpoint_accepts_only_an_active_running_turn_and_normalizes_refer
 
         failed = turn.clone()
         failed.status = "failed"
-        session_store(state, user_id).update_node(failed)
-        state.active_turn_steering[(user_id, turn.id)] = TurnSteeringInbox()
+        store.update_node(failed)
+        state.active_turn_steering[turn.id] = TurnSteeringInbox()
         assert (
             client.post(
                 f"/api/turns/{turn.id}/steer",
