@@ -13,10 +13,11 @@ from backend.api.active_turn_stream import ActiveTurnStream
 from backend.api.app import create_app
 from backend.api.chat import routes as chat_routes
 from backend.api.chat.routes import _startup_failure_message, _terminal_type_for_status
+from backend.api.pause_control import TurnPauseController
 from backend.api.session_store import session_store
 from backend.api.state import WebAppState
 from backend.configuration import ClientPaths
-from backend.domain import CHECKPOINT_PREAMBLE, AssistantMessage, PlanningError, ToolMessage
+from backend.domain import CHECKPOINT_PREAMBLE, AssistantMessage, PlanningError, ToolMessage, UserMessage
 from backend.domain.runtime_state import (
     APP_VERSION,
     InMemoryNodeStore,
@@ -165,6 +166,18 @@ def test_turn_shape_is_strict_and_has_no_synthetic_root() -> None:
     with pytest.raises(RuntimeStateValidationError, match="missing required fields"):
         RuntimeState.from_dict(payload)
 
+    missing_status = turn.to_dict()
+    missing_status["data"][0][1]["content"].append({"type": "text", "text": "partial"})
+    with pytest.raises(RuntimeStateValidationError, match="Item status"):
+        RuntimeState.from_dict(missing_status)
+
+    legacy_tool_status = turn.to_dict()
+    legacy_tool_status["data"][0][1]["content"].append(
+        {"type": "tool_result", "call_id": "legacy", "content": "done", "status": "succeeded"}
+    )
+    with pytest.raises(RuntimeStateValidationError, match="Item status"):
+        RuntimeState.from_dict(legacy_tool_status)
+
 
 def test_writer_emits_one_baseline_then_exact_incremental_operations() -> None:
     frames: list[NodeFrame] = []
@@ -172,18 +185,32 @@ def test_writer_emits_one_baseline_then_exact_incremental_operations() -> None:
     writer = NodeWriter(store, emit=frames.append)
     turn = writer.create(make_turn())
     turn = writer.append_item(
-        turn, {"type": "tool_call", "call_id": "call_1", "name": "read_file", "arguments": {}, "replay_safe": True}
+        turn,
+        {
+            "type": "tool_call",
+            "call_id": "call_1",
+            "name": "read_file",
+            "arguments": {},
+            "replay_safe": True,
+            "status": "running",
+        },
     )
+    turn = writer.set_item_status(turn, data_idx=0, message_idx=1, item_idx=0, status="success")
     turn = writer.append_item(
-        turn, {"type": "tool_result", "call_id": "call_1", "content": "ok", "status": "succeeded", "replay_safe": True}
+        turn,
+        {"type": "tool_result", "call_id": "call_1", "content": "ok", "status": "success", "replay_safe": True},
     )
-    turn = writer.append_item(turn, {"type": "text", "text": "answer "}, persist=False)
+    turn = writer.append_item(turn, {"type": "text", "text": "answer ", "status": "running"}, persist=False)
     turn = writer.append_text(turn, data_idx=0, item_idx=2, delta="done", persist=True)
+    turn = writer.set_item_status(turn, data_idx=0, message_idx=1, item_idx=2, status="success")
     turn = writer.finalize(turn, "success")
-    assert [frame.type for frame in frames] == ["turn.snapshot", *["turn.delta"] * 5]
-    assert [frame.revision for frame in frames] == list(range(6))
-    assert frames[4].operations == (
+    assert [frame.type for frame in frames] == ["turn.snapshot", *["turn.delta"] * 7]
+    assert [frame.revision for frame in frames] == list(range(8))
+    assert frames[5].operations == (
         {"op": "append_text", "data_idx": 0, "message_idx": 1, "item_idx": 2, "delta": "done"},
+    )
+    assert frames[6].operations == (
+        {"op": "set_item_status", "data_idx": 0, "message_idx": 1, "item_idx": 2, "status": "success"},
     )
     assert frames[-1].patch == {"status": "success"}
     assert all("turn" not in frame.to_dict() and "data" not in frame.to_dict() for frame in frames[1:])
@@ -199,6 +226,144 @@ def test_writer_emits_one_baseline_then_exact_incremental_operations() -> None:
     assert child.parent_id == turn.id
 
 
+def test_model_context_projects_only_successful_turn_items() -> None:
+    node = RuntimeState.create(
+        session_id="session_context",
+        thread_id="session_context",
+        user_content="inspect",
+        data=[
+            [
+                {"role": "user", "content": [{"type": "text", "text": "inspect", "status": "success"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "kept", "status": "success"},
+                        {"type": "text", "text": "partial", "status": "failed"},
+                        {"type": "reasoning", "text": "unfinished", "status": "running"},
+                        {
+                            "type": "tool_call",
+                            "call_id": "call_ok",
+                            "name": "read_file",
+                            "arguments": {},
+                            "status": "success",
+                        },
+                        {
+                            "type": "tool_result",
+                            "call_id": "call_ok",
+                            "content": "done",
+                            "status": "success",
+                        },
+                        {
+                            "type": "tool_call",
+                            "call_id": "call_failed",
+                            "name": "write_file",
+                            "arguments": {},
+                            "status": "failed",
+                        },
+                        {
+                            "type": "tool_result",
+                            "call_id": "call_failed",
+                            "content": "denied",
+                            "status": "failed",
+                        },
+                        {
+                            "type": "tool_call",
+                            "call_id": "call_orphan",
+                            "name": "glob",
+                            "arguments": {},
+                            "status": "success",
+                        },
+                        {
+                            "type": "tool_result",
+                            "call_id": "result_orphan",
+                            "content": "ignored",
+                            "status": "success",
+                        },
+                    ],
+                },
+            ]
+        ],
+    )
+    runtime = AgentRunner(RuleBasedPlanner(), ToolRegistry()).empty_runtime(session_id="session_context")
+    runtime.services.runtime_node_context = lambda: [node]
+
+    projected = runtime.model_messages()
+
+    assert isinstance(projected[0], UserMessage) and projected[0].content == "inspect"
+    assert isinstance(projected[1], AssistantMessage)
+    assert projected[1].content == "kept"
+    assert projected[1].reasoning is None
+    assert [(tool.call_id, tool.content, tool.status) for tool in projected[1].tool_messages] == [
+        ("call_ok", "done", "succeeded")
+    ]
+
+
+def test_late_tool_failure_after_steering_settles_the_previous_assistant_call() -> None:
+    frames: list[NodeFrame] = []
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(
+        store,
+        session_id="session_steering_status",
+        thread_id="session_steering_status",
+        turn_id="turn_steering_status",
+        prompt="start",
+        emit=frames.append,
+    )
+    bridge.start()
+    bridge.handle(
+        RuntimeEvent(
+            "assistant_message",
+            "",
+            {
+                "message": {
+                    "role": "assistant",
+                    "tool_messages": [
+                        {
+                            "name": "read_file",
+                            "call_id": "call_stale",
+                            "arguments": {"path": "README.md"},
+                        }
+                    ],
+                }
+            },
+        )
+    )
+    bridge.handle(
+        RuntimeEvent(
+            "steering_applied",
+            "In-run user input applied",
+            {"content": "redirect", "steering_id": "steer_1"},
+        )
+    )
+    bridge.handle(
+        RuntimeEvent(
+            "tool_failed",
+            "Not executed because the user supplied new instructions.",
+            {
+                "tool": "read_file",
+                "call_id": "call_stale",
+                "error": "Not executed because the user supplied new instructions.",
+            },
+        )
+    )
+    bridge.handle(
+        RuntimeEvent(
+            "assistant_message",
+            "",
+            {"message": {"role": "assistant", "content": "redirected answer"}},
+        )
+    )
+
+    completed = bridge.finish("success", "redirected answer")
+
+    assert completed is not None and completed.status == "success"
+    messages = completed.data[completed.current_data_idx]
+    assert [message["role"] for message in messages] == ["user", "assistant", "user", "assistant"]
+    first_call = next(item for item in messages[1]["content"] if item.get("call_id") == "call_stale")
+    assert first_call["type"] == "tool_call" and first_call["status"] == "failed"
+    assert not any(item["status"] == "running" for message in messages for item in message["content"])
+
+
 def test_active_turn_stream_rebases_late_subscribers_and_broadcasts_terminal() -> None:
     stream = ActiveTurnStream("turn_1")
     original = stream.subscribe("turn_1")
@@ -207,7 +372,7 @@ def test_active_turn_stream_rebases_late_subscribers_and_broadcasts_terminal() -
     assert original.next_event()["revision"] == 0
 
     with_text = turn.clone()
-    with_text.data[0][1]["content"].append({"type": "text", "text": "first"})
+    with_text.data[0][1]["content"].append({"type": "text", "text": "first", "status": "success"})
     first_delta = NodeFrame.delta(turn, with_text, revision=1)
     assert first_delta is not None
     stream.publish_frame(first_delta, with_text)
@@ -289,7 +454,7 @@ def test_long_text_delta_frames_grow_linearly_without_repeating_accumulated_text
         writer = NodeWriter(InMemoryNodeStore(), emit=frames.append)
         turn = writer.create(make_turn())
         chunk = "abcdefghij"
-        turn = writer.append_item(turn, {"type": "text", "text": chunk}, persist=False)
+        turn = writer.append_item(turn, {"type": "text", "text": chunk, "status": "running"}, persist=False)
         for _ in range(chunk_count - 1):
             turn = writer.append_text(turn, data_idx=0, item_idx=0, delta=chunk)
         writer.persist(turn)
@@ -324,13 +489,15 @@ def test_legacy_tui_reducer_applies_the_incremental_turn_contract() -> None:
                     "data_idx": 0,
                     "message_idx": 1,
                     "item_idx": 0,
-                    "item": {"type": "text", "text": "a"},
+                    "item": {"type": "text", "text": "a", "status": "running"},
                 },
                 {"op": "append_text", "data_idx": 0, "message_idx": 1, "item_idx": 0, "delta": "b"},
             ],
         }
     )
-    assert updated is not None and updated.data[0][1]["content"] == [{"type": "text", "text": "ab"}]
+    assert updated is not None and updated.data[0][1]["content"] == [
+        {"type": "text", "text": "ab", "status": "running"}
+    ]
     with pytest.raises(ValueError, match="not consecutive"):
         reducer.apply(
             {
@@ -476,6 +643,7 @@ def test_tool_approval_persists_only_the_interactive_decision_item() -> None:
         "event": "decision_requested",
         "decision_id": "dec_search",
         "kind": "tool",
+        "status": "success",
         **approval_data,
         "text": "Call tool web_search?",
     }
@@ -528,7 +696,7 @@ def test_sqlite_rewind_fork_and_compact_are_atomic(tmp_path: Path) -> None:
         )
     )
     for index in range(10):
-        original = writer.append_item(original, {"type": "text", "text": f"item-{index}"})
+        original = writer.append_item(original, {"type": "text", "text": f"item-{index}", "status": "success"})
     writer.finalize(original, "success")
 
     rewound = store.append_turn_version("turn_original", {"type": "text", "text": "v2"})
@@ -546,7 +714,7 @@ def test_sqlite_rewind_fork_and_compact_are_atomic(tmp_path: Path) -> None:
     compacted = store.create_compact_turn("turn_original", "summary", new_turn_id="turn_compact")
     items = compacted.assistant_items
     assert compacted.compaction_id == compacted.id
-    assert items[0] == {"type": "compaction", "summary": "summary", "kept_item_count": 8}
+    assert items[0] == {"type": "compaction", "summary": "summary", "kept_item_count": 8, "status": "success"}
     assert len(items[1:]) == 8
 
 
@@ -613,14 +781,16 @@ def test_pause_targets_only_the_requested_turn_in_parallel_threads(tmp_path: Pat
         store.append_turn_version("turn_main", {"type": "text", "text": "main again"})
         store.append_turn_version("turn_fork", {"type": "text", "text": "fork again"})
 
-        cancelled: list[str] = []
+        main_pause = TurnPauseController()
+        fork_pause = TurnPauseController()
         state.active_turn_cancellations = {
-            (identity["id"], "turn_main"): lambda: cancelled.append("turn_main"),
-            (identity["id"], "turn_fork"): lambda: cancelled.append("turn_fork"),
+            (identity["id"], "turn_main"): main_pause,
+            (identity["id"], "turn_fork"): fork_pause,
         }
         response = client.post("/api/turns/turn_main/pause")
         assert response.status_code == 200
-        assert cancelled == ["turn_main"]
+        assert main_pause.is_requested() is True
+        assert fork_pause.is_requested() is False
         assert store.find_node("turn_main").status == "running"
         assert store.find_node("turn_fork").status == "running"
 
@@ -704,8 +874,10 @@ def test_plan_handoff_creates_agent_child_with_raw_plan_message(tmp_path: Path) 
     assert plan.running_mode == "plan"
     assert agent.running_mode == "agent"
     assert agent.parent_id == plan.id
-    assert plan.selected_messages[0]["content"] == [{"type": "text", "text": "plan the change"}]
-    assert agent.selected_messages[0]["content"] == [{"type": "text", "text": "Implement the reviewed change."}]
+    assert plan.selected_messages[0]["content"] == [{"type": "text", "text": "plan the change", "status": "success"}]
+    assert agent.selected_messages[0]["content"] == [
+        {"type": "text", "text": "Implement the reviewed change.", "status": "success"}
+    ]
     assert any(
         item.get("type") == "text" and item.get("text") == "Implemented from the reviewed plan."
         for item in agent.assistant_items
@@ -770,7 +942,9 @@ def test_plan_compaction_handoff_emits_plan_compact_agent_nodes_in_one_stream(tm
     assert [node.running_mode for node in (plan, compact, agent)] == ["plan", "plan", "agent"]
     assert compact.assistant_items[0]["type"] == "compaction"
     assert compact.assistant_items[0]["summary"] == "deterministic compact summary"
-    assert agent.selected_messages[0]["content"] == [{"type": "text", "text": "Implement after a real compaction."}]
+    assert agent.selected_messages[0]["content"] == [
+        {"type": "text", "text": "Implement after a real compaction.", "status": "success"}
+    ]
     assert [node.status for node in store.load_nodes(session.session_id)] == ["success", "success", "success"]
 
 
@@ -1087,14 +1261,16 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
                 if operation["op"] == "append_item":
                     assert operation["item_idx"] == len(items)
                     items.append(operation["item"])
-                else:
+                elif operation["op"] == "append_text":
                     items[operation["item_idx"]]["text"] += operation["delta"]
+                else:
+                    items[operation["item_idx"]]["status"] = operation["status"]
 
         turns = client.get("/api/turns", params={"session_id": sidebar["session_id"]}).json()
         assert len(turns) == 1
         assert reconstructed == turns[0]
         assert turns[0]["id"] == turn_id
-        assert turns[0]["data"][0][0]["content"] == [{"type": "text", "text": "hello   sidebar"}]
+        assert turns[0]["data"][0][0]["content"] == [{"type": "text", "text": "hello   sidebar", "status": "success"}]
         assert turns[0]["data"][0][1]["content"][-1]["type"] == "text"
         refreshed_sidebar = next(
             item for item in client.get("/api/sidebar-threads").json() if item["thread_id"] == sidebar["thread_id"]

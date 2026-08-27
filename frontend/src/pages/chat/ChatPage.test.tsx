@@ -45,8 +45,8 @@ function turn(id: string, userText: string, parent?: RuntimeStateNode): RuntimeS
     status: "success",
     current_data_idx: 0,
     data: [[
-      { role: "user", content: [{ type: "text", text: userText }] },
-      { role: "assistant", content: [{ type: "text", text: `${userText}-answer` }] },
+      { role: "user", content: [{ type: "text", text: userText, status: "success" }] },
+      { role: "assistant", content: [{ type: "text", text: `${userText}-answer`, status: "success" }] },
     ]],
   };
 }
@@ -173,7 +173,7 @@ function QueueHarness({
         data[current.current_data_idx].push({
           role: "user",
           steering_id: "queued-1",
-          content: [{ type: "text", text: "第一条" }],
+          content: [{ type: "text", text: "第一条", status: "success" }],
         });
         return { ...current, data };
       })}>

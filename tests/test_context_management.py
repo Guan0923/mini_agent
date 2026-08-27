@@ -444,6 +444,7 @@ def test_conversation_compact_turn_uses_llm_summary_and_finalizes_exact_source(t
         "type": "compaction",
         "summary": STRUCTURED_CHECKPOINT,
         "kept_item_count": 2,
+        "status": "success",
     }
     assert CHECKPOINT_PREAMBLE not in compacted.assistant_items[0]["summary"]
     assert service.runtime is not None

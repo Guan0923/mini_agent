@@ -38,8 +38,8 @@ function turn(): RuntimeStateNode {
     status: "running",
     current_data_idx: 0,
     data: [[
-      { role: "user", content: [{ type: "text", text: "hello" }] },
-      { role: "assistant", content: [{ type: "text", text: "" }] },
+      { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
+      { role: "assistant", content: [{ type: "text", text: "", status: "running" }] },
     ]],
   };
 }
@@ -118,7 +118,13 @@ describe("run controller incremental batching", () => {
         session_id: "session_1",
         turn_id: "turn_1",
         revision: 1,
-        operations: [{ op: "append_item", data_idx: 0, message_idx: 1, item_idx: 0, item: { type: "text", text: "bad" } }],
+        operations: [{
+          op: "append_item",
+          data_idx: 0,
+          message_idx: 1,
+          item_idx: 0,
+          item: { type: "text", text: "bad", status: "running" },
+        }],
       });
       return "completed";
     });

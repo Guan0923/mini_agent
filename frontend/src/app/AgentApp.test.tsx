@@ -119,8 +119,8 @@ function turn(
     status: "success",
     current_data_idx: 0,
     data: [[
-      { role: "user", content: [{ type: "text", text: userText }] },
-      { role: "assistant", content: [{ type: "text", text: "回答" }] },
+      { role: "user", content: [{ type: "text", text: userText, status: "success" }] },
+      { role: "assistant", content: [{ type: "text", text: "回答", status: "success" }] },
     ]],
   };
 }
@@ -288,7 +288,7 @@ describe("AgentApp new conversation initialization", () => {
     const summary = { ...session("session-running"), thread_id: "session-running" };
     const running = turn("session-running", "session-running", "turn-running");
     running.status = "running";
-    running.data[0][1].content = [{ type: "reasoning", text: "已恢复" }];
+    running.data[0][1].content = [{ type: "reasoning", text: "已恢复", status: "running" }];
     api.listSessions.mockResolvedValue([summary]);
     api.getSessionNodes.mockResolvedValue([running]);
     let finish!: () => void;

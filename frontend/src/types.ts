@@ -67,6 +67,7 @@ export interface RuntimeNodeUsage {
 
 export interface TurnItem {
   type: string;
+  status: "running" | "failed" | "success";
   text?: string;
   [key: string]: unknown;
 }
@@ -110,7 +111,8 @@ export type RuntimeNodePatch = Partial<Omit<RuntimeStateNode,
 export type TurnDeltaOperation =
   | { op: "append_message"; data_idx: number; message_idx: number; message: TurnMessage }
   | { op: "append_item"; data_idx: number; message_idx: number; item_idx: number; item: TurnItem }
-  | { op: "append_text"; data_idx: number; message_idx: number; item_idx: number; delta: string };
+  | { op: "append_text"; data_idx: number; message_idx: number; item_idx: number; delta: string }
+  | { op: "set_item_status"; data_idx: number; message_idx: number; item_idx: number; status: TurnItem["status"] };
 
 export interface RuntimeNodeSnapshotFrame {
   type: "turn.snapshot";

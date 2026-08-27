@@ -247,6 +247,8 @@ class LLMClient:
                     self.llm.headers,
                     payload,
                     self.llm.timeout_seconds,
+                    cancel_requested=runtime.stop_requested,
+                    register_abort=runtime.services.register_operation_abort,
                 )
                 recorded_stream = _RecordedStream(source)
                 raw = recorded_stream
@@ -256,6 +258,8 @@ class LLMClient:
                     self.llm.headers,
                     payload,
                     self.llm.timeout_seconds,
+                    cancel_requested=runtime.stop_requested,
+                    register_abort=runtime.services.register_operation_abort,
                 )
             runtime.exchange.raw_response = raw
             previous_reasoning = runtime.exchange.on_reasoning

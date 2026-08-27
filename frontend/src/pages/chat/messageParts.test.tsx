@@ -100,7 +100,7 @@ function renderAssistant(message: ChatMessage, display: DisplayMode = "developer
 describe("assistant Item presentation", () => {
   it("hides Skill metadata and shows the running indicator instead of none", () => {
     render(renderAssistant(assistant([
-      { type: "skill_snapshot", event: "skills_selected", text: "none", skills: [] },
+      { type: "skill_snapshot", event: "skills_selected", text: "none", skills: [], status: "success" },
     ], true)));
 
     expect(screen.queryByText("none")).not.toBeInTheDocument();
@@ -109,7 +109,7 @@ describe("assistant Item presentation", () => {
 
   it("renders one pending tool approval card", () => {
     const message = assistant([
-      { type: "approval", event: "decision_requested", decision_id: "dec-search", kind: "tool", call_id: "call-search", tool: "web_search", arguments: { query: "local" }, text: "Call tool web_search?" },
+      { type: "approval", event: "decision_requested", decision_id: "dec-search", kind: "tool", call_id: "call-search", tool: "web_search", arguments: { query: "local" }, text: "Call tool web_search?", status: "success" },
     ], true);
     message.decision = {
       decision_id: "dec-search",
@@ -127,10 +127,10 @@ describe("assistant Item presentation", () => {
 
   it("renders resolved approval once in canonical Item order", () => {
     const { container } = render(renderAssistant(assistant([
-      { type: "tool_call", call_id: "call-search", name: "web_search", arguments: { query: "local" } },
-      { type: "approval", event: "approval_resolved", approval_status: "allowed", call_id: "call-search", tool: "web_search" },
-      { type: "tool_result", call_id: "call-search", tool: "web_search", content: "local result", status: "succeeded" },
-      { type: "text", text: "done" },
+      { type: "tool_call", call_id: "call-search", name: "web_search", arguments: { query: "local" }, status: "success" },
+      { type: "approval", event: "approval_resolved", approval_status: "allowed", call_id: "call-search", tool: "web_search", status: "success" },
+      { type: "tool_result", call_id: "call-search", tool: "web_search", content: "local result", status: "success" },
+      { type: "text", text: "done", status: "success" },
     ])));
 
     expect(screen.getAllByText("已允许 web_search")).toHaveLength(1);
@@ -145,7 +145,7 @@ describe("assistant Item presentation", () => {
 
   it("renders a denied approval as one static status", () => {
     render(renderAssistant(assistant([
-      { type: "approval", event: "approval_resolved", approval_status: "denied", call_id: "call-search", tool: "web_search" },
+      { type: "approval", event: "approval_resolved", approval_status: "denied", call_id: "call-search", tool: "web_search", status: "success" },
     ])));
 
     expect(screen.getAllByText("已拒绝 web_search")).toHaveLength(1);
@@ -154,13 +154,13 @@ describe("assistant Item presentation", () => {
 
   it("renders every Item in canonical order and keeps answers outside Collapse", async () => {
     const items: TurnItem[] = [
-      { type: "reasoning", text: "第一次思考" },
-      { type: "tool_call", call_id: "call-1", name: "read_file", arguments: { path: "README.md" } },
-      { type: "tool_result", call_id: "call-1", tool: "read_file", content: "工具结果" },
-      { type: "text", text: "中间回答" },
-      { type: "reasoning", text: "第二次思考" },
-      { type: "tool_call", call_id: "call-2", name: "glob", arguments: { pattern: "*.ts" } },
-      { type: "text", text: "最终回答" },
+      { type: "reasoning", text: "第一次思考", status: "success" },
+      { type: "tool_call", call_id: "call-1", name: "read_file", arguments: { path: "README.md" }, status: "success" },
+      { type: "tool_result", call_id: "call-1", tool: "read_file", content: "工具结果", status: "success" },
+      { type: "text", text: "中间回答", status: "success" },
+      { type: "reasoning", text: "第二次思考", status: "success" },
+      { type: "tool_call", call_id: "call-2", name: "glob", arguments: { pattern: "*.ts" }, status: "success" },
+      { type: "text", text: "最终回答", status: "success" },
     ];
     const { container } = render(renderAssistant(assistant(items)));
 
@@ -189,9 +189,9 @@ describe("assistant Item presentation", () => {
     "starts every runtime Collapse folded in %s mode",
     (display) => {
       const activeItems: TurnItem[] = [
-        { type: "reasoning", text: "实时思考" },
-        { type: "tool_call", call_id: "call-folded", name: "read_file", arguments: {} },
-        { type: "tool_result", call_id: "call-folded", tool: "read_file", content: "实时结果" },
+        { type: "reasoning", text: "实时思考", status: "running" },
+        { type: "tool_call", call_id: "call-folded", name: "read_file", arguments: {}, status: "running" },
+        { type: "tool_result", call_id: "call-folded", tool: "read_file", content: "实时结果", status: "running" },
       ];
 
       for (const item of activeItems) {
@@ -203,9 +203,9 @@ describe("assistant Item presentation", () => {
   );
 
   it("keeps manual expansion across active changes while new Items stay folded", async () => {
-    const first: TurnItem = { type: "reasoning", text: "流式思考" };
-    const tool: TurnItem = { type: "tool_call", call_id: "call-1", name: "read_file", arguments: {} };
-    const result: TurnItem = { type: "tool_result", call_id: "call-1", tool: "read_file", content: "读取完成" };
+    const first: TurnItem = { type: "reasoning", text: "流式思考", status: "running" };
+    const tool: TurnItem = { type: "tool_call", call_id: "call-1", name: "read_file", arguments: {}, status: "running" };
+    const result: TurnItem = { type: "tool_result", call_id: "call-1", tool: "read_file", content: "读取完成", status: "running" };
     const view = render(renderAssistant(assistant([first], true)));
 
     let collapses = view.container.querySelectorAll(".runtime-item-collapse");
@@ -220,7 +220,7 @@ describe("assistant Item presentation", () => {
     expect(collapses[0].querySelectorAll(".runtime-status-dot")).toHaveLength(3);
     expect(collapses[0].querySelector(".shimmer-text.is-active")).toBeNull();
 
-    const updatedFirst: TurnItem = { type: "reasoning", text: "流式思考继续" };
+    const updatedFirst: TurnItem = { type: "reasoning", text: "流式思考继续", status: "running" };
     view.rerender(renderAssistant(assistant([updatedFirst], true)));
     collapses = view.container.querySelectorAll(".runtime-item-collapse");
     expect(collapses[0].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active");
@@ -269,7 +269,7 @@ describe("assistant Item presentation", () => {
     const originalResizeObserver = window.ResizeObserver;
     window.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
 
-    const view = render(renderAssistant(assistant([{ type: "reasoning", text: "初始思考" }], true)));
+    const view = render(renderAssistant(assistant([{ type: "reasoning", text: "初始思考", status: "running" }], true)));
     const collapse = view.container.querySelector(".runtime-item-collapse")!;
     expect(collapse.querySelector(".ant-collapse-item")).not.toHaveClass("ant-collapse-item-active");
 
@@ -284,7 +284,7 @@ describe("assistant Item presentation", () => {
     });
 
     viewport.scrollLeft = 42;
-    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "短摘要更新" }], true)));
+    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "短摘要更新", status: "running" }], true)));
     expect(viewport.scrollLeft).toBe(0);
     expect(collapse.querySelector(".runtime-summary-viewport")).toBe(viewport);
     expect(viewport.querySelector(".runtime-summary-text")).toBe(summaryText);
@@ -292,7 +292,7 @@ describe("assistant Item presentation", () => {
 
     clientWidth = 100;
     scrollWidth = 260;
-    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "足够长的摘要更新并贴住最新字符" }], true)));
+    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "足够长的摘要更新并贴住最新字符", status: "running" }], true)));
     expect(viewport.scrollLeft).toBe(160);
 
     clientWidth = 150;
@@ -301,7 +301,7 @@ describe("assistant Item presentation", () => {
 
     clientWidth = 90;
     scrollWidth = 240;
-    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "已完成且仍然跟随尾部" }], false)));
+    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "已完成且仍然跟随尾部", status: "success" }], false)));
     const completedViewport = view.container.querySelector<HTMLElement>(".runtime-summary-viewport")!;
     Object.defineProperties(completedViewport, {
       clientWidth: { configurable: true, get: () => clientWidth },
@@ -317,9 +317,9 @@ describe("assistant Item presentation", () => {
 
   it("uses static completed labels and distinguishes failed tool results", async () => {
     const items: TurnItem[] = [
-      { type: "reasoning", text: "完成后的思考摘要" },
-      { type: "tool_call", name: "read_file", arguments: {} },
-      { type: "tool_result", tool: "read_file", content: "成功结果", status: "succeeded" },
+      { type: "reasoning", text: "完成后的思考摘要", status: "success" },
+      { type: "tool_call", name: "read_file", arguments: {}, status: "success" },
+      { type: "tool_result", tool: "read_file", content: "成功结果", status: "success" },
       { type: "tool_result", tool: "write_file", content: "失败结果", status: "failed" },
     ];
     const { container } = render(renderAssistant(assistant(items)));
@@ -339,7 +339,7 @@ describe("assistant Item presentation", () => {
   });
 
   it("falls back to the active reasoning status when folded content is empty", () => {
-    const { container } = render(renderAssistant(assistant([{ type: "reasoning", text: "" }], true)));
+    const { container } = render(renderAssistant(assistant([{ type: "reasoning", text: "", status: "running" }], true)));
     const collapse = container.querySelector(".runtime-item-collapse")!;
     expect(collapse.querySelector(".ant-collapse-item")).not.toHaveClass("ant-collapse-item-active");
     expect(collapse.querySelector(".shimmer-text.is-active")).toHaveTextContent("正在思考中");
@@ -348,9 +348,9 @@ describe("assistant Item presentation", () => {
 
   it("renders only the current non-collapsible status in minimal mode", () => {
     const view = render(renderAssistant(assistant([
-      { type: "reasoning", text: "历史思考" },
-      { type: "tool_call", name: "read_file", arguments: { path: "README.md" } },
-      { type: "tool_result", tool: "read_file", content: "隐藏结果", status: "succeeded" },
+      { type: "reasoning", text: "历史思考", status: "success" },
+      { type: "tool_call", name: "read_file", arguments: { path: "README.md" }, status: "success" },
+      { type: "tool_result", tool: "read_file", content: "隐藏结果", status: "running" },
     ], true), "minimal"));
 
     expect(view.container.querySelector(".runtime-item-collapse")).toBeNull();
@@ -360,11 +360,11 @@ describe("assistant Item presentation", () => {
     expect(view.container).not.toHaveTextContent("历史思考");
     expect(view.container).not.toHaveTextContent("隐藏结果");
 
-    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "实时思考" }], true), "minimal"));
+    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "实时思考", status: "running" }], true), "minimal"));
     expect(screen.getByRole("status", { name: "思考中" })).toBeInTheDocument();
     expect(view.container).not.toHaveTextContent("实时思考");
 
-    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "完成思考" }]), "minimal"));
+    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "完成思考", status: "success" }]), "minimal"));
     expect(view.container.querySelector(".runtime-minimal-status")).toBeNull();
     expect(view.container.querySelector(".runtime-item-collapse")).toBeNull();
   });
@@ -420,7 +420,7 @@ describe("assistant Item presentation", () => {
   });
 
   it("keeps answer Markdown code blocks separate from tool results", () => {
-    const message = assistant([{ type: "text", text: "```text\n最终答案代码\n```" }]);
+    const message = assistant([{ type: "text", text: "```text\n最终答案代码\n```", status: "success" }]);
     const { container } = render(renderAssistant(message));
 
     const answerCode = container.querySelector(".markdown pre");

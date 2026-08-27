@@ -38,7 +38,7 @@ function turn(status: RuntimeStateNode["status"] = "running"): RuntimeStateNode 
     status,
     current_data_idx: 0,
     data: [[
-      { role: "user", content: [{ type: "text", text: "hello" }] },
+      { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
       { role: "assistant", content: [] },
     ]],
   };

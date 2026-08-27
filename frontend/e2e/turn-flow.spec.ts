@@ -130,6 +130,7 @@ test("Plan Review compacts and implements as Plan, Compact, Agent Turns in one S
     {
       type: "text",
       text: "# Compact implementation plan\n\n1. Preserve the reviewed Plan Turn.\n2. Compact the conversation context.\n3. Implement from this exact plan text.",
+      status: "success",
     },
   ]);
 });
@@ -207,11 +208,25 @@ test("a paused Turn resumes in place with the same id", async ({ page }) => {
   await expect(page.getByRole("button", { name: "暂停" })).toBeVisible();
   await page.getByRole("button", { name: "暂停" }).click();
   await expect(page.getByRole("button", { name: "继续" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".message.assistant").last()).toContainText("Partial output preserved before pause.");
+  await expect(page.getByText("The run was paused at the user's request.", { exact: false })).toHaveCount(0);
 
   const pausedTurnsResponse = await page.request.get(`/api/turns?session_id=${encodeURIComponent(sidebar.session_id)}`);
-  const pausedTurns = await pausedTurnsResponse.json() as Array<{ id: string; status: string }>;
+  const pausedTurns = await pausedTurnsResponse.json() as Array<{
+    id: string;
+    status: string;
+    current_data_idx: number;
+    data: Array<Array<{ role: string; content: Array<Record<string, unknown>> }>>;
+  }>;
   expect(pausedTurns).toHaveLength(1);
   expect(pausedTurns[0].status).toBe("paused");
+  const pausedItems = pausedTurns[0].data[pausedTurns[0].current_data_idx][1].content;
+  expect(pausedItems).toContainEqual(expect.objectContaining({
+    type: "text",
+    text: "Partial output preserved before pause.",
+    status: "failed",
+  }));
+  expect(pausedItems.some((item) => item.type === "error")).toBe(false);
   const originalTurnId = pausedTurns[0].id;
 
   const resumeResponse = page.waitForResponse((response) =>
@@ -304,7 +319,7 @@ test("steering waits for the active tool and skips the next stale tool", async (
     type: "tool_result",
     call_id: "slow_steering",
     content: "Slow tool completed.",
-    status: "succeeded",
+    status: "success",
   }));
   expect(firstAssistant).toContainEqual(expect.objectContaining({
     type: "tool_result",
@@ -314,6 +329,10 @@ test("steering waits for the active tool and skips the next stale tool", async (
 });
 
 test("Pause merges the local queue into one same-Turn steering Message", async ({ page }) => {
+  let pauseRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/pause")) pauseRequests += 1;
+  });
   const guest = await page.request.post("/api/auth/guest");
   expect(guest.ok(), `${guest.status()} ${await guest.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Merged Steering" } });
@@ -333,6 +352,7 @@ test("Pause merges the local queue into one same-Turn steering Message", async (
   const steerResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/steer"));
   await page.getByRole("button", { name: "暂停" }).click();
   expect((await steerResponse).status()).toBe(202);
+  expect(pauseRequests).toBe(0);
   await expect(page.getByRole("button", { name: "继续" })).toHaveCount(0);
   await expect(page.locator(".message.user")).toHaveCount(2, { timeout: 15_000 });
   await expect(page.locator(".message.user").last()).toContainText("merge first");

@@ -25,8 +25,8 @@ function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
     status: "success",
     current_data_idx: 0,
     data: [[
-      { role: "user", content: [{ type: "text", text: "hello" }] },
-      { role: "assistant", content: [{ type: "text", text: "world" }] },
+      { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
+      { role: "assistant", content: [{ type: "text", text: "world", status: "success" }] },
     ]],
     ...overrides,
   };
@@ -41,7 +41,7 @@ describe("Turn protocol projection", () => {
       revision: 0,
       turn: turn({
         status: "running",
-        data: [[{ role: "user", content: [{ type: "text", text: "hello" }] }, { role: "assistant", content: [{ type: "text", text: "" }] }]],
+        data: [[{ role: "user", content: [{ type: "text", text: "hello", status: "success" }] }, { role: "assistant", content: [{ type: "text", text: "", status: "running" }] }]],
       }),
     });
     const created = integrateRuntimeNodeUpdates(conversation, [baseline], baseline.id, true);
@@ -78,7 +78,7 @@ describe("Turn protocol projection", () => {
         op: "append_message",
         data_idx: 0,
         message_idx: 2,
-        message: { role: "user", steering_id: "steer_1", content: [{ type: "text", text: "redirect" }] },
+        message: { role: "user", steering_id: "steer_1", content: [{ type: "text", text: "redirect", status: "success" }] },
       }],
     });
     conversation = integrateRuntimeNodeUpdates(conversation, [withUser], withUser.id, true);
@@ -105,7 +105,7 @@ describe("Turn protocol projection", () => {
         data_idx: 0,
         message_idx: 3,
         item_idx: 0,
-        item: { type: "text", text: "new answer" },
+        item: { type: "text", text: "new answer", status: "running" },
       }],
     });
     conversation = integrateRuntimeNodeUpdates(conversation, [withText], withText.id, false);
@@ -125,7 +125,7 @@ describe("Turn protocol projection", () => {
       session_id: "session_1",
       turn_id: "turn_1",
       revision: 1,
-      operations: [{ op: "append_item", data_idx: 0, message_idx: 1, item_idx: 0, item: { type: "text", text: "x" } }],
+      operations: [{ op: "append_item", data_idx: 0, message_idx: 1, item_idx: 0, item: { type: "text", text: "x", status: "running" } }],
     };
     expect(() => applyRuntimeNodeFrame(runtimeNodeAccumulator(), delta)).toThrow("before its baseline");
 
@@ -167,16 +167,16 @@ describe("Turn protocol projection", () => {
 
   it("projects assistant Items without grouping or reordering repeated types", () => {
     const items = [
-      { type: "reasoning", text: "思考一" },
-      { type: "tool_call", call_id: "call-1", name: "read_file", arguments: {} },
-      { type: "tool_result", call_id: "call-1", tool: "read_file", content: "ok" },
-      { type: "text", text: "回答一" },
-      { type: "reasoning", text: "思考二" },
-      { type: "text", text: "回答二" },
+      { type: "reasoning", text: "思考一", status: "success" as const },
+      { type: "tool_call", call_id: "call-1", name: "read_file", arguments: {}, status: "success" as const },
+      { type: "tool_result", call_id: "call-1", tool: "read_file", content: "ok", status: "success" as const },
+      { type: "text", text: "回答一", status: "success" as const },
+      { type: "reasoning", text: "思考二", status: "success" as const },
+      { type: "text", text: "回答二", status: "success" as const },
     ];
     const projected = projectTurnPath(new Map([["session_1:turn_1", turn({
       data: [[
-        { role: "user", content: [{ type: "text", text: "hello" }] },
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
         { role: "assistant", content: items },
       ]],
     })]]), "turn_1");
@@ -189,8 +189,8 @@ describe("Turn protocol projection", () => {
     const projected = projectTurnPath(new Map([["session_1:turn_1", turn({
       status: "running",
       data: [[
-        { role: "user", content: [{ type: "text", text: "hello" }] },
-        { role: "assistant", content: [{ type: "skill_snapshot", event: "skills_selected", text: "none", skills: [] }] },
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
+        { role: "assistant", content: [{ type: "skill_snapshot", event: "skills_selected", text: "none", skills: [], status: "success" }] },
       ]],
     })]]), "turn_1");
 
@@ -201,16 +201,16 @@ describe("Turn protocol projection", () => {
 
   it("folds persisted tool approval lifecycle Items into one allowed status", () => {
     const items = [
-      { type: "tool_call", call_id: "call-search", name: "web_search", arguments: { query: "local" } },
-      { type: "approval", event: "approval_requested", call_id: "call-search", tool: "web_search", text: "Call tool web_search?" },
-      { type: "approval", event: "decision_requested", decision_id: "dec-search", kind: "tool", tool: "web_search", text: "Call tool web_search?" },
-      { type: "approval", event: "approval_granted", call_id: "call-search", tool: "web_search", text: "Call tool web_search?" },
-      { type: "tool_result", call_id: "call-search", tool: "web_search", content: "local result", status: "succeeded" },
-      { type: "text", text: "done" },
+      { type: "tool_call", call_id: "call-search", name: "web_search", arguments: { query: "local" }, status: "success" as const },
+      { type: "approval", event: "approval_requested", call_id: "call-search", tool: "web_search", text: "Call tool web_search?", status: "success" as const },
+      { type: "approval", event: "decision_requested", decision_id: "dec-search", kind: "tool", tool: "web_search", text: "Call tool web_search?", status: "success" as const },
+      { type: "approval", event: "approval_granted", call_id: "call-search", tool: "web_search", text: "Call tool web_search?", status: "success" as const },
+      { type: "tool_result", call_id: "call-search", tool: "web_search", content: "local result", status: "success" as const },
+      { type: "text", text: "done", status: "success" as const },
     ];
     const projected = projectTurnPath(new Map([["session_1:turn_1", turn({
       data: [[
-        { role: "user", content: [{ type: "text", text: "hello" }] },
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
         { role: "assistant", content: items },
       ]],
     })]]), "turn_1");
@@ -227,13 +227,13 @@ describe("Turn protocol projection", () => {
 
   it("projects one pending card and derives a denied approval from its tool result", () => {
     const pendingItems = [
-      { type: "tool_call", call_id: "call-search", name: "web_search", arguments: { query: "local" } },
-      { type: "approval", event: "decision_requested", decision_id: "dec-search", kind: "tool", call_id: "call-search", tool: "web_search", text: "Call tool web_search?" },
+      { type: "tool_call", call_id: "call-search", name: "web_search", arguments: { query: "local" }, status: "running" as const },
+      { type: "approval", event: "decision_requested", decision_id: "dec-search", kind: "tool", call_id: "call-search", tool: "web_search", text: "Call tool web_search?", status: "success" as const },
     ];
     const pending = projectTurnPath(new Map([["session_1:turn_1", turn({
       status: "running",
       data: [[
-        { role: "user", content: [{ type: "text", text: "hello" }] },
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
         { role: "assistant", content: pendingItems },
       ]],
     })]]), "turn_1");
@@ -242,10 +242,10 @@ describe("Turn protocol projection", () => {
 
     const denied = projectTurnPath(new Map([["session_1:turn_1", turn({
       data: [[
-        { role: "user", content: [{ type: "text", text: "hello" }] },
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
         { role: "assistant", content: [
           ...pendingItems,
-          { type: "tool_result", call_id: "call-search", tool: "web_search", content: "denied", status: "failed", failure_code: "user_denied" },
+          { type: "tool_result", call_id: "call-search", tool: "web_search", content: "denied", status: "failed" as const, failure_code: "user_denied" },
         ] },
       ]],
     })]]), "turn_1");
@@ -257,11 +257,11 @@ describe("Turn protocol projection", () => {
     const parent = turn({
       current_data_idx: 1,
       data: [
-        [{ role: "user", content: [{ type: "text", text: "v1" }] }, { role: "assistant", content: [{ type: "text", text: "a1" }] }],
-        [{ role: "user", content: [{ type: "text", text: "v2" }] }, { role: "assistant", content: [{ type: "text", text: "a2" }] }],
+        [{ role: "user", content: [{ type: "text", text: "v1", status: "success" }] }, { role: "assistant", content: [{ type: "text", text: "a1", status: "success" }] }],
+        [{ role: "user", content: [{ type: "text", text: "v2", status: "success" }] }, { role: "assistant", content: [{ type: "text", text: "a2", status: "success" }] }],
       ],
     });
-    const child = turn({ id: "turn_2", parent_id: "turn_1", parent_session_id: "session_1", parent_thread_id: "session_1", compactionId: "turn_1", data: [[{ role: "user", content: [{ type: "text", text: "child" }] }, { role: "assistant", content: [{ type: "text", text: "answer" }] }]] });
+    const child = turn({ id: "turn_2", parent_id: "turn_1", parent_session_id: "session_1", parent_thread_id: "session_1", compactionId: "turn_1", data: [[{ role: "user", content: [{ type: "text", text: "child", status: "success" }] }, { role: "assistant", content: [{ type: "text", text: "answer", status: "success" }] }]] });
     const map = new Map([["session_1:turn_1", parent], ["session_1:turn_2", child]]);
     expect(projectTurnPath(map, "turn_2").map((message) => message.content)).toEqual(["v2", "a2", "child", "answer"]);
     parent.current_data_idx = 0;
@@ -277,8 +277,8 @@ describe("Turn protocol projection", () => {
       parent_thread_id: root.thread_id,
       current_data_idx: 1,
       data: [
-        [{ role: "user", content: [{ type: "text", text: "target-v1" }] }, { role: "assistant", content: [{ type: "text", text: "answer-v1" }] }],
-        [{ role: "user", content: [{ type: "text", text: "target-v2" }] }, { role: "assistant", content: [{ type: "text", text: "answer-v2" }] }],
+        [{ role: "user", content: [{ type: "text", text: "target-v1", status: "success" }] }, { role: "assistant", content: [{ type: "text", text: "answer-v1", status: "success" }] }],
+        [{ role: "user", content: [{ type: "text", text: "target-v2", status: "success" }] }, { role: "assistant", content: [{ type: "text", text: "answer-v2", status: "success" }] }],
       ],
     });
     const descendant = turn({
@@ -340,18 +340,20 @@ describe("Turn protocol projection", () => {
       parent_thread_id: "session_1",
       compactionId: "turn_compact",
       data: [[
-        { role: "user", content: [{ type: "text", text: "copied user" }] },
+        { role: "user", content: [{ type: "text", text: "copied user", status: "success" }] },
         { role: "assistant", content: [
-          { type: "compaction", summary: "summary", kept_item_count: 1 },
-          { type: "text", text: "kept" },
-          { type: "text", text: "new output" },
+          { type: "compaction", summary: "summary", kept_item_count: 1, status: "success" },
+          { type: "text", text: "kept", status: "success" },
+          { type: "text", text: "new output", status: "success" },
         ] },
       ]],
     });
     const projected = projectTurnPath(new Map([["session_1:turn_1", turn()], ["session_1:turn_compact", compact]]), compact.id);
     expect(projected.map((message) => message.content)).toEqual(["hello", "world", "new output"]);
     expect(projected[projected.length - 1]?.events[0]).toMatchObject({ kind: "compaction", message: "上下文已压缩" });
-    expect(projected[projected.length - 1]?.items).toEqual([{ type: "text", text: "new output" }]);
+    expect(projected[projected.length - 1]?.items).toEqual([
+      { type: "text", text: "new output", status: "success" },
+    ]);
     expect(projected[projected.length - 1]?.compactionNotice).toBe(true);
   });
 

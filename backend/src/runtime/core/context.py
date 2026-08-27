@@ -247,13 +247,19 @@ def new_exchange_id() -> str:
     return f"exchange_{uuid4().hex}"
 
 
+def successful_items(items: Sequence[object]) -> list[Mapping[str, Any]]:
+    """Return only complete canonical Items for provider context projection."""
+
+    return [item for item in items if isinstance(item, Mapping) and item.get("status") == "success"]
+
+
 def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMessage]:
     """Project each selected Turn version into the existing planner port."""
 
     result: list[ChatMessage] = []
     for node in nodes:
         for message in node.selected_messages:
-            blocks = [item for item in message.get("content", []) if isinstance(item, Mapping)]
+            blocks = successful_items(message.get("content", []))
             if message.get("role") == "user":
                 user_text = "".join(
                     str(item.get("text") or item.get("summary") or "")
@@ -277,10 +283,15 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
             text_parts = [str(item.get("text") or "") for item in blocks if item.get("type") in {"text", "bash"}]
             reasoning_parts = [str(item.get("text") or "") for item in blocks if item.get("type") == "reasoning"]
             calls: dict[str, ToolMessage] = {}
+            completed_call_ids = {
+                str(item.get("call_id") or "")
+                for item in blocks
+                if item.get("type") == "tool_result" and item.get("call_id")
+            }
             for item in blocks:
                 kind = item.get("type")
                 call_id = str(item.get("call_id") or "")
-                if kind == "tool_call" and call_id:
+                if kind == "tool_call" and call_id in completed_call_ids:
                     calls[call_id] = ToolMessage(
                         name=str(item.get("name") or "unknown"),
                         call_id=call_id,
@@ -291,13 +302,12 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                 elif kind == "tool_result" and call_id:
                     tool = calls.get(call_id)
                     if tool is None:
-                        tool = ToolMessage(name=str(item.get("tool") or "unknown"), call_id=call_id, arguments={})
-                        calls[call_id] = tool
+                        continue
                     content = item.get("content")
                     tool.content = (
                         content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
                     )
-                    tool.status = "failed" if item.get("status") == "failed" else "succeeded"
+                    tool.status = "succeeded"
                     tool.retryable = item.get("retryable") if isinstance(item.get("retryable"), bool) else None
                     tool.failure_code = item.get("failure_code") if isinstance(item.get("failure_code"), str) else None
                 elif kind == "error":
@@ -330,6 +340,7 @@ class RuntimeServices:
     steering: SteeringHandler | None = None
     cancel_requested: CancellationHandler | None = None
     suspend_requested: SuspensionHandler | None = None
+    register_operation_abort: Callable[[Callable[[], None]], Callable[[], None]] | None = None
     confirm: Confirm | None = None
     id_factory: Callable[[], str] = new_tool_call_id
     clock: Callable[[], str] = utc_now
@@ -374,6 +385,11 @@ class AgentRuntime:
 
     def next_exchange_id(self) -> str:
         return new_exchange_id()
+
+    def stop_requested(self) -> bool:
+        cancel = self.services.cancel_requested
+        suspend = self.services.suspend_requested
+        return bool((cancel is not None and cancel()) or (suspend is not None and suspend()))
 
     def model_nodes(self) -> list[RuntimeTreeNode]:
         """Return the canonical provider context when a message-tree bridge is active.

@@ -176,8 +176,7 @@ class SubagentCoordinator:
             while pending:
                 bridge.drain()
                 now = monotonic()
-                cancel_requested = runtime.services.cancel_requested
-                cancelled = bool(cancel_requested is not None and cancel_requested())
+                cancelled = runtime.stop_requested()
                 expired_batch = batch_control.elapsed(now) >= self._settings.batch_timeout_seconds
                 for task_id in list(pending):
                     task = next(item for item in tasks if item.id == task_id)

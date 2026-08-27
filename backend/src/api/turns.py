@@ -124,6 +124,7 @@ def _user_item(message: Mapping[str, object]) -> dict[str, object]:
         raise HTTPException(status_code=422, detail="当前交互要求一个 text Item。")
     if not str(item["text"]).strip() and not item.get("references"):
         raise HTTPException(status_code=422, detail="text 或文件引用至少需要一个。")
+    item["status"] = "success"
     return item
 
 
@@ -330,9 +331,10 @@ def pause_turn(turn_id: str, request: Request, identity: UserIdentity = Depends(
     state: WebAppState = request.app.state.web
     store = session_store(state, identity.id)
     source = _turn(store, turn_id)
-    cancel = getattr(state, "active_turn_cancellations", {}).get((identity.id, turn_id))
-    if callable(cancel):
-        cancel()
+    controller = getattr(state, "active_turn_cancellations", {}).get((identity.id, turn_id))
+    request_pause = getattr(controller, "request_pause", None)
+    if callable(request_pause):
+        request_pause()
         return source.to_dict()
     try:
         return store.pause_turn(turn_id).to_dict()
@@ -359,6 +361,7 @@ def steer_turn(
             {
                 "type": "text",
                 "text": str(item["text"]).strip(),
+                "status": "success",
                 **({"references": _references(item)} if item.get("references") else {}),
             }
         ],

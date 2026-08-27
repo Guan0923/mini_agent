@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from time import perf_counter
 from typing import Any
 
@@ -29,21 +29,51 @@ class JsonHttpTransport:
         self.last_metadata: dict[str, Any] = {}
 
     def post_json(
-        self, endpoint: str, headers: dict[str, str], payload: dict[str, Any], timeout_seconds: int
+        self,
+        endpoint: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_seconds: int,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+        register_abort: Callable[[Callable[[], None]], Callable[[], None]] | None = None,
     ) -> dict[str, Any]:
         started = perf_counter()
         response: requests.Response | None = None
+        unregister: Callable[[], None] | None = None
         try:
+            _raise_if_cancelled(cancel_requested, stream_started=False)
             response = self.session.post(
-                endpoint, headers=headers, json=payload, timeout=timeout_seconds, allow_redirects=False
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=timeout_seconds,
+                stream=True,
+                allow_redirects=False,
             )
+            close_response = getattr(response, "close", None)
+            if register_abort is not None and callable(close_response):
+                unregister = register_abort(close_response)
+            _raise_if_cancelled(cancel_requested, stream_started=False)
             response.raise_for_status()
             data = response.json()
+            _raise_if_cancelled(cancel_requested, stream_started=False)
         except requests.RequestException as exc:
+            if cancel_requested is not None and cancel_requested():
+                raise _paused_error(stream_started=False) from exc
             raise _transport_error(exc, "Model request failed") from exc
         except ValueError as exc:
+            if cancel_requested is not None and cancel_requested():
+                raise _paused_error(stream_started=False) from exc
             raise ModelTransportError("Model response is not valid JSON.", retryable=True) from exc
+        except Exception as exc:
+            if cancel_requested is not None and cancel_requested():
+                raise _paused_error(stream_started=False) from exc
+            raise
         finally:
+            if unregister is not None:
+                unregister()
+            _close_response(response)
             self.last_metadata = {
                 "http_status": getattr(response, "status_code", None),
                 "response_headers": _safe_response_headers(getattr(response, "headers", None)),
@@ -59,12 +89,17 @@ class JsonHttpTransport:
         headers: dict[str, str],
         payload: dict[str, Any],
         timeout_seconds: int,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+        register_abort: Callable[[Callable[[], None]], Callable[[], None]] | None = None,
     ) -> Iterator[dict[str, Any]]:
         started = perf_counter()
         response: requests.Response | None = None
         saw_done = False
         saw_event = False
+        unregister: Callable[[], None] | None = None
         try:
+            _raise_if_cancelled(cancel_requested, stream_started=False)
             response = self.session.post(
                 endpoint,
                 headers=headers,
@@ -73,9 +108,14 @@ class JsonHttpTransport:
                 stream=True,
                 allow_redirects=False,
             )
+            close_response = getattr(response, "close", None)
+            if register_abort is not None and callable(close_response):
+                unregister = register_abort(close_response)
+            _raise_if_cancelled(cancel_requested, stream_started=False)
             response.raise_for_status()
             pending_event: str | None = None
             for line in response.iter_lines(decode_unicode=False):
+                _raise_if_cancelled(cancel_requested, stream_started=saw_event)
                 if not line:
                     pending_event = None
                     continue
@@ -123,6 +163,7 @@ class JsonHttpTransport:
                 yield event
                 if saw_done:
                     return
+            _raise_if_cancelled(cancel_requested, stream_started=saw_event)
             if not saw_done:
                 raise ModelTransportError(
                     "Model stream ended before [DONE] or a completion event.",
@@ -130,10 +171,17 @@ class JsonHttpTransport:
                     stream_started=saw_event,
                 )
         except requests.RequestException as exc:
+            if cancel_requested is not None and cancel_requested():
+                raise _paused_error(stream_started=saw_event) from exc
             raise _transport_error(exc, "Model stream failed", stream_started=saw_event) from exc
+        except Exception as exc:
+            if cancel_requested is not None and cancel_requested():
+                raise _paused_error(stream_started=saw_event) from exc
+            raise
         finally:
-            if response is not None:
-                response.close()
+            if unregister is not None:
+                unregister()
+            _close_response(response)
             self.last_metadata = {
                 "http_status": getattr(response, "status_code", None),
                 "response_headers": _safe_response_headers(getattr(response, "headers", None)),
@@ -149,7 +197,22 @@ def _safe_response_headers(headers: Any) -> dict[str, str]:
     return {str(key).lower(): str(value) for key, value in headers.items() if str(key).lower() in allowed}
 
 
+def _close_response(response: Any) -> None:
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+
+
 _RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _paused_error(*, stream_started: bool) -> ModelTransportError:
+    return ModelTransportError("Model request paused by user.", retryable=False, stream_started=stream_started)
+
+
+def _raise_if_cancelled(cancel_requested: Callable[[], bool] | None, *, stream_started: bool) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise _paused_error(stream_started=stream_started)
 
 
 def _response_detail(response: Any) -> str:

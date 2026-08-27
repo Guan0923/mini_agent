@@ -19,7 +19,7 @@ def make_running_turn() -> RuntimeState:
         session_id="session_1",
         thread_id="session_1",
         id="turn_1",
-        user_content=[{"type": "text", "text": "start"}],
+        user_content=[{"type": "text", "text": "start", "status": "success"}],
         provider_name="local",
     )
 
@@ -27,7 +27,11 @@ def make_running_turn() -> RuntimeState:
 def test_running_turn_may_end_in_user_but_terminal_turn_must_end_in_assistant() -> None:
     running = make_running_turn()
     running.data[0].append(
-        {"role": "user", "steering_id": "steer_1", "content": [{"type": "text", "text": "redirect"}]}
+        {
+            "role": "user",
+            "steering_id": "steer_1",
+            "content": [{"type": "text", "text": "redirect", "status": "success"}],
+        }
     )
     running = RuntimeState.from_dict(running.to_dict())
     assert [message["role"] for message in running.data[0]] == ["user", "assistant", "user"]
@@ -44,12 +48,16 @@ def test_writer_emits_append_message_then_message_indexed_item_and_text_operatio
     turn = writer.create(make_running_turn())
     turn = writer.append_message(
         turn,
-        {"role": "user", "steering_id": "steer_1", "content": [{"type": "text", "text": "redirect"}]},
+        {
+            "role": "user",
+            "steering_id": "steer_1",
+            "content": [{"type": "text", "text": "redirect", "status": "success"}],
+        },
     )
     turn = writer.append_message(turn, {"role": "assistant", "content": []})
     turn = writer.append_items(
         turn,
-        [{"type": "text", "text": "new "}],
+        [{"type": "text", "text": "new ", "status": "running"}],
         message_idx=3,
         persist=False,
     )
@@ -63,7 +71,7 @@ def test_writer_emits_append_message_then_message_indexed_item_and_text_operatio
             "data_idx": 0,
             "message_idx": 3,
             "item_idx": 0,
-            "item": {"type": "text", "text": "new "},
+            "item": {"type": "text", "text": "new ", "status": "running"},
         },
     )
     assert frames[4].operations[0]["message_idx"] == 3
@@ -100,12 +108,12 @@ def test_runtime_bridge_appends_canonical_user_before_starting_the_next_assistan
     completed = bridge.finish("success")
     assert completed is not None
     assert [message["role"] for message in completed.data[0]] == ["user", "assistant", "user", "assistant"]
-    assert completed.data[0][-1]["content"] == [{"type": "text", "text": "new answer"}]
+    assert completed.data[0][-1]["content"] == [{"type": "text", "text": "new answer", "status": "success"}]
 
 
 def test_runtime_model_history_includes_every_same_turn_message_and_file_reference() -> None:
     turn = make_running_turn()
-    turn.data[0][1]["content"] = [{"type": "text", "text": "first answer"}]
+    turn.data[0][1]["content"] = [{"type": "text", "text": "first answer", "status": "success"}]
     turn.data[0].extend(
         [
             {
@@ -115,11 +123,15 @@ def test_runtime_model_history_includes_every_same_turn_message_and_file_referen
                     {
                         "type": "text",
                         "text": "redirect",
+                        "status": "success",
                         "references": [{"source": "project", "path": "README.md"}],
                     }
                 ],
             },
-            {"role": "assistant", "content": [{"type": "text", "text": "second answer"}]},
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "second answer", "status": "success"}],
+            },
         ]
     )
     turn = RuntimeState.from_dict(turn.to_dict())

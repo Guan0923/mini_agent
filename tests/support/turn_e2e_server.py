@@ -183,11 +183,14 @@ class CooperativePausePlanner(LLMPlanner):
             return self._rule_planner.decide(runtime)
         if runtime.run.provenance.attempt > 1:
             return AssistantMessage(content="Resumed the same Turn successfully.")
+        partial = "Partial output preserved before pause."
+        if runtime.exchange.on_content is not None:
+            runtime.exchange.on_content(partial)
         deadline = monotonic() + 15
         while monotonic() < deadline:
             stop_requested = runtime.services.suspend_requested or runtime.services.cancel_requested
             if stop_requested is not None and stop_requested():
-                return AssistantMessage(content="")
+                return AssistantMessage(content=partial)
             sleep(0.02)
         return AssistantMessage(content="Pause request timed out.")
 

@@ -164,10 +164,24 @@ export function applyRuntimeNodeFrame(
     const items = itemsAt(operation.data_idx, operation.message_idx);
     if (operation.op === "append_item") {
       if (operation.item_idx !== items.length) throw new Error("Turn item delta is out of order");
-      if (!isRecord(operation.item) || typeof operation.item.type !== "string" || !operation.item.type) {
+      if (
+        !isRecord(operation.item)
+        || typeof operation.item.type !== "string"
+        || !operation.item.type
+        || !["running", "failed", "success"].includes(String(operation.item.status))
+      ) {
         throw new Error("Turn item delta is invalid");
       }
       items.push(structuredClone(operation.item));
+      continue;
+    }
+    if (operation.op === "set_item_status") {
+      if (!["running", "failed", "success"].includes(operation.status)) {
+        throw new Error("Turn Item status delta is invalid");
+      }
+      const item = items[operation.item_idx];
+      if (!item) throw new Error("Turn Item status delta target is missing");
+      items[operation.item_idx] = { ...item, status: operation.status };
       continue;
     }
     if (operation.op !== "append_text" || typeof operation.delta !== "string" || !operation.delta) {

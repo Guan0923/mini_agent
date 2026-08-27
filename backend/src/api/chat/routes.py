@@ -19,6 +19,7 @@ from backend.storage.auth.crypto import SecretDecryptionError
 
 from ..active_turn_stream import ActiveTurnStream
 from ..auth.types import UserIdentity
+from ..pause_control import TurnPauseController
 from ..session_store import session_store as _store
 from ..shared.runtime import build_user_application
 from ..state import WebAppState
@@ -190,13 +191,13 @@ def _stream(
         active_turn_streams[(identity.id, turn_id)] = active_stream
     original_subscription = active_stream.subscribe(turn_id)
     cancel_requested = threading.Event()
-    pause_requested = threading.Event()
+    pause_controller = TurnPauseController()
     active_turn_cancellations = getattr(state, "active_turn_cancellations", None)
     if not isinstance(active_turn_cancellations, dict):
         active_turn_cancellations = {}
         setattr(state, "active_turn_cancellations", active_turn_cancellations)
     cancellation_key = (identity.id, turn_id)
-    active_turn_cancellations[cancellation_key] = pause_requested.set
+    active_turn_cancellations[cancellation_key] = pause_controller
     steering_inbox = TurnSteeringInbox()
     active_turn_steering[cancellation_key] = steering_inbox
     job_registry = getattr(state, "job_registry", None)
@@ -210,10 +211,12 @@ def _stream(
         return cancel_requested.is_set()
 
     def suspension_requested() -> bool:
-        return pause_requested.is_set()
+        return pause_controller.is_requested()
 
     def sink(item) -> None:
         if cancellation_requested():
+            return
+        if pause_controller.is_requested() and getattr(item, "kind", "") not in {"cancelled", "run_suspended"}:
             return
         bridge = bridge_ref["bridge"]
         if isinstance(item, dict):
@@ -382,6 +385,7 @@ def _stream(
                     if runtime_for_bridge is not None:
                         bridge_ref["bridge"].bind_runtime(runtime_for_bridge)
                         runtime_for_bridge.services.steering = steering_inbox.take
+                        runtime_for_bridge.services.register_operation_abort = pause_controller.register_abort
                     if operation is not None:
                         # Resume keeps the immediate bridge start: there is no
                         # new user text and the bridge must adopt the paused

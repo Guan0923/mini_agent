@@ -25,6 +25,7 @@ DEFAULT_COMPACTION_RETENTION = DEFAULT_FIRST_KEPT_ITEM_SIZE
 FAILED_TERMINAL_MESSAGE = "An unknown error caused the system to encounter an exception."
 
 NodeStatus: TypeAlias = Literal["running", "success", "paused", "failed"]
+ItemStatus: TypeAlias = Literal["running", "failed", "success"]
 PermissionMode: TypeAlias = Literal["read_only", "workspace_write", "full_access"]
 RunningMode: TypeAlias = Literal["agent", "plan"]
 ReasoningEffort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max"]
@@ -47,6 +48,7 @@ ContentBlockType: TypeAlias = Literal[
 TerminalErrorCategory: TypeAlias = Literal["user", "network", "tool", "provider", "server", "billing", "agent"]
 
 NODE_STATUSES = frozenset({"running", "success", "paused", "failed"})
+ITEM_STATUSES = frozenset({"running", "failed", "success"})
 PERMISSION_MODES = frozenset({"read_only", "workspace_write", "full_access"})
 RUNNING_MODES = frozenset({"agent", "plan"})
 REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
@@ -176,7 +178,7 @@ def normalize_content(content: str | Mapping[str, Any] | Sequence[Mapping[str, A
     if content is None:
         return []
     if isinstance(content, str):
-        content = [{"type": "text", "text": content}]
+        content = [{"type": "text", "text": content, "status": "success"}]
     elif isinstance(content, Mapping):
         content = [content]
     if not isinstance(content, Sequence) or isinstance(content, (str, bytes, bytearray)):
@@ -187,6 +189,9 @@ def normalize_content(content: str | Mapping[str, Any] | Sequence[Mapping[str, A
         kind = item.get("type")
         if kind not in CONTENT_BLOCK_TYPES:
             raise RuntimeStateValidationError(f"Unsupported Item type: {kind!r}.")
+        status = item.get("status")
+        if status not in ITEM_STATUSES:
+            raise RuntimeStateValidationError(f"{kind} Item status must be running, failed, or success.")
         if kind in {"text", "reasoning", "bash"} and not isinstance(item.get("text"), str):
             raise RuntimeStateValidationError(f"{kind} Item requires string text.")
         if kind == "tool_call":
@@ -201,8 +206,6 @@ def normalize_content(content: str | Mapping[str, Any] | Sequence[Mapping[str, A
         if kind == "tool_result":
             if not isinstance(item.get("call_id"), str) or not item["call_id"]:
                 raise RuntimeStateValidationError("tool_result requires call_id.")
-            if item.get("status", "succeeded") not in {"succeeded", "failed"}:
-                raise RuntimeStateValidationError("tool_result.status is invalid.")
         if kind == "compaction":
             if not isinstance(item.get("summary"), str):
                 raise RuntimeStateValidationError("compaction.summary must be a string.")
@@ -223,6 +226,10 @@ def normalize_content(content: str | Mapping[str, Any] | Sequence[Mapping[str, A
 def message_payload(role: MessageRole, content: Any = None, **metadata: Any) -> dict[str, Any]:
     if role not in MESSAGE_ROLES:
         raise RuntimeStateValidationError("message.role must be user or assistant.")
+    if role == "user" and isinstance(content, Mapping):
+        content = [{**content, "status": "success"}]
+    elif role == "user" and isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
+        content = [{**item, "status": "success"} for item in content]
     message: dict[str, Any] = {"role": role, "content": normalize_content(content)}
     if metadata:
         message.update(_json(metadata, "message metadata"))
@@ -236,7 +243,12 @@ def turn_payload(user: Any, assistant: Any = None, **user_metadata: Any) -> list
 def compaction_payload(summary: str, *, kept_items: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
     if not isinstance(summary, str):
         raise RuntimeStateValidationError("compaction summary must be a string.")
-    return {"type": "compaction", "summary": summary, "kept_item_count": len(kept_items)}
+    return {
+        "type": "compaction",
+        "summary": summary,
+        "kept_item_count": len(kept_items),
+        "status": "success",
+    }
 
 
 def terminal_error_payload(category: str, message: str, *, retryable: bool) -> dict[str, Any]:
@@ -246,6 +258,7 @@ def terminal_error_payload(category: str, message: str, *, retryable: bool) -> d
             "category": str(category),
             "message": str(message),
             "retryable": retryable,
+            "status": "failed",
         }
     )[0]
 
@@ -362,6 +375,13 @@ class RuntimeState:
             raise RuntimeStateValidationError("current_data_idx is out of range.")
         if self.status != "running" and any(version[-1]["role"] != "assistant" for version in self.data):
             raise RuntimeStateValidationError("A non-running Turn must end with an assistant Message.")
+        if self.status != "running" and any(
+            item.get("status") == "running"
+            for version in self.data
+            for message in version
+            for item in message["content"]
+        ):
+            raise RuntimeStateValidationError("A non-running Turn cannot contain running Items.")
 
     @property
     def key(self) -> tuple[str, str]:
@@ -767,6 +787,19 @@ def _data_delta_operations(before: list[Any], after: list[Any]) -> list[TurnDelt
         if not isinstance(before_item, Mapping) or not isinstance(after_item, Mapping):
             return None
         before_fields, after_fields = dict(before_item), dict(after_item)
+        before_status = before_fields.pop("status", None)
+        after_status = after_fields.pop("status", None)
+        if before_fields == after_fields and before_status != after_status and after_status in ITEM_STATUSES:
+            operations.append(
+                {
+                    "op": "set_item_status",
+                    "data_idx": data_idx,
+                    "message_idx": message_idx,
+                    "item_idx": item_idx,
+                    "status": after_status,
+                }
+            )
+            continue
         before_text = before_fields.pop("text", None)
         after_text = after_fields.pop("text", None)
         if (
@@ -1026,7 +1059,7 @@ class NodeWriter:
             content = target["content"]
             operations: list[TurnDeltaOperation] = []
             for item in items:
-                normalized = _json(item, "Item")
+                normalized = normalize_content([item])[0]
                 operations.append(
                     {
                         "op": "append_item",
@@ -1040,6 +1073,41 @@ class NodeWriter:
             current.data = validate_data(current.data)
             value = self._store_dynamic(current, persist=persist)
             self._emit_delta(value, operations=operations)
+            return value.clone()
+
+    def set_item_status(
+        self,
+        node: RuntimeState,
+        *,
+        data_idx: int,
+        message_idx: int,
+        item_idx: int,
+        status: ItemStatus,
+        persist: bool = True,
+    ) -> RuntimeState:
+        if status not in ITEM_STATUSES:
+            raise RuntimeStateValidationError("Item status must be running, failed, or success.")
+        with self._lock:
+            current = self.current(node.session_id, node.id)
+            try:
+                item = current.data[data_idx][message_idx]["content"][item_idx]
+            except (IndexError, KeyError) as exc:
+                raise RuntimeStateValidationError("Turn Item status target is out of range.") from exc
+            item["status"] = status
+            current.data = validate_data(current.data)
+            value = self._store_dynamic(current, persist=persist)
+            self._emit_delta(
+                value,
+                operations=(
+                    {
+                        "op": "set_item_status",
+                        "data_idx": data_idx,
+                        "message_idx": message_idx,
+                        "item_idx": item_idx,
+                        "status": status,
+                    },
+                ),
+            )
             return value.clone()
 
     def append_text(
@@ -1118,10 +1186,12 @@ __all__ = [
     "DEFAULT_FIRST_KEPT_ITEM_SIZE",
     "DEFAULT_MODEL",
     "MESSAGE_ROLES",
+    "ITEM_STATUSES",
     "NODE_STATUSES",
     "USAGE_FIELDS",
     "ContentBlockType",
     "InMemoryNodeStore",
+    "ItemStatus",
     "MessageRole",
     "NodeFrame",
     "NodeFrameType",

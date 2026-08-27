@@ -145,13 +145,15 @@ class ToolStepExecutor:
                             timezone=runtime.state.timezone,
                             clock=runtime.services.clock,
                             job_scope=runtime.services.job_scope,
-                            cancel_requested=runtime.services.cancel_requested,
+                            cancel_requested=runtime.stop_requested,
                             sandbox_decision=sandbox_decision,
                         ),
                         confirmed=True,
                     )
                 else:
                     result = tools.invoke(tool, tool_message.arguments, confirmed=True)
+            if runtime.stop_requested():
+                raise ToolError("Tool invocation cancelled.")
             tool_message.status = "succeeded"
             tool_message.content = result
             tool_message.retryable = retryable

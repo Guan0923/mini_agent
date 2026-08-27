@@ -17,7 +17,6 @@ from backend.domain.runtime_state import (
     message_payload,
     new_node_id,
     new_thread_id,
-    terminal_error_payload,
     utc_iso,
 )
 from backend.domain.sidebar_thread import SidebarThread
@@ -235,7 +234,12 @@ class SQLiteRuntimeMixin:
             raise KeyError(turn_id)
         if node.status != "running":
             raise ValueError("Only a running Turn can be paused.")
-        node.data[node.current_data_idx][1]["content"].append(terminal_error_payload("user", message, retryable=True))
+        del message
+        for version in node.data:
+            for turn_message in version:
+                for item in turn_message["content"]:
+                    if item.get("status") == "running":
+                        item["status"] = "failed"
         node.status = "paused"
         node = TreeRuntimeState.from_dict(node.to_dict())
         self.finalize_node(node)

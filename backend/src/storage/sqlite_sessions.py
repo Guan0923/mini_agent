@@ -284,11 +284,13 @@ class SQLiteSessionMixin:
                             [
                                 {
                                     "role": "user",
-                                    "content": [{"type": "text", "text": prompt}],
+                                    "content": [{"type": "text", "text": prompt, "status": "success"}],
                                 },
                                 {
                                     "role": "assistant",
-                                    "content": ([{"type": "text", "text": answer}] if answer else []),
+                                    "content": (
+                                        [{"type": "text", "text": answer, "status": "success"}] if answer else []
+                                    ),
                                 },
                             ]
                         ],

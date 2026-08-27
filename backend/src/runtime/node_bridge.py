@@ -181,7 +181,7 @@ class RuntimeEventNodeBridge:
                 self.thread_id = source.thread_id
         else:
             self.parent = self._latest_parent()
-        user_item: dict[str, Any] = {"type": "text", "text": self.prompt}
+        user_item: dict[str, Any] = {"type": "text", "text": self.prompt, "status": "success"}
         if self.references:
             user_item["references"] = self.references
         node = RuntimeState.create(
@@ -232,7 +232,7 @@ class RuntimeEventNodeBridge:
         if self.assistant is None:
             self.start()
         assert self.assistant is not None
-        item: dict[str, Any] = {"type": "text", "text": content}
+        item: dict[str, Any] = {"type": "text", "text": content, "status": "success"}
         if isinstance(references, list) and references:
             item["references"] = self._json_value(references)
         message: dict[str, Any] = {"role": "user", "content": [item]}
@@ -296,7 +296,7 @@ class RuntimeEventNodeBridge:
         if self._stream_item_index is None:
             self._stream_item_index = len(self.assistant_blocks)
             self._stream_text = chunk
-            item = {"type": item_type, "text": chunk}
+            item = {"type": item_type, "text": chunk, "status": "running"}
             self.assistant_blocks.append(item)
             assert self.assistant is not None
             self.assistant = self.writer.append_items(
@@ -307,7 +307,11 @@ class RuntimeEventNodeBridge:
             )
         else:
             self._stream_text += chunk
-            self.assistant_blocks[self._stream_item_index] = {"type": item_type, "text": self._stream_text}
+            self.assistant_blocks[self._stream_item_index] = {
+                "type": item_type,
+                "text": self._stream_text,
+                "status": "running",
+            }
             assert self.assistant is not None
             self.assistant = self.writer.append_text(
                 self.assistant,
@@ -318,14 +322,23 @@ class RuntimeEventNodeBridge:
             )
         self.last_node = self.assistant
 
-    def _finish_stream_item(self, item_type: str | None = None) -> None:
+    def _finish_stream_item(self, item_type: str | None = None, *, status: str = "success") -> None:
         if self._stream_item_type is None:
             return
         if item_type is not None and self._stream_item_type != item_type:
             return
         if self._stream_item_index is not None:
             assert self.assistant is not None
+            assert self.assistant_message_idx is not None
             self.assistant = self.writer.persist(self.assistant)
+            self.assistant = self.writer.set_item_status(
+                self.assistant,
+                data_idx=self.assistant.current_data_idx,
+                message_idx=self.assistant_message_idx,
+                item_idx=self._stream_item_index,
+                status=status,
+            )
+            self.assistant_blocks[self._stream_item_index]["status"] = status
             self.last_node = self.assistant
             self.produced_item = True
         self._stream_item_index = None
@@ -336,6 +349,7 @@ class RuntimeEventNodeBridge:
         self._finish_stream_item()
         self._ensure_assistant_message()
         normalized = {str(key): self._json_value(value) for key, value in item.items()}
+        normalized.setdefault("status", "success")
         self.assistant_blocks.append(normalized)
         if self.assistant is None:
             raise RuntimeError("No active Turn.")
@@ -356,7 +370,11 @@ class RuntimeEventNodeBridge:
         if not items:
             return self.assistant
         self._ensure_assistant_message()
-        normalized = [{str(key): self._json_value(value) for key, value in item.items()} for item in items]
+        normalized = []
+        for item in items:
+            value = {str(key): self._json_value(raw) for key, raw in item.items()}
+            value.setdefault("status", "success")
+            normalized.append(value)
         self.assistant_blocks.extend(normalized)
         if self.assistant is None:
             raise RuntimeError("No active Turn.")
@@ -418,7 +436,8 @@ class RuntimeEventNodeBridge:
 
         if status == "running":
             raise ValueError("A finalized Turn cannot remain running.")
-        self._finish_stream_item()
+        self._finish_stream_item(status="success" if status == "success" else "failed")
+        self._settle_running_items("success" if status == "success" else "failed")
         current = self.assistant or self.last_node
         if current is None:
             current = self.start()
@@ -441,7 +460,7 @@ class RuntimeEventNodeBridge:
             session_id=parent.session_id,
             thread_id=parent.thread_id,
             parent=parent,
-            user_content=[{"type": "text", "text": prompt}],
+            user_content=[{"type": "text", "text": prompt, "status": "success"}],
             user=parent.user or self.user,
             provider_name=parent.provider_name or self.provider_name,
             model=parent.model,
@@ -489,16 +508,68 @@ class RuntimeEventNodeBridge:
 
     def _event_item(self, item_type: str, kind: str, message: str, data: Mapping[str, Any]) -> None:
         item = {str(key): self._json_value(value) for key, value in data.items()}
-        item.update({"type": item_type, "event": kind})
+        item.update({"type": item_type, "event": kind, "status": "success"})
         if message:
             item.setdefault("text", message)
         self._append_item(item)
 
+    def _set_tool_call_status(self, call_id: str, status: str) -> None:
+        if self.assistant is None:
+            return
+        data_idx = self.assistant.current_data_idx
+        messages = self.assistant.data[data_idx]
+        for message_idx in range(len(messages) - 1, -1, -1):
+            message = messages[message_idx]
+            if message.get("role") != "assistant":
+                continue
+            items = message.get("content", [])
+            for item_idx in range(len(items) - 1, -1, -1):
+                item = items[item_idx]
+                if item.get("type") != "tool_call" or item.get("call_id") != call_id:
+                    continue
+                if item.get("status") == status:
+                    return
+                self.assistant = self.writer.set_item_status(
+                    self.assistant,
+                    data_idx=data_idx,
+                    message_idx=message_idx,
+                    item_idx=item_idx,
+                    status=status,
+                )
+                if message_idx == self.assistant_message_idx and item_idx < len(self.assistant_blocks):
+                    self.assistant_blocks[item_idx]["status"] = status
+                self.last_node = self.assistant
+                return
+
+    def _settle_running_items(self, status: str) -> None:
+        if self.assistant is None:
+            return
+        data_idx = self.assistant.current_data_idx
+        targets = [
+            (message_idx, item_idx)
+            for message_idx, message in enumerate(self.assistant.data[data_idx])
+            for item_idx, item in enumerate(message.get("content", []))
+            if item.get("status") == "running"
+        ]
+        for message_idx, item_idx in targets:
+            self.assistant = self.writer.set_item_status(
+                self.assistant,
+                data_idx=data_idx,
+                message_idx=message_idx,
+                item_idx=item_idx,
+                status=status,
+            )
+            if message_idx == self.assistant_message_idx and item_idx < len(self.assistant_blocks):
+                self.assistant_blocks[item_idx]["status"] = status
+        self.last_node = self.assistant
+
     def _tool_result(self, message: str, data: Mapping[str, Any], *, status: str) -> None:
         tool = str(data.get("tool") or data.get("name") or "")
+        call_id = str(data.get("call_id") or "call_unknown")
+        self._set_tool_call_status(call_id, status)
         result = {
             "type": "tool_result",
-            "call_id": str(data.get("call_id") or "call_unknown"),
+            "call_id": call_id,
             "content": self._json_value(data.get("result", data.get("error", message))),
             "status": status,
             "replay_safe": bool(
@@ -549,9 +620,9 @@ class RuntimeEventNodeBridge:
             raw = data["message"]
             items: list[dict[str, Any]] = []
             if raw.get("reasoning") and not data.get("reasoning_streamed"):
-                items.append({"type": "reasoning", "text": str(raw["reasoning"])})
+                items.append({"type": "reasoning", "text": str(raw["reasoning"]), "status": "success"})
             if raw.get("content") and not data.get("content_streamed"):
-                items.append({"type": "text", "text": str(raw["content"])})
+                items.append({"type": "text", "text": str(raw["content"]), "status": "success"})
             for tool in raw.get("tool_messages", []) if isinstance(raw.get("tool_messages"), list) else []:
                 call_id = str(tool.get("call_id") or "call_unknown") if isinstance(tool, Mapping) else ""
                 if isinstance(tool, Mapping) and not any(
@@ -564,6 +635,7 @@ class RuntimeEventNodeBridge:
                             "name": str(tool.get("name") or "unknown"),
                             "arguments": dict(tool.get("arguments") or {}),
                             "replay_safe": bool(tool.get("replay_safe", True)),
+                            "status": "running",
                         }
                     )
             self._append_items(items)
@@ -579,6 +651,7 @@ class RuntimeEventNodeBridge:
                         "call_id": call_id,
                         "name": name,
                         "arguments": dict(data.get("arguments") or {}),
+                        "status": "running",
                         "replay_safe": bool(
                             data.get(
                                 "replay_safe",
@@ -588,7 +661,7 @@ class RuntimeEventNodeBridge:
                     }
                 )
         elif kind == "tool_result":
-            self._tool_result(message, data, status="succeeded")
+            self._tool_result(message, data, status="success")
         elif kind == "tool_failed":
             self.abort_category = "tool"
             self._tool_result(message, data, status="failed")
@@ -677,13 +750,15 @@ class RuntimeEventNodeBridge:
         if self.assistant is None:
             self.start()
         self._ensure_assistant_message()
+        self._finish_stream_item(status="success" if status == "success" else "failed")
         if (
             final_answer
             and status == "success"
             and not any(item.get("type") == "text" for item in self.assistant_blocks)
         ):
-            self._append_item({"type": "text", "text": final_answer})
-        if status in {"paused", "failed"}:
+            self._append_item({"type": "text", "text": final_answer, "status": "success"})
+        self._settle_running_items("success" if status == "success" else "failed")
+        if status == "failed" or (status == "paused" and category != "user"):
             retryable = status == "paused"
             self.terminal_error = terminal_error_payload(
                 category or ("user" if retryable else "agent"),
