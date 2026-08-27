@@ -65,6 +65,7 @@ PLAN_REVIEW_MARKDOWN = """# Compact implementation plan
 1. Preserve the reviewed Plan Turn.
 2. Compact the conversation context.
 3. Implement from this exact plan text."""
+APPROVED_PLAN_TASK = f"<approved_plan>\n{PLAN_REVIEW_MARKDOWN}\n</approved_plan>"
 
 ORDERED_REASONING = "推理内容持续更新并保持右侧最新字符可见。" * 12
 
@@ -105,7 +106,7 @@ class CooperativePausePlanner(LLMPlanner):
                     )
                 ]
             )
-        if runtime.run.mode == "agent" and task == PLAN_REVIEW_MARKDOWN:
+        if runtime.run.mode == "agent" and task == APPROVED_PLAN_TASK:
             return AssistantMessage(content="Implemented the exact reviewed plan after compaction.")
         if task == "steering fifo":
             if runtime.run.model_turns <= 2:

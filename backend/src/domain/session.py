@@ -62,7 +62,7 @@ class Session:
 
 @dataclass(frozen=True)
 class SessionSummary:
-    """Session metadata used by listing and the TUI status view."""
+    """Session metadata used by listings and the Web sidebar."""
 
     session_id: str
     title: str

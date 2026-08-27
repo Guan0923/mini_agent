@@ -1,12 +1,11 @@
 # Architecture
 
-Mini-Agent 是纯本地单用户系统。浏览器和遗留 TUI 是客户端，本机 backend 是唯一服务端；仓库不包含账户服务、Cloud、同步或 PostgreSQL 部署层。
+Mini-Agent 是纯本地单用户系统。浏览器是客户端，本机 backend 是唯一服务端；仓库不包含账户服务、Cloud、同步或 PostgreSQL 部署层。
 
 ## 部署边界
 
 ```text
 frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
-tui/      ── shared Python packages ──┘
                                   ├─ local model providers
                                   ├─ tools / Skills / MCP / Sandbox
                                   └─ ~/.mini_agent
@@ -14,7 +13,6 @@ tui/      ── shared Python packages ──┘
 
 - `frontend/` 不导入 Python，只调用本地 backend API。
 - `backend/` 承载 Agent Runtime、模型 Provider、工具、项目、会话、设置和本地持久化。
-- `tui/` 复用同一份 `ClientPaths`、配置、Provider 和会话存储。
 - `domain` 不依赖外层；runtime 依赖 planner/tool 端口；provider 不依赖 storage；frontend 不绕过 API。
 
 ## 前端入口

@@ -2,8 +2,6 @@
 
 Mini-Agent 是纯本地单用户 Agent 应用。React/Vite 前端通过 loopback HTTP/SSE 访问本机 FastAPI backend；Agent Runtime、模型调用、工具、项目、会话与设置都保存在本机。应用没有账户、游客、登录 Cookie、设备授权、云同步、Cloud 服务或 PostgreSQL。
 
-当前客户端方向是 Web；`tui/` 是仍可运行的遗留 Textual 入口，并与 Web 共用本地配置和运行数据。
-
 ## 架构
 
 ```text
@@ -16,7 +14,6 @@ React/Vite frontend ── HTTP/SSE ──> FastAPI backend (127.0.0.1:8000)
 - 浏览器访问 `/` 直接进入 Chat；其他前端路径统一回到 `/`。
 - `frontend/` 只调用 backend API。开发时 Vite 代理 `/api` 和 `/benchmark`，生产时 backend 可托管 `frontend/dist`。
 - `backend/` 负责本地 API、Agent Runtime、Provider、工具、项目、MCP、Sandbox 和持久化。
-- `tui/` 直接复用 backend/domain/runtime，是兼容入口，不扩展新的 Web 功能。
 
 ## 快速开始
 
@@ -90,14 +87,6 @@ $env:MINI_AGENT_ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 - `/api/settings/providers` 下的增删改、激活和模型发现接口
 
 `/api/auth/*` 和 `/api/sync/*` 不存在。
-
-## 遗留 TUI
-
-```powershell
-uv run python run.py --planner rule "calculate (18 + 6) * 4"
-uv run python -m tui
-uv run mini-agent --resume <session_id>
-```
 
 ## 开发与验证
 

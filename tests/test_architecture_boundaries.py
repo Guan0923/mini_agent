@@ -71,11 +71,6 @@ def test_chat_completions_adapter_does_not_own_http_transport() -> None:
     assert "requests" not in imports
 
 
-def test_backend_does_not_import_tui() -> None:
-    imports = _package_imports(SOURCE)
-    assert not any(name == "tui" or name.startswith("tui.") for name in imports)
-
-
 def test_removed_account_cloud_and_sync_sources_are_absent() -> None:
     removed_sources = (
         ROOT / "cloud" / "pyproject.toml",

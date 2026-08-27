@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { COMMANDS, HELP_TEXT, parseCommand } from "./commands";
 
 describe("web command catalog", () => {
-  it("removes TUI-only commands from the browser entry points", () => {
+  it("rejects unsupported commands at browser entry points", () => {
     const removed = ["/permission", "/sessions", "/fork", "/benchmark", "/history", "/clear", "/tools", "/trace", "/agent", "/plan", "/resume", "/time", "/display"];
     for (const command of removed) {
       expect(COMMANDS.some((item) => item.name === command)).toBe(false);

@@ -6,7 +6,6 @@ from backend.runtime import AgentRunner
 from backend.sandbox import ApprovalStore
 from backend.tools import ToolRegistry
 from tests.local_store import session_store
-from tui.cli import TerminalApp
 
 
 def test_sqlite_session_store_persists_multi_turn_conversation(tmp_path: Path) -> None:
@@ -138,39 +137,6 @@ class HistoryPlanner:
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         self.histories.append(list(history))
         return AgentAction(type="final_answer", answer=f"history has {len(history)} messages")
-
-
-def test_tui_consumes_only_spaced_session_arguments_and_rejects_legacy_slash_forms() -> None:
-    assert TerminalApp._split_input("before /new Project notes /plan after") == [
-        ("command", "new", "Project notes"),
-        ("command", "plan", ""),
-        ("task", "before after", ""),
-    ]
-    assert TerminalApp._split_input("/resume session_123") == [
-        ("command", "resume", "session_123"),
-    ]
-    assert TerminalApp._split_input("/resume") == [("command", "resume", "")]
-    assert TerminalApp._split_input("/use session_123") == [("command", "legacy_session", "")]
-    assert TerminalApp._split_input("/session") == [("command", "legacy_session", "")]
-    assert TerminalApp._split_input("/new/legacy title") == [("task", "/new/legacy title", "")]
-    assert TerminalApp._split_input("/resume/session_123") == [("task", "/resume/session_123", "")]
-
-
-def test_tui_quit_stops_line_before_submitting_a_task(tmp_path: Path, monkeypatch) -> None:
-    app = TerminalApp(AgentRunner(HistoryPlanner(), ToolRegistry(tmp_path)))
-    app.mode = "plan"
-    tasks: list[str] = []
-    monkeypatch.setattr(app, "run_task", tasks.append)
-
-    assert app._handle("before /agent /quit after /plan") is False
-    assert app.mode == "agent"
-    assert tasks == []
-
-
-def test_tui_does_not_treat_paths_or_urls_as_commands() -> None:
-    segments = TerminalApp._split_input("read docs/architecture.md from https://example.com/guide")
-
-    assert segments == [("task", "read docs/architecture.md from https://example.com/guide", "")]
 
 
 def test_sqlite_stores_keep_state_in_the_configured_session_root(tmp_path: Path) -> None:

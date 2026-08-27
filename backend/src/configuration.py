@@ -47,13 +47,13 @@ class ClientPaths:
 
     @property
     def projects_db(self) -> Path:
-        """Local project index shared by Web and the legacy TUI."""
+        """Local project index used by the Web application."""
 
         return self.runtime_dir / "projects.db"
 
     @property
     def runtime_dir(self) -> Path:
-        """Runtime shared by Web and TUI; no client-type directory is used."""
+        """Runtime data used by the local application."""
 
         return self.root / "runtime"
 

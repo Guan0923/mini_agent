@@ -77,7 +77,7 @@ export interface RuntimeRootNode {
   id: string;
 }
 
-/** Canonical executable Turn shared by API, TUI and the web reducer. */
+/** Canonical executable Turn shared by the API and web reducer. */
 export interface RuntimeTurnNode {
   thread_id: string;
   parent_thread_id: string;

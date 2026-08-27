@@ -13,7 +13,6 @@ from backend.planning import LLMPlanner
 from backend.runtime import LegacyAgentRunner as AgentRunner
 from backend.runtime import PreparedResponse, RunnerSettings, RuntimeState
 from backend.tools import Tool, ToolRegistry
-from tui import cli
 
 
 class BatchedPlanner:
@@ -209,20 +208,3 @@ def test_llm_finalizer_uses_text_mode_without_tools() -> None:
 
     assert message.content == "Bounded summary"
     assert client.request == ("finalize", "text", [])
-
-
-def test_cli_rejects_removed_tool_budget_flag(tmp_path, capsys) -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        cli.main(
-            [
-                "--workspace",
-                str(tmp_path),
-                "--planner",
-                "rule",
-                "--max-actions",
-                "4",
-            ]
-        )
-
-    assert exc_info.value.code == 2
-    assert "unrecognized arguments: --max-actions" in capsys.readouterr().err

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -26,7 +25,6 @@ from backend.skills import (
     discover_project_skills,
 )
 from backend.tools import ToolRegistry
-from tui.cli import TerminalApp
 
 
 def write_skill(
@@ -486,21 +484,6 @@ def test_handoff_skills_skip_reselection(tmp_path: Path) -> None:
     assert planner.selection_calls == 0
     event = next(event for event in state.events if event.kind == "skills_selected")
     assert event.data["source"] == "handoff"
-
-
-def test_skills_command_lists_catalog_and_empty_state() -> None:
-    outputs: list[str] = []
-    app = object.__new__(TerminalApp)
-    app.runner = SimpleNamespace(skill_catalog=SkillCatalog((definition("demo", "Demo tasks."),)))
-    app._write = outputs.append
-
-    assert app._handle_command("skills", "") is True
-    assert outputs == ["demo — Demo tasks."]
-
-    outputs.clear()
-    app.runner = SimpleNamespace(skill_catalog=SkillCatalog())
-    assert app._handle_command("skills", "") is True
-    assert outputs == ["No user Skills found."]
 
 
 def test_discovers_skill_with_optional_frontmatter(tmp_path: Path) -> None:

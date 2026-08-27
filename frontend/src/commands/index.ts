@@ -6,7 +6,7 @@ export interface CommandDefinition {
   argument?: string;
 }
 
-/** Browser equivalents of the TUI command catalog. */
+/** Commands supported by the browser client. */
 export const COMMANDS: CommandDefinition[] = [
   { name: "/new", label: "新建", description: "创建新的服务端会话", argument: "title" },
   { name: "/help", label: "帮助", description: "查看使用说明" },

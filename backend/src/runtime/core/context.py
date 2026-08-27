@@ -595,7 +595,7 @@ class AgentRuntime:
 
 
 def text_messages(messages: list[ChatMessage]) -> list[dict[str, str]]:
-    """Return the durable user/assistant projection used by the terminal UI."""
+    """Return the durable user/assistant projection used by local clients."""
 
     projected: list[dict[str, str]] = []
     for message in messages:

@@ -1,8 +1,8 @@
 """Interrupt handlers and the run-time decision registry for interactive chat.
 
 Auto-approve mirrors the offline policy used by the benchmark harness; the
-interactive handler pauses a run and asks the client to decide, which the TUI
-client resolves through ``POST /api/decisions``.
+interactive handler pauses a run and asks the browser client to decide through
+``POST /api/decisions``.
 """
 
 from __future__ import annotations

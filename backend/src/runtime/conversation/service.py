@@ -60,8 +60,8 @@ class ConversationService(ConversationSessionController):
         self._session_provisioner = session_provisioner
         self._session_provisioner_cleanup = session_provisioner_cleanup
         # Web streaming installs its bridge before invoking this service so it
-        # can expose the active leaf to PATCH /runtime-config.  Local TUI and
-        # embedding callers leave this unset; ``_run_single_turn`` then owns a
+        # can expose the active leaf to PATCH /runtime-config.  Embedding
+        # callers leave this unset; ``_run_single_turn`` then owns a
         # bridge and projects the same canonical node lifecycle internally.
         self.runtime_node_bridge: RuntimeEventNodeBridge | None = None
         self._node_bridge_events_external = False
@@ -408,8 +408,8 @@ class ConversationService(ConversationSessionController):
         if request_parameters:
             self.runtime.state.request_parameters.update(dict(request_parameters))
         runtime = self.runner.bind(self.runtime)
-        # The canonical message-tree bridge is installed for local TUI and
-        # embedding executions as well as Web SSE.  Web attaches a bridge
+        # The canonical message-tree bridge is installed for embedding
+        # executions as well as Web SSE.  Web attaches a bridge
         # ahead of time so it can expose the active dynamic leaf to PATCH;
         # local callers get an equivalent bridge here.
         self._bind_node_bridge(prepared, on_event, references, running_mode=mode)

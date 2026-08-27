@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-Mini-Agent 是纯本地单用户 Agent 应用：浏览器前端通过 loopback HTTP/SSE 访问本机 backend；backend 承载 Runtime、模型调用、工具、会话、项目和本地设置。仓库不包含账户、登录、设备授权、云同步、Cloud 或 PostgreSQL 子系统。当前客户端方向是 Web，`tui/` 仅作为遗留兼容入口。
+Mini-Agent 是纯本地单用户 Agent 应用：浏览器前端通过 loopback HTTP/SSE 访问本机 backend；backend 承载 Runtime、模型调用、工具、会话、项目和本地设置。仓库不包含账户、登录、设备授权、云同步、Cloud 或 PostgreSQL 子系统。
 
 以当前源码、测试、`pyproject.toml` 和 `frontend/package.json` 为准；文档与源码冲突时先核对实现。
 
@@ -32,7 +32,6 @@ frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
 - `backend/src/mcp/`：只读 server 与审批型外部 MCP 客户端。
 - `backend/src/storage/`：本地 TOML、SQLite 和凭据加密。
 - `frontend/`：React/Vite/TypeScript，只调用 API。
-- `tui/`：遗留入口，不承载新 Web 功能。
 
 依赖向内；Runtime 发布事件，展示留在前端。Sandbox Broker 未就绪时不得静默降级。
 
@@ -50,7 +49,7 @@ frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
 └─ config.toml
 ```
 
-`config.toml` 只保存非敏感配置；Provider API Key 使用 OS credential vault 的安装级密钥加密后写入 `runtime/state.db`。Web 与 TUI 使用同一份配置和运行数据。不得恢复旧 UUID、`user.db`、认证缓存、同步数据或旧密文迁移。
+`config.toml` 只保存非敏感配置；Provider API Key 使用 OS credential vault 的安装级密钥加密后写入 `runtime/state.db`。Web 与 backend 使用同一份配置和运行数据。不得恢复旧 UUID、`user.db`、认证缓存、同步数据或旧密文迁移。
 
 Sandbox 内部 `user_id` 仅是 Broker 资源隔离标识，不是应用登录身份。
 

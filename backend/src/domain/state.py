@@ -63,7 +63,7 @@ RunStopReason = Literal[
     "user_terminated",
     "process_interrupted",
 ]
-RunTrigger = Literal["tui", "cli", "embedding", "handoff", "resume", "legacy"]
+RunTrigger = Literal["embedding", "handoff", "resume", "legacy"]
 
 
 def utc_now() -> str:

@@ -29,7 +29,7 @@ npm run dev
 
 首次运行会初始化 `~/.mini_agent` 的严格五项顶层：`mcp/`、`plugins/`、`runtime/`、`skills/` 和 `config.toml`。初始化不读取 `.env`，也不扫描旧 UUID 目录。
 
-`config.toml` 保存 Profile、Agent、Runtime、Sandbox 与能力配置。Provider 元数据及加密 API Key 位于 `runtime/state.db`，项目索引位于 `runtime/projects.db`。Web 与 TUI 使用同一份路径契约。
+`config.toml` 保存 Profile、Agent、Runtime、Sandbox 与能力配置。Provider 元数据及加密 API Key 位于 `runtime/state.db`，项目索引位于 `runtime/projects.db`。Web 与 backend 使用同一份路径契约。
 
 不要实现旧 `user.db`、旧目录、旧密文、账户或同步数据迁移。用户旧数据的备份、移动和删除不属于应用启动流程。
 
@@ -53,9 +53,8 @@ http://127.0.0.1:5173
 - `backend/src/tools/`：工具 schema、实现、审批和路径边界。
 - `backend/src/storage/`：本地 TOML/SQLite 和凭据加密。
 - `frontend/`：React/Vite/TypeScript 本地客户端。
-- `tui/`：遗留兼容入口。
 
-不要为新 Web 功能扩展 TUI，不要让 provider 导入 storage，不要让 frontend 导入 backend 实现。
+不要让 provider 导入 storage，不要让 frontend 导入 backend 实现。
 
 ## 测试
 

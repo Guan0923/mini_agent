@@ -1,6 +1,6 @@
-# Workspace root for the local backend and TUI client.
+# Workspace root for the local backend.
 [tool.uv.workspace]
-members = ["backend", "tui"]
+members = ["backend"]
 
 [tool.uv.sources]
 mini-agent-backend = { workspace = true }
@@ -23,7 +23,6 @@ xfail_strict = true
 [tool.coverage.run]
 branch = true
 source = ["backend"]
-omit = ["*/tui/*"]
 
 [tool.coverage.report]
 skip_covered = true
@@ -43,6 +42,6 @@ select = ["E", "F", "I", "UP"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-# Multi-package workspace: backend/tui packages live in flat src dirs, so ruff
-# cannot infer first-party status from the file's own package path.
-known-first-party = ["backend", "tui"]
+# The backend package uses a flat source layout, so ruff cannot infer
+# first-party status from the file's own package path.
+known-first-party = ["backend"]

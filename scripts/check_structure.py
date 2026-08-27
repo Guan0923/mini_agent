@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOTS = (ROOT / "backend" / "src", ROOT / "tui" / "src", ROOT / "frontend" / "src")
+SOURCE_ROOTS = (ROOT / "backend" / "src", ROOT / "frontend" / "src")
 SOURCE_SUFFIXES = {".py", ".ts", ".tsx", ".css"}
 IGNORED_DIRECTORY_NAMES = {
     ".git",

@@ -50,7 +50,6 @@ from backend.sandbox import SandboxInitializationError
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.storage.sqlite_schema import SCHEMA, SQLiteSchemaMixin
 from backend.tools import ToolRegistry
-from tui.runtime_nodes import RuntimeNodeReducer
 
 
 def make_turn(
@@ -727,43 +726,6 @@ def test_long_text_delta_frames_grow_linearly_without_repeating_accumulated_text
     size_64 = stream_size(64)
     size_128 = stream_size(128)
     assert size_128 < size_64 * 2.1
-
-
-def test_legacy_tui_reducer_applies_the_incremental_turn_contract() -> None:
-    reducer = RuntimeNodeReducer()
-    baseline = make_turn().to_dict()
-    node = reducer.apply({"type": "turn.snapshot", "revision": 0, "turn": baseline})
-    assert node is not None
-    updated = reducer.apply(
-        {
-            "type": "turn.delta",
-            "session_id": "session_1",
-            "turn_id": "turn_1",
-            "revision": 1,
-            "operations": [
-                {
-                    "op": "append_item",
-                    "data_idx": 0,
-                    "message_idx": 1,
-                    "item_idx": 0,
-                    "item": {"type": "text", "text": "a", "status": "running"},
-                },
-                {"op": "append_text", "data_idx": 0, "message_idx": 1, "item_idx": 0, "delta": "b"},
-            ],
-        }
-    )
-    assert updated is not None and updated.data[0][1]["content"] == [
-        {"type": "text", "text": "ab", "status": "running"}
-    ]
-    with pytest.raises(ValueError, match="not consecutive"):
-        reducer.apply(
-            {
-                "type": "turn.delta",
-                "session_id": "session_1",
-                "turn_id": "turn_1",
-                "revision": 3,
-            }
-        )
 
 
 def test_streamed_items_keep_canonical_order_across_model_and_tool_rounds() -> None:

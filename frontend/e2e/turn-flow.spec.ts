@@ -165,7 +165,7 @@ test("Plan Review compacts and implements as Plan, Compact, Agent Turns in one S
   expect(agent?.data[agent.current_data_idx][0].content).toEqual([
     {
       type: "text",
-      text: "# Compact implementation plan\n\n1. Preserve the reviewed Plan Turn.\n2. Compact the conversation context.\n3. Implement from this exact plan text.",
+      text: "<approved_plan>\n# Compact implementation plan\n\n1. Preserve the reviewed Plan Turn.\n2. Compact the conversation context.\n3. Implement from this exact plan text.\n</approved_plan>",
       status: "success",
     },
   ]);
@@ -456,8 +456,13 @@ test("assistant Items stay chronological and runtime Collapse starts folded", as
   });
   expect(Math.abs(summaryMetrics.left - bodyBounds.left)).toBeLessThanOrEqual(1);
   expect(Math.abs(summaryMetrics.right - bodyBounds.right)).toBeLessThanOrEqual(1);
-  await firstReasoning.locator(".ant-collapse-header").click();
-  await expect(firstReasoning.locator(".ant-collapse-item")).not.toHaveClass(/ant-collapse-item-active/);
+  const reasoningItem = firstReasoning.locator(".ant-collapse-item");
+  await expect(async () => {
+    if (await reasoningItem.evaluate((element) => element.classList.contains("ant-collapse-item-active"))) {
+      await firstReasoning.locator(".ant-collapse-header").click();
+    }
+    await expect(reasoningItem).not.toHaveClass(/ant-collapse-item-active/, { timeout: 1_000 });
+  }).toPass({ timeout: 5_000 });
 
   await expect(assistant.getByText("The first tool completed.", { exact: false })).toBeVisible();
   expect(await assistant.getByText("The first tool completed.", { exact: false }).evaluate((element) => element.closest(".runtime-collapse"))).toBeNull();
