@@ -31,7 +31,7 @@ def test_running_turn_may_end_in_user_but_terminal_turn_must_end_in_assistant() 
     running.data[0].append(
         {
             "role": "user",
-            "steering_id": "steer_1",
+            "delivery_id": "delivery_1",
             "content": [{"type": "text", "text": "redirect", "status": "success"}],
         }
     )
@@ -53,7 +53,7 @@ def test_writer_emits_append_message_then_message_indexed_item_and_text_operatio
         turn,
         {
             "role": "user",
-            "steering_id": "steer_1",
+            "delivery_id": "delivery_1",
             "content": [{"type": "text", "text": "redirect", "status": "success"}],
         },
     )
@@ -97,7 +97,7 @@ def test_runtime_bridge_appends_canonical_user_before_starting_the_next_assistan
         RuntimeEvent(
             "steering_applied",
             data={
-                "steering_id": "steer_1",
+                "delivery_id": "delivery_1",
                 "content": "redirect",
                 "references": [{"source": "project", "path": "README.md"}],
             },
@@ -105,7 +105,16 @@ def test_runtime_bridge_appends_canonical_user_before_starting_the_next_assistan
     )
     after_user = bridge.writer.current("session_1", "turn_1")
     assert [message["role"] for message in after_user.data[0]] == ["user", "assistant", "user"]
-    assert after_user.data[0][-1]["steering_id"] == "steer_1"
+    assert after_user.data[0][-1]["delivery_id"] == "delivery_1"
+
+    bridge.handle(
+        RuntimeEvent(
+            "steering_applied",
+            data={"delivery_id": "delivery_1", "content": "redirect"},
+        )
+    )
+    deduplicated = bridge.writer.current("session_1", "turn_1")
+    assert [message["role"] for message in deduplicated.data[0]] == ["user", "assistant", "user"]
 
     bridge.handle(RuntimeEvent("response_delta", "new answer"))
     completed = bridge.finish("success")
@@ -121,7 +130,7 @@ def test_runtime_model_history_includes_every_same_turn_message_and_file_referen
         [
             {
                 "role": "user",
-                "steering_id": "steer_1",
+                "delivery_id": "delivery_1",
                 "content": [
                     {
                         "type": "text",

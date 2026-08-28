@@ -61,6 +61,7 @@ export interface AgentShellProps {
   onStopRun: (conversationId: string) => void;
   queuedMessages?: Map<string, QueuedMessage[]>;
   onQueuedMessagesChange?: (conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) => void;
+  onQueuedMessagesRefresh?: (conversationId: string) => Promise<void>;
   onClearError: () => void;
   onDisplayModeUpdate: (config: AgentConfig) => void;
   onProviderConfigUpdate: (config: ProviderConfig) => void;
@@ -169,6 +170,7 @@ export default function AgentShell(props: AgentShellProps) {
               onStopRun={props.onStopRun}
               queuedMessages={props.queuedMessages?.get(props.current?.id ?? "") ?? []}
               onQueuedMessagesChange={props.onQueuedMessagesChange}
+              onQueuedMessagesRefresh={props.onQueuedMessagesRefresh}
               sandboxHealth={props.sandboxHealth}
             />
           ) : props.page === "trash" ? <TrashPage conversations={props.archivedConversations} projects={props.removedProjects} onRestore={props.onRestore} onDelete={props.onDelete} onRestoreProject={props.onRestoreProject} /> : <BenchmarkPage />}

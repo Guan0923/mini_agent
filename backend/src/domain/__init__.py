@@ -1,6 +1,17 @@
 """Stable domain types with no dependency on the UI, tools, or providers."""
 
 from .errors import ModelOutputError, PlanningError
+from .message_queue import (
+    ClaimedEnvelope,
+    DeliveryConflict,
+    MessageEnvelope,
+    MessageQueueError,
+    MessageQueueUnavailable,
+    QueuedMessage,
+    QueueItemConflict,
+    QueueItemNotFound,
+    QueueItemStateConflict,
+)
 from .messages import (
     CHECKPOINT_PREAMBLE,
     AssistantMessage,
@@ -108,6 +119,9 @@ __all__ = [
     "DEFAULT_MODEL",
     "FAILED_TERMINAL_MESSAGE",
     "Message",
+    "MessageEnvelope",
+    "MessageQueueError",
+    "MessageQueueUnavailable",
     "MessageRole",
     "MESSAGE_ROLES",
     "RuntimeMessageRole",
@@ -129,6 +143,12 @@ __all__ = [
     "RuntimeNode",
     "RuntimeRootState",
     "PlanningError",
+    "ClaimedEnvelope",
+    "DeliveryConflict",
+    "QueueItemConflict",
+    "QueueItemNotFound",
+    "QueueItemStateConflict",
+    "QueuedMessage",
     "RecoveryCheckpoint",
     "ResumePreview",
     "RunMode",

@@ -17,6 +17,7 @@ export interface ChatRunRequest {
   attach?: boolean;
   waitForActiveRun?: boolean;
   onBaseline?: (turn: RuntimeStateNode) => void;
+  queuedDelivery?: { deliveryId: string; messageIds: string[] };
 }
 
 export interface ActiveRun {
@@ -31,8 +32,10 @@ export interface ActiveRun {
 
 export interface QueuedMessage {
   id: string;
+  thread_id: string;
   content: string;
-  references?: import("../types").FileReference[];
-  sendingSteeringId?: string;
-  sendingTurnId?: string;
+  references: import("../types").FileReference[];
+  state: "pending" | "dispatched";
+  created_at: string;
+  updated_at: string;
 }

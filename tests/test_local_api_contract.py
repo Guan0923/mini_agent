@@ -8,6 +8,17 @@ from fastapi.testclient import TestClient
 
 from backend.api.app import REPO_ROOT, create_app
 from backend.api.state import WebAppState
+from backend.domain import MessageQueueUnavailable
+from backend.storage.message_queue import MemoryMessageQueue
+
+
+class UnavailableMessageQueue(MemoryMessageQueue):
+    def ping(self) -> None:
+        raise MessageQueueUnavailable("message_queue_unavailable")
+
+    def list(self, thread_id: str):
+        del thread_id
+        raise MessageQueueUnavailable("message_queue_unavailable")
 
 
 def test_backend_repo_root_targets_the_current_checkout() -> None:
@@ -42,6 +53,26 @@ def test_local_apis_need_no_session_credentials_and_removed_routes_are_absent(tm
         assert client.post("/api/auth/guest").status_code == 404
         assert client.post("/api/auth/login", json={}).status_code == 404
         assert client.post("/api/sync/push", json={}).status_code == 404
+
+
+def test_health_stays_live_while_ready_and_queue_mutations_fail_when_redis_is_unavailable(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / ".mini_agent", message_queue=UnavailableMessageQueue())
+    with TestClient(create_app(state)) as client:
+        assert client.get("/api/health").status_code == 200
+        assert client.get("/api/ready").status_code == 503
+        sidebar = client.post("/api/sidebar-threads", json={}).json()
+        assert client.get("/api/sidebar-threads").status_code == 200
+        assert client.get(f"/api/sidebar-threads/{sidebar['thread_id']}/queued-messages").status_code == 503
+        create_turn = client.post(
+            "/api/turns",
+            json={
+                "id": "turn-no-redis",
+                "session_id": sidebar["session_id"],
+                "thread_id": sidebar["thread_id"],
+                "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            },
+        )
+        assert create_turn.status_code == 503
 
 
 def test_browser_writes_require_an_allowed_loopback_origin_but_cli_writes_do_not(tmp_path: Path) -> None:

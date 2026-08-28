@@ -23,7 +23,7 @@ cd frontend
 npm run dev
 ```
 
-不需要 Docker、PostgreSQL、SMTP、Cloud URL 或账户密钥。
+需要 Docker Desktop 启动仓库内 Redis；不需要 PostgreSQL、SMTP、Cloud URL 或账户密钥。backend、frontend、Sandbox 与 GPU 任务仍直接运行在 Windows 主机。
 
 ## 配置和数据
 

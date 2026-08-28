@@ -115,16 +115,24 @@ function QueueHarness({
   const [queued, setQueued] = useState<QueuedMessage[]>([
     {
       id: "queued-1",
+      thread_id: "session-rewind",
       content: "第一条",
       references: [{ source: "project", path: "README.md" }],
+      state: "pending",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
     },
     {
       id: "queued-2",
+      thread_id: "session-rewind",
       content: "第二条",
       references: [
         { source: "project", path: "README.md" },
         { source: "upload", path: "notes.txt" },
       ],
+      state: "pending",
+      created_at: "2026-01-01T00:00:01Z",
+      updated_at: "2026-01-01T00:00:01Z",
     },
   ]);
   const conversation: Conversation = {
@@ -145,6 +153,20 @@ function QueueHarness({
         running={node.status === "running"}
         queuedMessages={queued}
         onQueuedMessagesChange={(_conversationId, updater) => setQueued((current) => updater(current))}
+        onQueuedMessagesRefresh={async () => {
+          const hasAcknowledgedDelivery = node.data[node.current_data_idx]
+            .some((item) => item.role === "user" && typeof item.delivery_id === "string");
+          if (hasAcknowledgedDelivery) {
+            setQueued((current) => current.filter((item) => item.state !== "dispatched"));
+            return;
+          }
+          const calls = vi.mocked(steerTurn).mock.calls;
+          const latest = calls[calls.length - 1];
+          const dispatchedIds = new Set(latest?.[2] ?? []);
+          setQueued((current) => current.map((item) => dispatchedIds.has(item.id)
+            ? { ...item, state: "dispatched" }
+            : item));
+        }}
         onUpdate={() => undefined}
         onNew={async () => conversation.id}
         onNavigate={() => undefined}
@@ -152,6 +174,11 @@ function QueueHarness({
         onRun={async (request) => {
           onRun(request);
           const accepted = turn("turn-queued", request.prompt ?? "");
+          if (request.queuedDelivery) {
+            accepted.data[0][0].delivery_id = request.queuedDelivery.deliveryId;
+            const submitted = new Set(request.queuedDelivery.messageIds);
+            setQueued((current) => current.filter((item) => !submitted.has(item.id)));
+          }
           accepted.status = "running";
           setNode(accepted);
           request.onBaseline?.(accepted);
@@ -167,7 +194,15 @@ function QueueHarness({
       </button>
       <button type="button" onClick={() => setQueued((current) => [
         ...current,
-        { id: "queued-during-submit", content: "提交期间新增" },
+        {
+          id: "queued-during-submit",
+          thread_id: "session-rewind",
+          content: "提交期间新增",
+          references: [],
+          state: "pending",
+          created_at: "2026-01-01T00:00:02Z",
+          updated_at: "2026-01-01T00:00:02Z",
+        },
       ])}>
         提交期间新增队列项
       </button>
@@ -175,7 +210,7 @@ function QueueHarness({
         const data = structuredClone(current.data);
         data[current.current_data_idx].push({
           role: "user",
-          steering_id: "queued-1",
+          delivery_id: "delivery-1",
           content: [{ type: "text", text: "第一条", status: "success" }],
         });
         return { ...current, data };
@@ -636,13 +671,13 @@ describe("ChatPage queued message flushing", () => {
       await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
 
       expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
-        prompt: "第一条\n\n第二条",
+        prompt: null,
         sourceNodeId: "turn-running",
         waitForActiveRun: true,
-        references: [
-          { source: "project", path: "README.md" },
-          { source: "upload", path: "notes.txt" },
-        ],
+        queuedDelivery: {
+          deliveryId: expect.any(String),
+          messageIds: ["queued-1", "queued-2"],
+        },
       }));
       await waitFor(() => expect(screen.getByTestId("queued-count")).toHaveTextContent("0"));
     },
@@ -664,9 +699,8 @@ describe("ChatPage queued message flushing", () => {
     fireEvent.click(screen.getByRole("button", { name: "发送第 1 条待发送消息" }));
     await waitFor(() => expect(vi.mocked(steerTurn)).toHaveBeenCalledWith(
       "turn-running",
-      "queued-1",
-      "第一条",
-      [{ source: "project", path: "README.md" }],
+      expect.any(String),
+      ["queued-1"],
     ));
     expect(screen.getByTestId("queued-count")).toHaveTextContent("2");
     expect(screen.getByRole("button", { name: "发送第 1 条待发送消息" })).toBeDisabled();
@@ -683,11 +717,7 @@ describe("ChatPage queued message flushing", () => {
     await waitFor(() => expect(vi.mocked(steerTurn)).toHaveBeenCalledWith(
       "turn-running",
       expect.any(String),
-      "第一条\n\n第二条",
-      [
-        { source: "project", path: "README.md" },
-        { source: "upload", path: "notes.txt" },
-      ],
+      ["queued-1", "queued-2"],
     ));
     expect(screen.getAllByText(/发送中/)).toHaveLength(2);
   });
@@ -710,7 +740,7 @@ describe("ChatPage queued message flushing", () => {
 
     await user.click(screen.getByRole("button", { name: "编辑第 1 条待发送消息" }));
     expect(screen.getByLabelText("聊天输入")).toHaveTextContent("第一条");
-    expect(screen.getByTestId("queued-count")).toHaveTextContent("1");
+    expect(screen.getByTestId("queued-count")).toHaveTextContent("2");
     expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
   });
 
@@ -749,8 +779,9 @@ describe("ChatPage queued message flushing", () => {
     await act(async () => releaseRun());
     await waitFor(() => expect(onRun).toHaveBeenCalledTimes(2));
     expect(onRun.mock.calls[1][0]).toEqual(expect.objectContaining({
-      prompt: "提交期间新增",
+      prompt: null,
       waitForActiveRun: true,
+      queuedDelivery: expect.objectContaining({ messageIds: ["queued-during-submit"] }),
     }));
   });
 });

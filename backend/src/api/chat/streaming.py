@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Callable
 from typing import Any, Literal
 
 from fastapi import HTTPException
 
-from backend.domain import FAILED_TERMINAL_MESSAGE, terminal_error_text
+from backend.domain import FAILED_TERMINAL_MESSAGE, ClaimedEnvelope, MessageQueueUnavailable, terminal_error_text
 from backend.domain.runtime_state import NodeFrame
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.sandbox import ApprovalStore, SandboxInitializationError
+from backend.storage.message_queue import RedisTurnMailbox
 from backend.storage.settings.crypto import SecretDecryptionError
 
 from ..active_turn_stream import ActiveTurnStream
 from ..pause_control import TurnPauseController
 from ..session_store import session_store as _store
 from ..state import WebAppState
-from ..turn_steering import TurnSteeringInbox
 from .interrupts import make_interactive_interrupt
 from .models import ReasoningEffort, RuntimeModelRequest, _model_request_parameters
 from .titles import _auto_title_main_thread
@@ -75,6 +76,7 @@ def _stream(
     request_model: RuntimeModelRequest | None = None,
     references: list[dict[str, str]] | None = None,
     operation: Callable[..., object] | None = None,
+    initial_delivery: ClaimedEnvelope | None = None,
 ):
     # ``WebAppState`` owns these process-local registries in production, but
     # callers such as focused SSE tests may provide a small state double.  A
@@ -88,11 +90,6 @@ def _stream(
     if not isinstance(active_runtime_bridges, dict):
         active_runtime_bridges = {}
         setattr(state, "active_runtime_bridges", active_runtime_bridges)
-    active_turn_steering = getattr(state, "active_turn_steering", None)
-    if not isinstance(active_turn_steering, dict):
-        active_turn_steering = {}
-        setattr(state, "active_turn_steering", active_turn_steering)
-
     # Reserve the session before creating the Job object.  Endpoint-level
     # summary checks are advisory; this lock closes the two-window race where
     # both requests otherwise pass validation and create two running leaves.
@@ -129,8 +126,7 @@ def _stream(
         setattr(state, "active_turn_cancellations", active_turn_cancellations)
     cancellation_key = turn_id
     active_turn_cancellations[cancellation_key] = pause_controller
-    steering_inbox = TurnSteeringInbox()
-    active_turn_steering[cancellation_key] = steering_inbox
+    steering_inbox = RedisTurnMailbox(state.message_queue, turn_id, f"backend-{os.getpid()}-{threading.get_ident()}")
     job_registry = getattr(state, "job_registry", None)
     job_holder: dict[str, ThreadJob | None] = {"job": None}
     bridge_ref: dict[str, RuntimeEventNodeBridge | None] = {"bridge": None}
@@ -301,6 +297,7 @@ def _stream(
                         running_mode=mode,
                         cwd=str(workspace),
                         references=references,
+                        delivery_id=initial_delivery.envelope.delivery_id if initial_delivery is not None else None,
                         emit=publish_frame,
                     )
                     bridge_ref["bridge"].apply_runtime_config(
@@ -341,6 +338,10 @@ def _stream(
                     request_parameters=request_parameters,
                     references=references or [],
                     steering=steering_inbox.take,
+                    delivery_id=initial_delivery.envelope.delivery_id if initial_delivery is not None else None,
+                    on_started=(
+                        lambda: state.message_queue.ack(initial_delivery) if initial_delivery is not None else None
+                    ),
                 )
             else:
                 run_state = operation(
@@ -407,6 +408,19 @@ def _stream(
                     )
             else:
                 enqueue_terminal("failed", turn_id or "unknown", "Turn persistence is unavailable.")
+        except MessageQueueUnavailable:
+            bridge = bridge_ref["bridge"]
+            if bridge is not None:
+                final_node = bridge.finish(
+                    "failed",
+                    "消息队列连接中断，Turn 已失败。",
+                    category="server",
+                    code="message_queue_unavailable",
+                )
+                terminal_id = final_node.id if final_node is not None else turn_id or "unknown"
+                enqueue_terminal("failed", terminal_id, "message_queue_unavailable")
+            else:
+                enqueue_terminal("failed", turn_id or "unknown", "message_queue_unavailable")
         except ModelConfigurationError as exc:
             if bridge_ref["bridge"] is not None:
                 error_message = f"模型未配置：{exc}"
@@ -448,12 +462,16 @@ def _stream(
                     stream_locks["keys"].difference_update(reserved_stream_keys)
             active_turn_cancellations.pop(cancellation_key, None)
             steering_inbox.close()
-            if active_turn_steering.get(cancellation_key) is steering_inbox:
-                active_turn_steering.pop(cancellation_key, None)
             with active_turn_streams_lock:
                 for alias in active_stream_aliases:
                     if active_turn_streams.get(alias) is active_stream:
                         active_turn_streams.pop(alias, None)
+            final = bridge._current() if bridge is not None else None
+            if final is not None and final.status in {"success", "failed"}:
+                try:
+                    state.message_queue.release_turn(final.id)
+                except MessageQueueUnavailable:
+                    pass
 
     if job_registry is not None:
         parent_scope = getattr(state, "system_job_scope", job_registry.root_scope())

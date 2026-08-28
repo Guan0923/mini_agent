@@ -3,10 +3,13 @@ import { App as AntApp, FloatButton, Grid } from "antd";
 import { VerticalAlignBottomOutlined } from "@ant-design/icons";
 import {
   compactTurn,
+  createQueuedMessage,
+  deleteQueuedMessage,
   listSkills,
   sessionFileContentUrl,
   steerTurn,
   submitDecision,
+  updateQueuedMessage,
 } from "../../api";
 import { HELP_TEXT, parseCommand } from "../../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../../commands/completion";
@@ -16,7 +19,6 @@ import { latestTodoList } from "./todoPanel";
 import { messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "../../app/runtime/runtimeDetailProjection";
 import { leafNodes } from "../../app/runtime/runtimeNodeReducer";
 import type { QueuedMessage } from "../../app/types";
-import { mergeQueuedMessages } from "../../app/queuedMessages";
 import { isRuntimeTurnNode } from "../../app/runtime/runtimeNodeNormalization";
 import type {
   ChatMessage,
@@ -60,6 +62,7 @@ export default function ChatPage({
   onStopRun,
   queuedMessages = [],
   onQueuedMessagesChange = () => undefined,
+  onQueuedMessagesRefresh = async () => undefined,
   sandboxHealth = { phase: "healthy", detail: null },
 }: ChatPageProps) {
   const { message } = AntApp.useApp();
@@ -78,9 +81,13 @@ export default function ChatPage({
   // IDs captured when a queue flush starts. Items added while that flush
   // is running belong to the next FIFO pass and must never be removed when
   // the submitted user frames are acknowledged.
-  const queueInFlightIdsRef = useRef<Set<string> | null>(null);
   const queueAutoBlockedRef = useRef(false);
-  const acknowledgedSteeringIdsRef = useRef(new Set<string>());
+  const acknowledgedDeliveryIdsRef = useRef(new Set<string>());
+  const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setEditingQueuedMessageId(null);
+  }, [conversation?.id]);
 
   const messages = conversation?.messages ?? [];
   // A queue flush has no optimistic assistant message by design. Keep the
@@ -260,26 +267,13 @@ export default function ChatPage({
   useEffect(() => {
     if (!conversation?.id || !activeRuntimeNode) return;
     const ids = activeRuntimeNode.data[activeRuntimeNode.current_data_idx]
-      ?.filter((item) => item.role === "user" && typeof item.steering_id === "string")
-      .map((item) => String(item.steering_id)) ?? [];
-    const fresh = ids.filter((id) => !acknowledgedSteeringIdsRef.current.has(id));
+      ?.filter((item) => item.role === "user" && typeof item.delivery_id === "string")
+      .map((item) => String(item.delivery_id)) ?? [];
+    const fresh = ids.filter((id) => !acknowledgedDeliveryIdsRef.current.has(id));
     if (fresh.length === 0) return;
-    fresh.forEach((id) => acknowledgedSteeringIdsRef.current.add(id));
-    const accepted = new Set(fresh);
-    onQueuedMessagesChange(conversation.id, (items) =>
-      items.filter((item) => !item.sendingSteeringId || !accepted.has(item.sendingSteeringId)));
-  }, [activeRuntimeNode?.data, activeRuntimeNode?.current_data_idx, conversation?.id, onQueuedMessagesChange]);
-
-  useEffect(() => {
-    if (!conversation?.id || queuedMessages.every((item) => !item.sendingSteeringId)) return;
-    const activeId = activeRuntimeNode?.status === "running" ? activeRuntimeNode.id : undefined;
-    if (queuedMessages.every((item) => !item.sendingSteeringId || item.sendingTurnId === activeId)) return;
-    onQueuedMessagesChange(conversation.id, (items) => items.map((item) => {
-      if (!item.sendingSteeringId || item.sendingTurnId === activeId) return item;
-      const { sendingSteeringId: _steering, sendingTurnId: _turn, ...pending } = item;
-      return pending;
-    }));
-  }, [activeRuntimeNode?.id, activeRuntimeNode?.status, conversation?.id, onQueuedMessagesChange, queuedMessages]);
+    fresh.forEach((id) => acknowledgedDeliveryIdsRef.current.add(id));
+    void onQueuedMessagesRefresh(conversation.id);
+  }, [activeRuntimeNode?.data, activeRuntimeNode?.current_data_idx, conversation?.id, onQueuedMessagesRefresh]);
 
   function completeCommand(index = activeCommandIndex) {
     const command = filteredCommands[index];
@@ -336,6 +330,7 @@ export default function ChatPage({
     rewindTurnId?: string,
     waitForActiveRun = false,
     onBaseline?: (turn: RuntimeStateNode) => void,
+    queuedDelivery?: { deliveryId: string; messageIds: string[] },
   ) {
     if (sandboxBlocked) throw new Error("沙箱 Broker 尚未确认健康。");
     if (!onRun) throw new Error("ChatPage requires the Turn run controller.");
@@ -356,6 +351,7 @@ export default function ChatPage({
         rewindTurnId,
         waitForActiveRun,
         onBaseline,
+        queuedDelivery,
     });
   }
 
@@ -364,12 +360,21 @@ export default function ChatPage({
     onQueuedMessagesChange(conversation.id, updater);
   }
 
-  function queueCurrentPrompt(prompt: string, itemReferences?: FileReference[]) {
+  async function queueCurrentPrompt(prompt: string, itemReferences?: FileReference[]) {
     if (!prompt.trim() && (!itemReferences || itemReferences.length === 0)) return;
-    updateQueue((items) => [
-      ...items,
-      { id: crypto.randomUUID(), content: prompt, references: itemReferences },
-    ]);
+    if (!conversation?.id || !conversation.threadId) return;
+    try {
+      const stored = editingQueuedMessageId
+        ? await updateQueuedMessage(conversation.threadId, editingQueuedMessageId, prompt, itemReferences ?? [])
+        : await createQueuedMessage(conversation.threadId, crypto.randomUUID(), prompt, itemReferences ?? []);
+      updateQueue((items) => editingQueuedMessageId
+        ? items.map((item) => item.id === stored.id ? stored : item)
+        : [...items, stored]);
+      setEditingQueuedMessageId(null);
+    } catch (error) {
+      setLast({ error: String((error as Error).message ?? error) });
+      return;
+    }
     clearComposer();
     // The uploaded files are already represented by references on this queue
     // item.  Detach them from the composer so a subsequent queued message
@@ -379,14 +384,14 @@ export default function ChatPage({
   }
 
   function editQueuedMessage(item: QueuedMessage) {
-    if (item.sendingSteeringId) return;
+    if (item.state !== "pending") return;
     const currentPrompt = input.trim();
     const currentReferences = collectedReferences();
     if (currentPrompt || currentReferences.length > 0) {
       void message.warning("输入框有内容，无法修改队列消息");
       return;
     }
-    updateQueue((items) => items.filter((candidate) => candidate.id !== item.id));
+    setEditingQueuedMessageId(item.id);
     editorRef.current?.restore(item.content, item.references);
     setInput(item.content);
     setReferences(item.references ?? []);
@@ -394,27 +399,23 @@ export default function ChatPage({
   }
 
   function sendQueuedMessage(item: QueuedMessage) {
-    if (item.sendingSteeringId) return;
+    if (item.state !== "pending") return;
     void submitSteering([item]);
   }
 
   async function submitSteering(items: QueuedMessage[]) {
     if (sandboxBlocked || !conversation?.id || !activeRuntimeNode || activeRuntimeNode.status !== "running" || items.length === 0) return;
-    const merged = mergeQueuedMessages(items);
-    const steeringId = items.length === 1 ? items[0].id : crypto.randomUUID();
+    const deliveryId = crypto.randomUUID();
     try {
-      await steerTurn(activeRuntimeNode.id, steeringId, merged.content, merged.references);
-      const submitted = new Set(items.map((item) => item.id));
-      updateQueue((current) => current.map((item) => submitted.has(item.id)
-        ? { ...item, sendingSteeringId: steeringId, sendingTurnId: activeRuntimeNode.id }
-        : item));
+      await steerTurn(activeRuntimeNode.id, deliveryId, items.map((item) => item.id));
+      await onQueuedMessagesRefresh(conversation.id);
     } catch (error) {
       setLast({ error: String((error as Error).message ?? error) });
     }
   }
 
   function pauseOrSteer() {
-    const pending = queuedMessages.filter((item) => !item.sendingSteeringId);
+    const pending = queuedMessages.filter((item) => item.state === "pending");
     if (pending.length > 0) {
       void submitSteering(pending);
       return;
@@ -429,38 +430,39 @@ export default function ChatPage({
     const items = queuedMessages.slice();
     if (sandboxBlocked) {
       queueFlushRef.current = false;
-      queueInFlightIdsRef.current = null;
       setQueueSubmitting(false);
       return;
     }
     if (!conversation?.sessionId || items.length === 0) {
       queueFlushRef.current = false;
-      queueInFlightIdsRef.current = null;
       setQueueSubmitting(false);
       return;
     }
-    if (!queueInFlightIdsRef.current) queueInFlightIdsRef.current = new Set(items.map((item) => item.id));
-    const submittedIds = queueInFlightIdsRef.current;
-    const merged = mergeQueuedMessages(items);
+    const pendingItems = items.filter((item) => item.state === "pending");
+    if (pendingItems.length === 0) {
+      queueFlushRef.current = false;
+      setQueueSubmitting(false);
+      return;
+    }
+    const deliveryId = crypto.randomUUID();
     let acknowledged = false;
     try {
       const source = activeRuntimeNode;
       await dispatchRun(
         conversation.id,
         conversation.sessionId,
-        merged.content,
+        null,
         false,
         source?.id ?? null,
-        merged.references,
+        undefined,
         undefined,
         true,
         () => {
           if (acknowledged) return;
           acknowledged = true;
-          onQueuedMessagesChange(conversation.id, (current) =>
-            current.filter((item) => !submittedIds.has(item.id)));
-          queueInFlightIdsRef.current = null;
+          void onQueuedMessagesRefresh(conversation.id);
         },
+        { deliveryId, messageIds: pendingItems.map((item) => item.id) },
       );
       if (!acknowledged) queueAutoBlockedRef.current = true;
     } catch (error) {
@@ -589,7 +591,7 @@ export default function ChatPage({
       return;
     }
     if (activeRuntimeNode?.status === "running") {
-      queueCurrentPrompt(prompt, mergedReferences);
+      await queueCurrentPrompt(prompt, mergedReferences);
       return;
     }
     clearComposer();
@@ -731,7 +733,10 @@ export default function ChatPage({
         onQueueSend={sendQueuedMessage}
         onQueueEdit={editQueuedMessage}
         onQueueDelete={(item) => {
-          if (!item.sendingSteeringId) updateQueue((items) => items.filter((candidate) => candidate.id !== item.id));
+          if (item.state !== "pending" || !conversation?.threadId) return;
+          void deleteQueuedMessage(conversation.threadId, item.id)
+            .then(() => updateQueue((items) => items.filter((candidate) => candidate.id !== item.id)))
+            .catch((error) => setLast({ error: String((error as Error).message ?? error) }));
         }}
         onRemoveUpload={removePendingUpload}
         onRetryUpload={retryUpload}

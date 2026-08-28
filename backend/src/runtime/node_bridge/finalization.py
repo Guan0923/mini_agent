@@ -35,6 +35,7 @@ class _FinalizationMixin:
                 category or ("user" if retryable else "agent"),
                 final_answer or "Execution did not complete.",
                 retryable=retryable,
+                code=code,
             )
             self._append_item(self.terminal_error)
         try:

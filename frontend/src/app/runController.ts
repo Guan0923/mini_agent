@@ -115,6 +115,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       providerName: request.providerName,
       model: request.model,
       references: request.references,
+      queuedDelivery: request.queuedDelivery,
     } as const;
 
     try {

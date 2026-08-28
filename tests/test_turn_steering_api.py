@@ -7,20 +7,34 @@ from fastapi.testclient import TestClient
 from backend.api.app import create_app
 from backend.api.session_store import session_store
 from backend.api.state import WebAppState
-from backend.api.turn_steering import TurnSteeringInbox
+from backend.domain import QueuedMessage
 from backend.domain.runtime_state import RuntimeState
+from backend.storage.message_queue import MemoryMessageQueue, RedisTurnMailbox
 
 
-def test_turn_steering_inbox_consumes_one_fifo_entry_per_boundary() -> None:
-    inbox = TurnSteeringInbox()
-    assert inbox.put("first", {"content": [{"type": "text", "text": "one"}]})
-    assert inbox.put("second", {"content": [{"type": "text", "text": "two"}]})
+def test_turn_mailbox_consumes_one_fifo_delivery_per_boundary() -> None:
+    queue = MemoryMessageQueue()
+    for message_id, content in (("first", "one"), ("second", "two")):
+        queue.create(QueuedMessage(message_id, "thread", content))
+        queue.dispatch(
+            delivery_id=f"delivery-{message_id}",
+            message_ids=[message_id],
+            session_id="session",
+            thread_id="thread",
+            turn_id="turn",
+        )
+    inbox = RedisTurnMailbox(queue, "turn", "worker")
 
-    assert inbox.take() == [{"steering_id": "first", "content": "one", "references": []}]
-    assert inbox.take() == [{"steering_id": "second", "content": "two", "references": []}]
+    first = inbox.take()[0]
+    assert first["delivery_id"] == "delivery-first"
+    assert first["content"] == "one"
+    first["_ack"]()
+    second = inbox.take()[0]
+    assert second["delivery_id"] == "delivery-second"
+    assert second["content"] == "two"
+    second["_ack"]()
     assert inbox.take() == []
     inbox.close()
-    assert not inbox.put("third", {"content": [{"type": "text", "text": "three"}]})
 
 
 def test_steer_endpoint_accepts_only_an_active_running_turn_and_normalizes_references(tmp_path: Path) -> None:
@@ -38,49 +52,45 @@ def test_steer_endpoint_accepts_only_an_active_running_turn_and_normalizes_refer
             provider_name="local",
         )
         store.create_node(turn)
-        inbox = TurnSteeringInbox()
-        state.active_turn_steering = {turn.id: inbox}
+        state.active_turn_streams = {turn.id: object()}
+        queued = client.post(
+            f"/api/sidebar-threads/{sidebar['thread_id']}/queued-messages",
+            json={
+                "id": "23d58ec5-7d2f-4a41-87e6-21ac50b5921d",
+                "content": " redirect ",
+                "references": [
+                    {"source": "project", "path": "README.md"},
+                    {"source": "project", "path": "README.md"},
+                    {"source": "upload", "path": "notes.txt"},
+                ],
+            },
+        ).json()
 
         response = client.post(
             f"/api/turns/{turn.id}/steer",
             json={
-                "steering_id": "steer_1",
-                "message": {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": " redirect ",
-                            "references": [
-                                {"source": "project", "path": "README.md"},
-                                {"source": "project", "path": "README.md"},
-                                {"source": "upload", "path": "notes.txt"},
-                            ],
-                        }
-                    ],
-                },
+                "delivery_id": "delivery-1",
+                "message_ids": [queued["id"]],
             },
         )
 
         assert response.status_code == 202
-        assert inbox.take() == [
-            {
-                "steering_id": "steer_1",
-                "content": "redirect",
-                "references": [
-                    {"source": "project", "path": "README.md"},
-                    {"source": "upload", "path": "notes.txt"},
-                ],
-            }
+        claimed = state.message_queue.claim(turn.id, "worker")
+        assert claimed is not None
+        assert claimed.envelope.delivery_id == "delivery-1"
+        assert claimed.envelope.content == "redirect"
+        assert list(claimed.envelope.references) == [
+            {"source": "project", "path": "README.md"},
+            {"source": "upload", "path": "notes.txt"},
         ]
 
-        state.active_turn_steering.clear()
+        state.active_turn_streams.clear()
         assert (
             client.post(
                 f"/api/turns/{turn.id}/steer",
                 json={
-                    "steering_id": "closed",
-                    "message": {"role": "user", "content": [{"type": "text", "text": "late"}]},
+                    "delivery_id": "closed",
+                    "message_ids": [queued["id"]],
                 },
             ).status_code
             == 409
@@ -89,13 +99,13 @@ def test_steer_endpoint_accepts_only_an_active_running_turn_and_normalizes_refer
         failed = turn.clone()
         failed.status = "failed"
         store.update_node(failed)
-        state.active_turn_steering[turn.id] = TurnSteeringInbox()
+        state.active_turn_streams[turn.id] = object()
         assert (
             client.post(
                 f"/api/turns/{turn.id}/steer",
                 json={
-                    "steering_id": "failed",
-                    "message": {"role": "user", "content": [{"type": "text", "text": "late"}]},
+                    "delivery_id": "failed",
+                    "message_ids": [queued["id"]],
                 },
             ).status_code
             == 409

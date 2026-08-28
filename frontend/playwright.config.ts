@@ -1,5 +1,7 @@
 import { defineConfig } from "@playwright/test";
 
+const redisKeyPrefix = `mini-agent:e2e:${process.pid}:${Date.now()}`;
+
 export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,
@@ -17,6 +19,7 @@ export default defineConfig({
         MINI_AGENT_E2E_PORT: "18080",
         MINI_AGENT_ALLOWED_ORIGINS: "http://127.0.0.1:15173",
         MINI_AGENT_PUBLIC_URL: "http://127.0.0.1:15173",
+        MINI_AGENT_REDIS_KEY_PREFIX: redisKeyPrefix,
       },
       reuseExistingServer: false,
       timeout: 120_000,

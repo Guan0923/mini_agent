@@ -6,7 +6,7 @@ backend 是本地单用户 Runtime 与 HTTP/SSE 服务。`configuration.py` 提�
 - `domain/`：无外层依赖的消息、计划、Session、Skill 与 RuntimeState 契约。
 - `planning/`、`runtime/`、`providers/`、`tools/`：模型决策、执行编排、Provider 与工具。
 - `api/`：FastAPI/HTTP/SSE 边界。
-- `storage/`：SQLite、本地设置与项目数据。
+- `storage/`：Redis message queue、SQLite、本地设置与项目数据。
 - `sandbox/`、`jobs/`、`mcp/`、`skills/`：隔离、作业、外部 MCP 和 Skill 信任。
 - `observability/`：结构化事件与 JSONL。
 

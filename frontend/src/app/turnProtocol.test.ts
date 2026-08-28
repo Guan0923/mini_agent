@@ -149,7 +149,7 @@ describe("Turn protocol projection", () => {
         op: "append_message",
         data_idx: 0,
         message_idx: 2,
-        message: { role: "user", steering_id: "steer_1", content: [{ type: "text", text: "redirect", status: "success" }] },
+        message: { role: "user", delivery_id: "delivery_1", content: [{ type: "text", text: "redirect", status: "success" }] },
       }],
     });
     conversation = integrateRuntimeNodeUpdates(conversation, [withUser], withUser.id, true);

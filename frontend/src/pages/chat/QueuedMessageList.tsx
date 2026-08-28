@@ -20,16 +20,16 @@ export default function QueuedMessageList({ items, onSend, onEdit, onDelete, dis
             <span className="queued-message-index" aria-hidden="true">{index + 1}</span>
             <span className="queued-message-content">
               {item.content || "（仅文件）"}
-              {item.sendingSteeringId ? <span className="queued-message-sending"> · 发送中</span> : null}
+              {item.state === "dispatched" ? <span className="queued-message-sending"> · 发送中</span> : null}
             </span>
             <span className="queued-message-actions">
-              <button type="button" className="queued-message-button" aria-label={`发送第 ${index + 1} 条待发送消息`} disabled={disabled || Boolean(item.sendingSteeringId)} onClick={() => onSend(item)}>
+              <button type="button" className="queued-message-button" aria-label={`发送第 ${index + 1} 条待发送消息`} disabled={disabled || item.state === "dispatched"} onClick={() => onSend(item)}>
                 <SendOutlined aria-hidden="true" />
               </button>
-              <button type="button" className="queued-message-button" aria-label={`编辑第 ${index + 1} 条待发送消息`} disabled={disabled || Boolean(item.sendingSteeringId)} onClick={() => onEdit(item)}>
+              <button type="button" className="queued-message-button" aria-label={`编辑第 ${index + 1} 条待发送消息`} disabled={disabled || item.state === "dispatched"} onClick={() => onEdit(item)}>
                 <EditOutlined aria-hidden="true" />
               </button>
-              <button type="button" className="queued-message-button danger" aria-label={`删除第 ${index + 1} 条待发送消息`} disabled={disabled || Boolean(item.sendingSteeringId)} onClick={() => onDelete(item)}>
+              <button type="button" className="queued-message-button danger" aria-label={`删除第 ${index + 1} 条待发送消息`} disabled={disabled || item.state === "dispatched"} onClick={() => onDelete(item)}>
                 <DeleteOutlined aria-hidden="true" />
               </button>
             </span>

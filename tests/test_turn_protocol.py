@@ -652,7 +652,7 @@ def test_late_tool_failure_after_steering_settles_the_previous_assistant_call() 
         RuntimeEvent(
             "steering_applied",
             "In-run user input applied",
-            {"content": "redirect", "steering_id": "steer_1"},
+            {"content": "redirect", "delivery_id": "delivery_1"},
         )
     )
     bridge.handle(
@@ -775,7 +775,7 @@ def test_root_turn_is_listed_but_rejects_every_turn_operation(tmp_path: Path) ->
             (
                 "post",
                 f"/api/turns/{root.id}/steer",
-                {"steering_id": "s1", "message": {"role": "user", "content": [{"type": "text", "text": "x"}]}},
+                {"delivery_id": "s1", "message_ids": ["message-1"]},
             ),
             ("post", f"/api/turns/{root.id}/fork", {}),
             ("post", f"/api/turns/{root.id}/compact", None),

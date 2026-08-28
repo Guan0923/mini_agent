@@ -70,6 +70,27 @@ describe("Turn SSE contract", () => {
     expect(frames.map((frame) => frame.type)).toEqual(["turn.snapshot", "turn.delta"]);
   });
 
+  it("creates a Turn from queued_delivery without sending a duplicate message body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response([
+      JSON.stringify({ type: "turn.snapshot", revision: 0, turn: turn() }),
+      '<SSE id="turn_1" type="success"></SSE>',
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await streamChat("", () => undefined, new AbortController().signal, {
+      sessionId: "session_1",
+      threadId: "session_1",
+      turnId: "turn_1",
+      queuedDelivery: { deliveryId: "delivery_1", messageIds: ["message_1", "message_2"] },
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body).toMatchObject({
+      queued_delivery: { delivery_id: "delivery_1", message_ids: ["message_1", "message_2"] },
+    });
+    expect(body).not.toHaveProperty("message");
+  });
+
   it("attaches to a running Turn with GET and the same strict frame contract", async () => {
     const fetchMock = vi.fn().mockResolvedValue(response([
       JSON.stringify({ type: "turn.snapshot", revision: 0, turn: turn() }),

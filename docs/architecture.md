@@ -33,7 +33,7 @@ frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
 - `RuntimeServices`：planner、工具、持久化、审批、steering、Subagent、时钟和 ID 生成器；密钥与 callable 不序列化。
 - `RuntimeExchange`：一次瞬态模型操作的请求、响应、流和推理回调。
 
-每个 session 同时最多一个活动 Turn。稳定状态迁移会写入 SQLite；SSE 断线只取消订阅，不取消后台 worker。Job registry 按 system/session/thread/run/task 组织，不含账户 owner。
+每个 Thread 同时最多一个活动 Turn。稳定聊天历史写入 SQLite；浏览器待发送草稿与 active Turn steering 进入 Redis Stream，采用至少一次投递和 `delivery_id` 持久幂等。SSE 断线只取消订阅，不取消后台 worker。Job registry 按 system/session/thread/run/task 组织，不含账户 owner。
 
 ## 工具、Skills、MCP 与 Sandbox
 
@@ -75,4 +75,4 @@ Browser request
   -> SSE projection
 ```
 
-Provider wire formats只存在于 `backend/src/providers/`。Runtime 发布事件，UI 展示逻辑留在前端；本地 SQLite 不承担远端 revision、outbox 或同步投影。
+Provider wire formats只存在于 `backend/src/providers/`。Runtime 发布事件，UI 展示逻辑留在前端；`delivery_id` 只进入 SQLite/Node Message 元数据，不进入 Provider 请求。SQLite 仍是正式历史权威，Redis 不承担历史投影。

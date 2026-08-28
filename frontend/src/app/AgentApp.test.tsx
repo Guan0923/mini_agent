@@ -15,6 +15,7 @@ const api = vi.hoisted(() => ({
   getSandboxStatus: vi.fn(),
   getSessionNodes: vi.fn(),
   listSessions: vi.fn(),
+  listQueuedMessages: vi.fn(),
   renameSession: vi.fn(),
   restoreSession: vi.fn(),
   pauseTurn: vi.fn(),
@@ -140,6 +141,7 @@ describe("AgentApp new conversation initialization", () => {
     api.getSandboxStatus.mockResolvedValue({ installed: true, healthy: true });
     api.getSessionNodes.mockResolvedValue([]);
     api.listSessions.mockResolvedValue([]);
+    api.listQueuedMessages.mockResolvedValue([]);
     api.pauseTurn.mockResolvedValue(undefined);
     api.streamAttachedTurn.mockResolvedValue("completed");
     projectsApi.listProjects.mockResolvedValue([]);

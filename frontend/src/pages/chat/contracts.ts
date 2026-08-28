@@ -34,6 +34,7 @@ export interface ChatPageProps {
   onStopRun?: (conversationId: string) => void;
   queuedMessages?: QueuedMessage[];
   onQueuedMessagesChange?: (conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) => void;
+  onQueuedMessagesRefresh?: (conversationId: string) => Promise<void>;
   sandboxHealth?: Pick<SandboxHealthState, "phase" | "detail">;
 }
 
@@ -74,6 +75,7 @@ export interface ChatRunRequest {
   references?: FileReference[];
   waitForActiveRun?: boolean;
   onBaseline?: (turn: RuntimeStateNode) => void;
+  queuedDelivery?: { deliveryId: string; messageIds: string[] };
 }
 
 export function composerAction(

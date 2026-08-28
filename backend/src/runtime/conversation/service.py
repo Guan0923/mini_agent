@@ -8,6 +8,7 @@ from typing import Any
 from backend.domain import (
     FAILED_TERMINAL_MESSAGE,
     AssistantMessage,
+    MessageQueueUnavailable,
     ResumePreview,
     RunMode,
     RunProvenance,
@@ -79,6 +80,8 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         trigger: RunTrigger = "embedding",
         request_parameters: Mapping[str, Any] | None = None,
         references: Sequence[Mapping[str, str]] = (),
+        delivery_id: str | None = None,
+        on_started: Callable[[], None] | None = None,
     ) -> RunState:
         prepared = self._prepare(task, structured=bool(references))
         state = self._run_single_turn(
@@ -92,6 +95,8 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
             trigger=trigger,
             request_parameters=request_parameters,
             references=list(references),
+            delivery_id=delivery_id,
+            on_started=on_started,
         )
         handoff = state.handoff
         if handoff is None:
@@ -154,6 +159,8 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         source_run_id: str | None = None,
         request_parameters: Mapping[str, Any] | None = None,
         references: list[Mapping[str, str]] | None = None,
+        delivery_id: str | None = None,
+        on_started: Callable[[], None] | None = None,
     ) -> RunState:
         provenance = RunProvenance(
             trigger=trigger,
@@ -173,6 +180,7 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
                 run_id,
                 prepared,
                 provenance,
+                delivery_id=delivery_id,
             )
         else:
             if self.runtime is None:
@@ -220,7 +228,16 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         if mode in {"agent", "plan"}:
             self.runtime.state.running_mode = mode
         try:
+            if on_started is not None:
+                on_started()
             state = self.runner.run(runtime)
+        except MessageQueueUnavailable as exc:
+            self._record_unexpected_failure(
+                exc,
+                message="消息队列连接中断，Turn 已失败。",
+                publish_error=False,
+            )
+            raise
         except Exception as exc:
             bridge = self.runtime_node_bridge
             if bridge is not None and not self._node_bridge_events_external:
@@ -294,7 +311,13 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         except ToolError as exc:
             raise TaskPreparationError(str(exc)) from exc
 
-    def _record_unexpected_failure(self, error: Exception) -> None:
+    def _record_unexpected_failure(
+        self,
+        error: Exception,
+        *,
+        message: str = FAILED_TERMINAL_MESSAGE,
+        publish_error: bool = True,
+    ) -> None:
         if self.runtime is None or self.runtime.state.current_run is None:
             return
         run = self.runtime.state.current_run
@@ -305,25 +328,26 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
             None,
         )
         if assistant is None:
-            self.runtime.state.messages.append(AssistantMessage(content=FAILED_TERMINAL_MESSAGE))
-        elif FAILED_TERMINAL_MESSAGE not in (assistant.content or ""):
-            assistant.content = f"{assistant.content}\n\n{FAILED_TERMINAL_MESSAGE}".strip()
+            self.runtime.state.messages.append(AssistantMessage(content=message))
+        elif message not in (assistant.content or ""):
+            assistant.content = f"{assistant.content}\n\n{message}".strip()
         run.history = self.runtime.state.messages
-        run.final_answer = FAILED_TERMINAL_MESSAGE
-        run.add_event("error", FAILED_TERMINAL_MESSAGE, error_type=error.__class__.__name__)
+        run.final_answer = message
+        run.add_event("error", message, error_type=error.__class__.__name__)
         self.runtime.state.status = "idle"
         self.runtime.state.usage = self.runtime.state.turn_usage
         self.runtime.state.turn_usage = None
         publish = self.runtime.services.publish
         if publish is not None:
             publish(RuntimeEvent("thinking_end", data={"interrupted": True}))
-            publish(
-                RuntimeEvent(
-                    "error",
-                    FAILED_TERMINAL_MESSAGE,
-                    {"error_type": error.__class__.__name__, "unexpected": True},
+            if publish_error:
+                publish(
+                    RuntimeEvent(
+                        "error",
+                        message,
+                        {"error_type": error.__class__.__name__, "unexpected": True},
+                    )
                 )
-            )
             run.add_event("run_finished", "Run finished", status=run.status)
             publish(RuntimeEvent("run_finished", run.status, {"final_answer": run.final_answer}))
         self.runtime.save()

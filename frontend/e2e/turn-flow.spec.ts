@@ -13,7 +13,7 @@ interface RuntimeTurnResponse extends RuntimeRootResponse {
   current_data_idx: number;
   data: Array<Array<{
     role: string;
-    steering_id?: string;
+    delivery_id?: string;
     content: Array<Record<string, unknown> & { type: string; text?: string }>;
   }>>;
 }
@@ -41,7 +41,7 @@ async function send(page: import("@playwright/test").Page, text: string): Promis
   const response = await responsePromise;
   expect(response.ok(), `${response.status()} ${response.url()}`).toBeTruthy();
   await expect(page.locator(".message.user").last()).toContainText(text, { timeout: 15_000 });
-  await expect(page.getByRole("button", { name: "发送" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible({ timeout: 15_000 });
 }
 
 async function distanceToBottom(locator: import("@playwright/test").Locator): Promise<number> {
