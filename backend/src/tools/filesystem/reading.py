@@ -28,7 +28,7 @@ class FileReadMixin:
         self._validate_integer("start_line", start_line, minimum=1)
         self._validate_integer("max_lines", max_lines, minimum=1, maximum=self._MAX_READ_LINES)
         self._validate_integer("start_column", start_column, minimum=1)
-        file_path = self._read_path(path)
+        file_path = self._read_file_path(path)
         if not file_path.is_file():
             raise ToolError(f"Not a file: {path}")
 

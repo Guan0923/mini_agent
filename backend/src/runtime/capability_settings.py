@@ -11,13 +11,13 @@ from backend.configuration import ConfigurationError, section
 
 @dataclass(frozen=True)
 class SkillSettings:
-    auto_select: bool = False
+    enabled: bool = True
 
     @classmethod
     def from_config(cls, values: Mapping[str, object]) -> SkillSettings:
-        raw = section(values, "skills").get("auto_select", False)
+        raw = section(values, "capabilities").get("skills", True)
         if not isinstance(raw, bool):
-            raise ConfigurationError("skills.auto_select must be boolean.")
+            raise ConfigurationError("capabilities.skills must be boolean.")
         return cls(raw)
 
 

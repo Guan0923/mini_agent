@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.configuration import ClientPaths
 from backend.domain import (
     AssistantMessage,
     RunHandoff,
@@ -15,7 +16,8 @@ from backend.domain import (
     UserMessage,
 )
 from backend.planning import LLMPlanner
-from backend.runtime import AgentRunner, PreparedResponse
+from backend.runtime import AgentRunner, PreparedResponse, build_application
+from backend.runtime.capability_settings import SkillSettings
 from backend.skills import (
     MAX_INSTRUCTION_LINES,
     MAX_SKILL_BYTES,
@@ -24,7 +26,7 @@ from backend.skills import (
     SkillDefinition,
     discover_project_skills,
 )
-from backend.tools import ToolRegistry
+from backend.tools import ToolError, ToolRegistry
 
 
 def write_skill(
@@ -67,6 +69,54 @@ def test_missing_skill_directory_produces_empty_catalog(tmp_path: Path) -> None:
 
     assert not catalog
     assert catalog.names() == ()
+
+
+def test_capabilities_skills_is_the_only_user_skill_switch() -> None:
+    assert SkillSettings.from_config({}).enabled is True
+    assert SkillSettings.from_config({"capabilities": {"skills": True}}).enabled is True
+    assert SkillSettings.from_config({"capabilities": {"skills": False}}).enabled is False
+    assert SkillSettings.from_config({"skills": {"auto_select": True}}).enabled is True
+
+
+def test_rejects_non_boolean_capabilities_skills() -> None:
+    with pytest.raises(ValueError, match="capabilities.skills"):
+        SkillSettings.from_config({"capabilities": {"skills": "yes"}})
+
+
+def test_application_capability_controls_catalog_and_read_file_whitelist(
+    tmp_path: Path, local_sandbox_runtime: None
+) -> None:
+    paths = ClientPaths(tmp_path / "user-data")
+    manifest = paths.skills_dir / "demo" / "SKILL.md"
+    workspace = tmp_path / "workspace"
+    manifest.parent.mkdir(parents=True)
+    workspace.mkdir()
+    manifest.write_text("---\nname: demo\ndescription: Demo Skill.\n---\nInstructions.\n", encoding="utf-8")
+
+    disabled = build_application(
+        workspace,
+        planner_name="rule",
+        paths=paths,
+        config_override={"capabilities": {"skills": False}},
+    )
+    try:
+        assert disabled.runner.skill_catalog.names() == ()
+        with pytest.raises(ToolError, match="allowed read root"):
+            disabled.runner.tools.invoke("read_file", {"path": str(manifest)})
+    finally:
+        disabled.close()
+
+    enabled = build_application(
+        workspace,
+        planner_name="rule",
+        paths=paths,
+        config_override={"capabilities": {"skills": True}},
+    )
+    try:
+        assert enabled.runner.skill_catalog.names() == ("demo",)
+        assert "Instructions." in enabled.runner.tools.invoke("read_file", {"path": str(manifest)})
+    finally:
+        enabled.close()
 
 
 def test_rejects_skill_directory_without_manifest(tmp_path: Path) -> None:
@@ -309,7 +359,7 @@ class ReplyOnlyPlanner:
         return AssistantMessage(content="done")
 
 
-def test_explicit_skill_bypasses_automatic_selection(tmp_path: Path) -> None:
+def test_explicit_user_skill_is_left_for_agent_read_file(tmp_path: Path) -> None:
     planner = SelectingPlanner(("beta", "beta"))
     catalog = SkillCatalog(
         (
@@ -327,12 +377,10 @@ def test_explicit_skill_bypasses_automatic_selection(tmp_path: Path) -> None:
     state = runner.run(runner.new_runtime(task="Use $alpha for this task.", on_event=events.append))
 
     assert state.status == "completed"
-    assert [skill.name for skill in state.active_skills] == ["alpha"]
+    assert state.active_skills == []
     assert planner.selection_calls == 0
     assert state.model_turns == 1
-    event = next(event for event in events if event.kind == "skills_selected")
-    assert event.data["explicit"] == ["alpha"]
-    assert event.data["automatic"] == []
+    assert all(event.kind != "skills_selected" for event in events)
 
 
 def test_runner_without_skills_does_not_call_selector() -> None:
@@ -346,7 +394,7 @@ def test_runner_without_skills_does_not_call_selector() -> None:
     assert state.model_turns == 1
 
 
-def test_automatic_skill_selection_has_a_separate_budget_counter(tmp_path: Path) -> None:
+def test_user_skills_do_not_trigger_hidden_selection(tmp_path: Path) -> None:
     planner = SelectingPlanner(("demo",))
     runner = AgentRunner(
         planner,
@@ -359,8 +407,8 @@ def test_automatic_skill_selection_has_a_separate_budget_counter(tmp_path: Path)
 
     assert state.status == "completed"
     assert state.model_turns == 1
-    assert state.skill_selection_calls == 1
-    assert planner.selection_calls == 1
+    assert state.skill_selection_calls == 0
+    assert planner.selection_calls == 0
     assert planner.decision_calls == 1
 
 
@@ -375,7 +423,7 @@ def test_explicit_skill_does_not_require_a_selector(tmp_path: Path) -> None:
     state = runner.run(runner.new_runtime(task="Use $demo."))
 
     assert state.status == "completed"
-    assert [skill.name for skill in state.active_skills] == ["demo"]
+    assert state.active_skills == []
     assert planner.decision_calls == 1
 
 
@@ -420,13 +468,8 @@ def test_llm_skill_selection_uses_only_current_turn() -> None:
 
 
 @pytest.mark.parametrize("mode", ["agent", "plan"])
-def test_llm_selection_sees_metadata_then_active_body_is_injected(tmp_path: Path, mode: str) -> None:
-    client = RecordingClient(
-        [
-            PreparedResponse(AssistantMessage(content='{"skills":["demo"]}')),
-            PreparedResponse(AssistantMessage(content="done")),
-        ]
-    )
+def test_main_agent_sees_skill_metadata_without_body(tmp_path: Path, mode: str) -> None:
+    client = RecordingClient([PreparedResponse(AssistantMessage(content="done"))])
     catalog = SkillCatalog(
         (definition("demo", "Use for reports.", manifest=write_skill(tmp_path, "demo", instructions="Follow demo.")),)
     )
@@ -434,17 +477,25 @@ def test_llm_selection_sees_metadata_then_active_body_is_injected(tmp_path: Path
     runner = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog)
     runtime = runner.new_runtime(task="Prepare a report.", mode=mode)
 
-    selection = planner.select_skills(runtime)
-    runtime.run.active_skills = catalog.snapshots(set(selection.names))
     planner.decide(runtime)
 
-    selection_system = client.requests[0][0].content or ""
-    decision_system = client.requests[1][0].content or ""
-    assert "Use for reports." in selection_system
-    assert "Follow demo." not in selection_system
-    assert "Follow demo." in decision_system
-    assert "lower priority than every preceding system rule" in decision_system
-    assert "skills/demo" in decision_system
+    decision_system = client.requests[0][0].content or ""
+    assert "## Available user Skills" in decision_system
+    assert "Use for reports." in decision_system
+    assert "Follow demo." not in decision_system
+    assert str(catalog.definitions()[0].manifest.as_posix()) in decision_system
+    assert "call `read_file`" in decision_system
+
+
+def test_disabled_user_skills_are_absent_from_main_agent_prompt(tmp_path: Path) -> None:
+    client = RecordingClient([PreparedResponse(AssistantMessage(content="done"))])
+    catalog = SkillCatalog((definition("demo", manifest=write_skill(tmp_path, "demo")),))
+    planner = LLMPlanner(client, [], [])
+    runtime = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog, skills_enabled=False).new_runtime(task="demo")
+
+    planner.decide(runtime)
+
+    assert "Available user Skills" not in (client.requests[0][0].content or "")
 
 
 def test_llm_skill_selection_repairs_unknown_name() -> None:
@@ -527,29 +578,44 @@ def test_ignores_invalid_optional_frontmatter(tmp_path: Path) -> None:
     assert skill.snapshot().instructions == "Body"
 
 
-def test_llm_skill_selection_sees_optional_frontmatter() -> None:
-    client = RecordingClient([PreparedResponse(AssistantMessage(content='{"skills":[]}'))])
+def test_main_agent_skill_metadata_includes_optional_frontmatter() -> None:
+    client = RecordingClient([PreparedResponse(AssistantMessage(content="done"))])
     catalog = SkillCatalog((definition("demo", metadata=(("owner", "platform"),), allowed_tools=("read", "write")),))
     planner = LLMPlanner(client, [], [])
     runtime = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog).new_runtime(task="demo")
 
-    planner.select_skills(runtime)
+    planner.decide(runtime)
 
     selection_system = client.requests[0][0].content or ""
     assert '"metadata": {"owner": "platform"}' in selection_system
     assert '"allowed-tools": ["read", "write"]' in selection_system
 
 
-def test_explicit_skill_with_empty_instructions_fails_run(tmp_path: Path) -> None:
+def test_explicit_user_skill_body_is_not_read_before_agent_tool_call(tmp_path: Path) -> None:
     planner = ReplyOnlyPlanner()
     catalog = SkillCatalog((definition("demo", manifest=write_skill(tmp_path, "demo", instructions="")),))
     runner = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog)
 
     state = runner.run(runner.new_runtime(task="Use $demo."))
 
+    assert state.status == "completed"
+    assert state.active_skills == []
+    assert planner.decision_calls == 1
+
+
+def test_explicit_user_skill_fails_when_capability_is_disabled(tmp_path: Path) -> None:
+    planner = ReplyOnlyPlanner()
+    runner = AgentRunner(
+        planner,
+        ToolRegistry(),
+        skill_catalog=SkillCatalog((definition("demo", manifest=write_skill(tmp_path, "demo")),)),
+        skills_enabled=False,
+    )
+
+    state = runner.run(runner.new_runtime(task="Use $demo."))
+
     assert state.status == "failed"
-    assert "Skill activation failed" in (state.final_answer or "")
-    assert "instructions must not be empty" in (state.final_answer or "")
+    assert "capabilities.skills" in (state.final_answer or "")
     assert planner.decision_calls == 0
 
 

@@ -99,7 +99,16 @@ class FileIOMixin:
         return newline if count else "\n"
 
     def _display_path(self, path: Path) -> str:
-        return path.relative_to(self.workspace).as_posix()
+        try:
+            return path.relative_to(self.workspace).as_posix()
+        except ValueError:
+            for root in self.read_file_roots:
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    continue
+                return path.as_posix()
+            raise
 
     def _display_candidate(self, path: Path) -> str:
         try:

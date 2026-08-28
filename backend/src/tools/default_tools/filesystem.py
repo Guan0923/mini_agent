@@ -12,14 +12,21 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
         Tool(
             "read_file",
             (
-                "Reads a bounded line range from one UTF-8 text file inside the workspace. "
+                "Reads a bounded line range from one UTF-8 text file. Paths are workspace-relative, or may be "
+                "absolute only when the runtime explicitly exposes a read-only user Skill directory. "
                 "Output uses LF line endings and includes the returned and total line ranges. "
                 "Use start_line and max_lines to continue through large files."
             ),
             files.read_file,
             object_schema(
                 {
-                    "path": {"type": "string", "minLength": 1, "description": "Workspace-relative file path."},
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "Workspace-relative path, or an explicitly allowed absolute or ~/.mini_agent/skills path."
+                        ),
+                    },
                     "start_line": {
                         "type": "integer",
                         "minimum": 1,

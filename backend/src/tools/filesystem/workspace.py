@@ -35,5 +35,6 @@ class WorkspaceFiles(FileReadMixin, FileWriteMixin, WorkspacePathMixin, FileIOMi
         "venv",
     }
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, *, read_file_roots: tuple[Path, ...] = ()) -> None:
         self.workspace = workspace.resolve()
+        self.read_file_roots = tuple(root.resolve() for root in read_file_roots)

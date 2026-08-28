@@ -80,7 +80,9 @@ def build_application(
                 config[name] = value
     resolved = _settings_for(resolved_paths, settings, config_override)
     store = SQLiteSessionStore(resolved_paths)
-    files = WorkspaceFiles(workspace)
+    skill_settings = SkillSettings.from_config(config)
+    read_file_roots = (resolved_paths.skills_dir,) if skill_settings.enabled else ()
+    files = WorkspaceFiles(workspace, read_file_roots=read_file_roots)
     upload_files = WorkspaceFiles(upload_root) if upload_root is not None else None
     runner_args = (
         workspace,
@@ -164,6 +166,8 @@ def _build_subagent_runner(
     skill_settings = SkillSettings.from_config(config)
     subagent_settings = SubagentSettings.from_config(config)
     sandbox_launcher, sandbox_config = _sandbox_runtime(config)
+    read_file_roots = (resolved_paths.skills_dir,) if skill_settings.enabled else ()
+    workspace_files = files or WorkspaceFiles(workspace, read_file_roots=read_file_roots)
 
     def child_factory() -> AgentRunner:
         return _build_runner(
@@ -172,6 +176,7 @@ def _build_subagent_runner(
             settings,
             build_tool_registry(
                 workspace,
+                workspace_files=WorkspaceFiles(workspace, read_file_roots=read_file_roots),
                 upload_files=upload_files,
                 terminal_type=terminal_type,
                 sandbox_config=sandbox_config,
@@ -205,7 +210,7 @@ def _build_subagent_runner(
     try:
         tools = build_tool_registry(
             workspace,
-            workspace_files=files,
+            workspace_files=workspace_files,
             upload_files=upload_files,
             terminal_type=terminal_type,
             sandbox_config=sandbox_config,
@@ -256,7 +261,7 @@ def _build_runner(
     sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: dict[str, object] | None = None,
 ) -> AgentRunner:
-    skills = SkillCatalog.discover(global_root=paths.skills_dir)
+    skills = SkillCatalog.discover(global_root=paths.skills_dir) if skill_settings.enabled else SkillCatalog()
     project_skill_gate = (
         ProjectSkillGate(
             workspace,
@@ -286,7 +291,7 @@ def _build_runner(
         log_full_messages=settings.log_full_messages,
         checkpoints=checkpoints,
         skill_catalog=skills,
-        skill_auto_select=skill_settings.auto_select,
+        skills_enabled=skill_settings.enabled,
         project_skill_gate=project_skill_gate,
         workspace_root=str(workspace.resolve()),
         subagents=subagents,

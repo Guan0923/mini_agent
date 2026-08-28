@@ -49,7 +49,17 @@ class SkillActivator:
             fail_run(runtime, f"Skill activation failed: {exc}")
             return False
 
-        if explicit:
+        project_names = {skill.name for skill in gate_result.usable}
+        user_names = set(catalog.names()) - project_names
+        explicit_user = explicit & user_names
+        explicit_project = explicit & project_names
+
+        if explicit_user and not runtime.services.skills_enabled:
+            rendered = ", ".join(sorted(explicit_user))
+            fail_run(runtime, f"User Skill(s) disabled by capabilities.skills: {rendered}.")
+            return False
+
+        if explicit_project:
             untrusted = set(gate_result.untrusted_names) & {name for name in explicit}
             if untrusted:
                 rendered = ", ".join(sorted(untrusted))
@@ -59,17 +69,21 @@ class SkillActivator:
                 )
                 return False
             try:
-                run.active_skills = merged.snapshots(explicit)
+                project_catalog = SkillCatalog(tuple(skill for skill in gate_result.usable))
+                run.active_skills = project_catalog.snapshots(explicit_project)
             except SkillConfigurationError as exc:
                 fail_run(runtime, f"Skill activation failed: {exc}")
                 return False
             names = [skill.name for skill in run.active_skills]
             self._publish(runtime, names, names, [], source="explicit")
             runtime.save()
+        if explicit:
+            # User Skills use progressive disclosure. Their exact manifest path
+            # is already in the main Agent request, and the Agent must load it
+            # through read_file so the durable tool result becomes the context.
             return True
 
-        if not runtime.services.skill_auto_select:
-            self._publish(runtime, [], [], [], source="disabled")
+        if not runtime.services.skill_auto_select or (runtime.services.project_skill_gate or self.project_gate) is None:
             return True
 
         capabilities = PlannerCapabilities.from_planner(runtime.services.planner)
@@ -79,10 +93,15 @@ class SkillActivator:
             return False
 
         run.skill_selection_calls += 1
+        project_catalog = SkillCatalog(tuple(skill for skill in gate_result.usable))
+        original_catalog = runtime.services.skill_catalog
         try:
+            # Preserve the trusted project-Skill selector without exposing user
+            # Skills to the hidden pre-selection request.
+            runtime.services.skill_catalog = project_catalog
             selection = selector.select_skills(runtime)
             automatic = set(selection.names)
-            snapshots = merged.snapshots(automatic)
+            snapshots = project_catalog.snapshots(automatic)
         except (PlanningError, SkillConfigurationError) as exc:
             _publish_repairs(runtime, capabilities)
             fail_run(
@@ -91,11 +110,19 @@ class SkillActivator:
                 **planning_failure_data(exc, capabilities.name),
             )
             return False
+        finally:
+            runtime.services.skill_catalog = original_catalog
         _publish_repairs(runtime, capabilities)
 
         run.active_skills = snapshots
         names = [skill.name for skill in snapshots]
-        self._publish(runtime, names, [], [name for name in merged.names() if name in automatic], source="llm")
+        self._publish(
+            runtime,
+            names,
+            [],
+            [name for name in project_catalog.names() if name in automatic],
+            source="llm",
+        )
         runtime.save()
         return True
 

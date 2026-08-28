@@ -38,7 +38,7 @@ DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
     "tokenizer_model": "",
     "api_key_configured": False,
 }
-DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {}
+DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {"skills": True}
 DEFAULT_RUNTIME_CONFIG: dict[str, object] = {"max_tool_calls": 32, "terminal_type": DEFAULT_TERMINAL_TYPE}
 DEFAULT_SANDBOX_CONFIG: dict[str, object] = {
     "policy_version": 2,

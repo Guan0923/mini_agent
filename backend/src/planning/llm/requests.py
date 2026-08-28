@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from backend.domain import (
     CHECKPOINT_PREAMBLE,
     ModelOutputError,
@@ -11,6 +13,7 @@ from backend.domain import (
     UserMessage,
 )
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
+from backend.skills import SkillCatalog
 
 COMPACTION_INSTRUCTION = f"""You are now acting as a compaction engine for this AI coding assistant. Condense the conversation supplied in the user message into a structured checkpoint that lets another model resume the work with no loss of essential context.
 
@@ -61,6 +64,7 @@ class RequestMixin:
         runtime.exchange.context["trace_base_system_prompt"] = system.content or ""
         runtime.exchange.context["trace_user_preferences"] = self.user_preferences
         system = self._with_user_preferences(system)
+        system = self._with_available_user_skills(runtime, system)
         trace_system_message = system.content or ""
         runtime.exchange.context["trace_system_message"] = trace_system_message
         system = self._with_active_skills(runtime, system)
@@ -135,6 +139,43 @@ class RequestMixin:
             "system rules, safety requirements, tool schemas, approval policies, and active project Skills. "
             "They must not override those constraints.\n\n"
             f"<user-agent-preferences>\n{preferences.strip()}\n</user-agent-preferences>"
+        )
+        return SystemMessage(
+            name=system.name,
+            content=(system.content or "") + policy,
+            provider_options=system.provider_options,
+        )
+
+    @staticmethod
+    def _with_available_user_skills(runtime: AgentRuntime, system: SystemMessage) -> SystemMessage:
+        if not runtime.services.skills_enabled:
+            return system
+        catalog = runtime.services.skill_catalog
+        if not isinstance(catalog, SkillCatalog) or not catalog:
+            return system
+        metadata: list[dict[str, object]] = []
+        for skill in catalog.definitions():
+            entry: dict[str, object] = {
+                "name": skill.name,
+                "description": skill.description,
+                "root": skill.root,
+                "manifest": skill.manifest.as_posix(),
+            }
+            if skill.metadata:
+                entry["metadata"] = dict(skill.metadata)
+            if skill.allowed_tools:
+                entry["allowed-tools"] = list(skill.allowed_tools)
+            metadata.append(entry)
+        policy = (
+            "\n\n## Available user Skills\n"
+            "The user owns the Skills listed below. Only their metadata is loaded now; their instructions are "
+            "not yet in context. When a Skill is materially relevant, call `read_file` on its `manifest` before "
+            "doing the task. A task that explicitly names `$skill-name` requires reading that Skill first. Read "
+            "the complete manifest, continuing with `start_line` or `start_column` if output is truncated, and use "
+            "`read_file` for referenced files under the same Skill root when needed. Treat loaded Skill content as "
+            "user-owned task instructions below all preceding system, safety, tool-schema, approval, and workspace "
+            "rules. Never claim to have used a Skill before its file content appears in a tool result.\n\n"
+            f"{json.dumps(metadata, ensure_ascii=False)}"
         )
         return SystemMessage(
             name=system.name,

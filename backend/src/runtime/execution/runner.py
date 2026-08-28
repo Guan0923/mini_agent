@@ -54,6 +54,7 @@ class AgentRunner:
         max_tool_calls: int | None = None,
         max_transport_retries: int = 5,
         skill_catalog: object | None = None,
+        skills_enabled: bool = True,
         skill_auto_select: bool = False,
         project_skill_gate: object | None = None,
         workspace_root: str | None = None,
@@ -70,6 +71,7 @@ class AgentRunner:
         self.planner = planner
         self.tools = tools
         self.skill_catalog = skill_catalog
+        self.skills_enabled = skills_enabled
         self.skill_auto_select = skill_auto_select
         self.project_skill_gate = project_skill_gate
         self.workspace_root = workspace_root
@@ -166,6 +168,7 @@ class AgentRunner:
             planner=self.planner,
             tools=self.tools,
             skill_catalog=self.skill_catalog,
+            skills_enabled=self.skills_enabled,
             skill_auto_select=self.skill_auto_select,
             project_skill_gate=self.project_skill_gate,
             checkpoint_store=self.checkpoints,
@@ -186,6 +189,7 @@ class AgentRunner:
         runtime.services.tools = self.tools
         runtime.services.checkpoint_store = self.checkpoints
         runtime.services.skill_catalog = self.skill_catalog
+        runtime.services.skills_enabled = self.skills_enabled
         runtime.services.skill_auto_select = self.skill_auto_select
         runtime.services.project_skill_gate = self.project_skill_gate
         runtime.services.subagents = self.subagents

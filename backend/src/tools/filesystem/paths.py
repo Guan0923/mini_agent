@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -46,6 +47,53 @@ def normalized_workspace_path(workspace: Path, path: str) -> str:
 class WorkspacePathMixin:
     def _read_path(self, path: str, *, allow_root: bool = False) -> Path:
         return self._resolve_relative(path, allow_root=allow_root)
+
+    def _read_file_path(self, path: str) -> Path:
+        """Resolve a workspace path or one absolute path in a read-only whitelist."""
+
+        if not isinstance(path, str) or not path.strip():
+            raise ToolError("path must be a non-empty string.")
+        normalised = path.strip().replace("\\", "/")
+        candidate = Path(normalised).expanduser() if normalised.startswith("~/") else Path(normalised)
+        if candidate.is_absolute() or re.match(r"^[A-Za-z]:", normalised):
+            if ".." in candidate.parts:
+                raise ToolError("Path must stay inside an allowed read root.")
+            return self._resolve_whitelisted_file(candidate)
+        return self._resolve_relative(path, allow_root=False)
+
+    def _resolve_whitelisted_file(self, candidate: Path) -> Path:
+        lexical = Path(os.path.abspath(candidate))
+        resolved = lexical.resolve()
+        for root in self.read_file_roots:
+            lexical_root = Path(os.path.abspath(root))
+            try:
+                lexical.relative_to(lexical_root)
+                resolved.relative_to(root)
+            except ValueError:
+                continue
+            self._reject_reparse_points(lexical, lexical_root)
+            return resolved
+        raise ToolError("Absolute path must stay inside an allowed read root.")
+
+    @staticmethod
+    def _reject_reparse_points(path: Path, root: Path) -> None:
+        current = root
+        candidates = [root]
+        try:
+            relative = path.relative_to(root)
+        except ValueError as exc:
+            raise ToolError("Path must stay inside an allowed read root.") from exc
+        for part in relative.parts:
+            current /= part
+            candidates.append(current)
+        for candidate in candidates:
+            try:
+                info = candidate.lstat()
+            except OSError as exc:
+                raise ToolError(f"Unable to inspect whitelisted path: {candidate}") from exc
+            attributes = int(getattr(info, "st_file_attributes", 0))
+            if stat.S_ISLNK(info.st_mode) or attributes & 0x400:
+                raise ToolError(f"Symbolic links and reparse points are not supported: {candidate}")
 
     def _write_path(self, path: str) -> Path:
         relative = self._relative_parts(path, allow_root=False)

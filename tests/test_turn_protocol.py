@@ -1644,6 +1644,111 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
         assert state.active_turn_streams == {}
 
 
+def test_real_http_sse_progressively_loads_user_skill_through_read_file(
+    tmp_path: Path,
+    monkeypatch,
+    local_sandbox_runtime: None,
+) -> None:
+    state = WebAppState(tmp_path / "web")
+    marker = "PROGRESSIVE_SKILL_MARKER"
+    manifest = state.paths.skills_dir / "demo-skill" / "SKILL.md"
+    reference = manifest.parent / "references" / "guide.md"
+    reference.parent.mkdir(parents=True)
+    manifest.write_text(
+        "---\nname: demo-skill\ndescription: Use for progressive loading tests.\n---\n"
+        f"Read references/guide.md and remember {marker}.\n",
+        encoding="utf-8",
+    )
+    reference.write_text("Nested Skill reference.", encoding="utf-8")
+    monkeypatch.setattr(
+        state, "model_config", lambda *_args, **_kwargs: ModelConfig("test", "https://example.test/v1", "test")
+    )
+
+    class ProgressiveSkillClient:
+        def __init__(self) -> None:
+            self.decision_requests: list[list] = []
+
+        def run(self, runtime: AgentRuntime) -> PreparedResponse:
+            if runtime.exchange.operation == "title":
+                return PreparedResponse(AssistantMessage(content="Skill loading"))
+            messages = list(runtime.exchange.messages)
+            self.decision_requests.append(messages)
+            if len(self.decision_requests) == 1:
+                return PreparedResponse(
+                    AssistantMessage(
+                        tool_messages=[
+                            ToolMessage(
+                                name="read_file",
+                                call_id="load_demo_skill",
+                                arguments={"path": str(manifest)},
+                            )
+                        ]
+                    )
+                )
+            loaded = any(
+                marker in (tool.content or "")
+                for message in messages
+                if isinstance(message, AssistantMessage)
+                for tool in message.tool_messages
+            )
+            return PreparedResponse(AssistantMessage(content=f"Skill loaded: {loaded}"))
+
+    model = ProgressiveSkillClient()
+
+    def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
+        application = build_application(
+            workspace or state.session_workspace(session_id),
+            planner_name="rule",
+            paths=state.paths,
+        )
+        tools = application.runner.tools
+        application.runner.planner = LLMPlanner(model, tools.specs(), tools.read_only_specs())
+        return application
+
+    monkeypatch.setattr(chat_routes, "build_local_application", local_application)
+
+    with TestClient(create_app(state)) as client:
+        sidebar = client.post("/api/sidebar-threads", json={}).json()
+        response = client.post(
+            "/api/turns",
+            json={
+                "id": "turn_progressive_skill",
+                "session_id": sidebar["session_id"],
+                "thread_id": sidebar["thread_id"],
+                "parent_id": "",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Use $demo-skill."}],
+                },
+                "permission_mode": "read_only",
+                "running_mode": "agent",
+            },
+        )
+
+        assert response.status_code == 200
+        assert '<SSE id="turn_progressive_skill" type="success"></SSE>' in response.text
+        assert len(model.decision_requests) == 2
+        first_system = model.decision_requests[0][0].content or ""
+        assert "Use for progressive loading tests." in first_system
+        assert manifest.as_posix() in first_system
+        assert marker not in first_system
+        assert any(
+            marker in (tool.content or "")
+            for message in model.decision_requests[1]
+            if isinstance(message, AssistantMessage)
+            for tool in message.tool_messages
+        )
+
+        persisted = client.get("/api/turns", params={"session_id": sidebar["session_id"]}).json()[-1]
+        items = [item for message in persisted["data"][0] for item in message["content"]]
+        tool_call = next(item for item in items if item["type"] == "tool_call")
+        tool_result = next(item for item in items if item["type"] == "tool_result")
+        assert tool_call["call_id"] == tool_result["call_id"] == "load_demo_skill"
+        assert tool_result["status"] == "success"
+        assert all(item["type"] != "skill_snapshot" for item in items)
+        assert any(item.get("text") == "Skill loaded: True" for item in items)
+
+
 def test_real_http_sse_generates_title_with_isolated_model_request(
     tmp_path: Path,
     monkeypatch,

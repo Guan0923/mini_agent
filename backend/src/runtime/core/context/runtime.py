@@ -42,6 +42,7 @@ class RuntimeServices:
     planner: object
     tools: object
     skill_catalog: object | None = None
+    skills_enabled: bool = True
     skill_auto_select: bool = False
     project_skill_gate: object | None = None
     checkpoint_store: object | None = None

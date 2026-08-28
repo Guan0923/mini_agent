@@ -30,6 +30,46 @@ def test_read_file_validates_ranges_paths_and_utf8(tmp_path: Path) -> None:
         files.read_file("binary.dat")
 
 
+def test_read_file_allows_only_absolute_paths_in_read_only_whitelist(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    skill_root = tmp_path / "user" / ".mini_agent" / "skills"
+    nested = skill_root / "brainstorming" / "references" / "guide.md"
+    outside = tmp_path / "outside.txt"
+    workspace.mkdir()
+    nested.parent.mkdir(parents=True)
+    nested.write_text("skill guide", encoding="utf-8")
+    outside.write_text("secret", encoding="utf-8")
+    files = WorkspaceFiles(workspace, read_file_roots=(skill_root,))
+
+    result = files.read_file(str(nested))
+
+    assert result.endswith("\nskill guide")
+    assert nested.as_posix() in result
+    with pytest.raises(ToolError, match="allowed read root"):
+        files.read_file(str(outside))
+    with pytest.raises(ToolError, match="relative to the workspace"):
+        files.glob("*.md", path=str(skill_root))
+    with pytest.raises(ToolError, match="relative to the workspace"):
+        files.grep("guide", path=str(skill_root))
+    with pytest.raises(ToolError, match="relative to the workspace"):
+        files.write_file(str(nested), "changed")
+
+
+def test_read_file_expands_tilde_only_inside_configured_skill_root(tmp_path: Path, monkeypatch) -> None:
+    profile = tmp_path / "profile"
+    workspace = tmp_path / "workspace"
+    skill_root = profile / ".mini_agent" / "skills"
+    manifest = skill_root / "demo" / "SKILL.md"
+    workspace.mkdir()
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("demo instructions", encoding="utf-8")
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    monkeypatch.setenv("HOME", str(profile))
+    files = WorkspaceFiles(workspace, read_file_roots=(skill_root,))
+
+    assert files.read_file("~/.mini_agent/skills/demo/SKILL.md").endswith("\ndemo instructions")
+
+
 def test_glob_matches_root_and_nested_files_and_skips_internal_directories(tmp_path: Path) -> None:
     (tmp_path / "root.py").write_text("root", encoding="utf-8")
     (tmp_path / "src" / "nested").mkdir(parents=True)
