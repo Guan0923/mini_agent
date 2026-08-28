@@ -1,5 +1,6 @@
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -528,7 +529,7 @@ def test_transient_http_status_retries_with_retry_after(monkeypatch, status_code
     events = []
     runtime.services.publish = events.append
     delays = []
-    monkeypatch.setattr("backend.providers.client.time.sleep", delays.append)
+    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=delays.append))
 
     response = client.run(runtime)
 
@@ -559,7 +560,7 @@ def test_non_retryable_http_status_fails_immediately(monkeypatch) -> None:
         adapter=CustomAdapter(),
     )
     runtime = runtime_for_custom()
-    monkeypatch.setattr("backend.providers.client.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
 
     with pytest.raises(ModelRequestError, match="HTTPError"):
         client.run(runtime)
@@ -580,7 +581,7 @@ def test_invalid_json_http_body_retries(monkeypatch) -> None:
         adapter=CustomAdapter(),
     )
     runtime = runtime_for_custom()
-    monkeypatch.setattr("backend.providers.client.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
 
     response = client.run(runtime)
 
@@ -599,7 +600,7 @@ def test_stream_retries_only_before_the_first_event(monkeypatch) -> None:
     session = SequencedStreamSession([first, second])
     client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
     runtime = runtime_for_stream()
-    monkeypatch.setattr("backend.providers.client.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
 
     response = client.run(runtime)
 
@@ -680,7 +681,7 @@ def test_connection_timeout_retries(monkeypatch) -> None:
     )
     runtime = runtime_for_custom()
     delays = []
-    monkeypatch.setattr("backend.providers.client.time.sleep", delays.append)
+    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=delays.append))
 
     response = client.run(runtime)
 

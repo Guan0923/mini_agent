@@ -247,9 +247,7 @@ class CooperativePausePlanner(LLMPlanner):
                             name="todo_write",
                             call_id="todo_complete_running",
                             arguments={
-                                "todos": [
-                                    {"content": "Complete the browser lifecycle", "status": "in_progress"}
-                                ]
+                                "todos": [{"content": "Complete the browser lifecycle", "status": "in_progress"}]
                             },
                         )
                     ]
@@ -261,11 +259,7 @@ class CooperativePausePlanner(LLMPlanner):
                         ToolMessage(
                             name="todo_write",
                             call_id="todo_complete_done",
-                            arguments={
-                                "todos": [
-                                    {"content": "Complete the browser lifecycle", "status": "completed"}
-                                ]
-                            },
+                            arguments={"todos": [{"content": "Complete the browser lifecycle", "status": "completed"}]},
                         )
                     ]
                 )
