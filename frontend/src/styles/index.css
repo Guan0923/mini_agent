@@ -1,6 +1,7 @@
 @import "./foundation.css";
 @import "./chat-messages.css";
 @import "./chat-runtime.css";
+@import "./trace.css";
 @import "./chat-markdown.css";
 @import "./chat-todo.css";
 @import "./composer-core.css";

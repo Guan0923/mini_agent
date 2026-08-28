@@ -107,6 +107,7 @@ def start_external_tools(
                         schema,
                         requires_confirmation=True,
                         read_only=False,
+                        trace_origin={"kind": "mcp", "server": server.name, "tool": definition_name},
                     )
                 )
     except Exception:

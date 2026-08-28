@@ -45,7 +45,6 @@ class PlanControlMixin:
 
         tool = response.tool_messages[0]
         runtime.state.active_tool_index = 0
-        runtime.run.add_event("model", "Plan Review call validated", tool=tool.name, mode=runtime.run.mode)
         try:
             plan = parse_plan_review(tool.arguments)
         except ValueError as exc:
@@ -82,7 +81,6 @@ class PlanControlMixin:
 
         tool = response.tool_messages[0]
         runtime.state.active_tool_index = 0
-        runtime.run.add_event("model", "Plan question call validated", tool=tool.name, mode=runtime.run.mode)
         try:
             questions = parse_user_input_questions(tool.arguments)
         except ValueError as exc:
@@ -104,7 +102,6 @@ class PlanControlMixin:
             {"questions": question_data, "call_id": tool.call_id},
             questions=questions,
         )
-        runtime.run.add_event("user_input_requested", request.message, call_id=tool.call_id, questions=question_data)
         _publish(runtime, RuntimeEvent("user_input_requested", request.message, request.data))
         runtime.save()
 
@@ -144,9 +141,6 @@ class PlanControlMixin:
         tool.content = format_user_input_answers(answers)
         tool.retryable = False
         _publish_tool_result(runtime, tool)
-        runtime.run.add_event(
-            "user_input_received", "Plan question answers received", call_id=tool.call_id, answers=answers
-        )
         _publish(
             runtime,
             RuntimeEvent(

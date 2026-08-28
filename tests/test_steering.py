@@ -40,7 +40,8 @@ def test_steering_after_model_response_discards_stale_tool_call() -> None:
         SteeringPlanner(),
         ToolRegistry([Tool("work", "Work", lambda: calls.append("called") or "done")]),
     )
-    runtime = runner.new_runtime(task="start")
+    events = []
+    runtime = runner.new_runtime(task="start", on_event=events.append)
     runtime.services.steering = sequence_handler([[], ["change direction"], [], []])
 
     result = runner.run(runtime)
@@ -48,7 +49,7 @@ def test_steering_after_model_response_discards_stale_tool_call() -> None:
     assert result.status == "completed"
     assert result.final_answer == "adjusted: change direction"
     assert calls == []
-    assert any(event.kind == "steering_applied" for event in result.events)
+    assert any(event.kind == "steering_applied" for event in events)
 
 
 def test_cancellation_after_model_response_discards_stale_tool_call() -> None:
@@ -75,7 +76,10 @@ def test_cancellation_after_model_response_discards_stale_tool_call() -> None:
     assert result.status == "cancelled"
     assert result.final_answer == "Run cancelled by user"
     assert calls == []
-    assert any(event.kind == "tool_failed" for event in result.events)
+    assert result.tool_calls == 0
+    assert not any(
+        isinstance(message, AssistantMessage) and message.tool_messages for message in runtime.state.messages
+    )
 
 
 def test_cancellation_during_tool_marks_current_and_remaining_tools_failed() -> None:

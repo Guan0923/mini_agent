@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -18,8 +21,10 @@ from backend.api.chat import routes as chat_routes  # noqa: E402
 from backend.api.routes import turns as turn_routes  # noqa: E402
 from backend.api.state import WebAppState  # noqa: E402
 from backend.domain import AssistantMessage, ToolMessage  # noqa: E402
+from backend.mcp.client import start_external_tools  # noqa: E402
+from backend.mcp.config import McpServerConfig  # noqa: E402
 from backend.planning import LLMPlanner, RuleBasedPlanner  # noqa: E402
-from backend.providers import ModelConfig  # noqa: E402
+from backend.providers import LLMClient, ModelConfig  # noqa: E402
 from backend.runtime import build_application  # noqa: E402
 from backend.runtime.application import factory as application_factory  # noqa: E402
 from backend.runtime.core.context import PreparedResponse  # noqa: E402
@@ -67,6 +72,118 @@ state.model_config = lambda _provider_name=None: ModelConfig(
     "https://example.test/v1",
     "deterministic-e2e",
 )
+
+TRACE_MODEL_PORT = int(os.environ.get("MINI_AGENT_E2E_MODEL_PORT", "18081"))
+TRACE_MODEL_CONFIG = ModelConfig(
+    "local-test-key",
+    f"http://127.0.0.1:{TRACE_MODEL_PORT}/v1",
+    "trace-e2e-model",
+    max_tokens=512,
+    context_size=8_192,
+    provider_name="trace-http",
+)
+
+
+class TraceModelHandler(BaseHTTPRequestHandler):
+    """Deterministic loopback Chat Completions endpoint with streaming support."""
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        if self.path != "/v1/chat/completions":
+            self.send_error(404)
+            return
+        if payload.get("stream"):
+            events = [
+                {
+                    "id": "trace-e2e",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "trace-e2e-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "reasoning_content": "Trace reasoning from HTTP."},
+                            "finish_reason": None,
+                        }
+                    ],
+                    "usage": None,
+                },
+                {
+                    "id": "trace-e2e",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "trace-e2e-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": "Trace response from HTTP."},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": None,
+                },
+                {"choices": [], "usage": {"input_tokens": 8, "output_tokens": 6, "total_tokens": 14}},
+            ]
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+            encoded = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
+        body = json.dumps(
+            {
+                "id": "trace-e2e",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "trace-e2e-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "reasoning_content": "Trace reasoning from HTTP.",
+                            "content": "Trace response from HTTP.",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"input_tokens": 8, "output_tokens": 6, "total_tokens": 14},
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+trace_model_server = ThreadingHTTPServer(("127.0.0.1", TRACE_MODEL_PORT), TraceModelHandler)
+threading.Thread(target=trace_model_server.serve_forever, name="trace-e2e-model", daemon=True).start()
+
+trace_skill = state.paths.skills_dir / "trace-audit"
+trace_skill.mkdir(parents=True, exist_ok=True)
+(trace_skill / "SKILL.md").write_text(
+    "---\nname: trace-audit\ndescription: Audit the Trace page.\n---\n\n"
+    "Confirm that the complete local Skill instructions are visible in Trace.\n",
+    encoding="utf-8",
+)
+trace_mcp_resources = start_external_tools(
+    (
+        McpServerConfig(
+            "trace",
+            sys.executable,
+            (str(ROOT / "tests" / "support" / "trace_mcp_server.py"),),
+            cwd=str(ROOT),
+        ),
+    )
+)
+trace_mcp_tool = trace_mcp_resources[0]
 
 
 STRUCTURED_CHECKPOINT = """## Primary Request and Intent
@@ -127,9 +244,17 @@ class CooperativePausePlanner(LLMPlanner):
     def __init__(self) -> None:
         super().__init__(DeterministicCompactionClient(), [], [])
         self._rule_planner = RuleBasedPlanner()
+        self._trace_planner = LLMPlanner(
+            LLMClient(TRACE_MODEL_CONFIG),
+            [trace_mcp_tool.spec],
+            [trace_mcp_tool.spec],
+            user_preferences="Trace E2E preference: concise local audit.",
+        )
 
     def decide(self, runtime):
         task = runtime.run.task.strip()
+        if "trace audit e2e" in task:
+            return self._trace_planner.decide(runtime)
         if runtime.run.mode == "plan" and task == PLAN_REVIEW_TASK:
             return AssistantMessage(
                 tool_messages=[
@@ -276,6 +401,7 @@ def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
             ),
             Tool("slow_tool", "Run one deterministic slow tool.", slow_tool),
             Tool("forbidden_tool", "Must be skipped after steering.", lambda: "Forbidden tool executed."),
+            trace_mcp_tool,
         ]
     )
     return application

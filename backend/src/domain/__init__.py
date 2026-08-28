@@ -1,6 +1,6 @@
 """Stable domain types with no dependency on the UI, tools, or providers."""
 
-from .errors import ModelOutputError, PlanningError
+from .errors import ModelOutputError, PlanningError, TracePersistenceError
 from .messages import (
     CHECKPOINT_PREAMBLE,
     AssistantMessage,
@@ -87,12 +87,11 @@ from .state import (
     RunState,
     RunStatus,
     RunStopReason,
-    RuntimeMessage,
     RunTrigger,
-    TraceEvent,
     new_run_id,
     new_workflow_id,
 )
+from .turn_trace import TurnTraceRequest
 
 __all__ = [
     "AgentAction",
@@ -133,7 +132,6 @@ __all__ = [
     "ResumePreview",
     "RunMode",
     "RunProvenance",
-    "RuntimeMessage",
     "RuntimeState",
     "RuntimeStateNode",
     "RuntimeStateTree",
@@ -156,7 +154,8 @@ __all__ = [
     "ToolStatus",
     "TIME_ZONE_OPTIONS",
     "TimeZoneOption",
-    "TraceEvent",
+    "TracePersistenceError",
+    "TurnTraceRequest",
     "UserMessage",
     "message_from_dict",
     "message_to_dict",

@@ -93,8 +93,6 @@ export async function setTimezone(_sessionId: string, timezone: string): Promise
   return { timezone };
 }
 
-export async function getTrace(_sessionId: string): Promise<Record<string, unknown>> { return {}; }
-
 export async function submitDecision(decisionId: string, choice: string, options: { supplement?: string; answers?: Record<string, string[]> } = {}): Promise<void> {
   await requestJson("/api/decisions", {
     method: "POST",

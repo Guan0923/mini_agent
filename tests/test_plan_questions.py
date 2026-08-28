@@ -139,6 +139,7 @@ def test_plan_question_answer_is_saved_once_then_plan_review_starts(tmp_path: Pa
     planner = QuestionThenPlanPlanner()
     service = build_service(tmp_path, planner)
     request_kinds: list[str] = []
+    events = []
 
     def interrupt(request):
         request_kinds.append(request.kind)
@@ -147,7 +148,7 @@ def test_plan_question_answer_is_saved_once_then_plan_review_starts(tmp_path: Pa
             return InterruptDecision("answer", answers={"storage": ["PostgreSQL"]})
         return InterruptDecision("stay_in_plan_mode")
 
-    result = service.run_task("Plan the change", mode="plan", interrupt=interrupt)
+    result = service.run_task("Plan the change", mode="plan", interrupt=interrupt, on_event=events.append)
 
     assert result.status == "completed"
     assert request_kinds == ["question", "plan"]
@@ -167,8 +168,8 @@ def test_plan_question_answer_is_saved_once_then_plan_review_starts(tmp_path: Pa
     assert review_message.tool_messages[0].arguments == {"plan": PLAN}
     assert review_message.tool_messages[0].status == "succeeded"
     assert len([message for message in service.runtime.state.messages if message is question_message]) == 1
-    assert [event.kind for event in result.events].count("user_input_requested") == 1
-    assert [event.kind for event in result.events].count("user_input_received") == 1
+    assert [event.kind for event in events].count("user_input_requested") == 1
+    assert [event.kind for event in events].count("user_input_received") == 1
 
 
 def test_plan_question_cancellation_persists_failed_call_without_plan_review(tmp_path: Path) -> None:

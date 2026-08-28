@@ -77,7 +77,13 @@ def runtime_for(messages, *, turn_start_index: int) -> AgentRuntime:
         history=runtime.state.messages,
         turn_start_index=turn_start_index,
     )
+    runtime.exchange.context["test_events"] = []
+    runtime.services.publish = runtime.exchange.context["test_events"].append
     return runtime
+
+
+def runtime_events(runtime: AgentRuntime):
+    return runtime.exchange.context["test_events"]
 
 
 def test_context_manager_preserves_incomplete_messages_and_pending_tools() -> None:
@@ -104,7 +110,7 @@ def test_context_manager_preserves_incomplete_messages_and_pending_tools() -> No
     assert runtime.state.messages == original
     assert messages[1:] == original
     assert runtime.run.turn_start_index == 2
-    assert not any(event.kind.startswith("context_compaction") for event in runtime.run.events)
+    assert not any(event.kind.startswith("context_compaction") for event in runtime_events(runtime))
 
 
 def test_automatic_compaction_compresses_only_completed_history() -> None:
@@ -131,11 +137,11 @@ def test_automatic_compaction_compresses_only_completed_history() -> None:
     ]
     assert runtime.run.turn_start_index == 1
     assert messages[1:] == runtime.state.messages
-    assert [event.kind for event in runtime.run.events] == [
+    assert [event.kind for event in runtime_events(runtime) if event.kind.startswith("context_compaction")] == [
         "context_compaction_started",
         "context_compaction_completed",
     ]
-    completed = runtime.run.events[-1]
+    completed = next(event for event in runtime_events(runtime) if event.kind == "context_compaction_completed")
     assert completed.data["trigger"] == "automatic"
     assert completed.data["estimated_tokens_after"] == 20
     assert completed.data["target_tokens"] == 80
@@ -180,7 +186,7 @@ def test_summary_failure_keeps_original_history_and_records_failure() -> None:
         )
 
     assert runtime.state.messages == original
-    assert [event.kind for event in runtime.run.events] == [
+    assert [event.kind for event in runtime_events(runtime) if event.kind.startswith("context_compaction")] == [
         "context_compaction_started",
         "context_compaction_failed",
     ]
@@ -198,7 +204,7 @@ def test_uncompressible_current_request_over_context_size_fails_without_deleting
         )
 
     assert runtime.state.messages == original
-    assert not runtime.run.events
+    assert not any(event.kind.startswith("context_compaction") for event in runtime_events(runtime))
 
 
 def test_manual_compaction_summarizes_all_finished_history_and_tool_results() -> None:
@@ -234,11 +240,11 @@ def test_manual_compaction_summarizes_all_finished_history_and_tool_results() ->
         SystemMessage(name="context_summary", content=f"{CHECKPOINT_PREAMBLE}\n\ndurable summary"),
     ]
     assert runtime.run.turn_start_index == 1
-    assert [event.kind for event in runtime.run.events] == [
+    assert [event.kind for event in runtime_events(runtime) if event.kind.startswith("context_compaction")] == [
         "context_compaction_started",
         "context_compaction_completed",
     ]
-    assert runtime.run.events[-1].data["trigger"] == "manual"
+    assert runtime_events(runtime)[-1].data["trigger"] == "manual"
 
 
 def test_manual_compaction_failure_leaves_history_unchanged() -> None:
@@ -256,7 +262,7 @@ def test_manual_compaction_failure_leaves_history_unchanged() -> None:
         )
 
     assert runtime.state.messages == original
-    assert [event.kind for event in runtime.run.events] == [
+    assert [event.kind for event in runtime_events(runtime) if event.kind.startswith("context_compaction")] == [
         "context_compaction_started",
         "context_compaction_failed",
     ]
@@ -270,7 +276,7 @@ def test_candidate_over_context_target_keeps_history_unchanged() -> None:
         ContextManager(FakeEstimator([100, 81])).compact(runtime, summarize=lambda _transcript: "too large")
 
     assert runtime.state.messages == original
-    failed = runtime.run.events[-1]
+    failed = runtime_events(runtime)[-1]
     assert failed.kind == "context_compaction_failed"
     assert failed.data["target_tokens"] == 80
 
@@ -564,7 +570,7 @@ def test_context_manager_uses_input_estimate_without_output_reservation() -> Non
         summarize=lambda _transcript: "unused",
     )
 
-    assert not any(event.kind.startswith("context_compaction") for event in runtime.run.events)
+    assert not any(event.kind.startswith("context_compaction") for event in runtime_events(runtime))
     usage = next(event for event in events if event.kind == "context_usage")
     assert usage.data["input_tokens"] == 90
     assert usage.data["estimated_tokens"] == 90

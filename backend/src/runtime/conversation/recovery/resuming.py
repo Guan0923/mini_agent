@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from backend.domain import ResumePreview, RunState, Session
+from backend.domain.runtime_state import RuntimeState as RuntimeTreeState
 
 from ...core.context import AgentRuntime, text_messages
 from ...core.contracts import (
@@ -36,6 +37,10 @@ class ResumableConversation(Protocol):
 
     def _reload_active_session(self) -> None: ...
 
+    def _bind_resume_node_bridge(self, turn_id: str, on_event: EventHandler | None): ...
+
+    def _finish_resume_node_bridge(self, state: RunState) -> None: ...
+
 
 def prepare_resume(conversation: ResumableConversation, session_id: str | None = None) -> ResumePreview:
     """Inspect a resume target without changing the active conversation."""
@@ -50,7 +55,11 @@ def prepare_resume(conversation: ResumableConversation, session_id: str | None =
         if session_id:
             raise ValueError(f"Unknown session: {session_id}")
         raise ValueError("No saved session is available to resume.")
-    return build_preview(session, store.load_runtime(session.session_id))
+    state = store.load_runtime(session.session_id)
+    run = state.current_run if state is not None else None
+    finder = getattr(store, "find_node", None)
+    turn = finder(run.turn_id) if run is not None and run.turn_id and callable(finder) else None
+    return build_preview(session, state, turn if isinstance(turn, RuntimeTreeState) else None)
 
 
 def resume_session(
@@ -110,7 +119,15 @@ def resume_session(
         raise RuntimeError(
             f"Workflow belongs to workspace {state.workspace_root}; current workspace is {current_workspace}."
         )
-    source, resumed = reconstruct_attempt(state)
+    run = state.current_run
+    turn = None
+    if run is not None and run.turn_id:
+        settle = getattr(store, "settle_indeterminate_tool_calls", None)
+        finder = getattr(store, "find_node", None)
+        turn = finder(run.turn_id) if callable(finder) else None
+        if callable(settle):
+            settle(run.turn_id)
+    source, resumed = reconstruct_attempt(state, turn if isinstance(turn, RuntimeTreeState) else None)
     store.resume_runtime(source, resumed)
     session = store.get_session(preview.session_id)
     assert session is not None
@@ -124,13 +141,18 @@ def resume_session(
     conversation.runtime.services.steering = steering
     conversation.runtime.services.cancel_requested = cancel_requested
     conversation.runtime.services.suspend_requested = suspend_requested
+    if resumed.current_run is None or not resumed.current_run.turn_id:
+        raise RuntimeError("The resumed workflow is not bound to a canonical Turn.")
+    bridge = conversation._bind_resume_node_bridge(resumed.current_run.turn_id, on_event)
     if request_parameters:
         conversation.runtime.state.request_parameters.update(dict(request_parameters))
     try:
         result = conversation.runner.resume(conversation.runtime)
     except Exception as exc:
+        bridge.finish_exception(exc)
         conversation._record_unexpected_failure(exc)
         raise
+    conversation._finish_resume_node_bridge(result)
     store.finish_turn(preview.session_id, result.run_id, result.status, result.final_answer)
     conversation.conversation = text_messages(conversation.runtime.state.messages)
     conversation._reload_active_session()

@@ -112,6 +112,7 @@ class ConversationNodeBridgeMixin:
         *,
         source_node_id: str | None = None,
         compaction_turn_id: str | None = None,
+        adopt_existing: bool = False,
     ) -> RuntimeEventNodeBridge | None:
         """Create a local bridge from the latest durable node configuration."""
 
@@ -168,6 +169,7 @@ class ConversationNodeBridgeMixin:
             thread_id=latest.thread_id if latest is not None else session.session_id,
             source_node_id=latest.id if source_node_id and latest is not None else None,
             compaction_turn_id=compaction_turn_id,
+            adopt_existing=adopt_existing,
             prompt=prompt,
             user=str(getattr(self.runtime.state, "user", "") or ""),
             provider_name=provider_name,
@@ -179,6 +181,58 @@ class ConversationNodeBridgeMixin:
             references=references,
             emit=lambda _frame: None,
         )
+
+    def _bind_resume_node_bridge(self, turn_id: str, on_event: EventHandler | None) -> RuntimeEventNodeBridge:
+        """Adopt the interrupted Turn so recovery appends Items in place."""
+
+        if self.runtime is None:
+            raise RuntimeError("Conversation runtime is unavailable for resume.")
+        bridge = self._node_bridge_for_runtime(
+            "",
+            source_node_id=turn_id,
+            adopt_existing=True,
+        )
+        if bridge is None:
+            raise RuntimeError("The Turn store cannot resume the interrupted Turn.")
+        self.runtime_node_bridge = bridge
+        self._node_bridge_events_external = False
+        bridge.bind_runtime(self.runtime)
+        current = bridge.start()
+        run = self.runtime.run
+        run.thread_id = current.thread_id
+        run.turn_id = current.id
+        run.data_idx = current.current_data_idx
+
+        def sink(event: RuntimeEvent) -> None:
+            bridge.handle(event)
+            if on_event is not None:
+                on_event(event)
+
+        self.runtime.services.on_event = sink
+        return bridge
+
+    def _finish_resume_node_bridge(self, state) -> None:
+        """Finalize and release an embedding-owned resumed Turn bridge."""
+
+        bridge = self.runtime_node_bridge
+        if bridge is None or self._node_bridge_events_external:
+            return
+        if state.status in {"completed", "success"}:
+            bridge.finish("success", state.final_answer or "")
+        elif state.status == "cancelled":
+            bridge.finish("paused", state.final_answer or "", category="user")
+        elif bridge.abort_category is not None:
+            bridge.finish(
+                "paused" if bridge.abort_category == "network" else "failed",
+                state.final_answer or "",
+                category=bridge.abort_category,
+                code=bridge.abort_code,
+            )
+        else:
+            bridge.finish("failed", state.final_answer or "", category="agent", code="runtime_failed")
+        if bridge.closed:
+            self.runtime_node_bridge = None
+            self._node_bridge_events_external = False
 
     def _bind_node_bridge(
         self,
@@ -202,6 +256,12 @@ class ConversationNodeBridgeMixin:
         bridge.bind_runtime(self.runtime)
         if not bridge.started:
             bridge.start()
+        current = bridge._current()
+        if current is not None and self.runtime.state.current_run is not None:
+            run = self.runtime.state.current_run
+            run.thread_id = current.thread_id
+            run.turn_id = current.id
+            run.data_idx = current.current_data_idx
         if self._node_bridge_events_external:
             # The caller (Web SSE) already invokes bridge.handle from its
             # transport sink and owns frame publication/active registration.

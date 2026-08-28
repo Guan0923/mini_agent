@@ -87,17 +87,19 @@ class PlanProposalPlanner:
 
 def test_plan_review_defaults_to_staying_in_plan_mode_without_an_interrupt_handler() -> None:
     runner = AgentRunner(PlanProposalPlanner(), ToolRegistry())
+    events = []
     runtime = runner.new_runtime(
         task="prepare a plan",
         mode="plan",
         confirm=lambda _message: True,
+        on_event=events.append,
     )
 
     result = runner.run(runtime)
 
     assert result.status == "completed"
     assert result.mode == "plan"
-    assert any(event.kind == "approval_granted" for event in result.events)
+    assert any(event.kind == "approval_granted" for event in events)
 
 
 class ToolPlanProposalPlanner:

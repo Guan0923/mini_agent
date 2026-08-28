@@ -58,6 +58,8 @@ class RequestMixin:
         extra: list[UserMessage] | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> list:
+        runtime.exchange.context["trace_base_system_prompt"] = system.content or ""
+        runtime.exchange.context["trace_user_preferences"] = self.user_preferences
         system = self._with_user_preferences(system)
         system = self._with_active_skills(runtime, system)
         canonical_nodes = runtime.model_nodes()
@@ -105,6 +107,8 @@ class RequestMixin:
     ) -> list:
         """Build a selector request without exposing previous conversation turns."""
 
+        runtime.exchange.context["trace_base_system_prompt"] = system.content or ""
+        runtime.exchange.context["trace_user_preferences"] = self.user_preferences
         system = self._with_user_preferences(system)
         system = self._with_active_skills(runtime, system)
         canonical_nodes = runtime.model_nodes()
@@ -161,6 +165,8 @@ class RequestMixin:
     def _summarize_history(self, runtime: AgentRuntime, transcript: str) -> str:
         previous_usage = runtime.state.turn_usage
         try:
+            runtime.exchange.context["trace_base_system_prompt"] = COMPACTION_INSTRUCTION
+            runtime.exchange.context["trace_user_preferences"] = self.user_preferences
             prepared = self._request(
                 runtime,
                 [

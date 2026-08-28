@@ -281,7 +281,6 @@ class ContextManager:
 
     @staticmethod
     def _record(runtime: AgentRuntime, kind: str, message: str, data: dict[str, Any]) -> None:
-        runtime.run.add_event(kind, message, **data)  # type: ignore[arg-type]
         (runtime.services.publish or (lambda _event: None))(RuntimeEvent(kind, message, data))  # type: ignore[arg-type]
 
     @staticmethod

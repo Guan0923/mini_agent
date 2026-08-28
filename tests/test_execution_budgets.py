@@ -82,12 +82,13 @@ def test_default_budget_allows_one_plus_four_plus_six_plan_reads_then_answer() -
 
 def test_over_budget_tool_batch_is_rejected_atomically_and_finalized() -> None:
     calls: list[str] = []
+    events = []
     planner = BatchedPlanner([3])
     state = AgentRunner(
         planner,
         registry(calls),
         max_tool_calls=2,
-    ).run("Inspect")
+    ).run("Inspect", on_event=events.append)
 
     assert state.status == "failed"
     assert state.final_answer == "Useful budget summary"
@@ -97,7 +98,7 @@ def test_over_budget_tool_batch_is_rejected_atomically_and_finalized() -> None:
         message for message in state.history if isinstance(message, AssistantMessage) and message.tool_messages
     )
     assert all(tool.status == "failed" for tool in rejected.tool_messages)
-    error = next(event for event in reversed(state.events) if event.kind == "error")
+    error = next(event for event in reversed(events) if event.kind == "error")
     assert error.data["limit_type"] == "tool_calls"
     assert error.data["limit"] == 2
     assert error.data["tool_calls"] == 0
@@ -121,16 +122,17 @@ def test_model_turns_are_metrics_without_a_model_turn_budget() -> None:
 
 @pytest.mark.parametrize("planner", [NoFinalizerPlanner(), BrokenFinalizerPlanner()])
 def test_budget_finalization_has_a_deterministic_fallback(planner) -> None:
+    events = []
     state = AgentRunner(
         planner,
         registry(),
         max_tool_calls=1,
-    ).run("Inspect")
+    ).run("Inspect", on_event=events.append)
 
     assert state.status == "failed"
     assert state.final_answer is not None
     assert "Execution budget exhausted" in state.final_answer
-    error = next(event for event in reversed(state.events) if event.kind == "error")
+    error = next(event for event in reversed(events) if event.kind == "error")
     assert error.data["finalizer"] == "fallback"
     if isinstance(planner, BrokenFinalizerPlanner):
         assert error.data["finalization_error"] == "provider unavailable"
@@ -170,13 +172,17 @@ def test_settings_serialize_new_budgets_and_load_legacy_max_actions() -> None:
     )
 
 
-def test_run_state_model_turns_round_trip_and_legacy_default() -> None:
-    state = RunState(task="Inspect", mode="agent", model_turns=3)
+def test_run_state_explicit_counters_round_trip_and_default_to_zero() -> None:
+    state = RunState(task="Inspect", mode="agent", model_turns=3, model_calls=4, tool_calls=5, retries=2)
     assert RunState.from_dict(state.to_dict()).model_turns == 3
+    restored = RunState.from_dict(state.to_dict())
+    assert (restored.model_calls, restored.tool_calls, restored.retries) == (4, 5, 2)
 
     payload = state.to_dict()
-    payload.pop("model_turns")
-    assert RunState.from_dict(payload).model_turns == 0
+    for key in ("model_turns", "model_calls", "tool_calls", "retries"):
+        payload.pop(key)
+    restored = RunState.from_dict(payload)
+    assert (restored.model_turns, restored.model_calls, restored.tool_calls, restored.retries) == (0, 0, 0, 0)
 
 
 def test_deleted_tool_budget_arguments_are_not_public_contract() -> None:

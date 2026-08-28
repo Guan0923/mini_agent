@@ -252,6 +252,53 @@ class SQLiteNodeMixin:
             self._touch_session(connection, node.session_id, utc_iso())
         return node
 
+    def settle_indeterminate_tool_calls(self, turn_id: str) -> TreeRuntimeState:
+        """Seal running tool calls whose side effects cannot be determined after process loss."""
+
+        node = _require_runtime_turn(self.find_node(turn_id), turn_id)
+        data_idx = node.current_data_idx
+        messages = node.data[data_idx]
+        terminal_results = {
+            str(item.get("call_id"))
+            for message in messages
+            for item in message.get("content", [])
+            if item.get("type") == "tool_result" and item.get("status") in {"success", "failed"} and item.get("call_id")
+        }
+        uncertain: list[tuple[str, str]] = []
+        for message in messages:
+            for item in message.get("content", []):
+                if item.get("type") != "tool_call" or item.get("status") != "running":
+                    continue
+                call_id = str(item.get("call_id") or "")
+                if not call_id or call_id in terminal_results:
+                    continue
+                item["status"] = "failed"
+                item["replay_safe"] = False
+                uncertain.append((call_id, str(item.get("name") or "unknown")))
+        if not uncertain:
+            return node
+        if messages[-1]["role"] != "assistant":
+            messages.append({"role": "assistant", "content": []})
+        for call_id, tool in uncertain:
+            messages[-1]["content"].append(
+                {
+                    "type": "tool_result",
+                    "call_id": call_id,
+                    "tool": tool,
+                    "content": (
+                        "Outcome is indeterminate because the process stopped after the tool call began. "
+                        "This call will not be replayed automatically."
+                    ),
+                    "status": "failed",
+                    "replay_safe": False,
+                    "retryable": False,
+                    "failure_code": "indeterminate",
+                }
+            )
+        node = TreeRuntimeState.from_dict(node.to_dict())
+        self.update_node(node)
+        return node
+
     def fork_turn_node(
         self, turn_id: str, *, new_turn_id: str | None = None, thread_id: str | None = None
     ) -> TreeRuntimeState:

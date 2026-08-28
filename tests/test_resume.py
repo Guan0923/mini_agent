@@ -105,12 +105,17 @@ def test_resume_creates_linked_attempt_without_replaying_indeterminate_tool(tmp_
         tool for message in result.history if isinstance(message, AssistantMessage) for tool in message.tool_messages
     ]
     assert [(tool.call_id, tool.status) for tool in indeterminate] == [("call_side_effect", "indeterminate")]
-    source_messages = store.load_runtime_messages(session_id, source_run_id)
-    assert {message.kind for message in source_messages} >= {"run_interrupted", "tool_indeterminate"}
-    indeterminate_event = next(message for message in source_messages if message.kind == "tool_indeterminate")
-    assert indeterminate_event.data["session_id"] == session_id
-    assert indeterminate_event.data["workspace_root"] == str(tmp_path.resolve())
-    assert indeterminate_event.data["workflow_id"] == result.provenance.workflow_id
+    turn = store.find_node(result.turn_id)
+    assert turn is not None and turn.status == "success"
+    items = [item for message in turn.data[result.data_idx] for item in message["content"]]
+    tool_call = next(item for item in items if item["type"] == "tool_call")
+    assert tool_call["status"] == "failed"
+    assert tool_call["replay_safe"] is False
+    tool_result = next(item for item in items if item["type"] == "tool_result")
+    assert tool_result["status"] == "failed"
+    assert tool_result["failure_code"] == "indeterminate"
+    assert tool_result["retryable"] is False
+    assert any(item["type"] == "text" and "Recovered without replaying" in item["text"] for item in items)
     archived = store.load_runtime(session_id)
     assert archived is not None
     assert any(summary.run_id == source_run_id for summary in archived.run_history)
@@ -323,4 +328,10 @@ def test_checkpoint_event_persists_local_sqlite_state(tmp_path: Path) -> None:
     assert restored.current_run is not None
     assert restored.current_run.run_id == completed.run_id
     assert restored.current_run.status == "completed"
-    assert store.load_runtime_messages(service.runtime.state.session_id, completed.run_id)
+    turn = store.find_node(completed.turn_id)
+    assert turn is not None and turn.status == "success"
+    assert any(
+        item.get("type") == "text" and item.get("text") == "Resumed."
+        for message in turn.data[completed.data_idx]
+        for item in message["content"]
+    )
