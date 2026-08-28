@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage, ToolEvent } from "../../types";
 import { SessionTodoPanel, latestTodoList } from "./todoPanel";
 
@@ -117,12 +117,16 @@ describe("SessionTodoPanel", () => {
     expect(screen.getByText("探索仓库")).toBeTruthy();
     const active = screen.getByText("实现工具").closest("li");
     expect(active?.className).toContain("is-active");
+    expect(screen.queryByRole("button", { name: "关闭任务清单" })).toBeNull();
   });
 
-  it("renders collapsed when idle and expands on header click", () => {
+  it("renders collapsed with a close action when an incomplete Turn is idle", () => {
+    const onClose = vi.fn();
     render(
       <SessionTodoPanel
         busy={false}
+        closable
+        onClose={onClose}
         todos={[{ content: "唯一任务", status: "pending" }]}
       />,
     );
@@ -132,6 +136,10 @@ describe("SessionTodoPanel", () => {
 
     const header = screen.getByText("任务清单").closest(".ant-collapse-header");
     expect(header).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "关闭任务清单" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(screen.queryByText("唯一任务")).toBeNull();
+
     fireEvent.click(header!);
     expect(screen.getByText("唯一任务")).toBeTruthy();
   });

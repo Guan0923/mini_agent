@@ -26,6 +26,7 @@ from backend.runtime.core.context import PreparedResponse  # noqa: E402
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME  # noqa: E402
 from backend.sandbox import BrokerStatus  # noqa: E402
 from backend.tools import Tool, ToolRegistry  # noqa: E402
+from backend.tools.default_tools.todo import todo_tools  # noqa: E402
 
 _temporary_root = tempfile.TemporaryDirectory(prefix="mini-agent-turn-e2e-")
 _root = Path(_temporary_root.name)
@@ -220,6 +221,56 @@ class CooperativePausePlanner(LLMPlanner):
                 reasoning="Combine both tool results.",
                 content="Ordered flow complete.",
             )
+        if task == "todo abnormal close":
+            if runtime.run.model_turns == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="todo_write",
+                            call_id="todo_abnormal_pending",
+                            arguments={
+                                "todos": [
+                                    {"content": "Inspect the abnormal Turn", "status": "in_progress"},
+                                    {"content": "Finish the interrupted work", "status": "pending"},
+                                ]
+                            },
+                        )
+                    ]
+                )
+            sleep(1.5)
+            return AssistantMessage(content="The Turn ended before its Todo list completed.")
+        if task == "todo completed auto close":
+            if runtime.run.model_turns == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="todo_write",
+                            call_id="todo_complete_running",
+                            arguments={
+                                "todos": [
+                                    {"content": "Complete the browser lifecycle", "status": "in_progress"}
+                                ]
+                            },
+                        )
+                    ]
+                )
+            if runtime.run.model_turns == 2:
+                sleep(1.5)
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="todo_write",
+                            call_id="todo_complete_done",
+                            arguments={
+                                "todos": [
+                                    {"content": "Complete the browser lifecycle", "status": "completed"}
+                                ]
+                            },
+                        )
+                    ]
+                )
+            sleep(1.0)
+            return AssistantMessage(content="The Todo list completed normally.")
         if task != "pause and resume":
             return self._rule_planner.decide(runtime)
         if runtime.run.provenance.attempt > 1:
@@ -276,6 +327,7 @@ def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
             ),
             Tool("slow_tool", "Run one deterministic slow tool.", slow_tool),
             Tool("forbidden_tool", "Must be skipped after steering.", lambda: "Forbidden tool executed."),
+            *todo_tools(),
         ]
     )
     return application

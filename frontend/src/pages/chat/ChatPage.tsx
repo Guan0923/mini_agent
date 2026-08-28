@@ -71,6 +71,7 @@ export default function ChatPage({
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const [commandMenuDismissedFor, setCommandMenuDismissedFor] = useState<string | null>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
+  const [dismissedTodoPanels, setDismissedTodoPanels] = useState<Set<string>>(() => new Set());
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const scrollConversationIdRef = useRef<string | undefined>(undefined);
@@ -148,6 +149,18 @@ export default function ChatPage({
     const sorted = [...sessionLeaves].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
     return sorted[sorted.length - 1];
   })();
+  const todoPanelKey = `${conversation?.id ?? "draft"}:${activeRuntimeNode?.id ?? conversation?.activeTurnId ?? "no-turn"}`;
+  const todoCompleted = todo !== null && todo.length > 0 && todo.every((item) => item.status === "completed");
+  const visibleTodo = todo?.length && !todoCompleted && !dismissedTodoPanels.has(todoPanelKey) ? todo : null;
+  const todoClosable = Boolean(visibleTodo) && !busy;
+  const closeTodoPanel = useCallback(() => {
+    setDismissedTodoPanels((current) => {
+      if (current.has(todoPanelKey)) return current;
+      const next = new Set(current);
+      next.add(todoPanelKey);
+      return next;
+    });
+  }, [todoPanelKey]);
   const runtimeControls = useRuntimeControls({
     conversation,
     activeRuntimeNode,
@@ -692,7 +705,9 @@ export default function ChatPage({
         modePending={runtimeConfigPending.mode}
         permissionPending={runtimeConfigPending.permission}
         reasoningPending={runtimeConfigPending.reasoning}
-        todos={todo}
+        todos={visibleTodo}
+        todoClosable={todoClosable}
+        onTodoClose={closeTodoPanel}
         usagePercent={usagePercent}
         usageTotalTokens={activeUsage?.total ?? null}
         usageContextLength={activeUsage?.context}

@@ -122,6 +122,44 @@ test("first main Turn receives a dedicated model-generated title", async ({ page
   await expect(page.getByRole("button", { name: "浏览器生成的新标题很", exact: true })).toBeVisible();
 });
 
+test("Todo panel auto-finishes and offers cleanup only for an incomplete terminal Turn", async ({ page }) => {
+  const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Todo Lifecycle" } });
+  expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Todo Lifecycle", exact: true }).click();
+  const editor = page.getByLabel("聊天输入");
+
+  await editor.fill("todo abnormal close");
+  const abnormalResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await abnormalResponse).ok()).toBeTruthy();
+  const todoPanel = page.locator(".todo-panel");
+  await expect(todoPanel).toBeVisible({ timeout: 15_000 });
+  await expect(todoPanel.locator(".ant-collapse-item")).toHaveClass(/ant-collapse-item-active/);
+  await expect(page.getByRole("button", { name: "关闭任务清单", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(todoPanel.locator(".ant-collapse-item")).not.toHaveClass(/ant-collapse-item-active/);
+  await expect(page.getByRole("button", { name: "关闭任务清单", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "关闭任务清单", exact: true }).click();
+  await expect(todoPanel).toHaveCount(0);
+  await expect(page.locator(".composer")).not.toHaveClass(/has-todo/);
+
+  await editor.fill("todo completed auto close");
+  const completedResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await completedResponse).ok()).toBeTruthy();
+  await expect(page.getByText("Complete the browser lifecycle")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "关闭任务清单", exact: true })).toHaveCount(0);
+  await expect(todoPanel).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.locator(".composer")).not.toHaveClass(/has-todo/);
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible({ timeout: 15_000 });
+});
+
 test("real Turn SSE flow supports tools, rewind versions, fork, and compact", async ({ page }) => {
   const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Playwright Turn" } });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();

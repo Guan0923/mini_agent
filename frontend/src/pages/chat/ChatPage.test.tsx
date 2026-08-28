@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { projectTurnPath } from "../../app/runtime/runtimeDetailProjection";
 import type { QueuedMessage } from "../../app/types";
 import { compactTurn, patchRuntimeConfig, steerTurn } from "../../api";
-import type { ChatMessage, ChatMode, Conversation, RuntimeStateNode } from "../../types";
+import type { ChatMessage, ChatMode, Conversation, RuntimeStateNode, TodoStatus, ToolEvent } from "../../types";
 import ChatPage, { composerAction } from "./ChatPage";
 
 vi.mock("../../api", async (importOriginal) => ({
@@ -280,6 +280,39 @@ function ScrollHarness({
   );
 }
 
+function TodoHarness({ status, running }: { status: TodoStatus; running: boolean }) {
+  const todoEvent: ToolEvent = {
+    kind: "tool_call",
+    message: "todo_write",
+    data: {
+      tool: "todo_write",
+      call_id: "todo-call",
+      arguments: { todos: [{ content: "完成 Todo 面板", status }] },
+    },
+  };
+  const conversation: Conversation = {
+    id: "session-todo",
+    sessionId: "session-todo",
+    threadId: "session-todo",
+    title: "todo",
+    messagesLoaded: true,
+    messages: [{ id: "assistant-todo", role: "assistant", content: "", events: [todoEvent] }],
+  };
+  return (
+    <AntApp>
+      <ChatPage
+        conversation={conversation}
+        running={running}
+        onUpdate={() => undefined}
+        onNew={async () => conversation.id}
+        onNavigate={() => undefined}
+        onEnsureSession={async () => conversation.sessionId!}
+        onRun={async () => undefined}
+      />
+    </AntApp>
+  );
+}
+
 interface ScrollMetrics {
   scrollHeight: number;
   clientHeight: number;
@@ -394,6 +427,52 @@ describe("ChatPage bottom anchoring", () => {
     view.rerender(<ScrollHarness conversationId="session-b" messages={[scrollMessage("b", "assistant", "b")]} />);
     expect(metrics.scrollTop).toBe(600);
     expect(screen.queryByRole("button", { name: "滚动到底部" })).not.toBeInTheDocument();
+  });
+});
+
+describe("ChatPage Todo panel lifecycle", () => {
+  it("keeps an incomplete running Todo expanded without a close action", () => {
+    render(<TodoHarness status="in_progress" running />);
+
+    expect(screen.getByText("任务清单")).toBeVisible();
+    expect(screen.getByText("完成 Todo 面板")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "关闭任务清单" })).not.toBeInTheDocument();
+    expect(document.querySelector(".composer")).toHaveClass("has-todo");
+  });
+
+  it("removes the panel and layout space as soon as every Todo completes", () => {
+    const view = render(<TodoHarness status="in_progress" running />);
+    expect(screen.getByText("任务清单")).toBeVisible();
+
+    view.rerender(<TodoHarness status="completed" running />);
+
+    expect(screen.queryByText("任务清单")).not.toBeInTheDocument();
+    expect(document.querySelector(".composer")).not.toHaveClass("has-todo");
+  });
+
+  it("resets a user-open panel to collapsed when its incomplete Turn ends", () => {
+    const view = render(<TodoHarness status="in_progress" running />);
+    const header = screen.getByText("任务清单").closest(".ant-collapse-header");
+    expect(header).not.toBeNull();
+    fireEvent.click(header!);
+    fireEvent.click(header!);
+    expect(screen.getByText("完成 Todo 面板")).toBeVisible();
+
+    view.rerender(<TodoHarness status="in_progress" running={false} />);
+
+    expect(screen.queryByText("完成 Todo 面板")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭任务清单" })).toBeVisible();
+  });
+
+  it("offers manual cleanup only after an incomplete Turn ends", () => {
+    render(<TodoHarness status="pending" running={false} />);
+
+    expect(screen.getByText("任务清单")).toBeVisible();
+    expect(screen.queryByText("完成 Todo 面板")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭任务清单" }));
+
+    expect(screen.queryByText("任务清单")).not.toBeInTheDocument();
+    expect(document.querySelector(".composer")).not.toHaveClass("has-todo");
   });
 });
 

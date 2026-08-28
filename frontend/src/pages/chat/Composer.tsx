@@ -31,6 +31,8 @@ export interface ComposerProps {
   permissionPending?: boolean;
   reasoningPending?: boolean;
   todos: TodoItem[] | null;
+  todoClosable?: boolean;
+  onTodoClose?: () => void;
   usagePercent?: number;
   usageTotalTokens?: number | null;
   usageContextLength?: number;
@@ -177,7 +179,13 @@ export default function Composer(props: ComposerProps) {
         ) : null}
         {props.todos && props.todos.length > 0 ? (
           <div className="composer-todo-anchor composer-reveal-item" data-reveal-index="1">
-            <SessionTodoPanel todos={props.todos} busy={props.busy} />
+            <SessionTodoPanel
+              key={props.todoClosable ? "closable" : "active"}
+              todos={props.todos}
+              busy={props.busy && !props.todoClosable}
+              closable={props.todoClosable}
+              onClose={props.onTodoClose}
+            />
           </div>
         ) : null}
         <div className={`composer-box composer-reveal-item${dragOver ? " is-dragging" : ""}`} data-reveal-index="2" onDragOver={(event) => { if (!props.disabled) { event.preventDefault(); setDragOver(true); } }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}>
