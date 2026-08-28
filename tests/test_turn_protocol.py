@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.api import turns as turn_routes
 from backend.api.active_turn_stream import ActiveTurnStream
 from backend.api.app import create_app
 from backend.api.chat import routes as chat_routes
 from backend.api.chat.routes import _auto_title_main_thread, _startup_failure_message, _terminal_type_for_status
 from backend.api.pause_control import TurnPauseController
+from backend.api.routes import turns as turn_routes
 from backend.api.session_store import session_store
 from backend.api.state import WebAppState
 from backend.configuration import ClientPaths

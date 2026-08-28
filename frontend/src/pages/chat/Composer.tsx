@@ -4,7 +4,7 @@ import { useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import type { ChatMode, PermissionMode, ReasoningEffort, TodoItem } from "../../types";
 import IconAction from "../../components/IconAction";
 import type { FileCandidate } from "../../commands/fileCompletion";
-import { sessionFileContentUrl } from "../../api/files";
+import { sessionFileContentUrl } from "../../api/projects/files";
 import { SessionTodoPanel } from "./todoPanel";
 import FileMentionEditor, { type FileMentionChange, type FileMentionEditorHandle } from "./FileMentionEditor";
 import QueuedMessageList from "./QueuedMessageList";

@@ -7,25 +7,32 @@ live in a separately mounted sub-application under /benchmark.
 from __future__ import annotations
 
 import os
-import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from .security import LocalWebSettings, origin_allowed
+from .state import DEFAULT_DATA_ROOT, WebAppState
 
-from .security import LocalWebSettings, origin_allowed  # noqa: E402
-from .state import DEFAULT_DATA_ROOT, WebAppState  # noqa: E402
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def create_app(state: WebAppState | None = None) -> FastAPI:
-    app = FastAPI(title="Mini-Agent Web", version="0.0.1")
     resolved = state or WebAppState(DEFAULT_DATA_ROOT)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            resolved.close()
+
+    app = FastAPI(title="Mini-Agent Web", version="0.0.1", lifespan=lifespan)
     app.state.web = resolved
     web_settings = LocalWebSettings.from_env()
 
@@ -44,15 +51,15 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
     )
 
     from .chat.decisions import router as decisions_router
-    from .jobs_routes import router as jobs_router
-    from .projects import router as projects_router
-    from .sandbox_routes import router as sandbox_router
+    from .routes.jobs import router as jobs_router
+    from .routes.projects import router as projects_router
+    from .routes.sandbox import router as sandbox_router
+    from .routes.settings import router as settings_router
+    from .routes.sidebar_threads import router as sidebar_threads_router
+    from .routes.turns import router as turns_router
     from .session_files import router as session_files_router
-    from .settings import router as settings_router
     from .shared.benchmark import create_benchmark_app
     from .shared.info import router as info_router
-    from .sidebar_threads import router as sidebar_threads_router
-    from .turns import router as turns_router
 
     app.include_router(settings_router)
     app.include_router(decisions_router)
@@ -75,15 +82,20 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
         resolved.projects.list("all")
         return {"status": "ready", "service": "mini-agent-backend", "database": "ok"}
 
+    @app.api_route(
+        "/api/{missing_path:path}",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
+    def missing_api(missing_path: str) -> None:
+        del missing_path
+        raise HTTPException(status_code=404, detail="Not Found")
+
     # In production the local backend can serve the browser bundle from the
     # same loopback origin.  Development keeps using Vite's proxy, and an
     # absent ``dist`` directory simply leaves the API-only app unchanged.
     frontend_dist = Path(os.environ.get("MINI_AGENT_FRONTEND_DIST", str(REPO_ROOT / "frontend" / "dist"))).expanduser()
     if frontend_dist.is_dir():
         app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
-
-    @app.on_event("shutdown")
-    def close_state() -> None:
-        resolved.close()
 
     return app

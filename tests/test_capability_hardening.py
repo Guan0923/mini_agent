@@ -216,7 +216,8 @@ def test_mcp_shutdown_timeout_stops_loop_and_has_stable_error(monkeypatch) -> No
     manager._stack = SimpleNamespace(aclose=lambda: object())
     manager._thread = SimpleNamespace(join=lambda **_kwargs: None, is_alive=lambda: False)
 
-    def timeout(*_args, **_kwargs):
+    def timeout(awaitable, **_kwargs):
+        awaitable.close()
         raise mcp_client.FutureTimeoutError
 
     monkeypatch.setattr(manager, "_submit", timeout)

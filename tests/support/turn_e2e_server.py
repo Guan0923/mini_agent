@@ -13,9 +13,9 @@ import uvicorn
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from backend.api import turns as turn_routes  # noqa: E402
 from backend.api.app import create_app  # noqa: E402
 from backend.api.chat import routes as chat_routes  # noqa: E402
+from backend.api.routes import turns as turn_routes  # noqa: E402
 from backend.api.state import WebAppState  # noqa: E402
 from backend.domain import AssistantMessage, ToolMessage  # noqa: E402
 from backend.planning import LLMPlanner, RuleBasedPlanner  # noqa: E402

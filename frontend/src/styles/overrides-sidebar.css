@@ -1,0 +1,192 @@
+/* ---------- Ant Design migration surface ---------- */
+
+.app-shell {
+  min-width: 0;
+  background: var(--bg);
+}
+
+.app-shell .main {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.mobile-sidebar-bar {
+  padding: 8px 12px;
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.app-sidebar {
+  color: var(--text);
+}
+
+.sidebar-create-button.ant-btn {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  color: #000000 !important;
+  background: #ffffff !important;
+  border-color: #000000 !important;
+  box-shadow: none !important;
+  transition: color 350ms ease, border-color 350ms ease;
+}
+
+.sidebar-create-button.ant-btn::before {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: block;
+  background: #efefef;
+  content: "";
+  pointer-events: none;
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 350ms ease;
+}
+
+.sidebar-create-button.ant-btn:not(:disabled):hover::before {
+  transform: scaleX(1);
+  transform-origin: left center;
+}
+
+.sidebar-create-button.ant-btn > * {
+  position: relative;
+  z-index: 1;
+}
+
+.history-list-item {
+  display: block;
+  width: 100%;
+}
+
+.history-item {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+
+.history-entry-button {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  justify-content: flex-start;
+  min-width: 0;
+  min-height: 42px;
+  width: auto;
+  padding: 5px 8px;
+  overflow: hidden;
+  text-align: left;
+}
+
+.history-entry-button.selected {
+  background: rgba(8, 127, 141, 0.1);
+}
+
+.history-entry-icon {
+  display: flex;
+  flex: 0 0 18px;
+  align-items: center;
+  min-height: 31px;
+  margin-right: 7px;
+}
+
+.history-entry-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.history-summary-viewport {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.history-summary-text {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-summary-viewport.is-scrolling .history-summary-text {
+  width: max-content;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  animation: history-summary-marquee 4.2s ease-in-out infinite alternate;
+}
+
+@keyframes history-summary-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(var(--history-shift)); }
+}
+
+.history-meta {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.history-actions {
+  display: flex;
+  flex: 0 0 32px;
+  align-items: center;
+}
+
+.history-actions .icon-action {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0 7px;
+}
+
+.app-sidebar .icon-action,
+.icon-action {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0 7px;
+  border-radius: 8px;
+}
+
+.global-error {
+  position: relative;
+  inset: auto;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  max-width: none;
+  margin: 12px 20px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  transform: none;
+}
+
+.message-actions .icon-action {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0 7px;
+  border: 0;
+}
+
+.message-actions .icon-action:hover,
+.message-actions .icon-action:focus-visible {
+  border: 0;
+  background: rgba(8, 127, 141, 0.1);
+  color: var(--accent-dark);
+}

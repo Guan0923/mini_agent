@@ -1,0 +1,223 @@
+/* ---------- Chat page ---------- */
+.chat-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #ffffff;
+}
+
+/* ---------- Message file references ---------- */
+.message-references {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.message-reference {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.65);
+  font-size: 12.5px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.message-reference:hover {
+  border-color: var(--accent);
+}
+
+.message-reference-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-reference.is-unavailable {
+  opacity: 0.75;
+  cursor: default;
+}
+
+.message-reference-unavailable {
+  color: #b91c1c;
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+.chat-content {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.chat-scroll {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 32px 0 16px;
+}
+
+.chat-scroll-content {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  min-height: 100%;
+}
+
+.chat-messages {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.welcome {
+  text-align: center;
+  padding: 12vh 20px 20px;
+}
+
+.logo {
+  font-size: 42px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.5px;
+}
+
+.welcome-sub {
+  color: var(--muted);
+  margin-top: 12px;
+  font-size: 15px;
+}
+
+.message {
+  display: flex;
+  gap: 12px;
+  max-width: 1038px;
+  margin: 0 auto 22px;
+  padding: 0 20px;
+  font-size: 17px;
+}
+
+.message.user {
+  justify-content: flex-end;
+}
+
+.message-content {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: 72%;
+}
+
+.message.user .message-content {
+  align-items: flex-end;
+}
+
+.message.user .bubble {
+  background: var(--user-bubble);
+  border-radius: 16px 4px 16px 16px;
+  padding: 12px 16px;
+  max-width: 100%;
+  line-height: 1.6;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.message.user .user-bubble {
+  cursor: text;
+  transition: box-shadow 120ms ease, outline-color 120ms ease;
+}
+
+.message.user .user-bubble:hover {
+  box-shadow: 0 0 0 1px rgba(79, 107, 255, 0.28);
+}
+
+.message-edit {
+  width: min(560px, calc(100vw - 40px));
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid var(--accent);
+  border-radius: 14px 4px 14px 14px;
+  background: var(--user-bubble);
+  box-shadow: 0 2px 8px rgba(79, 107, 255, 0.12);
+}
+
+.message.user .message-content.is-editing {
+  width: min(560px, calc(100vw - 40px));
+  max-width: 100%;
+}
+
+.message-edit textarea {
+  display: block;
+  width: 100%;
+  min-height: 66px;
+  max-height: 240px;
+  padding: 8px 9px;
+  border: 1px solid rgba(79, 107, 255, 0.3);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.message-edit textarea:focus {
+  border-color: var(--accent);
+}
+
+.message-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.message-edit-actions button {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8f9fb;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.message-edit-actions button:last-child {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.message-edit-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.message.assistant .bubble {
+  flex: 1;
+  min-width: 0;
+  padding-top: 4px;
+  line-height: 1.7;
+  color: #000000;
+}
+
+.assistant-run-frame {
+  position: relative;
+  min-width: 0;
+  padding: 12px 14px 8px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: #fff;
+}

@@ -31,7 +31,7 @@ from backend.sandbox import (
     SandboxLauncher,
     SandboxLimits,
 )
-from backend.sandbox.operation import sandbox_operation
+from backend.sandbox.control.operation import sandbox_operation
 from backend.tools import Tool, ToolError, ToolInvocationContext, ToolRegistry, WorkspaceCommand
 
 

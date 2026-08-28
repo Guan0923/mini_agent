@@ -1,6 +1,6 @@
 import type { SessionInfo } from "../api";
 import type { ChatMessage, Conversation } from "../types";
-import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
+import { normalizeRuntimeNode } from "./runtime/runtimeNodeNormalization";
 
 export const STORAGE_KEY = "mini-agent-conversations";
 export const ARCHIVE_READ_KEY = "mini-agent-archive-read";

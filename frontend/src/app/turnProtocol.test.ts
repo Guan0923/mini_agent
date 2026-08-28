@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Conversation, RuntimeNodeFrame, RuntimeRootNode, RuntimeStateNode } from "../types";
-import { integrateRuntimeNodeUpdates, messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "./runtimeDetailProjection";
-import { applyRuntimeNodeFrame, runtimeNodeAccumulator } from "./runtimeNodeReducer";
-import { isRuntimeRootNode, normalizeRuntimeNode } from "./runtimeNodeNormalization";
+import { integrateRuntimeNodeUpdates, messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "./runtime/runtimeDetailProjection";
+import { applyRuntimeNodeFrame, runtimeNodeAccumulator } from "./runtime/runtimeNodeReducer";
+import { isRuntimeRootNode, normalizeRuntimeNode } from "./runtime/runtimeNodeNormalization";
 
 function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
   return {

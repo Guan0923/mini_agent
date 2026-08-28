@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { projectTurnPath } from "../../app/runtimeDetailProjection";
+import { projectTurnPath } from "../../app/runtime/runtimeDetailProjection";
 import type { QueuedMessage } from "../../app/types";
 import { compactTurn, patchRuntimeConfig, steerTurn } from "../../api";
 import type { ChatMode, Conversation, RuntimeStateNode } from "../../types";

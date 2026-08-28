@@ -6,8 +6,25 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.api.app import create_app
+from backend.api.app import REPO_ROOT, create_app
 from backend.api.state import WebAppState
+
+
+def test_backend_repo_root_targets_the_current_checkout() -> None:
+    assert REPO_ROOT == Path(__file__).resolve().parents[1]
+    assert (REPO_ROOT / "frontend").is_dir()
+
+
+def test_production_frontend_does_not_capture_unknown_api_routes(tmp_path: Path, monkeypatch) -> None:
+    frontend_dist = tmp_path / "dist"
+    frontend_dist.mkdir()
+    (frontend_dist / "index.html").write_text("<!doctype html><title>Mini-Agent</title>", encoding="utf-8")
+    monkeypatch.setenv("MINI_AGENT_FRONTEND_DIST", str(frontend_dist))
+
+    state = WebAppState(tmp_path / ".mini_agent")
+    with TestClient(create_app(state)) as client:
+        assert client.get("/").status_code == 200
+        assert client.post("/api/auth/guest").status_code == 404
 
 
 def test_local_apis_need_no_session_credentials_and_removed_routes_are_absent(tmp_path: Path) -> None:

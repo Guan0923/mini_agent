@@ -1,0 +1,223 @@
+/* markdown content */
+.markdown {
+  overflow-wrap: break-word;
+  min-width: 0;
+}
+
+.markdown p {
+  margin: 0 0 10px;
+}
+
+.thinking-content .markdown p {
+  margin: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown pre {
+  background: #f7f8fa;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  max-width: 100%;
+  font-size: 13px;
+}
+
+.markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  background: #f2f3f5;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.markdown pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  margin: 16px 0 8px;
+  font-size: 1.2em;
+}
+
+.markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0 0 10px;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--border);
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.markdown .math-display,
+.markdown .math-svg-fallback mjx-container[display="true"] {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0;
+}
+
+.markdown .math-source {
+  overflow-wrap: anywhere;
+}
+
+.markdown .math-inline {
+  display: inline;
+}
+
+.markdown .math-display {
+  display: block;
+}
+
+.markdown .math-source,
+.markdown .math-native math,
+.markdown .math-native math *,
+.markdown .math-svg-fallback mjx-container,
+.markdown .math-svg-fallback mjx-container svg,
+.markdown .math-svg-fallback mjx-container svg * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.markdown .math-native,
+.markdown .math-native math,
+.markdown .math-svg-fallback mjx-container {
+  cursor: text;
+}
+
+.markdown .math-native math {
+  max-width: 100%;
+}
+
+.markdown .math-equation-number {
+  margin-left: 4px;
+}
+
+.markdown .math-svg-fallback mjx-assistive-mml,
+.markdown .math-svg-fallback mjx-help,
+.markdown .math-svg-fallback mjx-container > mjx-help {
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+}
+
+.markdown .math-svg-fallback mjx-help {
+  display: none !important;
+}
+.markdown a {
+  color: var(--accent);
+}
+
+.meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  margin-top: 5px;
+  color: var(--muted);
+}
+
+.message-actions button {
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.message-actions button:hover:not(:disabled),
+.message-actions button:focus-visible {
+  border-color: var(--border);
+  background: #f2f3f5;
+  color: var(--text);
+  outline: none;
+}
+
+.message-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.message.user .message-actions {
+  justify-content: flex-end;
+}
+
+.message-version-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.message.assistant .message-actions {
+  justify-content: flex-start;
+}
+
+.error-text {
+  color: #dc2626;
+  font-size: 13px;
+}
+
+.thinking {
+  display: flex;
+  gap: 5px;
+  padding: 10px 0;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  background: var(--accent);
+  border-radius: 50%;
+  animation: pulse 1.2s infinite ease-in-out;
+}
+
+.dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

@@ -46,7 +46,9 @@ describe("message actions", () => {
   it("keeps thinking Markdown compact without changing regular paragraph spacing", async () => {
     const fs = await vi.importActual<{ readFileSync(path: string, encoding: "utf8"): string }>("node:fs");
     const runtime = globalThis as typeof globalThis & { process: { cwd(): string } };
-    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat.css`, "utf8");
+    const css = ["chat-runtime.css", "chat-markdown.css"]
+      .map((file) => fs.readFileSync(`${runtime.process.cwd()}/src/styles/${file}`, "utf8"))
+      .join("\n");
     const rule = css.slice(css.indexOf(".thinking-content {"), css.indexOf(".shimmer-text {"));
 
     expect(rule).toMatch(/\.thinking-content\s*{[^}]*line-height:\s*1\.5;/s);
@@ -372,7 +374,7 @@ describe("assistant Item presentation", () => {
   it("uses one non-repeating shimmer band and honors reduced motion for both animations", async () => {
     const fs = await vi.importActual<{ readFileSync(path: string, encoding: "utf8"): string }>("node:fs");
     const runtime = globalThis as typeof globalThis & { process: { cwd(): string } };
-    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat.css`, "utf8");
+    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat-runtime.css`, "utf8");
     const activeRule = css.slice(css.indexOf(".shimmer-text.is-active"), css.indexOf("@keyframes runtime-summary-shimmer"));
     const reducedMotion = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
 
@@ -391,7 +393,7 @@ describe("assistant Item presentation", () => {
   it("uses one unclipped summary track and matching header and body padding", async () => {
     const fs = await vi.importActual<{ readFileSync(path: string, encoding: "utf8"): string }>("node:fs");
     const runtime = globalThis as typeof globalThis & { process: { cwd(): string } };
-    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat.css`, "utf8");
+    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat-runtime.css`, "utf8");
 
     expect(css).toMatch(/\.runtime-collapse\s*{[^}]*--runtime-collapse-inline-padding:\s*12px;/s);
     expect(css).toMatch(/\.runtime-collapse \.ant-collapse-header\s*{[^}]*padding-inline:\s*var\(--runtime-collapse-inline-padding\)/s);

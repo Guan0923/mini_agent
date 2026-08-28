@@ -1,5 +1,5 @@
 import type { BenchmarkResult, SkillInfo, TaskInfo, ToolInfo } from "../types";
-import { jsonBody, requestJson } from "./request";
+import { jsonBody, requestJson } from "./transport/request";
 
 export async function listTasks(): Promise<TaskInfo[]> {
   return requestJson<TaskInfo[]>("/benchmark/tasks");

@@ -26,7 +26,7 @@ from backend.sandbox import (
     WindowsBrokerClient,
 )
 from backend.skills import ProjectSkillGate, ProjectSkillTrustStore, SkillCatalog
-from backend.storage.settings_contract import normalize_sandbox_config
+from backend.storage.settings import normalize_sandbox_config
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry, delegation_tools
 from backend.tools.terminal import effective_terminal_type

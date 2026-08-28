@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi import Request
 
-from backend.api.sandbox_routes import install as install_broker
-from backend.api.sandbox_routes import repair as repair_broker
+from backend.api.routes.sandbox import install as install_broker
+from backend.api.routes.sandbox import repair as repair_broker
 from backend.sandbox.broker_service import WindowsServiceInstaller
 from backend.sandbox.errors import BrokerInstallationError, BrokerInstallFailureCode
 from backend.sandbox.install_helper import (

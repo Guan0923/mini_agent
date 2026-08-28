@@ -11,11 +11,10 @@ from backend.configuration import ClientPaths
 from backend.domain.terminal import TERMINAL_LABELS
 from backend.jobs import JobRegistry
 from backend.sandbox import WindowsBrokerClient
-from backend.storage.local_settings import LocalSettingsStore
 from backend.storage.projects import ProjectStore
+from backend.storage.settings import LocalSettingsStore
 from backend.tools.terminal import available_terminal_executables, effective_terminal_type
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_DATA_ROOT = Path.home() / ".mini_agent"
 
 

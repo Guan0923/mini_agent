@@ -1,19 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  archiveSession,
   createSession,
-  deleteSession,
-  forkTurn,
   getSettings,
   getSessionNodes,
   listSessions,
-  renameSession,
-  restoreSession,
   updateProfile,
   type ProviderConfig,
   type SessionInfo,
 } from "../api";
-import { changeProjectPath, createProject, createProjectSession, listProjects, removeProject, renameProject, restoreProject, revokeProjectSkillTrust, type ProjectInfo } from "../api/projects";
+import { listProjects, type ProjectInfo } from "../api/projects";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
 import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnreadArchived, summaryToConversation, STORAGE_KEY, ARCHIVE_READ_KEY } from "./storage";
 import type { ArchiveReadState } from "./storage";
@@ -22,8 +17,10 @@ import { createRunController } from "./runController";
 import type { QueuedMessage } from "./types";
 import { loadQueuedMessages, saveQueuedMessages } from "./queuedMessages";
 import { effectiveDisplayMode } from "./displayMode";
-import { projectTurnPath } from "./runtimeDetailProjection";
-import { isRuntimeTurnNode } from "./runtimeNodeNormalization";
+import { isRuntimeTurnNode } from "./runtime/runtimeNodeNormalization";
+import { withLoadedTurns } from "./conversationProjection";
+import { createConversationActions } from "./conversationActions";
+import { createProjectActions } from "./projectActions";
 import type {
   ChatMessage,
   ChatMode,
@@ -34,31 +31,6 @@ import type {
   RuntimeTreeNode,
   LocalProfile,
 } from "../types";
-
-function withLoadedTurns(
-  conversation: Conversation,
-  nodes: RuntimeTreeNode[],
-  preferredActiveTurnId?: string,
-): Conversation {
-  const threadId = conversation.threadId ?? conversation.sessionId;
-  const threadNodes = nodes.filter(isRuntimeTurnNode).filter((node) => node.thread_id === threadId);
-  const selected = threadNodes.find((node) => node.id === (preferredActiveTurnId ?? conversation.activeTurnId));
-  const parentIds = new Set(threadNodes.map((node) => node.parent_id).filter(Boolean));
-  const leaves = threadNodes
-    .filter((node) => !parentIds.has(node.id))
-    .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
-  const fallback = leaves[leaves.length - 1];
-  const activeTurnId = selected?.id ?? fallback?.id;
-  const map = new Map(nodes.map((node) => [`${node.session_id}:${node.id}`, node] as const));
-  return {
-    ...conversation,
-    runtimeNodes: nodes,
-    activeTurnId,
-    lastNodeId: activeTurnId,
-    messages: activeTurnId ? projectTurnPath(map, activeTurnId) : [],
-    messagesLoaded: true,
-  };
-}
 
 function AgentApp() {
   const [profile, setProfile] = useState<LocalProfile>({ display_name: "本地用户", agent_preferences: "" });
@@ -390,241 +362,6 @@ function AgentApp() {
     return conversation.id;
   }
 
-  async function newProject(): Promise<void> {
-    if (projectLoading) return;
-    setProjectLoading(true);
-    setActionError(null);
-    try {
-      const result = await createProject();
-      if (!result) return;
-      const conversation = summaryToConversation(result.session, {
-        id: result.session.session_id,
-        clientId: result.session.client_id ?? result.session.session_id,
-        title: result.session.title || "新对话",
-        messages: [],
-        messagesLoaded: true,
-        runtimeNodes: [],
-      });
-      setProjects((previous) => [result.project, ...previous.filter((item) => item.project_id !== result.project.project_id)]);
-      setConversations((previous) => [conversation, ...previous]);
-      setCurrentId(conversation.id);
-      setPage("chat");
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-    } finally {
-      setProjectLoading(false);
-    }
-  }
-
-  async function newProjectConversation(projectId: string): Promise<void> {
-    setActionError(null);
-    try {
-      const existing = activeConversations.find(
-        (conversation) =>
-          conversation.projectId === projectId &&
-          conversation.messages.length === 0 &&
-          (conversation.messageCount ?? 0) === 0,
-      );
-      if (existing) {
-        setCurrentId(existing.id);
-        setPage("chat");
-        return;
-      }
-      const result = await createProjectSession(projectId, crypto.randomUUID());
-      const conversation = summaryToConversation(result.session, {
-        id: result.session.session_id,
-        clientId: result.session.client_id ?? result.session.session_id,
-        title: result.session.title || "新对话",
-        messages: [],
-        messagesLoaded: true,
-        runtimeNodes: [],
-      });
-      setConversations((previous) => [conversation, ...previous]);
-      setProjects((previous) => previous.map((item) => item.project_id === projectId ? result.project : item));
-      setCurrentId(conversation.id);
-      setPage("chat");
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-    }
-  }
-
-  async function removeProjectFromSidebar(projectId: string): Promise<void> {
-    setActionError(null);
-    try {
-      await removeProject(projectId);
-      setProjects((previous) => previous.filter((item) => item.project_id !== projectId));
-      const removed = await listProjects("removed").catch(() => []);
-      setRemovedProjects(removed);
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-    }
-  }
-
-  async function renameProjectFromSidebar(projectId: string, name: string): Promise<void> {
-    setActionError(null);
-    try {
-      const updated = await renameProject(projectId, name);
-      setProjects((previous) => previous.map((item) => item.project_id === projectId ? updated : item));
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-      throw error;
-    }
-  }
-
-  async function changeProjectPathFromSidebar(projectId: string): Promise<void> {
-    setActionError(null);
-    try {
-      const updated = await changeProjectPath(projectId);
-      if (!updated) return;
-      setProjects((previous) => previous.map((item) => item.project_id === projectId ? updated : item));
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-      throw error;
-    }
-  }
-
-  async function revokeProjectSkillTrustFromSidebar(projectId: string): Promise<void> {
-    setActionError(null);
-    try {
-      await revokeProjectSkillTrust(projectId);
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-      throw error;
-    }
-  }
-
-  async function restoreProjectFromTrash(projectId: string): Promise<void> {
-    setActionError(null);
-    try {
-      const restored = await restoreProject(projectId);
-      setProjects((previous) => [restored, ...previous.filter((item) => item.project_id !== projectId)]);
-      setRemovedProjects((previous) => previous.filter((item) => item.project_id !== projectId));
-      await refreshSessions();
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-    }
-  }
-
-  function selectConversation(id: string) {
-    setCurrentId(id);
-    setPage("chat");
-  }
-
-  async function renameConversation(id: string, title: string) {
-    setActionError(null);
-    try {
-      const conversation = conversations.find((item) => item.id === id);
-      const sessionId = await ensureSession(id);
-      const summary = await renameSession(conversation?.threadId ?? sessionId, title);
-      updateConversation(id, (conversation) => summaryToConversation(summary, conversation));
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-      throw error;
-    }
-  }
-
-  async function archiveConversation(id: string) {
-    setActionError(null);
-    try {
-      const conversation = conversations.find((item) => item.id === id);
-      const sessionId = await ensureSession(id);
-      const summary = await archiveSession(conversation?.threadId ?? sessionId);
-      updateConversation(id, (conversation) => summaryToConversation(summary, conversation));
-      if (currentId === id) setCurrentId(activeConversations.find((conversation) => conversation.id !== id)?.id ?? null);
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-    }
-  }
-
-  async function deleteConversation(id: string) {
-    setActionError(null);
-    try {
-      const conversation = conversations.find((item) => item.id === id);
-      const sessionId = await ensureSession(id);
-      await deleteSession(conversation?.threadId ?? sessionId);
-      setConversations((previous) => previous.filter((conversation) => conversation.id !== id));
-      if (currentId === id) setCurrentId(null);
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-    }
-  }
-
-  async function restoreConversation(id: string) {
-    setActionError(null);
-    try {
-      const conversation = conversations.find((item) => item.id === id);
-      if (!conversation) return;
-      const sessionId = await ensureSession(id);
-      const summary = await restoreSession(conversation.threadId ?? sessionId);
-      updateConversation(id, (currentConversation) => summaryToConversation(summary, currentConversation));
-      if (!currentId) setCurrentId(conversation.id);
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-    }
-  }
-
-  async function forkConversation(id: string, messageId: string) {
-    setActionError(null);
-    const source = conversations.find((conversation) => conversation.id === id);
-    if (!source) return;
-    const index = source.messages.findIndex((message) => message.id === messageId);
-    if (index < 0 || source.messages[index].role !== "assistant") return;
-    try {
-      await ensureSession(id);
-      const sourceTurnId = source.messages[index].sourceNodeId;
-      if (!sourceTurnId) throw new Error("fork requires an assistant Turn");
-      const forked = await forkTurn(sourceTurnId);
-      const sidebar = forked.sidebar_thread;
-      const branch = withLoadedTurns({
-        id: sidebar.thread_id,
-        clientId: sidebar.thread_id,
-        sessionId: sidebar.session_id,
-        threadId: sidebar.thread_id,
-        activeTurnId: forked.turn.id,
-        title: sidebar.title,
-        messages: [],
-        messagesLoaded: false,
-        updatedAt: sidebar.updated_at,
-      }, await getSessionNodes(sidebar.session_id));
-      setConversations((previous) => [branch, ...previous]);
-      setCurrentId(branch.id);
-      setPage("chat");
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-    }
-  }
-
-  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string; sourceNodeId?: string; rewindTurnId?: string } | undefined> {
-    setActionError(null);
-    const source = conversations.find((conversation) => conversation.id === id);
-    if (!source) return undefined;
-    const index = source.messages.findIndex((message) => message.id === messageId);
-    if (index < 0 || source.messages[index].role !== "user") return undefined;
-    try {
-      const sessionId = await ensureSession(id);
-      const turnId = source.messages[index].nodeId;
-      if (!turnId) throw new Error("rewind requires a user Turn");
-      setCurrentId(id);
-      setPage("chat");
-      return {
-        content: source.messages[index].content,
-        sessionId,
-        sourceNodeId: turnId,
-        rewindTurnId: turnId,
-      };
-    } catch (error) {
-      setActionError(String((error as Error).message ?? error));
-      return undefined;
-    }
-  }
-  async function reloadConversation(id: string, preferredActiveTurnId?: string): Promise<void> {
-    const conversation = conversations.find((item) => item.id === id);
-    if (!conversation) throw new Error("会话不存在");
-    const sessionId = await ensureSession(id);
-    const nodes = await getSessionNodes(sessionId);
-    updateConversation(id, (currentConversation) => withLoadedTurns(currentConversation, nodes, preferredActiveTurnId));
-  }
-
   async function refreshSessions(): Promise<void> {
     const summaries = await listSessions("active");
     setConversations((previous) => {
@@ -641,25 +378,47 @@ function AgentApp() {
     });
   }
 
-  async function useSession(sessionId: string): Promise<string> {
-    let target = conversations.find((item) => item.threadId === sessionId || item.sessionId === sessionId);
-    if (!target) {
-      const summaries = await listSessions("active");
-      const summary = summaries.find((item) => item.thread_id === sessionId || item.session_id === sessionId);
-      if (!summary) throw new Error(`未知会话：${sessionId}`);
-      target = summaryToConversation(summary);
-      setConversations((previous) => [target!, ...previous]);
-    }
-    setCurrentId(target.id);
-    setPage("chat");
-    if (!target.messagesLoaded) {
-      const nodes = await getSessionNodes(target.sessionId ?? sessionId);
-      setConversations((previous) => previous.map((item) => (
-        item.id === target!.id ? withLoadedTurns(item, nodes) : item
-      )));
-    }
-    return target.id;
-  }
+  const {
+    newProject,
+    newProjectConversation,
+    removeProjectFromSidebar,
+    renameProjectFromSidebar,
+    changeProjectPathFromSidebar,
+    revokeProjectSkillTrustFromSidebar,
+    restoreProjectFromTrash,
+  } = createProjectActions({
+    projectLoading,
+    activeConversations,
+    setProjectLoading,
+    setProjects,
+    setRemovedProjects,
+    setConversations,
+    setCurrentId,
+    setPage,
+    setActionError,
+    refreshSessions,
+  });
+
+  const {
+    renameConversation,
+    archiveConversation,
+    deleteConversation,
+    restoreConversation,
+    forkConversation,
+    rewindConversation,
+    reloadConversation,
+    useSession,
+  } = createConversationActions({
+    conversations,
+    activeConversations,
+    currentId,
+    ensureSession,
+    updateConversation,
+    setConversations,
+    setCurrentId,
+    setPage,
+    setActionError,
+  });
 
   function setConversationMode(conversation: Conversation | null, mode: ChatMode) {
     if (!conversation) {

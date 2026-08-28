@@ -1,5 +1,5 @@
 import type { LocalProfile } from "../types";
-import { requestJson } from "./request";
+import { requestJson } from "./transport/request";
 
 export type UserProfile = LocalProfile;
 

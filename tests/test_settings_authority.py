@@ -8,7 +8,7 @@ import pytest
 from backend.domain import SystemMessage, ToolSpec, UserMessage
 from backend.providers import ChatCompletionsAdapter, LLMClient, MessagesAdapter, ModelConfig, ResponsesAdapter
 from backend.runtime.core.context import AgentRuntime
-from backend.storage.local_settings import LocalSettingsStore
+from backend.storage.settings import LocalSettingsStore
 
 
 def runtime_for(*messages, stream: bool = False) -> AgentRuntime:
