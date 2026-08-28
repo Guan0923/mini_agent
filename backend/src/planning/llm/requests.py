@@ -61,6 +61,8 @@ class RequestMixin:
         runtime.exchange.context["trace_base_system_prompt"] = system.content or ""
         runtime.exchange.context["trace_user_preferences"] = self.user_preferences
         system = self._with_user_preferences(system)
+        trace_system_message = system.content or ""
+        runtime.exchange.context["trace_system_message"] = trace_system_message
         system = self._with_active_skills(runtime, system)
         canonical_nodes = runtime.model_nodes()
         canonical = runtime.model_messages() if canonical_nodes else []
@@ -74,7 +76,7 @@ class RequestMixin:
             overrides = runtime.exchange.context.get("request_parameters")
             if isinstance(overrides, dict):
                 parameters.update(overrides)
-            return self._context_manager.prepare(
+            prepared = self._context_manager.prepare(
                 runtime,
                 system,
                 history=canonical,
@@ -83,13 +85,15 @@ class RequestMixin:
                 request_parameters=parameters,
                 summarize=lambda transcript: self._summarize_history(runtime, transcript),
             )
+            runtime.exchange.context["trace_system_message"] = trace_system_message
+            return prepared
         if self._context_manager is None:
             return [system, *runtime.state.messages, *(extra or [])]
         parameters = dict(runtime.state.request_parameters)
         overrides = runtime.exchange.context.get("request_parameters")
         if isinstance(overrides, dict):
             parameters.update(overrides)
-        return self._context_manager.prepare(
+        prepared = self._context_manager.prepare(
             runtime,
             system,
             extra=extra,
@@ -97,6 +101,8 @@ class RequestMixin:
             request_parameters=parameters,
             summarize=lambda transcript: self._summarize_history(runtime, transcript),
         )
+        runtime.exchange.context["trace_system_message"] = trace_system_message
+        return prepared
 
     def _messages_for_current_turn(
         self,
@@ -110,6 +116,7 @@ class RequestMixin:
         runtime.exchange.context["trace_base_system_prompt"] = system.content or ""
         runtime.exchange.context["trace_user_preferences"] = self.user_preferences
         system = self._with_user_preferences(system)
+        runtime.exchange.context["trace_system_message"] = system.content or ""
         system = self._with_active_skills(runtime, system)
         canonical_nodes = runtime.model_nodes()
         canonical = runtime.model_messages(current_turn_only=True) if canonical_nodes else []

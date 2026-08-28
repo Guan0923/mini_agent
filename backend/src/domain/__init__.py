@@ -102,7 +102,7 @@ from .state import (
     new_run_id,
     new_workflow_id,
 )
-from .turn_trace import TurnTraceRequest
+from .turn_trace import TurnTrace, TurnTraceContext, TurnTraceItem
 
 __all__ = [
     "AgentAction",
@@ -175,7 +175,9 @@ __all__ = [
     "TIME_ZONE_OPTIONS",
     "TimeZoneOption",
     "TracePersistenceError",
-    "TurnTraceRequest",
+    "TurnTrace",
+    "TurnTraceContext",
+    "TurnTraceItem",
     "UserMessage",
     "message_from_dict",
     "message_to_dict",

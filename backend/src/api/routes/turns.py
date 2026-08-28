@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
@@ -227,19 +227,31 @@ def list_turns(session_id: str, request: Request) -> list[dict[str, object]]:
 
 
 @router.get("/{turn_id}/trace")
-def get_turn_trace(turn_id: str, data_idx: int, request: Request) -> dict[str, object]:
+def get_turn_trace(
+    turn_id: str,
+    data_idx: int,
+    request: Request,
+    after_sequence: int | None = Query(default=None, ge=0),
+) -> dict[str, object]:
     store = session_store(request.app.state.web)
     turn = _turn(store, turn_id)
     if data_idx < 0 or data_idx >= len(turn.data):
         raise HTTPException(status_code=422, detail="data_idx 超出 Turn 版本范围。")
     try:
-        requests = store.load_turn_trace(turn.session_id, turn.id, data_idx)
+        trace = store.load_turn_trace(
+            turn.session_id,
+            turn.id,
+            data_idx,
+            after_sequence=after_sequence,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
         "turn": turn.to_dict(),
         "data_idx": data_idx,
-        "requests": [item.to_dict() for item in requests],
+        "context": trace.context.to_dict() if trace is not None and after_sequence is None else None,
+        "items": [item.to_dict() for item in trace.items] if trace is not None else [],
+        "last_sequence": trace.last_sequence if trace is not None else 0,
     }
 
 

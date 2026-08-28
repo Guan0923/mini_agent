@@ -67,6 +67,9 @@ class RuntimeServices:
     # RuntimeState or persisted node.
     provider_config_resolver: Callable[[str], object] | None = None
     pending_runtime_config: dict[str, Any] | None = None
+    # The NodeBridge ignores pre-decision Items until the immutable Turn Trace
+    # context and initial User Item have been committed together.
+    turn_trace_initialized: bool = False
     # Canonical message-tree context provider.  It is deliberately a callback
     # rather than a persisted field: the bridge owns the dynamic sidecar and
     # can replace a failed placeholder immediately before every model request.

@@ -9,9 +9,12 @@ export async function getTurnTrace(
   turnId: string,
   dataIdx: number,
   signal?: AbortSignal,
+  afterSequence?: number,
 ): Promise<TurnTraceResponse> {
+  const query = new URLSearchParams({ data_idx: String(dataIdx) });
+  if (afterSequence !== undefined) query.set("after_sequence", String(afterSequence));
   return requestJson(
-    `/api/turns/${encodeURIComponent(turnId)}/trace?data_idx=${encodeURIComponent(String(dataIdx))}`,
+    `/api/turns/${encodeURIComponent(turnId)}/trace?${query.toString()}`,
     { signal },
   );
 }

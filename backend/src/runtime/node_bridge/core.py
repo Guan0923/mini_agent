@@ -90,6 +90,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         self.abort_code = ""
         self.terminal_error: dict[str, Any] | None = None
         self.persistence_failed = False
+        self.trace_persistence_failed = False
         self.produced_item = False
         self.started = False
         self.closed = False
@@ -124,6 +125,16 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
             return self.writer.current(target.session_id, target.id)
         except KeyError:
             return target.clone()
+
+    def _bind_existing_trace(self, node: RuntimeState) -> None:
+        """Resume Item auditing before any new runtime event is projected."""
+
+        if self.runtime is None:
+            return
+        load = getattr(self.store, "load_turn_trace", None)
+        if callable(load):
+            existing = load(node.session_id, node.id, node.current_data_idx)
+            self.runtime.services.turn_trace_initialized = existing is not None
 
     def _latest_parent(self) -> RuntimeState | RuntimeRootState:
         nodes = [node for node in self.store.load_nodes(self.session_id) if node.thread_id == self.thread_id]
@@ -168,6 +179,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
                 self.assistant_blocks = source.assistant_items if self.assistant_message_idx is not None else []
                 if self.assistant_blocks and self.assistant_blocks[0].get("type") == "compaction":
                     self.protected_item_count = 1 + int(self.assistant_blocks[0].get("kept_item_count") or 0)
+                self._bind_existing_trace(source)
                 self.started = True
                 return source
             self.parent = source
@@ -200,6 +212,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         self.last_node = node
         self.turn_id = node.id
         self.assistant_message_idx = 1
+        self._bind_existing_trace(node)
         self.started = True
         return node
 
@@ -242,6 +255,8 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
             message["delivery_id"] = delivery_id
         self.assistant = self.writer.append_message(self.assistant, message, persist=True)
         self.last_node = self.assistant
+        message_idx = len(self.assistant.data[self.assistant.current_data_idx]) - 1
+        self._record_completed_item(message_idx, 0)
         self.assistant_blocks = []
         self.assistant_message_idx = None
 

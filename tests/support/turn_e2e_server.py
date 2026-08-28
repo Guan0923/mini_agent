@@ -103,6 +103,8 @@ TRACE_MODEL_CONFIG = ModelConfig(
     context_size=8_192,
     provider_name="trace-http",
 )
+TRACE_MODEL_CALLS = 0
+TRACE_MCP_TOOL_NAME = ""
 
 
 class TraceModelHandler(BaseHTTPRequestHandler):
@@ -112,43 +114,81 @@ class TraceModelHandler(BaseHTTPRequestHandler):
         return
 
     def do_POST(self) -> None:  # noqa: N802
+        global TRACE_MODEL_CALLS
+
         length = int(self.headers.get("Content-Length") or 0)
         payload = json.loads(self.rfile.read(length) or b"{}")
         if self.path != "/v1/chat/completions":
             self.send_error(404)
             return
+        TRACE_MODEL_CALLS += 1
+        has_tool_result = any(
+            isinstance(message, dict) and message.get("role") == "tool" for message in payload.get("messages", [])
+        )
         if payload.get("stream"):
-            events = [
-                {
-                    "id": "trace-e2e",
-                    "object": "chat.completion.chunk",
-                    "created": 1,
-                    "model": "trace-e2e-model",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"role": "assistant", "reasoning_content": "Trace reasoning from HTTP."},
-                            "finish_reason": None,
-                        }
-                    ],
-                    "usage": None,
-                },
-                {
-                    "id": "trace-e2e",
-                    "object": "chat.completion.chunk",
-                    "created": 1,
-                    "model": "trace-e2e-model",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": "Trace response from HTTP."},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                    "usage": None,
-                },
-                {"choices": [], "usage": {"input_tokens": 8, "output_tokens": 6, "total_tokens": 14}},
-            ]
+            events = (
+                [
+                    {
+                        "id": "trace-e2e",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "trace-e2e-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "trace_mcp_call",
+                                            "function": {
+                                                "name": TRACE_MCP_TOOL_NAME,
+                                                "arguments": json.dumps({"label": "incremental trace"}),
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                        "usage": None,
+                    },
+                    {"choices": [], "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}},
+                ]
+                if not has_tool_result
+                else [
+                    {
+                        "id": "trace-e2e",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "trace-e2e-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"role": "assistant", "reasoning_content": "Trace reasoning from HTTP."},
+                                "finish_reason": None,
+                            }
+                        ],
+                        "usage": None,
+                    },
+                    {
+                        "id": "trace-e2e",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "trace-e2e-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": "Trace response from HTTP."},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": None,
+                    },
+                    {"choices": [], "usage": {"input_tokens": 8, "output_tokens": 6, "total_tokens": 14}},
+                ]
+            )
             body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
             encoded = body.encode("utf-8")
             self.send_response(200)
@@ -205,6 +245,7 @@ trace_mcp_resources = start_external_tools(
     )
 )
 trace_mcp_tool = trace_mcp_resources[0]
+TRACE_MCP_TOOL_NAME = trace_mcp_tool.spec.name
 
 
 STRUCTURED_CHECKPOINT = """## Primary Request and Intent
@@ -478,6 +519,19 @@ turn_routes.build_local_application = local_application
 app = create_app(state)
 
 
+@app.post("/api/test/trace-model-reset")
+def reset_trace_model_calls() -> dict[str, int]:
+    global TRACE_MODEL_CALLS
+
+    TRACE_MODEL_CALLS = 0
+    return {"calls": TRACE_MODEL_CALLS}
+
+
+@app.get("/api/test/trace-model-calls")
+def get_trace_model_calls() -> dict[str, int]:
+    return {"calls": TRACE_MODEL_CALLS}
+
+
 @app.post("/api/test/sandbox-status")
 def set_sandbox_status(values: dict[str, object]) -> dict[str, object]:
     return sandbox_broker.set_status(
@@ -487,9 +541,10 @@ def set_sandbox_status(values: dict[str, object]) -> dict[str, object]:
     ).to_dict()
 
 
-# create_app may mount a built frontend at "/". Keep this test-only control
-# route ahead of that catch-all mount in the Starlette route table.
-app.router.routes.insert(0, app.router.routes.pop())
+# create_app may mount a built frontend at "/". Keep the three test-only
+# control routes ahead of that catch-all mount in the Starlette route table.
+for _test_route in range(3):
+    app.router.routes.insert(0, app.router.routes.pop())
 
 
 if __name__ == "__main__":
