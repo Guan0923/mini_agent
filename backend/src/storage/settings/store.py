@@ -129,13 +129,13 @@ class LocalSettingsStore:
     def sandbox_config(self) -> dict[str, object]:
         raw = self.config_store.read().get("sandbox")
         result = normalize_sandbox_config(raw if isinstance(raw, Mapping) else DEFAULT_SANDBOX_CONFIG)
-        if not isinstance(raw, Mapping) or raw.get("policy_version") != 2 or raw.get("enabled") is not True:
-            self.config_store.update({"sandbox": result})
+        if not isinstance(raw, Mapping) or dict(raw) != result:
+            self.config_store.replace_section("sandbox", result)
         return result
 
     def update_sandbox_config(self, values: Mapping[str, object]) -> dict[str, object]:
         result = normalize_sandbox_config(self.sandbox_config(), values)
-        self.config_store.update({"sandbox": result})
+        self.config_store.replace_section("sandbox", result)
         return result
 
     def capability_config(self) -> dict[str, object]:

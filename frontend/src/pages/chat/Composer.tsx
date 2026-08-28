@@ -154,6 +154,7 @@ export default function Composer(props: ComposerProps) {
       <div className="composer-box-anchor">
         <QueuedMessageList
           items={props.queuedMessages ?? []}
+          disabled={props.disabled}
           onSend={(item) => props.onQueueSend?.(item)}
           onEdit={(item) => props.onQueueEdit?.(item)}
           onDelete={(item) => props.onQueueDelete?.(item)}

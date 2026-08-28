@@ -31,6 +31,7 @@ interface ChatMessageListProps {
   changeMessageVersion: (message: ChatMessage, direction: -1 | 1) => Promise<void>;
   onDecision: (request: DecisionRequest, choice: string, options?: { supplement?: string; answers?: Record<string, string[]> }) => Promise<void>;
   onFork?: (messageId: string) => void;
+  sandboxFailure?: string | null;
 }
 
 export function ChatMessageList({
@@ -56,6 +57,7 @@ export function ChatMessageList({
   changeMessageVersion,
   onDecision,
   onFork,
+  sandboxFailure,
 }: ChatMessageListProps) {
   return (
     <div className="chat-scroll" ref={chatScrollRef} data-conversation-scroll>
@@ -137,6 +139,15 @@ export function ChatMessageList({
               onFork={onFork && (message.status === "success" || message.status === "failed") ? () => onFork(message.id) : undefined}
             />
           ))}
+          {sandboxFailure ? (
+            <div className="message assistant sandbox-health-failure" role="status" aria-live="polite">
+              <div className="message-content">
+                <div className="bubble assistant-bubble">
+                  <MarkdownContent text={`沙箱 Broker 不可用：${sandboxFailure}`} />
+                </div>
+              </div>
+            </div>
+          ) : null}
           {compactionPending ? (
             <div className="message assistant runtime-compaction-progress" role="status" aria-live="polite">
               <ShimmerText active>正在执行compaction操作中</ShimmerText>

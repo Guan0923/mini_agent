@@ -50,10 +50,7 @@ def sandbox_operation(context: ToolHookContext) -> HookOperationResult:
 
     execution_data: dict[str, object] = {}
     if context.name == "run_command":
-        if (
-            not isinstance(context.sandbox_launcher, SandboxLauncher)
-            or context.sandbox_config.get("enabled") is not True
-        ):
+        if not isinstance(context.sandbox_launcher, SandboxLauncher):
             return HookOperationResult.reject(
                 "Command execution is unavailable because the Sandbox runtime is not healthy.",
                 {"failure_code": "sandbox_unavailable"},

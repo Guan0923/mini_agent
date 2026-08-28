@@ -70,6 +70,15 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     onClearError: vi.fn(),
     onDisplayModeUpdate: vi.fn(),
     onProviderConfigUpdate: vi.fn(),
+    sandboxHealth: {
+      phase: "healthy",
+      installed: true,
+      detail: null,
+      checking: false,
+      repairing: false,
+      check: vi.fn().mockResolvedValue({ installed: true, healthy: true }),
+      repair: vi.fn().mockResolvedValue(undefined),
+    },
     ...overrides,
   };
 }

@@ -12,6 +12,7 @@ import type {
   RuntimeStateNode,
 } from "../../types";
 import type { ComposerActionMode } from "./Composer";
+import type { SandboxHealthState } from "../../app/useSandboxHealth";
 
 export interface ChatPageProps {
   conversation: Conversation | null;
@@ -33,6 +34,7 @@ export interface ChatPageProps {
   onStopRun?: (conversationId: string) => void;
   queuedMessages?: QueuedMessage[];
   onQueuedMessagesChange?: (conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) => void;
+  sandboxHealth?: Pick<SandboxHealthState, "phase" | "detail">;
 }
 
 export interface RewindResult {

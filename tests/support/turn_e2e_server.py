@@ -21,13 +21,47 @@ from backend.domain import AssistantMessage, ToolMessage  # noqa: E402
 from backend.planning import LLMPlanner, RuleBasedPlanner  # noqa: E402
 from backend.providers import ModelConfig  # noqa: E402
 from backend.runtime import build_application  # noqa: E402
+from backend.runtime.application import factory as application_factory  # noqa: E402
 from backend.runtime.core.context import PreparedResponse  # noqa: E402
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME  # noqa: E402
+from backend.sandbox import BrokerStatus  # noqa: E402
 from backend.tools import Tool, ToolRegistry  # noqa: E402
 
 _temporary_root = tempfile.TemporaryDirectory(prefix="mini-agent-turn-e2e-")
 _root = Path(_temporary_root.name)
-state = WebAppState(_root / "web")
+
+
+class SwitchableTestBroker:
+    """In-memory Broker control plane; it never performs privileged host operations."""
+
+    def __init__(self) -> None:
+        self._status = BrokerStatus(True, True, version="e2e", installation_id="e2e")
+
+    def status(self) -> BrokerStatus:
+        return self._status
+
+    def set_status(self, *, installed: bool, healthy: bool, detail: str | None = None) -> BrokerStatus:
+        self._status = BrokerStatus(installed, healthy, version="e2e", installation_id="e2e", detail=detail)
+        return self._status
+
+    def install(self) -> BrokerStatus:
+        return self.set_status(installed=True, healthy=True)
+
+    def repair(self) -> BrokerStatus:
+        return self.set_status(installed=True, healthy=True)
+
+
+sandbox_broker = SwitchableTestBroker()
+
+
+class TestBrokerFactory:
+    @classmethod
+    def from_system(cls):
+        return sandbox_broker
+
+
+application_factory.WindowsBrokerClient = TestBrokerFactory
+state = WebAppState(_root / "web", sandbox_broker=sandbox_broker)
 state.model_config = lambda _provider_name=None: ModelConfig(
     "test-key",
     "https://example.test/v1",
@@ -250,6 +284,20 @@ def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
 chat_routes.build_local_application = local_application
 turn_routes.build_local_application = local_application
 app = create_app(state)
+
+
+@app.post("/api/test/sandbox-status")
+def set_sandbox_status(values: dict[str, object]) -> dict[str, object]:
+    return sandbox_broker.set_status(
+        installed=values.get("installed") is True,
+        healthy=values.get("healthy") is True,
+        detail=str(values["detail"]) if values.get("detail") else None,
+    ).to_dict()
+
+
+# create_app may mount a built frontend at "/". Keep this test-only control
+# route ahead of that catch-all mount in the Starlette route table.
+app.router.routes.insert(0, app.router.routes.pop())
 
 
 if __name__ == "__main__":

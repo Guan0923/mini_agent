@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   updateProfile: vi.fn(),
   updateAgentConfig: vi.fn(),
   updateRuntimeConfig: vi.fn(),
+  updateSandboxConfig: vi.fn(),
   updateProviderConfig: vi.fn(),
   addProviderConfig: vi.fn(),
   updateProviderConfigById: vi.fn(),
@@ -25,7 +26,6 @@ const settings = {
   agent_config: { tone: "balanced", verbosity: "balanced", initiative: "balanced", custom_instructions: "" },
   runtime_config: { max_tool_calls: 32, terminal_type: "cmd" as const },
   sandbox_config: {
-    enabled: true,
     file_mode: "read_only" as const,
     network_mode: "no_network" as const,
     network_allowlist: [],
@@ -73,6 +73,15 @@ const settings = {
 };
 
 const localProfile = { display_name: "旧名字", agent_preferences: "" };
+const sandboxHealth = {
+  phase: "healthy" as const,
+  installed: true,
+  detail: null,
+  checking: false,
+  repairing: false,
+  check: vi.fn().mockResolvedValue({ installed: true, healthy: true }),
+  repair: vi.fn().mockResolvedValue(undefined),
+};
 
 function modalElement(
   open: boolean,
@@ -89,6 +98,7 @@ function modalElement(
         onClose={onClose}
         onProfileChange={onProfileChange}
         onProviderConfigUpdate={onProviderConfigUpdate}
+        sandboxHealth={sandboxHealth}
       />
     </AntApp>
   );
@@ -107,6 +117,7 @@ describe("UserSettingsModal", () => {
     api.updateProfile.mockResolvedValue({ display_name: "新名字", agent_preferences: "" });
     api.updateAgentConfig.mockResolvedValue(settings.agent_config);
     api.updateRuntimeConfig.mockResolvedValue(settings.runtime_config);
+    api.updateSandboxConfig.mockResolvedValue(settings.sandbox_config);
     api.updateProviderConfig.mockResolvedValue(settings.provider_config);
     api.discoverProviderModels.mockResolvedValue({ models: [] });
   });
@@ -175,11 +186,43 @@ describe("UserSettingsModal", () => {
     }));
   });
 
-  it("does not expose sandbox controls in user settings", async () => {
+  it("shows the complete sandbox configuration without an enabled switch", async () => {
     renderModal();
     await screen.findByDisplayValue("旧名字");
-    expect(screen.queryByRole("menuitem", { name: "沙箱" })).not.toBeInTheDocument();
-    expect(screen.queryByText("Windows 沙箱")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("menuitem", { name: "沙箱" }));
+
+    expect(screen.getByRole("combobox", { name: "沙箱文件权限" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "沙箱网络权限" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "网络白名单" })).toBeInTheDocument();
+    expect(screen.getByText("暂无白名单规则")).toBeInTheDocument();
+    expect(screen.getAllByRole("spinbutton")).toHaveLength(7);
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /检\s*查/ })).toBeInTheDocument();
+    expect(screen.queryByText(/健康/)).not.toBeInTheDocument();
+  });
+
+  it("forces Full access to full network, confirms risk, and saves without enabled", async () => {
+    renderModal();
+    await screen.findByDisplayValue("旧名字");
+    await userEvent.click(screen.getByRole("menuitem", { name: "沙箱" }));
+
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "沙箱文件权限" }));
+    fireEvent.click(await screen.findByText("Full access", { selector: ".ant-select-item-option-content" }));
+    expect(screen.getByRole("combobox", { name: "沙箱网络权限" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "沙箱网络权限" }).closest(".ant-select")).toHaveTextContent("完整网络");
+
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect((await screen.findAllByText("启用 Full access？")).length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "确认并保存" }));
+
+    await waitFor(() => expect(api.updateSandboxConfig).toHaveBeenCalledTimes(1));
+    const payload = api.updateSandboxConfig.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      file_mode: "full_access",
+      network_mode: "full_network",
+      full_access_acknowledged: true,
+    });
+    expect(payload).not.toHaveProperty("enabled");
   });
 
   it("checks dirty state for mask and close button but keeps Escape disabled", async () => {

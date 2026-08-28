@@ -100,10 +100,12 @@ function QueueHarness({
   terminalStatus,
   onRun,
   runGate,
+  sandboxHealth,
 }: {
   terminalStatus: RuntimeStateNode["status"];
   onRun: ReturnType<typeof vi.fn>;
   runGate?: Promise<void>;
+  sandboxHealth?: { phase: "checking" | "healthy" | "unhealthy"; detail: string | null };
 }) {
   const [node, setNode] = useState(() => {
     const value = turn("turn-running", "running");
@@ -158,6 +160,7 @@ function QueueHarness({
             setNode((current) => ({ ...current, status: "success" }));
           }
         }}
+        sandboxHealth={sandboxHealth}
       />
       <button type="button" onClick={() => setNode((current) => ({ ...current, status: terminalStatus }))}>
         结束当前 Turn
@@ -454,6 +457,25 @@ describe("ChatPage running Turn configuration", () => {
 });
 
 describe("ChatPage queued message flushing", () => {
+  it("blocks Agent controls and shows a temporary non-persisted failure bubble", async () => {
+    const onRun = vi.fn();
+    render(
+      <QueueHarness
+        terminalStatus="success"
+        onRun={onRun}
+        sandboxHealth={{ phase: "unhealthy", detail: "Broker service stopped" }}
+      />,
+    );
+
+    expect(document.querySelector(".sandbox-health-failure")).toHaveTextContent("沙箱 Broker 不可用：Broker service stopped");
+    expect(screen.getByLabelText("聊天输入")).toHaveAttribute("contenteditable", "false");
+    expect(screen.getByRole("combobox", { name: "运行模式" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "发送第 1 条待发送消息" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "暂停" })).toBeDisabled();
+    expect(screen.queryByText("沙箱 Broker 不可用：Broker service stopped", { selector: ".message.user *" })).toBeNull();
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
   it.each(["success", "failed"] as const)(
     "merges the persisted queue after a %s terminal",
     async (terminalStatus) => {

@@ -11,6 +11,7 @@ import {
   updateProfile,
   updateProviderConfigById,
   updateRuntimeConfig,
+  updateSandboxConfig,
   type ProviderConfig,
   type UserSettings,
 } from "../../api";
@@ -35,6 +36,7 @@ export function useUserSettingsState({
   activeSessionId,
   onAgentConfigUpdate,
   onProviderConfigUpdate,
+  sandboxHealth,
 }: UserSettingsModalProps) {
   const { modal, message } = AntApp.useApp();
   const [section, setSection] = useState<SettingsSection>("profile");
@@ -198,6 +200,29 @@ export function useUserSettingsState({
         const runtime = await updateRuntimeConfig(settings.runtime_config);
         updateSettings({ runtime_config: runtime });
         setSaved((current) => current ? { ...current, runtime_config: runtime } : current);
+      } else if (section === "sandbox") {
+        const firstFullAccessSave = settings.sandbox_config.file_mode === "full_access"
+          && saved?.sandbox_config.file_mode !== "full_access";
+        if (firstFullAccessSave) {
+          const confirmed = await new Promise<boolean>((resolve) => {
+            modal.confirm({
+              title: "启用 Full access？",
+              content: "Full access 同时开放完整文件与网络访问，沙箱不再提供低权限隔离。请确认你理解此风险。",
+              okText: "确认并保存",
+              cancelText: "取消",
+              okButtonProps: { danger: true },
+              onOk: () => resolve(true),
+              onCancel: () => resolve(false),
+            });
+          });
+          if (!confirmed) return;
+        }
+        const sandbox = await updateSandboxConfig({
+          ...settings.sandbox_config,
+          ...(firstFullAccessSave ? { full_access_acknowledged: true } : {}),
+        });
+        updateSettings({ sandbox_config: sandbox });
+        setSaved((current) => current ? { ...current, sandbox_config: sandbox } : current);
       } else if (section === "provider_add") {
         const provider = await addProviderConfig(providerAddDraft);
         const providers = [...settings.provider_configs, provider];
@@ -369,6 +394,7 @@ export function useUserSettingsState({
     managedModelOpen,
     setManagedModelOpen,
     managedModelFeedback,
+    sandboxHealth,
     updateSettings,
     requestClose,
     toggleLocation,

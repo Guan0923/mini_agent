@@ -520,3 +520,36 @@ test("denied tool approval shows one static denied status", async ({ page }) => 
   await expect(assistant.getByText("Call tool web_search?", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "发送" })).toBeVisible({ timeout: 15_000 });
 });
+
+test("Sandbox health gate recovers through the real status and repair HTTP flow", async ({ page }) => {
+  await page.goto("/app");
+  const editor = page.getByLabel("聊天输入");
+  await expect(editor).toHaveAttribute("contenteditable", "true");
+
+  const unhealthy = await page.request.post("/api/test/sandbox-status", {
+    data: { installed: true, healthy: false, detail: "E2E Broker service stopped" },
+  });
+  expect(unhealthy.ok(), `${unhealthy.status()} ${await unhealthy.text()}`).toBeTruthy();
+
+  await page.getByRole("button", { name: /个人简介：/ }).click();
+  await page.getByRole("menuitem", { name: "沙箱" }).click();
+  const statusResponse = page.waitForResponse((response) =>
+    response.request().method() === "GET" && response.url().endsWith("/api/sandbox/status"),
+  );
+  await page.getByRole("button", { name: /检\s*查/ }).click();
+  expect((await statusResponse).ok()).toBeTruthy();
+  await expect(page.getByText("E2E Broker service stopped", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /修\s*复/ })).toBeVisible();
+
+  const repairResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/sandbox/repair"),
+  );
+  await page.getByRole("button", { name: /修\s*复/ }).click();
+  expect((await repairResponse).ok()).toBeTruthy();
+  await expect(page.getByText("E2E Broker service stopped", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /修\s*复/ })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(page.locator(".sandbox-health-failure")).toHaveCount(0);
+  await expect(editor).toHaveAttribute("contenteditable", "true");
+});

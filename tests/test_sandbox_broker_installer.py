@@ -10,6 +10,7 @@ from fastapi import Request
 
 from backend.api.routes.sandbox import install as install_broker
 from backend.api.routes.sandbox import repair as repair_broker
+from backend.sandbox import WindowsBrokerClient
 from backend.sandbox.broker_service import WindowsServiceInstaller
 from backend.sandbox.errors import BrokerInstallationError, BrokerInstallFailureCode
 from backend.sandbox.install_helper import (
@@ -28,6 +29,14 @@ from backend.sandbox.install_helper import (
 class _Result:
     def __init__(self, returncode: int = 0) -> None:
         self.returncode = returncode
+
+
+def test_broker_status_preserves_safe_initialization_detail() -> None:
+    status = WindowsBrokerClient(is_windows=True).status()
+
+    assert status.installed is False
+    assert status.healthy is False
+    assert status.detail == "Broker installation key is missing"
 
 
 def test_injected_runner_executes_one_local_transaction() -> None:
@@ -283,6 +292,46 @@ def test_repair_route_returns_safe_stop_category_and_code() -> None:
         "detail": message,
         "code": "broker_service_stop_failed",
     }
+
+
+def test_repair_route_installs_when_broker_is_missing() -> None:
+    calls: list[str] = []
+
+    class Broker:
+        def status(self):
+            return {"installed": False, "healthy": False}
+
+        def install(self):
+            calls.append("install")
+            return {"installed": True, "healthy": True}
+
+        def repair(self):
+            calls.append("repair")
+            return {"installed": True, "healthy": True}
+
+    app = types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            web=types.SimpleNamespace(
+                sandbox_broker=Broker(),
+                auth_service=types.SimpleNamespace(origin_allowed=lambda request: True),
+            )
+        )
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/sandbox/repair",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+            "app": app,
+        }
+    )
+
+    assert repair_broker(request) == {"installed": True, "healthy": True}
+    assert calls == ["install"]
 
 
 @pytest.mark.parametrize("stop_returncode", [0, 1])

@@ -46,7 +46,10 @@ def install(request: Request) -> dict[str, object] | JSONResponse:
 @router.post("/repair", response_model=None)
 def repair(request: Request) -> dict[str, object] | JSONResponse:
     try:
-        return _broker_payload(_broker(request).repair())
+        broker = _broker(request)
+        current = _broker_payload(broker.status())
+        operation = broker.install if current.get("installed") is not True else broker.repair
+        return _broker_payload(operation())
     except BrokerInstallationError as exc:
         logger.warning("sandbox broker repair failed code=%s", exc.broker_code.value, exc_info=False)
         return JSONResponse(

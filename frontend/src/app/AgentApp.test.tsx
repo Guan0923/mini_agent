@@ -12,11 +12,13 @@ const api = vi.hoisted(() => ({
   deleteSession: vi.fn(),
   forkTurn: vi.fn(),
   getSettings: vi.fn(),
+  getSandboxStatus: vi.fn(),
   getSessionNodes: vi.fn(),
   listSessions: vi.fn(),
   renameSession: vi.fn(),
   restoreSession: vi.fn(),
   pauseTurn: vi.fn(),
+  repairSandboxBroker: vi.fn(),
   streamAttachedTurn: vi.fn(),
   streamChat: vi.fn(),
   streamResume: vi.fn(),
@@ -135,8 +137,10 @@ describe("AgentApp new conversation initialization", () => {
     vi.clearAllMocks();
     shell.props = null;
     api.getSettings.mockRejectedValue(new Error("settings unavailable"));
+    api.getSandboxStatus.mockResolvedValue({ installed: true, healthy: true });
     api.getSessionNodes.mockResolvedValue([]);
     api.listSessions.mockResolvedValue([]);
+    api.pauseTurn.mockResolvedValue(undefined);
     api.streamAttachedTurn.mockResolvedValue("completed");
     projectsApi.listProjects.mockResolvedValue([]);
   });
@@ -299,5 +303,24 @@ describe("AgentApp new conversation initialization", () => {
     await act(async () => Promise.resolve());
     expect(api.streamAttachedTurn).toHaveBeenCalledTimes(1);
     await act(async () => finish());
+  });
+
+  it("does not attach and pauses every known running Turn while the Broker is unhealthy", async () => {
+    const summary = { ...session("session-running"), thread_id: "session-running" };
+    const running = turn("session-running", "session-running", "turn-running");
+    running.status = "running";
+    api.getSandboxStatus.mockResolvedValue({
+      installed: true,
+      healthy: false,
+      detail: "Broker service stopped",
+    });
+    api.listSessions.mockResolvedValue([summary]);
+    api.getSessionNodes.mockResolvedValue([running]);
+
+    await renderReady();
+
+    await waitFor(() => expect(api.pauseTurn).toHaveBeenCalledWith("turn-running"));
+    expect(api.streamAttachedTurn).not.toHaveBeenCalled();
+    expect(shell.props?.sandboxHealth.phase).toBe("unhealthy");
   });
 });

@@ -54,6 +54,7 @@ export default function ChatPage({
   onStopRun,
   queuedMessages = [],
   onQueuedMessagesChange = () => undefined,
+  sandboxHealth = { phase: "healthy", detail: null },
 }: ChatPageProps) {
   const { message } = AntApp.useApp();
   const mode = selectedMode ?? "agent";
@@ -78,7 +79,8 @@ export default function ChatPage({
   // request is sent until its SSE cleanup, including the tiny interval
   // between the optimistic user bubble and the first turn.snapshot frame.
   const busy = Boolean(runningProp) || queueSubmitting;
-  const interactionBusy = busy || compactionPending;
+  const sandboxBlocked = sandboxHealth.phase !== "healthy";
+  const interactionBusy = busy || compactionPending || sandboxBlocked;
   const composerFiles = useComposerFiles({
     conversationId: conversation?.id,
     sessionId: conversation?.sessionId,
@@ -140,7 +142,7 @@ export default function ChatPage({
   const runtimeControls = useRuntimeControls({
     conversation,
     activeRuntimeNode,
-    busy,
+    busy: busy || sandboxBlocked,
     providerConfig,
     mode,
     onModeChange,
@@ -203,7 +205,8 @@ export default function ChatPage({
       return;
     }
     if (
-      !queueFlushRef.current
+      !sandboxBlocked
+      && !queueFlushRef.current
       && !queueAutoBlockedRef.current
       && queuedMessages.length > 0
       && conversation?.id
@@ -213,7 +216,7 @@ export default function ChatPage({
       setQueueSubmitting(true);
       void flushQueuedMessages();
     }
-  }, [activeRuntimeNode?.id, activeRuntimeNode?.status, busy, queuedMessages.length, conversation?.id]);
+  }, [activeRuntimeNode?.id, activeRuntimeNode?.status, busy, queuedMessages.length, conversation?.id, sandboxBlocked]);
 
   useEffect(() => {
     if (!conversation?.id || !activeRuntimeNode) return;
@@ -295,6 +298,7 @@ export default function ChatPage({
     waitForActiveRun = false,
     onBaseline?: (turn: RuntimeStateNode) => void,
   ) {
+    if (sandboxBlocked) throw new Error("沙箱 Broker 尚未确认健康。");
     if (!onRun) throw new Error("ChatPage requires the Turn run controller.");
     await onRun({
         conversationId,
@@ -356,7 +360,7 @@ export default function ChatPage({
   }
 
   async function submitSteering(items: QueuedMessage[]) {
-    if (!conversation?.id || !activeRuntimeNode || activeRuntimeNode.status !== "running" || items.length === 0) return;
+    if (sandboxBlocked || !conversation?.id || !activeRuntimeNode || activeRuntimeNode.status !== "running" || items.length === 0) return;
     const merged = mergeQueuedMessages(items);
     const steeringId = items.length === 1 ? items[0].id : crypto.randomUUID();
     try {
@@ -384,6 +388,12 @@ export default function ChatPage({
     // Snapshot both content and IDs. React may persist a new queue while this
     // request is in flight; that new content belongs to the next merged Turn.
     const items = queuedMessages.slice();
+    if (sandboxBlocked) {
+      queueFlushRef.current = false;
+      queueInFlightIdsRef.current = null;
+      setQueueSubmitting(false);
+      return;
+    }
     if (!conversation?.sessionId || items.length === 0) {
       queueFlushRef.current = false;
       queueInFlightIdsRef.current = null;
@@ -509,7 +519,7 @@ export default function ChatPage({
   }
 
   async function send() {
-    if (compactionPending) return;
+    if (compactionPending || sandboxBlocked) return;
     const prompt = input.trim();
     // A running assistant no longer blocks the composer: a draft is handed
     // to the in-memory FIFO queue below.  Only an in-progress upload prevents
@@ -612,6 +622,7 @@ export default function ChatPage({
           changeMessageVersion={changeMessageVersion}
           onDecision={chooseDecision}
           onFork={onFork ? forkMessage : undefined}
+          sandboxFailure={sandboxHealth.phase === "unhealthy" ? sandboxHealth.detail ?? "健康检查未通过。" : null}
         />
       </div>
       <Composer
@@ -647,9 +658,11 @@ export default function ChatPage({
         onStop={pauseOrSteer}
         onSend={() => void send()}
         actionMode={actionMode}
-        submitDisabled={projectUnavailable || compactionPending || composerActionState.disabled}
-        disabled={projectUnavailable || compactionPending}
-        disabledReason={conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
+        submitDisabled={sandboxBlocked || projectUnavailable || compactionPending || composerActionState.disabled}
+        disabled={sandboxBlocked || projectUnavailable || compactionPending}
+        disabledReason={sandboxBlocked
+          ? sandboxHealth.phase === "checking" ? "正在检查沙箱 Broker" : "沙箱 Broker 不可用"
+          : conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
         fileCandidates={fileCandidates}
         fileMenuVisible={fileMenuVisible}
         activeFileIndex={activeFileIndex}

@@ -1,7 +1,8 @@
 import type { AgentConfig, ProviderConfig, SandboxConfig, UserSettings } from "../../api";
+import type { SandboxHealthState } from "../../app/useSandboxHealth";
 import type { LocalProfile } from "../../types";
 
-export type SettingsSection = "profile" | "agent" | "runtime" | "provider_add" | "provider_manage";
+export type SettingsSection = "profile" | "agent" | "runtime" | "sandbox" | "provider_add" | "provider_manage";
 
 export type ProviderDraft = {
   provider_name: string;
@@ -29,6 +30,7 @@ export interface UserSettingsModalProps {
   onAgentConfigUpdate?: (config: AgentConfig) => void;
   onProviderConfigUpdate?: (config: ProviderConfig) => void;
   onProfileChange: (profile: LocalProfile) => void;
+  sandboxHealth: SandboxHealthState;
 }
 
 export const defaultAgent: AgentConfig = {
@@ -66,7 +68,6 @@ export const defaultProviderDraft: ProviderDraft = {
 };
 
 export const defaultSandboxConfig: SandboxConfig = {
-  enabled: true,
   file_mode: "read_only",
   network_mode: "no_network",
   network_allowlist: [],

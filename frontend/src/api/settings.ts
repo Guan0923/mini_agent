@@ -57,7 +57,6 @@ export interface SandboxNetworkRule {
 }
 
 export interface SandboxConfig {
-  enabled: true;
   file_mode: SandboxFileMode;
   network_mode: SandboxNetworkMode;
   network_allowlist: SandboxNetworkRule[];
@@ -121,6 +120,22 @@ export function updateSandboxConfig(config: SandboxConfig): Promise<SandboxConfi
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
+}
+
+export interface SandboxBrokerStatus {
+  installed: boolean;
+  healthy: boolean;
+  version?: string | null;
+  installation_id?: string | null;
+  detail?: string | null;
+}
+
+export function getSandboxStatus(): Promise<SandboxBrokerStatus> {
+  return requestJson<SandboxBrokerStatus>("/api/sandbox/status");
+}
+
+export function repairSandboxBroker(): Promise<SandboxBrokerStatus> {
+  return requestJson<SandboxBrokerStatus>("/api/sandbox/repair", { method: "POST" });
 }
 
 type ProviderInput = Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { api_key?: string };

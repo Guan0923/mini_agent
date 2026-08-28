@@ -335,7 +335,7 @@ def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(
         tools,
         workspace_root=str(tmp_path),
         sandbox_launcher=launcher,
-        sandbox_config={"enabled": True},
+        sandbox_config={},
     )
     runtime = runner.new_runtime(
         task="run approved command",

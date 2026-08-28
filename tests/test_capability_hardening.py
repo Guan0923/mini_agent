@@ -86,7 +86,7 @@ def test_user_mcp_servers_are_started_and_project_file_is_ignored(tmp_path: Path
         paths,
         {},
         sandbox_launcher=SandboxLauncher(is_windows=False, allow_local_backend=True),
-        sandbox_config={"enabled": True},
+        sandbox_config={},
     )
     assert len(started) == 2
     assert len(started[1]) == 1
@@ -108,7 +108,7 @@ def test_external_mcp_server_cannot_start_without_sandbox(tmp_path: Path, monkey
         app_factory._external_resources(workspace, paths, {})
 
 
-def test_sandbox_runtime_requires_healthy_broker_and_migrates_disabled_config(monkeypatch) -> None:
+def test_sandbox_runtime_requires_healthy_broker_and_drops_obsolete_enabled_config(monkeypatch) -> None:
     class Broker:
         def __init__(self, status: BrokerStatus) -> None:
             self._status = status
@@ -131,7 +131,7 @@ def test_sandbox_runtime_requires_healthy_broker_and_migrates_disabled_config(mo
     launcher, config = app_factory._sandbox_runtime({"sandbox_config": {"policy_version": 2, "enabled": False}})
 
     assert isinstance(launcher, SandboxLauncher)
-    assert config["enabled"] is True
+    assert "enabled" not in config
 
 
 def test_mcp_trust_store_is_compat_noop(tmp_path: Path) -> None:

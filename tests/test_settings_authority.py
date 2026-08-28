@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.api.routes.settings import SandboxConfigPayload
 from backend.domain import SystemMessage, ToolSpec, UserMessage
 from backend.providers import ChatCompletionsAdapter, LLMClient, MessagesAdapter, ModelConfig, ResponsesAdapter
 from backend.runtime.core.context import AgentRuntime
@@ -105,14 +106,19 @@ def test_local_profile_and_agent_preferences_are_stored_in_toml(tmp_path: Path) 
     assert store.agent_preferences() == "Preferred tone: direct\nUse bullets\nconcise"
 
 
-def test_sandbox_cannot_be_disabled(tmp_path: Path) -> None:
+def test_sandbox_enabled_parameter_is_removed_from_every_settings_projection(tmp_path: Path) -> None:
     store = LocalSettingsStore(tmp_path / "runtime" / "state.db", tmp_path / "config.toml")
     current = store.sandbox_config()
     store.config_store.update({"sandbox": {**current, "enabled": False}})
 
-    assert store.sandbox_config()["enabled"] is True
-    with pytest.raises(ValueError, match="cannot be disabled"):
-        store.update_sandbox_config({"enabled": False})
+    normalized = store.sandbox_config()
+    updated = store.update_sandbox_config({"enabled": False})
+
+    assert "enabled" not in normalized
+    assert "enabled" not in updated
+    assert "enabled" not in store.config_store.read()["sandbox"]
+    assert "enabled" not in SandboxConfigPayload.model_fields
+    assert "enabled" not in SandboxConfigPayload.model_json_schema()["properties"]
 
 
 def test_provider_names_are_case_insensitive_unique_and_renamable(tmp_path: Path) -> None:

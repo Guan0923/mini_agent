@@ -4,6 +4,7 @@ import {
   getSettings,
   getSessionNodes,
   listSessions,
+  pauseTurn,
   updateProfile,
   type ProviderConfig,
   type SessionInfo,
@@ -21,6 +22,7 @@ import { isRuntimeTurnNode } from "./runtime/runtimeNodeNormalization";
 import { withLoadedTurns } from "./conversationProjection";
 import { createConversationActions } from "./conversationActions";
 import { createProjectActions } from "./projectActions";
+import { useSandboxHealth } from "./useSandboxHealth";
 import type {
   ChatMessage,
   ChatMode,
@@ -51,6 +53,8 @@ function AgentApp() {
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const activeRunsRef = useRef(new Map<string, import("./types").ActiveRun>());
+  const pausedForSandboxOutageRef = useRef(new Set<string>());
+  const sandboxHealth = useSandboxHealth();
   const [queuedMessages, setQueuedMessages] = useState(
     () => loadQueuedMessages(localStorage),
   );
@@ -294,7 +298,59 @@ function AgentApp() {
   });
 
   useEffect(() => {
-    if (!current?.sessionId || !current.runtimeNodes || activeRunsRef.current.has(current.id)) return;
+    if (sandboxHealth.phase === "healthy") {
+      pausedForSandboxOutageRef.current.clear();
+      return;
+    }
+    if (sandboxHealth.phase !== "unhealthy") return;
+    const runningTurnIds = new Set<string>();
+    const turnSessions = new Map<string, { conversationId: string; sessionId: string }>();
+    for (const active of activeRunsRef.current.values()) {
+      if (active.turnId) runningTurnIds.add(active.turnId);
+    }
+    for (const conversation of conversations) {
+      for (const node of conversation.runtimeNodes ?? []) {
+        if (isRuntimeTurnNode(node) && node.status === "running") {
+          runningTurnIds.add(node.id);
+          if (conversation.sessionId) {
+            turnSessions.set(node.id, { conversationId: conversation.id, sessionId: conversation.sessionId });
+          }
+        }
+      }
+    }
+    if (turnSessions.size > 0) {
+      setConversations((previous) => previous.map((conversation) => {
+        const nodes = conversation.runtimeNodes;
+        if (!nodes?.some((node) => runningTurnIds.has(node.id))) return conversation;
+        return withLoadedTurns(conversation, nodes.map((node) => (
+          isRuntimeTurnNode(node) && runningTurnIds.has(node.id) ? { ...node, status: "paused" } : node
+        )));
+      }));
+    }
+    for (const turnId of runningTurnIds) {
+      if (pausedForSandboxOutageRef.current.has(turnId)) continue;
+      pausedForSandboxOutageRef.current.add(turnId);
+      void pauseTurn(turnId).catch(async () => {
+        pausedForSandboxOutageRef.current.delete(turnId);
+        const target = turnSessions.get(turnId);
+        if (!target) return;
+        try {
+          const nodes = await getSessionNodes(target.sessionId);
+          updateConversation(target.conversationId, (conversation) => withLoadedTurns(conversation, nodes));
+        } catch {
+          // The next health transition or session reload retries reconciliation.
+        }
+      });
+    }
+  }, [conversations, sandboxHealth.phase]);
+
+  useEffect(() => {
+    if (
+      sandboxHealth.phase !== "healthy"
+      || !current?.sessionId
+      || !current.runtimeNodes
+      || activeRunsRef.current.has(current.id)
+    ) return;
     const activeTurn = current.runtimeNodes.find(
       (node): node is RuntimeStateNode => isRuntimeTurnNode(node)
         && node.id === current.activeTurnId
@@ -316,7 +372,16 @@ function AgentApp() {
       model: activeTurn.model,
       sourceNodeId: activeTurn.id,
     });
-  }, [current?.id, current?.sessionId, current?.activeTurnId, current?.runtimeNodes]);
+  }, [current?.id, current?.sessionId, current?.activeTurnId, current?.runtimeNodes, sandboxHealth.phase]);
+
+  async function runConversationWithSandbox(request: import("./types").ChatRunRequest): Promise<void> {
+    if (sandboxHealth.phase !== "healthy") {
+      throw new Error(sandboxHealth.phase === "checking"
+        ? "正在检查沙箱 Broker，暂时无法运行 Agent。"
+        : `沙箱 Broker 不可用：${sandboxHealth.detail ?? "健康检查未通过。"}`);
+    }
+    await runConversation(request);
+  }
 
   async function ensureSession(id: string): Promise<string> {
     const conversation = conversations.find((item) => item.id === id);
@@ -475,13 +540,14 @@ function AgentApp() {
       onSelectSession={useSession}
       onReload={reloadConversation}
       onRefresh={refreshSessions}
-      onRun={runConversation}
+      onRun={runConversationWithSandbox}
       onStopRun={stopConversation}
       queuedMessages={queuedMessages}
       onQueuedMessagesChange={updateQueuedMessages}
       onClearError={() => setActionError(null)}
       onDisplayModeUpdate={(config) => setDisplayMode(effectiveDisplayMode(config.display_mode))}
       onProviderConfigUpdate={setProviderConfig}
+      sandboxHealth={sandboxHealth}
     />
   );
 }

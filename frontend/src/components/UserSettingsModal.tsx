@@ -5,6 +5,7 @@ import {
   RuntimeSettingsSection,
 } from "./settings/GeneralSettingsSections";
 import { ProviderAddSection, ProviderManageSection } from "./settings/ProviderSettingsSections";
+import { SandboxSettingsSection } from "./settings/SandboxSettingsSection";
 import type { SettingsSection, UserSettingsModalProps } from "./settings/contracts";
 import { useUserSettingsState } from "./settings/useUserSettingsState";
 
@@ -12,6 +13,7 @@ const menuItems = [
   { key: "profile", label: "个人简介" },
   { key: "agent", label: "Agent 配置" },
   { key: "runtime", label: "运行配置" },
+  { key: "sandbox", label: "沙箱" },
   { key: "provider_add", label: "添加提供商" },
   { key: "provider_manage", label: "Provider 与模型" },
 ];
@@ -34,6 +36,7 @@ export default function UserSettingsModal(props: UserSettingsModalProps) {
         {state.section === "profile" ? <ProfileSettingsSection state={state} /> : null}
         {state.section === "agent" ? <AgentSettingsSection state={state} /> : null}
         {state.section === "runtime" ? <RuntimeSettingsSection state={state} /> : null}
+        {state.section === "sandbox" ? <SandboxSettingsSection state={state} /> : null}
         {state.section === "provider_add" ? <ProviderAddSection state={state} /> : null}
         {state.section === "provider_manage" ? <ProviderManageSection state={state} /> : null}
         {state.error ? <Typography.Text type="danger">{state.error}</Typography.Text> : null}

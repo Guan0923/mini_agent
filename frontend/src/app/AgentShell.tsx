@@ -13,6 +13,7 @@ import ChatPage from "../pages/ChatPage";
 import TrashPage from "../pages/TrashPage";
 import UserSettingsModal from "../components/UserSettingsModal";
 import IconAction from "../components/IconAction";
+import type { SandboxHealthState } from "./useSandboxHealth";
 
 export interface AgentShellProps {
   profile: LocalProfile;
@@ -63,6 +64,7 @@ export interface AgentShellProps {
   onClearError: () => void;
   onDisplayModeUpdate: (config: AgentConfig) => void;
   onProviderConfigUpdate: (config: ProviderConfig) => void;
+  sandboxHealth: SandboxHealthState;
 }
 
 export default function AgentShell(props: AgentShellProps) {
@@ -167,6 +169,7 @@ export default function AgentShell(props: AgentShellProps) {
               onStopRun={props.onStopRun}
               queuedMessages={props.queuedMessages?.get(props.current?.id ?? "") ?? []}
               onQueuedMessagesChange={props.onQueuedMessagesChange}
+              sandboxHealth={props.sandboxHealth}
             />
           ) : props.page === "trash" ? <TrashPage conversations={props.archivedConversations} projects={props.removedProjects} onRestore={props.onRestore} onDelete={props.onDelete} onRestoreProject={props.onRestoreProject} /> : <BenchmarkPage />}
         </Layout.Content>
@@ -179,6 +182,7 @@ export default function AgentShell(props: AgentShellProps) {
         activeSessionId={props.current?.sessionId}
         onAgentConfigUpdate={props.onDisplayModeUpdate}
         onProviderConfigUpdate={props.onProviderConfigUpdate}
+        sandboxHealth={props.sandboxHealth}
       />
     </Layout>
   );

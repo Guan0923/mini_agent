@@ -130,7 +130,8 @@ class WindowsBrokerClient:
                 str(payload.get("detail")) if payload.get("detail") else None,
             )
         except Exception as exc:
-            return BrokerStatus(False, False, detail=str(type(exc).__name__))
+            detail = str(exc).strip() or type(exc).__name__
+            return BrokerStatus(False, False, detail=detail)
 
     def install(self) -> BrokerStatus:
         if self._installer is None:

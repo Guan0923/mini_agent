@@ -6,9 +6,10 @@ interface Props {
   onSend: (item: QueuedMessage) => void;
   onEdit: (item: QueuedMessage) => void;
   onDelete: (item: QueuedMessage) => void;
+  disabled?: boolean;
 }
 
-export default function QueuedMessageList({ items, onSend, onEdit, onDelete }: Props) {
+export default function QueuedMessageList({ items, onSend, onEdit, onDelete, disabled = false }: Props) {
   if (items.length === 0) return null;
   return (
     <section className="queued-message-list" aria-label="待发送消息">
@@ -22,13 +23,13 @@ export default function QueuedMessageList({ items, onSend, onEdit, onDelete }: P
               {item.sendingSteeringId ? <span className="queued-message-sending"> · 发送中</span> : null}
             </span>
             <span className="queued-message-actions">
-              <button type="button" className="queued-message-button" aria-label={`发送第 ${index + 1} 条待发送消息`} disabled={Boolean(item.sendingSteeringId)} onClick={() => onSend(item)}>
+              <button type="button" className="queued-message-button" aria-label={`发送第 ${index + 1} 条待发送消息`} disabled={disabled || Boolean(item.sendingSteeringId)} onClick={() => onSend(item)}>
                 <SendOutlined aria-hidden="true" />
               </button>
-              <button type="button" className="queued-message-button" aria-label={`编辑第 ${index + 1} 条待发送消息`} disabled={Boolean(item.sendingSteeringId)} onClick={() => onEdit(item)}>
+              <button type="button" className="queued-message-button" aria-label={`编辑第 ${index + 1} 条待发送消息`} disabled={disabled || Boolean(item.sendingSteeringId)} onClick={() => onEdit(item)}>
                 <EditOutlined aria-hidden="true" />
               </button>
-              <button type="button" className="queued-message-button danger" aria-label={`删除第 ${index + 1} 条待发送消息`} disabled={Boolean(item.sendingSteeringId)} onClick={() => onDelete(item)}>
+              <button type="button" className="queued-message-button danger" aria-label={`删除第 ${index + 1} 条待发送消息`} disabled={disabled || Boolean(item.sendingSteeringId)} onClick={() => onDelete(item)}>
                 <DeleteOutlined aria-hidden="true" />
               </button>
             </span>
