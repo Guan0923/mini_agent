@@ -5,8 +5,8 @@ import { getTurnTrace } from "../../api";
 import type {
   RuntimeStateNode,
   TurnItem,
-  TurnMessage,
-  TurnTraceRequest,
+  TurnTraceContext,
+  TurnTraceItem,
   TurnTraceResponse,
 } from "../../types";
 
@@ -14,11 +14,10 @@ interface TracePageProps {
   turns: RuntimeStateNode[];
 }
 
-type SemanticKind = "system" | "preference" | "skill" | "mcp" | "user" | "reasoning" | "assistant" | "tool";
+type SemanticKind = "system" | "skill" | "mcp" | "user" | "reasoning" | "assistant" | "tool";
 
 const TRACE_TAGS: Record<SemanticKind, { label: string; color?: string }> = {
   system: { label: "System", color: "purple" },
-  preference: { label: "Preference", color: "magenta" },
   skill: { label: "Skill", color: "cyan" },
   mcp: { label: "MCP", color: "orange" },
   user: { label: "User Message", color: "green" },
@@ -72,58 +71,21 @@ function panel(
   };
 }
 
-function requestPanels(request: TurnTraceRequest): NonNullable<CollapseProps["items"]> {
-  const result: NonNullable<CollapseProps["items"]> = [];
-  result.push(panel(`${request.exchange_id}:meta`, "tool", request.operation, {
-    timestamp: request.timestamp,
-    body: <pre className="trace-value">{json({
-      exchange_id: request.exchange_id,
-      sequence: request.sequence,
-      provider: request.provider,
-      provider_name: request.provider_name,
-      model: request.model,
-      operation: request.operation,
-      output_mode: request.output_mode,
-      stream: request.stream,
-      request_parameters: request.request_parameters,
-    })}</pre>,
-  }));
-  result.push(panel(`${request.exchange_id}:base-system`, "system", request.base_system_prompt));
-  result.push(panel(`${request.exchange_id}:effective-system`, "system", request.effective_system_prompt));
-  if (request.user_preferences) {
-    result.push(panel(`${request.exchange_id}:preferences`, "preference", request.user_preferences));
-  }
-  request.skills.forEach((skill, index) => {
-    result.push(panel(`${request.exchange_id}:skill:${index}`, "skill", skill.instructions ?? skill, {
+function contextPanels(context: TurnTraceContext | null): NonNullable<CollapseProps["items"]> {
+  if (!context) return [];
+  const result: NonNullable<CollapseProps["items"]> = [
+    panel("context:system", "system", context.system_message, { timestamp: context.initialized_at }),
+  ];
+  context.active_skills.forEach((skill, index) => {
+    result.push(panel(`context:skill:${index}`, "skill", skill.instructions ?? skill, {
       body: <pre className="trace-value">{json(skill)}</pre>,
     }));
   });
-  request.tools.forEach((tool, index) => {
+  context.tools.forEach((tool, index) => {
     const kind = tool.origin?.kind === "mcp" ? "mcp" : "tool";
-    result.push(panel(`${request.exchange_id}:tool:${index}`, kind, tool.name, {
+    result.push(panel(`context:tool:${index}`, kind, tool.name, {
       body: <pre className="trace-value">{json(tool)}</pre>,
     }));
-  });
-  request.messages.forEach((message, index) => {
-    const role = String(message.role ?? "");
-    if (role === "system") return;
-    if (role === "user") {
-      result.push(panel(`${request.exchange_id}:message:${index}`, "user", message.content));
-      return;
-    }
-    if (message.reasoning) {
-      result.push(panel(`${request.exchange_id}:reasoning:${index}`, "reasoning", message.reasoning));
-    }
-    if (message.content) {
-      result.push(panel(`${request.exchange_id}:message:${index}`, "assistant", message.content));
-    }
-    if (Array.isArray(message.tool_messages)) {
-      message.tool_messages.forEach((tool, toolIndex) => {
-        result.push(panel(`${request.exchange_id}:message:${index}:tool:${toolIndex}`, "tool", tool, {
-          body: <pre className="trace-value">{json(tool)}</pre>,
-        }));
-      });
-    }
   });
   return result;
 }
@@ -132,27 +94,43 @@ function itemValue(item: TurnItem): unknown {
   return item.text ?? item.message ?? item.content ?? item.summary ?? item;
 }
 
-function turnPanels(messages: TurnMessage[]): NonNullable<CollapseProps["items"]> {
-  const result: NonNullable<CollapseProps["items"]> = [];
-  messages.forEach((message, messageIndex) => {
-    message.content.forEach((item, itemIndex) => {
-      const key = `turn:${messageIndex}:${itemIndex}`;
-      if (message.role === "user") {
-        result.push(panel(key, "user", itemValue(item), { status: item.status }));
-        return;
-      }
-      const kind: SemanticKind = item.type === "reasoning"
-        ? "reasoning"
-        : item.type === "text"
-          ? "assistant"
-          : "tool";
-      result.push(panel(key, kind, itemValue(item), {
-        status: item.status,
-        body: <pre className="trace-value">{typeof itemValue(item) === "string" ? text(itemValue(item)) : json(item)}</pre>,
-      }));
-    });
+function itemKind(entry: TurnTraceItem): SemanticKind {
+  if (entry.role === "user") return "user";
+  if (entry.item.type === "reasoning") return "reasoning";
+  if (entry.item.type === "text") return "assistant";
+  if (entry.item.type === "skill_snapshot") return "skill";
+  return "tool";
+}
+
+function traceItemPanels(items: TurnTraceItem[]): NonNullable<CollapseProps["items"]> {
+  return items.map((entry) => {
+    const value = itemValue(entry.item);
+    return panel(
+      `item:${entry.message_idx}:${entry.item_idx}`,
+      itemKind(entry),
+      value,
+      {
+        status: entry.item.status,
+        timestamp: entry.completed_at,
+        body: (
+          <pre className="trace-value">
+            {typeof value === "string" && entry.item.type !== "tool_call" ? text(value) : json(entry.item)}
+          </pre>
+        ),
+      },
+    );
   });
-  return result;
+}
+
+function mergeTrace(current: TurnTraceResponse | null, incoming: TurnTraceResponse): TurnTraceResponse {
+  if (!current || current.turn.id !== incoming.turn.id || current.data_idx !== incoming.data_idx) return incoming;
+  const sequences = new Set(current.items.map((item) => item.sequence));
+  return {
+    ...incoming,
+    context: current.context ?? incoming.context,
+    items: [...current.items, ...incoming.items.filter((item) => !sequences.has(item.sequence))]
+      .sort((left, right) => left.sequence - right.sequence),
+  };
 }
 
 export default function TracePage({ turns }: TracePageProps) {
@@ -170,59 +148,83 @@ export default function TracePage({ turns }: TracePageProps) {
   const [trace, setTrace] = useState<TurnTraceResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const traceStatus = trace?.turn.id === selectedTurn?.id ? trace.turn.status : selectedTurn?.status;
 
   useEffect(() => {
     if (!selectedTurn) {
       setTrace(null);
       return;
     }
-    const controller = new AbortController();
-    let mounted = true;
+    let stopped = false;
+    let activeController: AbortController | null = null;
+    let timer: number | undefined;
+    let cursor = 0;
+    let hasContext = false;
+    let running = selectedTurn.status === "running";
+    setTrace(null);
+    setError(null);
+
+    const schedule = () => {
+      if (!stopped && running) timer = window.setTimeout(() => void load(false), 2_000);
+    };
     const load = async (showLoading: boolean) => {
       if (showLoading) setLoading(true);
+      activeController = new AbortController();
       try {
-        const value = await getTurnTrace(selectedTurn.id, dataIdx, controller.signal);
-        if (mounted) {
-          setTrace(value);
-          setError(null);
-        }
+        const value = await getTurnTrace(
+          selectedTurn.id,
+          dataIdx,
+          activeController.signal,
+          hasContext ? cursor : undefined,
+        );
+        if (stopped) return;
+        hasContext ||= value.context !== null;
+        cursor = Math.max(cursor, value.last_sequence);
+        running = value.turn.status === "running";
+        setTrace((current) => mergeTrace(current, value));
+        setError(null);
+        schedule();
       } catch (reason) {
-        if (mounted && !controller.signal.aborted) setError(String((reason as Error).message ?? reason));
+        if (!stopped && !activeController.signal.aborted) {
+          setError(String((reason as Error).message ?? reason));
+          schedule();
+        }
       } finally {
-        if (mounted && showLoading) setLoading(false);
+        if (!stopped && showLoading) setLoading(false);
       }
     };
     void load(true);
-    const interval = traceStatus === "running" ? window.setInterval(() => void load(false), 2_000) : undefined;
     return () => {
-      mounted = false;
-      controller.abort();
-      if (interval !== undefined) window.clearInterval(interval);
+      stopped = true;
+      activeController?.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [selectedTurn?.id, dataIdx, traceStatus]);
+  }, [selectedTurn?.id, dataIdx]);
 
   if (!selectedTurn) return <div className="trace-page"><Empty description="当前 Thread 还没有 Turn" /></div>;
 
   const response = trace?.turn.id === selectedTurn.id && trace.data_idx === dataIdx ? trace : null;
-  const selectedMessages = response?.turn.data[dataIdx] ?? selectedTurn.data[dataIdx] ?? [];
+  const displayTurn = response?.turn ?? selectedTurn;
   const innerItems = [
-    ...(response?.requests.flatMap(requestPanels) ?? []),
-    ...turnPanels(selectedMessages),
+    ...contextPanels(response?.context ?? null),
+    ...traceItemPanels(response?.items ?? []),
   ];
   const outerItems: CollapseProps["items"] = [{
     key: selectedTurn.id,
     label: (
       <span className="trace-turn-label">
-        <Tag color={selectedTurn.status === "failed" ? "red" : "blue"}>Turn</Tag>
-        <span>{selectedTurn.id}</span>
-        <Tag color={selectedTurn.status === "failed" ? "red" : undefined}>{selectedTurn.status}</Tag>
-        <time>{selectedTurn.timestamp}</time>
+        <Tag color={displayTurn.status === "failed" ? "red" : "blue"}>Turn</Tag>
+        <span className="trace-turn-id" title={displayTurn.id}>{displayTurn.id}</span>
+        <Tag color={displayTurn.status === "failed" ? "red" : undefined}>{displayTurn.status}</Tag>
+        <time>{displayTurn.timestamp}</time>
       </span>
     ),
     children: innerItems.length > 0
-      ? <Collapse className="trace-inner-collapse" items={innerItems} />
-      : <Empty description="该版本没有审计快照或 Item" />,
+      ? <Collapse
+          className="trace-inner-collapse"
+          classNames={{ title: "trace-collapse-title" }}
+          items={innerItems}
+        />
+      : <Empty description="该版本还没有 Trace 上下文或完成 Item" />,
   }];
 
   return (
@@ -255,7 +257,13 @@ export default function TracePage({ turns }: TracePageProps) {
       </div>
       {error ? <Alert type="error" showIcon title={`Trace 加载失败：${error}`} /> : null}
       {loading && !response ? <div className="trace-loading"><Spin /></div> : null}
-      <Collapse key={selectedTurn.id} className="trace-turn-collapse" defaultActiveKey={[selectedTurn.id]} items={outerItems} />
+      <Collapse
+        key={`${selectedTurn.id}:${dataIdx}`}
+        className="trace-turn-collapse"
+        classNames={{ title: "trace-collapse-title" }}
+        defaultActiveKey={[selectedTurn.id]}
+        items={outerItems}
+      />
     </div>
   );
 }

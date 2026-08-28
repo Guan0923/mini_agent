@@ -7,7 +7,8 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Protocol
 
-from backend.domain import ToolSpec, TracePersistenceError, TurnTraceRequest
+from backend.domain import ToolSpec, TracePersistenceError, TurnTrace, TurnTraceContext, TurnTraceItem
+from backend.domain.runtime_state import RuntimeState as TurnState
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 from backend.runtime.core.contracts import WorkflowModeChanged
 from backend.runtime.core.events import RuntimeEvent
@@ -25,7 +26,6 @@ from backend.runtime.persistence.recording import (
     model_error_data,
     model_request_data,
     model_response_data,
-    neutral_message_record,
     turn_trace_audit_value,
 )
 
@@ -173,7 +173,7 @@ class ModelRequestExecutor:
                 parameters,
             )
 
-        self._persist_turn_trace(runtime, parameters)
+        self._persist_turn_trace(runtime)
         runtime.run.model_calls += 1
 
         if getattr(self._client, "records_runtime_events", False):
@@ -208,21 +208,18 @@ class ModelRequestExecutor:
         return prepared
 
     @staticmethod
-    def _persist_turn_trace(runtime: AgentRuntime, parameters: dict) -> None:
-        """Fail closed before transport when a bound Turn audit cannot be persisted."""
+    def _persist_turn_trace(runtime: AgentRuntime) -> None:
+        """Initialize one immutable Turn-version context before its first decision."""
 
         run = runtime.run
-        if not run.turn_id:
+        exchange = runtime.exchange
+        if not run.turn_id or exchange.operation != "decision":
             return
         store = runtime.services.runtime_store
-        save = getattr(store, "save_turn_trace", None)
-        sequence_for = getattr(store, "next_turn_trace_sequence", None)
-        if not callable(save) or not callable(sequence_for):
+        initialize = getattr(store, "initialize_turn_trace", None)
+        get_node = getattr(store, "get_node", None)
+        if not callable(initialize) or not callable(get_node):
             raise TracePersistenceError("Local trace persistence is unavailable; the model request was not sent.")
-        exchange = runtime.exchange
-        exchange_id = exchange.exchange_id or ""
-        if not exchange_id:
-            raise TracePersistenceError("Local trace exchange identity is unavailable; the model request was not sent.")
         effective_system = next(
             (
                 str(getattr(message, "content", "") or "")
@@ -231,37 +228,57 @@ class ModelRequestExecutor:
             ),
             "",
         )
-        config = runtime.request_config()
         try:
-            sequence = sequence_for(runtime.state.session_id, run.turn_id, run.data_idx)
-            trace = TurnTraceRequest(
+            turn = get_node(runtime.state.session_id, run.turn_id)
+            if not isinstance(turn, TurnState):
+                raise ValueError(f"Unknown Turn: {run.turn_id}")
+            message_idx, item_idx, user_item = ModelRequestExecutor._initial_user_item(turn, run.data_idx)
+            timestamp = runtime.services.clock()
+            trace = TurnTrace(
                 turn_id=run.turn_id,
                 thread_id=run.thread_id,
                 data_idx=run.data_idx,
-                exchange_id=exchange_id,
-                sequence=sequence,
-                timestamp=runtime.services.clock(),
-                provider=str(runtime.state.provider or "unknown"),
-                provider_name=str(config.get("provider_name") or runtime.state.provider_name or "unknown"),
-                model=str(config.get("model") or runtime.state.model or "unknown"),
-                operation=str(exchange.operation or "unknown"),
-                output_mode=str(exchange.output_mode),
-                stream=bool(exchange.stream),
-                base_system_prompt=str(exchange.context.get("trace_base_system_prompt") or effective_system),
-                effective_system_prompt=effective_system,
-                messages=turn_trace_audit_value([neutral_message_record(message) for message in exchange.messages]),
-                user_preferences=str(turn_trace_audit_value(exchange.context.get("trace_user_preferences") or "")),
-                skills=turn_trace_audit_value([skill.to_dict() for skill in run.active_skills]),
-                tools=turn_trace_audit_value(
-                    [ModelRequestExecutor._trace_tool(tool) for tool in exchange.allowed_tools]
+                context=TurnTraceContext(
+                    system_message=str(
+                        turn_trace_audit_value(exchange.context.get("trace_system_message") or effective_system)
+                    ),
+                    active_skills=turn_trace_audit_value([skill.to_dict() for skill in run.active_skills]),
+                    tools=turn_trace_audit_value(
+                        [ModelRequestExecutor._trace_tool(tool) for tool in exchange.allowed_tools]
+                    ),
+                    initialized_at=timestamp,
                 ),
-                request_parameters=turn_trace_audit_value(parameters),
+                items=[
+                    TurnTraceItem(
+                        sequence=1,
+                        message_idx=message_idx,
+                        item_idx=item_idx,
+                        role="user",
+                        item=turn_trace_audit_value(user_item),
+                        completed_at=timestamp,
+                    )
+                ],
+                last_sequence=1,
+                updated_at=timestamp,
             )
-            save(runtime.state.session_id, trace)
+            initialize(runtime.state.session_id, trace)
+            runtime.services.turn_trace_initialized = True
         except TracePersistenceError:
             raise
         except Exception as exc:
             raise TracePersistenceError("Local trace persistence failed; the model request was not sent.") from exc
+
+    @staticmethod
+    def _initial_user_item(turn: TurnState, data_idx: int) -> tuple[int, int, dict[str, object]]:
+        if data_idx < 0 or data_idx >= len(turn.data):
+            raise ValueError("Trace data_idx is out of range.")
+        for message_idx, message in enumerate(turn.data[data_idx]):
+            if message.get("role") != "user":
+                continue
+            for item_idx, item in enumerate(message.get("content", [])):
+                if item.get("status") in {"success", "failed"}:
+                    return message_idx, item_idx, dict(item)
+        raise ValueError("The Turn has no completed User Item to initialize its Trace.")
 
     @staticmethod
     def _trace_tool(tool: ToolSpec) -> dict[str, object]:

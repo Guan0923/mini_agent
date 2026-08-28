@@ -6,7 +6,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { projectTurnPath } from "../../app/runtime/runtimeDetailProjection";
 import type { QueuedMessage } from "../../app/types";
 import { compactTurn, patchRuntimeConfig, steerTurn } from "../../api";
-import type { ChatMessage, ChatMode, Conversation, RuntimeStateNode, TodoStatus, ToolEvent } from "../../types";
+import type {
+  ChatMessage,
+  ChatMode,
+  Conversation,
+  RuntimeRootNode,
+  RuntimeStateNode,
+  TodoStatus,
+  ToolEvent,
+} from "../../types";
 import ChatPage, { composerAction } from "./ChatPage";
 
 vi.mock("../../api", async (importOriginal) => ({
@@ -835,6 +843,111 @@ describe("ChatPage queued message flushing", () => {
 });
 
 describe("ChatPage Trace navigation", () => {
+  function renderConversation(conversation: Conversation) {
+    return (
+      <AntApp>
+        <ChatPage
+          conversation={conversation}
+          onUpdate={() => undefined}
+          onNew={async () => conversation.id}
+          onNavigate={() => undefined}
+          onEnsureSession={async () => conversation.sessionId!}
+          onRun={async () => undefined}
+        />
+      </AntApp>
+    );
+  }
+
+  it("hides the toolbar until the current Thread has an ordinary Turn", () => {
+    const empty: Conversation = {
+      id: "session-empty",
+      sessionId: "session-empty",
+      threadId: "session-empty",
+      title: "新对话",
+      runtimeNodes: [],
+      messagesLoaded: true,
+      messages: [],
+    };
+    const syntheticRoot: RuntimeRootNode = {
+      session_id: "session-empty",
+      thread_id: "session-empty",
+      id: "turn-synthetic-root",
+    };
+    const { rerender } = render(renderConversation(empty));
+
+    expect(screen.queryByRole("navigation", { name: "主内容视图" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("聊天输入")).toBeInTheDocument();
+
+    rerender(renderConversation({ ...empty, runtimeNodes: [syntheticRoot] }));
+    expect(screen.queryByRole("navigation", { name: "主内容视图" })).not.toBeInTheDocument();
+
+    const node = turn("turn-first", "first");
+    const populated = {
+      ...empty,
+      id: node.session_id,
+      sessionId: node.session_id,
+      threadId: node.thread_id,
+      runtimeNodes: [node],
+      activeTurnId: node.id,
+      lastNodeId: node.id,
+      messages: projectTurnPath(new Map([[`${node.session_id}:${node.id}`, node]]), node.id),
+    };
+    rerender(renderConversation(populated));
+
+    expect(screen.getByRole("navigation", { name: "主内容视图" })).toBeInTheDocument();
+    expect(screen.getByTitle(node.thread_id)).toHaveClass("trace-toolbar-thread-id");
+  });
+
+  it("returns to Chat when switching from Trace to an empty conversation", async () => {
+    const populatedNode = turn("turn-populated", "populated");
+    const populated: Conversation = {
+      id: populatedNode.session_id,
+      sessionId: populatedNode.session_id,
+      threadId: populatedNode.thread_id,
+      title: "populated",
+      runtimeNodes: [populatedNode],
+      activeTurnId: populatedNode.id,
+      lastNodeId: populatedNode.id,
+      messagesLoaded: true,
+      messages: projectTurnPath(
+        new Map([[`${populatedNode.session_id}:${populatedNode.id}`, populatedNode]]),
+        populatedNode.id,
+      ),
+    };
+    const empty: Conversation = {
+      id: "session-empty",
+      sessionId: "session-empty",
+      threadId: "session-empty",
+      title: "新对话",
+      runtimeNodes: [],
+      messagesLoaded: true,
+      messages: [],
+    };
+    const { rerender } = render(renderConversation(populated));
+    fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+    expect(screen.queryByLabelText("聊天输入")).not.toBeInTheDocument();
+
+    rerender(renderConversation(empty));
+    expect(screen.queryByRole("navigation", { name: "主内容视图" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("聊天输入")).toBeInTheDocument();
+
+    const firstNode = {
+      ...turn("turn-empty-first", "first"),
+      session_id: empty.sessionId!,
+      thread_id: empty.threadId!,
+    };
+    rerender(renderConversation({
+      ...empty,
+      runtimeNodes: [firstNode],
+      activeTurnId: firstNode.id,
+      lastNodeId: firstNode.id,
+      messages: projectTurnPath(new Map([[`${firstNode.session_id}:${firstNode.id}`, firstNode]]), firstNode.id),
+    }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("aria-pressed", "true"));
+    expect(screen.getByLabelText("聊天输入")).toBeInTheDocument();
+  });
+
   it("shows the text toolbar and hides the Composer in Trace view", async () => {
     render(<Harness onRun={vi.fn()} onRewind={vi.fn()} />);
 

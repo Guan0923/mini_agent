@@ -117,33 +117,28 @@ export interface TurnTraceTool {
   origin: TurnTraceToolOrigin;
 }
 
-export interface TurnTraceRequest {
-  schema_version: number;
-  turn_id: string;
-  thread_id: string;
-  data_idx: number;
-  exchange_id: string;
-  sequence: number;
-  timestamp: string;
-  provider: string;
-  provider_name: string;
-  model: string;
-  operation: string;
-  output_mode: string;
-  stream: boolean;
-  base_system_prompt: string;
-  effective_system_prompt: string;
-  messages: Array<Record<string, unknown>>;
-  user_preferences: string;
-  skills: Array<Record<string, unknown>>;
+export interface TurnTraceContext {
+  system_message: string;
+  active_skills: Array<Record<string, unknown>>;
   tools: TurnTraceTool[];
-  request_parameters: Record<string, unknown>;
+  initialized_at: string;
+}
+
+export interface TurnTraceItem {
+  sequence: number;
+  message_idx: number;
+  item_idx: number;
+  role: "user" | "assistant";
+  item: TurnItem;
+  completed_at: string;
 }
 
 export interface TurnTraceResponse {
   turn: RuntimeStateNode;
   data_idx: number;
-  requests: TurnTraceRequest[];
+  context: TurnTraceContext | null;
+  items: TurnTraceItem[];
+  last_sequence: number;
 }
 
 export type NodeFrameType = "turn.snapshot" | "turn.delta";

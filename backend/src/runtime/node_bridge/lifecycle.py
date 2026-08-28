@@ -56,6 +56,8 @@ class _LifecycleMixin:
         self.abort_category = None
         self.abort_code = ""
         self.terminal_error = None
+        if self.runtime is not None:
+            self.runtime.services.turn_trace_initialized = False
         self.closed = False
         return child
 

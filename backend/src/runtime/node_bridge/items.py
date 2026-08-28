@@ -7,8 +7,10 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from backend.domain import TracePersistenceError
 from backend.domain.runtime_state import RuntimeState, RuntimeStateValidationError
 from backend.providers.token_usage import normalize_provider_usage
+from backend.runtime.persistence.recording import turn_trace_audit_value
 
 
 class _ItemProjectionMixin:
@@ -92,6 +94,7 @@ class _ItemProjectionMixin:
             self.assistant_blocks[self._stream_item_index]["status"] = status
             self.last_node = self.assistant
             self.produced_item = True
+            self._record_completed_item(self.assistant_message_idx, self._stream_item_index)
         self._stream_item_index = None
         self._stream_item_type = None
         self._stream_text = ""
@@ -101,6 +104,7 @@ class _ItemProjectionMixin:
         self._ensure_assistant_message()
         normalized = {str(key): self._json_value(value) for key, value in item.items()}
         normalized.setdefault("status", "success")
+        item_idx = len(self.assistant_blocks)
         self.assistant_blocks.append(normalized)
         if self.assistant is None:
             raise RuntimeError("No active Turn.")
@@ -114,6 +118,9 @@ class _ItemProjectionMixin:
         self.last_node = updated
         if persist:
             self.produced_item = True
+            if normalized.get("status") in {"success", "failed"}:
+                assert self.assistant_message_idx is not None
+                self._record_completed_item(self.assistant_message_idx, item_idx)
         return updated
 
     def _append_items(self, items: Sequence[Mapping[str, Any]]) -> RuntimeState | None:
@@ -121,6 +128,7 @@ class _ItemProjectionMixin:
         if not items:
             return self.assistant
         self._ensure_assistant_message()
+        first_item_idx = len(self.assistant_blocks)
         normalized = []
         for item in items:
             value = {str(key): self._json_value(raw) for key, raw in item.items()}
@@ -138,7 +146,50 @@ class _ItemProjectionMixin:
         self.assistant = updated
         self.last_node = updated
         self.produced_item = True
+        assert self.assistant_message_idx is not None
+        for offset, item in enumerate(normalized):
+            if item.get("status") in {"success", "failed"}:
+                self._record_completed_item(self.assistant_message_idx, first_item_idx + offset)
         return updated
+
+    def _record_completed_item(self, message_idx: int, item_idx: int) -> None:
+        """Persist one completed canonical Item after its Turn write succeeds."""
+
+        if self.trace_persistence_failed or self.runtime is None or self.assistant is None:
+            return
+        services = self.runtime.services
+        if not services.turn_trace_initialized:
+            return
+        append = getattr(self.store, "append_turn_trace_item", None)
+        try:
+            if not callable(append):
+                raise RuntimeError("Turn Trace Item persistence is unavailable.")
+            data_idx = self.assistant.current_data_idx
+            message = self.assistant.data[data_idx][message_idx]
+            raw_item = message["content"][item_idx]
+            if raw_item.get("status") not in {"success", "failed"}:
+                return
+            audited = turn_trace_audit_value(raw_item)
+            if not isinstance(audited, Mapping):
+                raise RuntimeError("Turn Trace Item is not a JSON object.")
+            stored = append(
+                self.assistant.session_id,
+                self.assistant.id,
+                data_idx,
+                message_idx=message_idx,
+                item_idx=item_idx,
+                role=str(message.get("role") or "assistant"),
+                item=dict(audited),
+                completed_at=services.clock(),
+            )
+            if stored is None:
+                raise RuntimeError("Turn Trace was not initialized.")
+        except TracePersistenceError:
+            self.trace_persistence_failed = True
+            raise
+        except Exception as exc:
+            self.trace_persistence_failed = True
+            raise TracePersistenceError("Local trace Item persistence failed; the Turn was stopped.") from exc
 
     def _apply_usage(self, raw: Any) -> None:
         if not isinstance(raw, Mapping) or self.assistant is None:

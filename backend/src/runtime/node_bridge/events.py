@@ -72,6 +72,7 @@ class _EventProjectionMixin:
                 if message_idx == self.assistant_message_idx and item_idx < len(self.assistant_blocks):
                     self.assistant_blocks[item_idx]["status"] = status
                 self.last_node = self.assistant
+                self._record_completed_item(message_idx, item_idx)
                 return
 
     def _settle_running_items(self, status: str) -> None:
@@ -94,6 +95,7 @@ class _EventProjectionMixin:
             )
             if message_idx == self.assistant_message_idx and item_idx < len(self.assistant_blocks):
                 self.assistant_blocks[item_idx]["status"] = status
+            self._record_completed_item(message_idx, item_idx)
         self.last_node = self.assistant
 
     def _tool_result(self, message: str, data: Mapping[str, Any], *, status: str) -> None:
