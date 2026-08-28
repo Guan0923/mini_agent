@@ -7,7 +7,7 @@
 - `__main__.py`：`main` 以 `127.0.0.1:8000` 启动 `create_app()`，是 `python -m backend.api` 的命令入口。
 - `state.py`：`WebAppState` 组合 storage、Runtime、Job、Sandbox 和决策注册表。
 - `active_turn_stream.py`：`ActiveTurnStream`/`ActiveTurnSubscription` 复用 running Turn SSE。
-- `turn_steering.py`、`pause_control.py`：`TurnSteeringInbox` 与 `TurnPauseController`。
+- `pause_control.py`：进程内 `TurnPauseController`；Turn steering 由 Redis mailbox 承载。
 - `security.py`：loopback Origin 校验；`session_store.py`、`user_data.py` 管理 Session 数据边界。
 - `chat/`、`routes/`、`session_files/`、`shared/`：按协议领域拆分的路由。
 

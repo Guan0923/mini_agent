@@ -18,6 +18,7 @@ dependencies = [
     "pyyaml>=6,<7",
     "regex>=2024.11.6,<2027",
     "requests>=2.31,<3",
+    "redis>=5.2,<7",
     "urllib3>=2.2,<3",
     "tokenizers>=0.21,<1",
     "tiktoken>=0.9,<1",

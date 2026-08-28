@@ -78,9 +78,17 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
 
     @app.get("/api/ready")
     def ready() -> dict:
-        resolved.settings.ping()
-        resolved.projects.list("all")
-        return {"status": "ready", "service": "mini-agent-backend", "database": "ok"}
+        try:
+            resolved.settings.ping()
+            resolved.projects.list("all")
+            resolved.message_queue.ping()
+        except Exception as exc:
+            from backend.domain import MessageQueueUnavailable
+
+            if isinstance(exc, MessageQueueUnavailable):
+                raise HTTPException(status_code=503, detail="message_queue_unavailable") from exc
+            raise
+        return {"status": "ready", "service": "mini-agent-backend", "database": "ok", "redis": "ok"}
 
     @app.api_route(
         "/api/{missing_path:path}",

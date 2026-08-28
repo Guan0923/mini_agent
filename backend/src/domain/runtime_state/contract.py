@@ -249,16 +249,23 @@ def compaction_payload(summary: str, *, kept_items: Sequence[Mapping[str, Any]] 
     }
 
 
-def terminal_error_payload(category: str, message: str, *, retryable: bool) -> dict[str, Any]:
-    return normalize_content(
-        {
-            "type": "error",
-            "category": str(category),
-            "message": str(message),
-            "retryable": retryable,
-            "status": "failed",
-        }
-    )[0]
+def terminal_error_payload(
+    category: str,
+    message: str,
+    *,
+    retryable: bool,
+    code: str = "",
+) -> dict[str, Any]:
+    payload = {
+        "type": "error",
+        "category": str(category),
+        "message": str(message),
+        "retryable": retryable,
+        "status": "failed",
+    }
+    if code:
+        payload["code"] = str(code)
+    return normalize_content(payload)[0]
 
 
 def terminal_error_text(error: Mapping[str, Any]) -> str:

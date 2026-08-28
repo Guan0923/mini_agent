@@ -21,6 +21,7 @@ class SQLiteCheckpointMixin:
         provenance: RunProvenance | None = None,
         *,
         append_user_message: bool = True,
+        delivery_id: str | None = None,
     ) -> None:
         timestamp = utc_now()
         origin = provenance or RunProvenance(workflow_id=run_id, trigger="legacy")
@@ -43,7 +44,9 @@ class SQLiteCheckpointMixin:
             }
             self._put_json_object(connection, session_id, "run", run_id, run, timestamp)
             if append_user_message:
-                self._append_turn_message(connection, session_id, run_id, "user", task, timestamp)
+                self._append_turn_message(
+                    connection, session_id, run_id, "user", task, timestamp, delivery_id=delivery_id
+                )
             self._write_session_document(connection, session_id, document)
 
     @staticmethod
@@ -61,13 +64,15 @@ class SQLiteCheckpointMixin:
             is not None
         )
 
-    def append_turn_input(self, session_id: str, run_id: str, content: str) -> None:
+    def append_turn_input(self, session_id: str, run_id: str, content: str, *, delivery_id: str | None = None) -> None:
         with self._connection(session_id) as connection:
             self._assert_writable(connection)
             if self._json_object(connection, session_id, "run", run_id) is None:
                 raise ValueError(f"Unknown session run: {run_id}")
             timestamp = utc_now()
-            self._append_turn_message(connection, session_id, run_id, "user", content, timestamp)
+            self._append_turn_message(
+                connection, session_id, run_id, "user", content, timestamp, delivery_id=delivery_id
+            )
             self._touch_session(connection, session_id, timestamp)
 
     def finish_turn(self, session_id: str, run_id: str, status: RunStatus, answer: str | None) -> None:
@@ -148,8 +153,19 @@ class SQLiteCheckpointMixin:
         timestamp: str,
         *,
         data: dict[str, object] | None = None,
+        delivery_id: str | None = None,
     ) -> None:
         existing = self._json_values(connection, session_id, "turn_message")
+        if delivery_id:
+            delivered = next((item for item in existing if item.get("delivery_id") == delivery_id), None)
+            if delivered is not None:
+                if (
+                    delivered.get("run_id") == run_id
+                    and delivered.get("role") == role
+                    and delivered.get("content") == content
+                ):
+                    return
+                raise ValueError("delivery_id already belongs to a different Turn message.")
         run_messages = [item for item in existing if str(item.get("run_id") or "") == run_id]
         prior_assistant = next(
             (item for item in run_messages if role == "assistant" and item.get("role") == "assistant"),
@@ -167,5 +183,24 @@ class SQLiteCheckpointMixin:
             "content": content,
             "data": data or {},
             "created_at": timestamp,
+            **({"delivery_id": delivery_id} if delivery_id else {}),
         }
         self._put_json_object(connection, session_id, "turn_message", f"{run_id}:{sequence}", payload, timestamp)
+
+    def has_turn_delivery(self, session_id: str, delivery_id: str) -> bool:
+        with self._connection(session_id) as connection:
+            return any(
+                item.get("delivery_id") == delivery_id
+                for item in self._json_values(connection, session_id, "turn_message")
+            )
+
+    def running_run_id(self, session_id: str) -> str | None:
+        """Return the sole running legacy Run when crash repair is unambiguous."""
+
+        with self._connection(session_id) as connection:
+            matches = [
+                str(item.get("run_id") or "")
+                for item in self._json_values(connection, session_id, "run")
+                if item.get("status") == "running" and item.get("run_id")
+            ]
+        return matches[0] if len(matches) == 1 else None

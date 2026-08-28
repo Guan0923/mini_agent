@@ -6,11 +6,12 @@
 
 ## 环境与启动
 
-先在仓库根目录启动 backend：
+先在仓库根目录启动 Redis 与 backend：
 
 ```powershell
 conda activate dev
 uv sync
+docker compose up -d redis
 uv run python -m backend.api
 ```
 
@@ -69,6 +70,7 @@ e2e/                        Playwright Turn 端到端测试
 - 带 `Origin` 的写请求必须来自 backend 配置的 loopback 来源。
 - 开发默认允许 `http://localhost:5173` 与 `http://127.0.0.1:5173`，CORS 不启用 credentials。
 - Provider API Key 不写入浏览器存储、不在响应中回显；backend 加密后保存到 `~/.mini_agent/runtime/state.db`。
+- 待发送消息不写入 localStorage；前端通过 queued-message API 读取 Redis 权威状态，POST 成功后才清空 Composer。
 
 ## 验证
 

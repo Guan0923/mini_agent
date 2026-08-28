@@ -52,26 +52,45 @@ jobs:
         run: npm run build
 
   tests:
-    name: Backend tests / Python ${{ matrix.python-version }} / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Backend tests / Python ${{ matrix.python-version }} / ubuntu
+    runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            python-version: "3.11"
-          - os: ubuntu-latest
-            python-version: "3.12"
-          - os: ubuntu-latest
-            python-version: "3.13"
-          - os: windows-latest
-            python-version: "3.11"
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Install locked development dependencies
+        run: uv sync --locked --dev
+      - name: Run tests from tests/
+        run: uv run python -m pytest tests --cov=backend --cov-report=term-missing --durations=20
+
+  tests-windows:
+    name: Backend tests / Python 3.11 / windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true

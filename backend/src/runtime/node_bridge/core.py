@@ -47,6 +47,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         cwd: str = "",
         thinking_level: str = "medium",
         references: Sequence[Mapping[str, str]] | None = None,
+        delivery_id: str | None = None,
         emit: Callable[[NodeFrame], None],
     ) -> None:
         self.store = store
@@ -73,6 +74,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         self.running_mode = running_mode
         self.cwd = cwd
         self.references = [dict(item) for item in references or []]
+        self.delivery_id = delivery_id or ""
         self.writer = NodeWriter(store, emit=emit)
         self.parent: RuntimeState | RuntimeRootState | None = None
         self.assistant: RuntimeState | None = None
@@ -188,7 +190,11 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
             permission_mode=self.permission_mode,
             running_mode=self.running_mode,
             cwd=self.cwd,
+            data=None,
         )
+        if self.delivery_id:
+            node.data[0][0]["delivery_id"] = self.delivery_id
+            node = RuntimeState.from_dict(node.to_dict())
         node = self.writer.create(node)
         self.assistant = node
         self.last_node = node
@@ -228,9 +234,12 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         if isinstance(references, list) and references:
             item["references"] = self._json_value(references)
         message: dict[str, Any] = {"role": "user", "content": [item]}
-        steering_id = str(data.get("steering_id") or "")
-        if steering_id:
-            message["steering_id"] = steering_id
+        delivery_id = str(data.get("delivery_id") or "")
+        if delivery_id:
+            selected = self.assistant.data[self.assistant.current_data_idx]
+            if any(value.get("role") == "user" and value.get("delivery_id") == delivery_id for value in selected):
+                return
+            message["delivery_id"] = delivery_id
         self.assistant = self.writer.append_message(self.assistant, message, persist=True)
         self.last_node = self.assistant
         self.assistant_blocks = []

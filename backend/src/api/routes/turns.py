@@ -9,7 +9,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
-from backend.domain import PlanningError
+from backend.domain import (
+    DeliveryConflict,
+    MessageQueueUnavailable,
+    PlanningError,
+    QueueItemConflict,
+    QueueItemNotFound,
+    QueueItemStateConflict,
+)
 from backend.domain.runtime_state import (
     NodeFrame,
     RuntimeRootState,
@@ -52,12 +59,28 @@ class TurnExecutionConfig(BaseModel):
         return self
 
 
+class QueuedDeliveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_id: str = Field(min_length=1, max_length=200)
+    message_ids: list[str] = Field(min_length=1, max_length=100)
+
+
 class CreateTurnRequest(TurnExecutionConfig):
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(min_length=1, max_length=200)
     session_id: str = Field(min_length=1, max_length=200)
     thread_id: str = Field(min_length=1, max_length=200)
     parent_id: str = Field(default="", max_length=200)
-    message: dict[str, object]
+    message: dict[str, object] | None = None
+    queued_delivery: QueuedDeliveryRequest | None = None
+
+    @model_validator(mode="after")
+    def validate_message_source(self):
+        if (self.message is None) == (self.queued_delivery is None):
+            raise ValueError("message and queued_delivery are mutually exclusive")
+        return self
 
 
 class RewindTurnRequest(TurnExecutionConfig):
@@ -79,9 +102,8 @@ class RuntimeModelPatch(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
 
 
-class SteerTurnRequest(BaseModel):
-    steering_id: str = Field(min_length=1, max_length=200)
-    message: dict[str, object]
+class SteerTurnRequest(QueuedDeliveryRequest):
+    pass
 
 
 class TurnConfigPatch(BaseModel):
@@ -148,6 +170,16 @@ def _references(item: Mapping[str, object]) -> list[dict[str, str]]:
     return result
 
 
+def _queue_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, MessageQueueUnavailable):
+        return HTTPException(status_code=503, detail="message_queue_unavailable")
+    if isinstance(exc, QueueItemNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, (DeliveryConflict, QueueItemConflict, QueueItemStateConflict)):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=500, detail="message_queue_error")
+
+
 def _stream_turn(
     state: WebAppState,
     *,
@@ -160,6 +192,7 @@ def _stream_turn(
     references: list[dict[str, str]] | None = None,
     adopt_existing: bool = False,
     operation=None,
+    initial_delivery=None,
 ) -> StreamingResponse:
     model = config.model
     stream = _stream(
@@ -181,6 +214,7 @@ def _stream_turn(
         model_config=_model_config_snapshot(state),
         references=references,
         operation=operation,
+        initial_delivery=initial_delivery,
     )
     return StreamingResponse(stream, media_type="text/event-stream")
 
@@ -256,17 +290,51 @@ async def create_turn(body: CreateTurnRequest, request: Request) -> StreamingRes
         for node in store.load_nodes(body.session_id)
     ):
         raise HTTPException(status_code=409, detail="非首个 Turn 必须提供 parent_id。")
-    item = _user_item(body.message)
-    return _stream_turn(
-        state,
-        session_id=body.session_id,
-        thread_id=body.thread_id,
-        turn_id=body.id,
-        prompt=str(item["text"]).strip(),
-        source_id=body.parent_id or None,
-        config=body,
-        references=_references(item),
-    )
+    initial_delivery = None
+    if body.queued_delivery is not None:
+        try:
+            envelope = state.message_queue.dispatch(
+                delivery_id=body.queued_delivery.delivery_id,
+                message_ids=body.queued_delivery.message_ids,
+                session_id=body.session_id,
+                thread_id=body.thread_id,
+                turn_id=body.id,
+            )
+            initial_delivery = state.message_queue.claim(body.id, f"initial-{body.id}")
+        except Exception as exc:
+            raise _queue_http_error(exc) from exc
+        if initial_delivery is None or initial_delivery.envelope.delivery_id != envelope.delivery_id:
+            raise HTTPException(status_code=409, detail="queued_delivery_not_claimable")
+        prompt = envelope.content
+        references = list(envelope.references)
+    else:
+        try:
+            state.message_queue.ping()
+        except Exception as exc:
+            raise _queue_http_error(exc) from exc
+        assert body.message is not None
+        item = _user_item(body.message)
+        prompt = str(item["text"]).strip()
+        references = _references(item)
+    try:
+        return _stream_turn(
+            state,
+            session_id=body.session_id,
+            thread_id=body.thread_id,
+            turn_id=body.id,
+            prompt=prompt,
+            source_id=body.parent_id or None,
+            config=body,
+            references=references,
+            initial_delivery=initial_delivery,
+        )
+    except Exception:
+        if initial_delivery is not None:
+            try:
+                state.message_queue.release_turn(body.id)
+            except MessageQueueUnavailable:
+                pass
+        raise
 
 
 @router.post("/{turn_id}/rewind")
@@ -275,6 +343,10 @@ async def rewind_turn(turn_id: str, body: RewindTurnRequest, request: Request) -
     store = session_store(state)
     source = _turn(store, turn_id)
     item = _user_item(body.message)
+    try:
+        state.message_queue.ping()
+    except Exception as exc:
+        raise _queue_http_error(exc) from exc
     try:
         rewound = store.append_turn_version(turn_id, item)
     except (ValueError, RuntimeStateValidationError) as exc:
@@ -299,6 +371,10 @@ async def resume_turn(turn_id: str, body: TurnExecutionConfig, request: Request)
     source = _turn(store, turn_id)
     if source.status != "paused":
         raise HTTPException(status_code=409, detail="只有 paused Turn 可以恢复。")
+    try:
+        state.message_queue.ping()
+    except Exception as exc:
+        raise _queue_http_error(exc) from exc
 
     def operation(
         conversation,
@@ -360,22 +436,20 @@ def steer_turn(
     source = _turn(store, turn_id)
     if source.status != "running":
         raise HTTPException(status_code=409, detail="只有 running Turn 可以接收新输入。")
-    item = _user_item(body.message)
-    normalized_message = {
-        "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": str(item["text"]).strip(),
-                "status": "success",
-                **({"references": _references(item)} if item.get("references") else {}),
-            }
-        ],
-    }
-    inbox = getattr(state, "active_turn_steering", {}).get(turn_id)
-    if inbox is None or not inbox.put(body.steering_id, normalized_message):
+    active_stream = getattr(state, "active_turn_streams", {}).get(turn_id)
+    if active_stream is None:
         raise HTTPException(status_code=409, detail="Turn 执行流已经封闭。")
-    return {"steering_id": body.steering_id, "status": "accepted"}
+    try:
+        state.message_queue.dispatch(
+            delivery_id=body.delivery_id,
+            message_ids=body.message_ids,
+            session_id=source.session_id,
+            thread_id=source.thread_id,
+            turn_id=source.id,
+        )
+    except Exception as exc:
+        raise _queue_http_error(exc) from exc
+    return {"delivery_id": body.delivery_id, "status": "accepted"}
 
 
 @router.post("/{turn_id}/fork", status_code=201)

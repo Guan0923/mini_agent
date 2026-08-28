@@ -3,6 +3,7 @@ import {
   createSession,
   getSettings,
   getSessionNodes,
+  listQueuedMessages,
   listSessions,
   pauseTurn,
   updateProfile,
@@ -16,7 +17,6 @@ import type { ArchiveReadState } from "./storage";
 import AgentShell from "./AgentShell";
 import { createRunController } from "./runController";
 import type { QueuedMessage } from "./types";
-import { loadQueuedMessages, saveQueuedMessages } from "./queuedMessages";
 import { effectiveDisplayMode } from "./displayMode";
 import { isRuntimeTurnNode } from "./runtime/runtimeNodeNormalization";
 import { withLoadedTurns } from "./conversationProjection";
@@ -55,9 +55,7 @@ function AgentApp() {
   const activeRunsRef = useRef(new Map<string, import("./types").ActiveRun>());
   const pausedForSandboxOutageRef = useRef(new Set<string>());
   const sandboxHealth = useSandboxHealth();
-  const [queuedMessages, setQueuedMessages] = useState(
-    () => loadQueuedMessages(localStorage),
-  );
+  const [queuedMessages, setQueuedMessages] = useState<Map<string, QueuedMessage[]>>(() => new Map());
 
   useEffect(() => {
     let active = true;
@@ -241,6 +239,24 @@ function AgentApp() {
     return undefined;
   }, [current?.id, current?.sessionId, current?.messagesLoaded, current?.runtimeNodes]);
 
+  useEffect(() => {
+    if (!current?.id || !current.threadId) return;
+    let active = true;
+    void listQueuedMessages(current.threadId)
+      .then((items) => {
+        if (!active) return;
+        setQueuedMessages((previous) => {
+          const next = new Map(previous);
+          next.set(current.id, items);
+          return next;
+        });
+      })
+      .catch((error) => {
+        if (active) setActionError(String((error as Error).message ?? error));
+      });
+    return () => { active = false; };
+  }, [current?.id, current?.threadId]);
+
   function updateConversation(id: string, updater: (conversation: Conversation) => Conversation) {
     setConversations((previous) => previous.map((conversation) => (conversation.id === id ? updater(conversation) : conversation)));
   }
@@ -251,8 +267,18 @@ function AgentApp() {
       const next = updater(previous.get(conversationId) ?? []);
       if (next.length > 0) queues.set(conversationId, next);
       else queues.delete(conversationId);
-      saveQueuedMessages(localStorage, queues);
       return queues;
+    });
+  }
+
+  async function refreshQueuedMessages(conversationId: string): Promise<void> {
+    const target = conversations.find((item) => item.id === conversationId);
+    if (!target?.threadId) return;
+    const items = await listQueuedMessages(target.threadId);
+    setQueuedMessages((previous) => {
+      const next = new Map(previous);
+      next.set(conversationId, items);
+      return next;
     });
   }
 
@@ -544,6 +570,7 @@ function AgentApp() {
       onStopRun={stopConversation}
       queuedMessages={queuedMessages}
       onQueuedMessagesChange={updateQueuedMessages}
+      onQueuedMessagesRefresh={refreshQueuedMessages}
       onClearError={() => setActionError(null)}
       onDisplayModeUpdate={(config) => setDisplayMode(effectiveDisplayMode(config.display_mode))}
       onProviderConfigUpdate={setProviderConfig}

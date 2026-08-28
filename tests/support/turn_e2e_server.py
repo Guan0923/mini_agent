@@ -74,6 +74,26 @@ state.model_config = lambda _provider_name=None: ModelConfig(
     "deterministic-e2e",
 )
 
+_redis_key_prefix = os.environ.get("MINI_AGENT_REDIS_KEY_PREFIX", "")
+_close_state = state.close
+
+
+def close_e2e_state() -> None:
+    """Delete only this Playwright run's randomized Redis namespace."""
+
+    try:
+        if _redis_key_prefix.startswith("mini-agent:e2e:"):
+            client = getattr(state.message_queue, "client", None)
+            if client is not None:
+                keys = list(client.scan_iter(f"{_redis_key_prefix}:*"))
+                if keys:
+                    client.delete(*keys)
+    finally:
+        _close_state()
+
+
+state.close = close_e2e_state
+
 TRACE_MODEL_PORT = int(os.environ.get("MINI_AGENT_E2E_MODEL_PORT", "18081"))
 TRACE_MODEL_CONFIG = ModelConfig(
     "local-test-key",

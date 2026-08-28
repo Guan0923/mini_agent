@@ -8,7 +8,7 @@ Mini-Agent 是纯本地、单用户的桌面 Agent 应用。React/Vite 前端通
 
 | 目录 | 包 | 用途 |
 | --- | --- | --- |
-| [`backend/`](backend/README.md) | `mini-agent-backend` | FastAPI、本地 Agent Runtime、Provider、工具、MCP、Sandbox 与 SQLite/TOML 持久化 |
+| [`backend/`](backend/README.md) | `mini-agent-backend` | FastAPI、本地 Agent Runtime、Provider、工具、MCP、Sandbox、Redis mailbox 与 SQLite/TOML 持久化 |
 | [`frontend/`](frontend/README.md) | `mini-agent-web` | React/Vite/TypeScript 客户端，包括 Chat、项目、设置和 Benchmark 界面 |
 | [`benchmarks/`](benchmarks/README.md) | benchmark harness | 9 个改编自开源基准的确定性任务、执行器与评分器 |
 
@@ -16,7 +16,8 @@ Mini-Agent 是纯本地、单用户的桌面 Agent 应用。React/Vite 前端通
 frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
                               ├─ runtime / planning / providers / tools
                               ├─ Skills / MCP / Sandbox
-                              └─ ~/.mini_agent (TOML / SQLite / workspace)
+                              ├─ ~/.mini_agent (TOML / SQLite / workspace)
+                              └─ Redis (queued messages / active Turn mailbox)
 ```
 
 开发时 Vite 把 `/api` 和 `/benchmark` 代理到 backend；生产本地模式由 backend 直接托管 `frontend/dist`。
@@ -26,6 +27,7 @@ frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
 - Python 3.11+
 - Node.js 20+
 - [`uv`](https://docs.astral.sh/uv/)
+- Docker Desktop（只用于仓库内 Redis 7.4）
 - Windows 开发环境使用 Conda `dev` 环境
 
 ## 安装与启动
@@ -38,6 +40,7 @@ uv sync
 cd frontend
 npm ci
 cd ..
+docker compose up -d redis
 ```
 
 启动 backend：
@@ -54,7 +57,7 @@ cd frontend
 npm run dev
 ```
 
-浏览器打开 <http://127.0.0.1:5173>。backend 健康检查位于 <http://127.0.0.1:8000/api/health>。
+浏览器打开 <http://127.0.0.1:5173>。`/api/health` 只表示 backend 进程存活；`/api/ready` 会同时检查 SQLite 与 Redis，Redis 不可用时返回 503。
 
 生产本地模式先构建前端，再启动 backend：
 
@@ -85,9 +88,14 @@ uv run python -m backend.api
 - `runtime/state.db` 保存 Provider 元数据和加密后的 API Key。
 - `runtime/projects.db` 保存项目索引。
 - `runtime/<session_id>/` 保存会话数据库、workspace 和 uploads。
+- Redis 保存浏览器待发送草稿、active Turn steering mailbox 和幂等 receipt；未完成 delivery 的 receipt 不过期，acknowledged/returned receipt 保留 7 天，正式聊天历史仍以 SQLite 为权威。
+- Redis 使用 `compose.yaml` 的命名卷和 AOF（`appendfsync everysec`）。待发送消息是明文，只允许绑定 `127.0.0.1:6379`。
+- `MINI_AGENT_REDIS_URL` 默认是 `redis://127.0.0.1:6379/0`，属于部署环境变量，不写入 `config.toml`。
 - Provider API Key 使用 OS credential vault 中的安装级密钥加密，不写入 TOML，也不通过 API 回显。
 
 项目不会读取或迁移旧 UUID 用户目录、`user.db`、认证缓存、同步数据或旧密文。
+
+Redis 不可用时不会回退到浏览器或进程内队列：历史读取仍可用，但 Turn 创建/恢复、queued-message CRUD 和 steering 会被阻断；运行中的 Turn 在最近安全边界以 `message_queue_unavailable` 失败。
 
 ## 安全边界
 

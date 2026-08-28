@@ -14,6 +14,7 @@ export interface StreamOptions {
   providerName?: string;
   model?: RuntimeConfigModel;
   references?: FileReference[];
+  queuedDelivery?: { deliveryId: string; messageIds: string[] };
 }
 
 const terminalPattern = /^<SSE id="([^"]+)" type="(success|network|failed)">([\s\S]*)<\/SSE>$/;
@@ -138,7 +139,9 @@ export async function streamChat(
       session_id: options.sessionId,
       thread_id: options.threadId ?? options.sessionId,
       parent_id: options.sourceNodeId ?? "",
-      message: { role: "user", content: [{ type: "text", text: prompt, ...(options.references?.length ? { references: options.references } : {}) }] },
+      ...(options.queuedDelivery
+        ? { queued_delivery: { delivery_id: options.queuedDelivery.deliveryId, message_ids: options.queuedDelivery.messageIds } }
+        : { message: { role: "user", content: [{ type: "text", text: prompt, ...(options.references?.length ? { references: options.references } : {}) }] } }),
       ...executionConfig(options),
     },
     turnId,
@@ -214,15 +217,11 @@ export async function pauseTurn(turnId: string): Promise<void> {
 
 export async function steerTurn(
   turnId: string,
-  steeringId: string,
-  content: string,
-  references?: FileReference[],
+  deliveryId: string,
+  messageIds: string[],
 ): Promise<void> {
   await requestJson(`/api/turns/${encodeURIComponent(turnId)}/steer`, jsonBody({
-      steering_id: steeringId,
-      message: {
-        role: "user",
-        content: [{ type: "text", text: content, ...(references?.length ? { references } : {}) }],
-      },
+      delivery_id: deliveryId,
+      message_ids: messageIds,
     }));
 }

@@ -5,6 +5,7 @@ const backendPort = process.env.MINI_AGENT_E2E_BACKEND_PORT ?? "18080";
 const modelPort = process.env.MINI_AGENT_E2E_MODEL_PORT ?? "18081";
 const frontendUrl = `http://127.0.0.1:${frontendPort}`;
 const backendUrl = `http://127.0.0.1:${backendPort}`;
+const redisKeyPrefix = `mini-agent:e2e:${process.pid}:${Date.now()}`;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -24,6 +25,7 @@ export default defineConfig({
         MINI_AGENT_E2E_MODEL_PORT: modelPort,
         MINI_AGENT_ALLOWED_ORIGINS: frontendUrl,
         MINI_AGENT_PUBLIC_URL: frontendUrl,
+        MINI_AGENT_REDIS_KEY_PREFIX: redisKeyPrefix,
       },
       reuseExistingServer: false,
       timeout: 120_000,

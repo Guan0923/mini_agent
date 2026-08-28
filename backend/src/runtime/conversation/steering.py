@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from backend.domain import UserMessage
@@ -15,8 +15,9 @@ from ..core.events import RuntimeEvent
 class SteeringUpdate:
     content: str
     message_count: int
-    steering_id: str = ""
+    delivery_id: str = ""
     references: tuple[dict[str, str], ...] = ()
+    ack: Callable[[], None] | None = None
 
 
 def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
@@ -27,13 +28,17 @@ def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
         return None
     raw_messages = handler()
     messages: list[str] = []
-    steering_id = ""
+    delivery_id = ""
+    ack: Callable[[], None] | None = None
     references: list[dict[str, str]] = []
     seen_references: set[tuple[str, str]] = set()
     for raw in raw_messages:
         if isinstance(raw, Mapping):
             content = str(raw.get("content") or "").strip()
-            steering_id = steering_id or str(raw.get("steering_id") or "")
+            delivery_id = delivery_id or str(raw.get("delivery_id") or "")
+            candidate_ack = raw.get("_ack")
+            if ack is None and callable(candidate_ack):
+                ack = candidate_ack
             for value in raw.get("references", []):
                 if not isinstance(value, Mapping):
                     continue
@@ -48,7 +53,7 @@ def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
             messages.append(content)
     if not messages:
         return None
-    return SteeringUpdate("\n\n".join(messages), len(messages), steering_id, tuple(references))
+    return SteeringUpdate("\n\n".join(messages), len(messages), delivery_id, tuple(references), ack)
 
 
 def apply_steering(runtime: AgentRuntime, update: SteeringUpdate, *, phase: str) -> None:
@@ -58,21 +63,35 @@ def apply_steering(runtime: AgentRuntime, update: SteeringUpdate, *, phase: str)
     data = {
         "message_count": update.message_count,
         "phase": phase,
-        "steering_id": update.steering_id,
+        "delivery_id": update.delivery_id,
         "references": list(update.references),
     }
     publish(RuntimeEvent("steering_received", "In-run user input received", data))
 
-    runtime.state.messages.append(UserMessage(content=update.content))
-    runtime.run.history = runtime.state.messages
     store = runtime.services.runtime_store
+    has_turn_delivery = getattr(store, "has_turn_delivery", None)
+    already_applied = (
+        bool(update.delivery_id)
+        and callable(has_turn_delivery)
+        and has_turn_delivery(runtime.state.session_id, update.delivery_id)
+    )
+    if not already_applied:
+        runtime.state.messages.append(UserMessage(content=update.content))
+        runtime.run.history = runtime.state.messages
     if store is not None:
-        store.append_turn_input(runtime.state.session_id, runtime.run.run_id, update.content)
+        store.append_turn_input(
+            runtime.state.session_id,
+            runtime.run.run_id,
+            update.content,
+            delivery_id=update.delivery_id or None,
+        )
     # The content travels with the event so the message-tree bridge can
     # persist the steering input as a first-class user node; without it the
     # canonical node projection would silently drop the message.
     publish(RuntimeEvent("steering_applied", "In-run user input applied", {**data, "content": update.content}))
     runtime.save()
+    if update.ack is not None:
+        update.ack()
 
 
 def consume_steering(runtime: AgentRuntime, *, phase: str) -> SteeringUpdate | None:
