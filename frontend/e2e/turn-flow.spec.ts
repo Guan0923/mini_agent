@@ -44,6 +44,73 @@ async function send(page: import("@playwright/test").Page, text: string): Promis
   await expect(page.getByRole("button", { name: "发送" })).toBeVisible({ timeout: 15_000 });
 }
 
+async function distanceToBottom(locator: import("@playwright/test").Locator): Promise<number> {
+  return locator.evaluate((element) => {
+    const scrollContainer = element as HTMLElement;
+    return scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
+  });
+}
+
+test("chat stays bottom-anchored and exposes a centered translucent return button only while reading above", async ({ page }) => {
+  const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Playwright Scroll Anchor" } });
+  expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Playwright Scroll Anchor", exact: true }).click();
+  await expect(page.getByLabel("聊天输入")).toBeVisible();
+
+  for (let index = 0; index < 8; index += 1) {
+    await send(page, `scroll anchor history ${index}`);
+  }
+
+  const scrollContainer = page.locator("[data-conversation-scroll]");
+  const returnButton = page.getByRole("button", { name: "滚动到底部" });
+  await expect.poll(() => distanceToBottom(scrollContainer)).toBeLessThanOrEqual(24);
+  await expect(returnButton).toHaveCount(0);
+
+  await scrollContainer.evaluate((element) => {
+    element.scrollTop = Math.max(0, element.scrollTop - 180);
+  });
+  await expect(returnButton).toBeVisible();
+
+  const [buttonBox, composerBox] = await Promise.all([
+    returnButton.boundingBox(),
+    page.locator(".composer-box").boundingBox(),
+  ]);
+  expect(buttonBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(Math.abs((buttonBox!.x + buttonBox!.width / 2) - (composerBox!.x + composerBox!.width / 2))).toBeLessThanOrEqual(1);
+  expect(Math.abs(composerBox!.y - (buttonBox!.y + buttonBox!.height) - 12)).toBeLessThanOrEqual(1);
+  await expect(returnButton).toHaveCSS("background-color", "rgba(255, 255, 255, 0.78)");
+  await returnButton.hover();
+  await expect(returnButton).toHaveCSS("background-color", "rgb(255, 255, 255)");
+  await page.mouse.move(0, 0);
+  await returnButton.focus();
+  await expect(returnButton).toHaveCSS("background-color", "rgb(255, 255, 255)");
+
+  const readingScrollTop = await scrollContainer.evaluate((element) => element.scrollTop);
+  await send(page, "sent while reading above");
+  await expect.poll(async () => Math.abs((await scrollContainer.evaluate((element) => element.scrollTop)) - readingScrollTop)).toBeLessThanOrEqual(1);
+  await expect(returnButton).toBeVisible();
+
+  await returnButton.click();
+  await expect.poll(() => distanceToBottom(scrollContainer)).toBeLessThanOrEqual(24);
+  await expect(returnButton).toHaveCount(0);
+
+  const editor = page.getByLabel("聊天输入");
+  await editor.fill("delayed reconnect");
+  const createResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await createResponse).ok()).toBeTruthy();
+  await expect(page.locator(".message.assistant").last()).toContainText("Streaming began before refresh.", { timeout: 15_000 });
+  await expect.poll(() => distanceToBottom(scrollContainer)).toBeLessThanOrEqual(24);
+  await expect(page.locator(".message.assistant").last()).toContainText("Streaming finished after refresh.", { timeout: 15_000 });
+  await expect.poll(() => distanceToBottom(scrollContainer)).toBeLessThanOrEqual(24);
+  await expect(returnButton).toHaveCount(0);
+});
+
 test("first main Turn receives a dedicated model-generated title", async ({ page }) => {
   const sidebar = await page.request.post("/api/sidebar-threads", { data: {} });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();

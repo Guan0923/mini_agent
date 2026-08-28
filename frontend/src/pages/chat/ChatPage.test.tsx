@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { projectTurnPath } from "../../app/runtime/runtimeDetailProjection";
 import type { QueuedMessage } from "../../app/types";
 import { compactTurn, patchRuntimeConfig, steerTurn } from "../../api";
-import type { ChatMode, Conversation, RuntimeStateNode } from "../../types";
+import type { ChatMessage, ChatMode, Conversation, RuntimeStateNode } from "../../types";
 import ChatPage, { composerAction } from "./ChatPage";
 
 vi.mock("../../api", async (importOriginal) => ({
@@ -246,6 +246,156 @@ function NewConversationTitleHarness({ onRun }: { onRun: ReturnType<typeof vi.fn
     </AntApp>
   );
 }
+
+function scrollMessage(id: string, role: ChatMessage["role"], content: string): ChatMessage {
+  return { id, role, content, events: [] };
+}
+
+function ScrollHarness({
+  conversationId = "session-scroll",
+  messages,
+}: {
+  conversationId?: string;
+  messages: ChatMessage[];
+}) {
+  const conversation: Conversation = {
+    id: conversationId,
+    sessionId: conversationId,
+    threadId: conversationId,
+    title: "scroll",
+    messagesLoaded: true,
+    messages,
+  };
+  return (
+    <AntApp>
+      <ChatPage
+        conversation={conversation}
+        onUpdate={() => undefined}
+        onNew={async () => conversation.id}
+        onNavigate={() => undefined}
+        onEnsureSession={async () => conversation.sessionId!}
+        onRun={async () => undefined}
+      />
+    </AntApp>
+  );
+}
+
+interface ScrollMetrics {
+  scrollHeight: number;
+  clientHeight: number;
+  scrollTop: number;
+}
+
+function mockScrollContainer(scrollContainer: HTMLDivElement, metrics: ScrollMetrics) {
+  Object.defineProperties(scrollContainer, {
+    scrollHeight: { configurable: true, get: () => metrics.scrollHeight },
+    clientHeight: { configurable: true, get: () => metrics.clientHeight },
+    scrollTop: {
+      configurable: true,
+      get: () => metrics.scrollTop,
+      set: (value: number) => {
+        metrics.scrollTop = Math.max(0, Math.min(value, Math.max(0, metrics.scrollHeight - metrics.clientHeight)));
+      },
+    },
+  });
+  const scrollTo = vi.fn((options: ScrollToOptions) => {
+    if (typeof options.top === "number") scrollContainer.scrollTop = options.top;
+    fireEvent.scroll(scrollContainer);
+  });
+  Object.defineProperty(scrollContainer, "scrollTo", { configurable: true, value: scrollTo });
+  return scrollTo;
+}
+
+describe("ChatPage bottom anchoring", () => {
+  it("shows the return button only beyond the 24px bottom threshold and scrolls smoothly on click", () => {
+    render(<ScrollHarness messages={[scrollMessage("assistant-1", "assistant", "answer")]} />);
+    const scrollContainer = document.querySelector<HTMLDivElement>("[data-conversation-scroll]")!;
+    const metrics = { scrollHeight: 1000, clientHeight: 600, scrollTop: 376 };
+    const scrollTo = mockScrollContainer(scrollContainer, metrics);
+
+    fireEvent.scroll(scrollContainer);
+    expect(screen.queryByRole("button", { name: "滚动到底部" })).not.toBeInTheDocument();
+
+    metrics.scrollTop = 375;
+    fireEvent.scroll(scrollContainer);
+    const button = screen.getByRole("button", { name: "滚动到底部" });
+    expect(button).toBeVisible();
+
+    fireEvent.click(button);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: "smooth" });
+    expect(metrics.scrollTop).toBe(400);
+    expect(screen.queryByRole("button", { name: "滚动到底部" })).not.toBeInTheDocument();
+  });
+
+  it("follows message growth only while the reader remains at the bottom", () => {
+    const firstMessages = [scrollMessage("assistant-1", "assistant", "first")];
+    const view = render(<ScrollHarness messages={firstMessages} />);
+    const scrollContainer = document.querySelector<HTMLDivElement>("[data-conversation-scroll]")!;
+    const metrics = { scrollHeight: 1000, clientHeight: 600, scrollTop: 400 };
+    mockScrollContainer(scrollContainer, metrics);
+    fireEvent.scroll(scrollContainer);
+
+    metrics.scrollHeight = 1200;
+    view.rerender(<ScrollHarness messages={[...firstMessages, scrollMessage("assistant-2", "assistant", "streaming")]} />);
+    expect(metrics.scrollTop).toBe(600);
+
+    metrics.scrollTop = 300;
+    fireEvent.scroll(scrollContainer);
+    expect(screen.getByRole("button", { name: "滚动到底部" })).toBeVisible();
+
+    metrics.scrollHeight = 1400;
+    view.rerender(<ScrollHarness messages={[
+      ...firstMessages,
+      scrollMessage("assistant-2", "assistant", "streaming update"),
+      scrollMessage("user-2", "user", "sent while reading above"),
+    ]} />);
+    expect(metrics.scrollTop).toBe(300);
+    expect(screen.getByRole("button", { name: "滚动到底部" })).toBeVisible();
+  });
+
+  it("keeps pinned content at the bottom when its rendered height changes", () => {
+    const originalResizeObserver = window.ResizeObserver;
+    let contentResizeCallback: ResizeObserverCallback | undefined;
+    class MockResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe = (target: Element) => {
+        if (target.matches(".chat-scroll-content")) contentResizeCallback = this.callback;
+      };
+      unobserve() {}
+      disconnect() {}
+    }
+    window.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+    const view = render(<ScrollHarness messages={[scrollMessage("assistant-1", "assistant", "streaming")]} />);
+    try {
+      const scrollContainer = document.querySelector<HTMLDivElement>("[data-conversation-scroll]")!;
+      const metrics = { scrollHeight: 1000, clientHeight: 600, scrollTop: 400 };
+      mockScrollContainer(scrollContainer, metrics);
+      fireEvent.scroll(scrollContainer);
+
+      metrics.scrollHeight = 1250;
+      act(() => contentResizeCallback?.([], {} as ResizeObserver));
+      expect(metrics.scrollTop).toBe(650);
+      expect(screen.queryByRole("button", { name: "滚动到底部" })).not.toBeInTheDocument();
+    } finally {
+      view.unmount();
+      window.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("resets the scroll anchor when switching conversations", () => {
+    const view = render(<ScrollHarness conversationId="session-a" messages={[scrollMessage("a", "assistant", "a")]} />);
+    const scrollContainer = document.querySelector<HTMLDivElement>("[data-conversation-scroll]")!;
+    const metrics = { scrollHeight: 1000, clientHeight: 600, scrollTop: 200 };
+    mockScrollContainer(scrollContainer, metrics);
+    fireEvent.scroll(scrollContainer);
+    expect(screen.getByRole("button", { name: "滚动到底部" })).toBeVisible();
+
+    metrics.scrollHeight = 1200;
+    view.rerender(<ScrollHarness conversationId="session-b" messages={[scrollMessage("b", "assistant", "b")]} />);
+    expect(metrics.scrollTop).toBe(600);
+    expect(screen.queryByRole("button", { name: "滚动到底部" })).not.toBeInTheDocument();
+  });
+});
 
 describe("ChatPage rewind projection", () => {
   afterEach(() => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { App as AntApp, FloatButton, Grid } from "antd";
 import { VerticalAlignBottomOutlined } from "@ant-design/icons";
 import {
@@ -34,6 +34,12 @@ import { useRuntimeControls } from "./useRuntimeControls";
 
 export { composerAction } from "./contracts";
 
+const BOTTOM_THRESHOLD_PX = 24;
+
+function isScrollContainerAtBottom(scrollContainer: HTMLDivElement): boolean {
+  return scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight <= BOTTOM_THRESHOLD_PX;
+}
+
 export default function ChatPage({
   conversation,
   displayMode: configuredDisplayMode,
@@ -64,7 +70,10 @@ export default function ChatPage({
   const [compactionPending, setCompactionPending] = useState(false);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const [commandMenuDismissedFor, setCommandMenuDismissedFor] = useState<string | null>(null);
+  const [isAtBottom, setIsAtBottom] = useState(true);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const scrollConversationIdRef = useRef<string | undefined>(undefined);
   const queueFlushRef = useRef(false);
   // IDs captured when a queue flush starts. Items added while that flush
   // is running belong to the next FIFO pass and must never be removed when
@@ -197,6 +206,36 @@ export default function ChatPage({
   );
   const actionMode = composerActionState.mode;
   const projectUnavailable = conversation?.projectId !== undefined && conversation.projectAvailable === false;
+
+  const syncBottomState = useCallback((scrollContainer: HTMLDivElement) => {
+    const nextIsAtBottom = isScrollContainerAtBottom(scrollContainer);
+    shouldStickToBottomRef.current = nextIsAtBottom;
+    setIsAtBottom((current) => current === nextIsAtBottom ? current : nextIsAtBottom);
+  }, []);
+
+  useLayoutEffect(() => {
+    const scrollContainer = chatScrollRef.current;
+    if (!scrollContainer) return;
+    const conversationChanged = scrollConversationIdRef.current !== conversation?.id;
+    scrollConversationIdRef.current = conversation?.id;
+    if (conversationChanged) shouldStickToBottomRef.current = true;
+    if (!shouldStickToBottomRef.current) return;
+    scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    syncBottomState(scrollContainer);
+  }, [conversation?.id, conversation?.messages, syncBottomState]);
+
+  useEffect(() => {
+    const scrollContainer = chatScrollRef.current;
+    const scrollContent = scrollContainer?.querySelector<HTMLElement>(".chat-scroll-content");
+    if (!scrollContainer || !scrollContent || typeof ResizeObserver !== "function") return;
+    const observer = new ResizeObserver(() => {
+      if (shouldStickToBottomRef.current) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      syncBottomState(scrollContainer);
+    });
+    observer.observe(scrollContainer);
+    observer.observe(scrollContent);
+    return () => observer.disconnect();
+  }, [conversation?.id, syncBottomState]);
 
   useEffect(() => {
     const status = activeRuntimeNode?.status;
@@ -582,6 +621,11 @@ export default function ChatPage({
     scrollContainer.scrollTo({ top: scrollContainer.scrollHeight, behavior: "smooth" });
   }
 
+  function handleChatScroll() {
+    const scrollContainer = chatScrollRef.current;
+    if (scrollContainer) syncBottomState(scrollContainer);
+  }
+
 
   function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     const isComposing = event.nativeEvent.isComposing;
@@ -607,6 +651,7 @@ export default function ChatPage({
           isMobile={isMobile}
           compactionPending={compactionPending}
           chatScrollRef={chatScrollRef}
+          onScroll={handleChatScroll}
           editingMessageId={editingMessageId}
           editingDraft={editingDraft}
           editRef={editRef}
@@ -624,6 +669,15 @@ export default function ChatPage({
           onFork={onFork ? forkMessage : undefined}
           sandboxFailure={sandboxHealth.phase === "unhealthy" ? sandboxHealth.detail ?? "健康检查未通过。" : null}
         />
+        {!isAtBottom ? (
+          <FloatButton
+            className="chat-scroll-bottom-button"
+            icon={<VerticalAlignBottomOutlined />}
+            tooltip="滚动到底部"
+            aria-label="滚动到底部"
+            onClick={scrollToBottom}
+          />
+        ) : null}
       </div>
       <Composer
         input={input}
@@ -687,14 +741,6 @@ export default function ChatPage({
             window.open(sessionFileContentUrl(conversation.sessionId, "upload", upload.path), "_blank", "noopener");
           }
         }}
-      />
-      <FloatButton
-        className="chat-scroll-bottom-button"
-        icon={<VerticalAlignBottomOutlined />}
-        tooltip="滚动到底部"
-        aria-label="滚动到底部"
-        style={{ right: 24, bottom: 96 }}
-        onClick={scrollToBottom}
       />
     </div>
   );
