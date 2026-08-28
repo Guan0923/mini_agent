@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -57,6 +58,7 @@ def test_injected_runner_executes_one_local_transaction() -> None:
     assert calls[0][calls[0].index("obj=") + 1] == r"NT SERVICE\MiniAgentSandboxBroker"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows service ACL test")
 def test_injected_runner_uses_prefixed_sid_for_acl(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
@@ -394,6 +396,7 @@ def test_repair_state_query_failure_aborts_before_config(monkeypatch: pytest.Mon
     assert calls == [["sc.exe", "stop", "MiniAgentSandboxBroker"]]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows icacls test")
 def test_numeric_sid_is_prefixed_for_icacls(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _icacls_sid("S-1-5-21-1-2-3-500") == "*S-1-5-21-1-2-3-500"
     with pytest.raises(ValueError):
@@ -443,6 +446,7 @@ def test_invalid_sid_is_rejected_before_replacing_existing_file(tmp_path: Path) 
     assert sid_path.read_text(encoding="ascii") == "existing"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows source ACL test")
 def test_source_acl_is_confined_to_rx_on_source_tree() -> None:
     source = Path("C:/workspace/mini_agent/backend/src")
     boundary = Path("C:/workspace/mini_agent")

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ from backend.tools.terminal import (
 )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows WSL path mapping test")
 def test_windows_workspace_to_wsl_maps_drive_and_special_characters() -> None:
     assert windows_workspace_to_wsl(Path("C:/Users/测试用户/mini agent")) == "/mnt/c/Users/测试用户/mini agent"
 

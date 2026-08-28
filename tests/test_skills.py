@@ -635,7 +635,7 @@ def test_project_skill_rejects_symlink_escape(tmp_path: Path) -> None:
     link.parent.mkdir(parents=True)
     link.symlink_to(outside)
 
-    with pytest.raises(SkillConfigurationError, match="symlink|escape|not a regular file"):
+    with pytest.raises(SkillConfigurationError, match="symbolic link|symlink|escape|not a regular file"):
         discover_project_skills(tmp_path, "project_1")
 
 
@@ -648,7 +648,7 @@ def test_project_skill_rejects_path_escape(tmp_path: Path) -> None:
     (tmp_path / ".mini_agent" / "skills" / "demo" / "SKILL.md").unlink()
     (tmp_path / ".mini_agent" / "skills" / "demo" / "SKILL.md").symlink_to(outside)
 
-    with pytest.raises(SkillConfigurationError, match="symlink|escape|not a regular file"):
+    with pytest.raises(SkillConfigurationError, match="symbolic link|symlink|escape|not a regular file"):
         discover_project_skills(tmp_path, "project_1")
 
 

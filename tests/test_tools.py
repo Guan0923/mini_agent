@@ -143,6 +143,7 @@ def test_command_tool_uses_git_bash_executable_when_selected(tmp_path: Path, mon
     assert calls == [["git-bash.exe", "-lc", "echo hi"]]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows WSL path mapping test")
 def test_command_tool_maps_workspace_for_wsl(tmp_path: Path, monkeypatch) -> None:
     from backend.tools.terminal import windows_workspace_to_wsl
 
@@ -324,6 +325,7 @@ def test_command_runtime_cancellation_terminates_managed_process(tmp_path: Path)
     assert "stdout:\npartial" in str(exc_info.value)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows terminal cancellation integration test")
 def test_real_long_running_command_is_cancelled_by_turn_pause(tmp_path: Path) -> None:
     marker = tmp_path / "command-started.txt"
     if os.name == "nt":
@@ -456,7 +458,10 @@ def test_upload_file_tool_reads_only_inside_uploads_root(tmp_path: Path) -> None
         registry.invoke("read_upload_file", {"path": "../outside.txt"})
 
 
-def test_build_application_registers_upload_tool_when_root_provided(tmp_path: Path) -> None:
+def test_build_application_registers_upload_tool_when_root_provided(
+    tmp_path: Path,
+    local_sandbox_runtime: None,
+) -> None:
     from backend.configuration import ClientPaths
     from backend.runtime import build_application
 

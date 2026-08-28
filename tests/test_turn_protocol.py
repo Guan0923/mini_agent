@@ -1555,7 +1555,9 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
 
 
 def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_deltas(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
+    monkeypatch,
+    local_sandbox_runtime: None,
 ) -> None:
     state = WebAppState(tmp_path / "web")
     monkeypatch.setattr(
@@ -1642,7 +1644,11 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
         assert state.active_turn_streams == {}
 
 
-def test_real_http_sse_generates_title_with_isolated_model_request(tmp_path: Path, monkeypatch) -> None:
+def test_real_http_sse_generates_title_with_isolated_model_request(
+    tmp_path: Path,
+    monkeypatch,
+    local_sandbox_runtime: None,
+) -> None:
     state = WebAppState(tmp_path / "web")
     monkeypatch.setattr(
         state, "model_config", lambda *_args, **_kwargs: ModelConfig("test", "https://example.test/v1", "test")

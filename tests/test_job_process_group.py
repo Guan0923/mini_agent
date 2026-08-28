@@ -407,19 +407,26 @@ def test_terminate_skips_terminator_and_root_when_exited_fake(tmp_path, is_windo
 @pytest.mark.skipif(not IS_WINDOWS, reason="Windows taskkill /T /F real-tree test")
 def test_terminate_kills_whole_tree_windows(tmp_path) -> None:
     child_pid_file = tmp_path / "child.pid"
+    script = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii'); "
+        "time.sleep(300)"
+    )
     argv = [
-        "powershell",
-        "-NoProfile",
-        "-Command",
-        f"$c = Start-Process -WindowStyle Hidden -PassThru -FilePath powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 300'; "
-        f"$c.Id | Out-File -FilePath '{child_pid_file}' -Encoding ascii; Start-Sleep 300",
+        sys.executable,
+        "-c",
+        script,
+        str(child_pid_file),
     ]
     env = make_env(tmp_path)
     group = ProcessGroup(argv, env, cwd=str(tmp_path))
     pid = group.start()
     child_pid = None
     try:
-        assert _retry_until(lambda: _read_pid_file(child_pid_file) is not None), "child pid file was never written"
+        assert _retry_until(lambda: _read_pid_file(child_pid_file) is not None), (
+            f"child pid file was never written; root poll={group.poll()}"
+        )
         child_pid = _read_pid_file(child_pid_file)
         assert child_pid is not None and child_pid != pid
     finally:
