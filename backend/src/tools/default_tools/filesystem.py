@@ -149,6 +149,7 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
             ),
             requires_confirmation=True,
             read_only=False,
+            workspace_confined=True,
         ),
         Tool(
             "write_file",
@@ -177,6 +178,7 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
             ),
             requires_confirmation=True,
             read_only=False,
+            workspace_confined=True,
         ),
         Tool(
             "edit_file",
@@ -204,6 +206,7 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
             ),
             requires_confirmation=True,
             read_only=False,
+            workspace_confined=True,
         ),
     )
 

@@ -73,6 +73,9 @@ class LockedToolExecutor:
     def requires_confirmation(self, name: str) -> bool:
         return self._tools.requires_confirmation(name)
 
+    def is_workspace_confined(self, name: str) -> bool:
+        return self._tools.is_workspace_confined(name)
+
     def is_retryable(self, name: str) -> bool:
         return self._tools.is_retryable(name)
 

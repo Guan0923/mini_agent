@@ -42,6 +42,7 @@ class Tool:
     parameters: dict[str, Any] = field(default_factory=dict)
     requires_confirmation: bool = False
     read_only: bool = True
+    workspace_confined: bool = False
     retryable: bool = False
     context_handler: ToolHandler | None = None
 
@@ -64,6 +65,8 @@ class ToolExecutor(Protocol):
     def is_read_only(self, name: str) -> bool: ...
 
     def requires_confirmation(self, name: str) -> bool: ...
+
+    def is_workspace_confined(self, name: str) -> bool: ...
 
     def is_retryable(self, name: str) -> bool: ...
 

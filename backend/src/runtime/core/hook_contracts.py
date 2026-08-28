@@ -112,6 +112,7 @@ class ToolHookContext:
     permission_mode: str
     requires_confirmation: bool
     read_only: bool
+    workspace_confined: bool
     sandbox_launcher: object | None = None
     sandbox_config: Mapping[str, Any] = field(default_factory=readonly_mapping)
     sandbox_user_id: str | None = None

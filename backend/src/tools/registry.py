@@ -72,6 +72,12 @@ class ToolRegistry:
             raise ToolError(f"Unknown tool: {name}")
         return tool.requires_confirmation
 
+    def is_workspace_confined(self, name: str) -> bool:
+        tool = self._tools.get(name)
+        if tool is None:
+            raise ToolError(f"Unknown tool: {name}")
+        return tool.workspace_confined
+
     def is_retryable(self, name: str) -> bool:
         tool = self._tools.get(name)
         if tool is None:

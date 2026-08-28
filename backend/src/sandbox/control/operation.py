@@ -20,7 +20,10 @@ def sandbox_operation(context: ToolHookContext) -> HookOperationResult:
     if context.outcome is not None:
         return HookOperationResult.continue_execution()
 
-    requires_approval = context.requires_confirmation and context.permission_mode != "full_access"
+    workspace_write_allowed = context.permission_mode == "workspace_write" and context.workspace_confined
+    requires_approval = (
+        context.requires_confirmation and context.permission_mode != "full_access" and not workspace_write_allowed
+    )
     if requires_approval:
         request = _approval_request(context)
         _record(context, "approval_requested", "Tool approval requested", request)

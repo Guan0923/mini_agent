@@ -57,6 +57,7 @@ class ToolStepExecutor:
                 return self._failure(runtime, tool, f"Read-only Plan mode blocked tool: {tool}")
             requires_confirmation = tools.requires_confirmation(tool)
             read_only = tools.is_read_only(tool)
+            workspace_confined = tools.is_workspace_confined(tool)
             retryable = tools.is_retryable(tool)
             validate = getattr(tools, "validate_arguments", None)
             if callable(validate):
@@ -73,6 +74,7 @@ class ToolStepExecutor:
             permission_mode=runtime.state.permission_mode,
             requires_confirmation=requires_confirmation,
             read_only=read_only,
+            workspace_confined=workspace_confined,
             sandbox_launcher=runtime.services.sandbox_launcher,
             sandbox_config=runtime.services.sandbox_config or {},
             sandbox_user_id=runtime.services.sandbox_user_id,

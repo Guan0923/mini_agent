@@ -109,6 +109,11 @@ def test_create_directory_is_recursive_idempotent_and_registered_as_approved_wri
     assert "create_directory" in registry.names()
     assert "create_directory" not in registry.read_only_names()
     assert registry.requires_confirmation("create_directory") is True
+    assert {name for name in registry.names() if registry.is_workspace_confined(name)} == {
+        "create_directory",
+        "write_file",
+        "edit_file",
+    }
     with pytest.raises(ConfirmationRequired):
         registry.invoke("create_directory", {"path": "approved"})
     with pytest.raises(ToolError, match="Invalid arguments"):
