@@ -180,6 +180,11 @@ def test_denial_stops_the_tool_batch_and_all_provider_pairs_remain_valid() -> No
     assert [item["call_id"] for item in response_results] == ["call_0", "call_1"]
     assert [call["id"] for call in message_calls] == ["call_0", "call_1"]
     assert [item["tool_use_id"] for item in message_results] == ["call_0", "call_1"]
-    assert chat_results[0]["content"] == "The user denied this write_file tool call."
-    assert response_results[0]["output"] == "The user denied this write_file tool call."
-    assert message_results[0]["content"] == "The user denied this write_file tool call."
+    expected_errors = [
+        "The user denied this write_file tool call.",
+        "Not executed because tool execution was interrupted.",
+    ]
+    assert [item["content"] for item in chat_results] == expected_errors
+    assert [item["output"] for item in response_results] == expected_errors
+    assert [item["content"] for item in message_results] == expected_errors
+    assert [item.get("is_error") for item in message_results] == [True, True]

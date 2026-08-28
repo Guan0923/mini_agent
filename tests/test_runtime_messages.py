@@ -12,8 +12,9 @@ from backend.runtime import (
     PreparedResponse,
 )
 from backend.runtime.core.config import log_full_messages_from_env
+from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.execution.lifecycle.outcomes import fail_run
-from backend.tools import Tool, ToolRegistry
+from backend.tools import Tool, ToolError, ToolRegistry, WorkspaceFiles, build_tool_registry
 from tests.local_store import session_store
 
 
@@ -52,6 +53,27 @@ class OneToolThenAnswerPlanner:
                 content="I will use a tool.",
                 reasoning="I need the tool result.",
                 tool_messages=[ToolMessage(name="echo", call_id="call_echo", arguments={"value": "ok"})],
+            )
+        return AssistantMessage(content="done")
+
+
+class NestedWriteThenAnswerPlanner:
+    name = "nested-write-then-answer"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, runtime) -> AssistantMessage:
+        self.calls += 1
+        if self.calls == 1:
+            return AssistantMessage(
+                tool_messages=[
+                    ToolMessage(
+                        name="write_file",
+                        call_id="call_write_nested",
+                        arguments={"path": "test/a.py", "content": "print('ok')\n"},
+                    )
+                ]
             )
         return AssistantMessage(content="done")
 
@@ -393,6 +415,64 @@ def test_tool_lifecycle_events_are_correlated_by_call_id() -> None:
 
     lifecycle = [event for event in events if event.kind in {"tool_call", "tool_result"}]
     assert [event.data["call_id"] for event in lifecycle] == ["call_echo", "call_echo"]
+
+
+def test_nested_write_creates_parent_with_one_tool_lifecycle(tmp_path: Path) -> None:
+    events = []
+    runner = AgentRunner(NestedWriteThenAnswerPlanner(), build_tool_registry(tmp_path))
+    runtime = runner.new_runtime(
+        task="write nested file",
+        interrupt=lambda _request: InterruptDecision("continue"),
+        on_event=events.append,
+    )
+
+    state = runner.run(runtime)
+
+    assert state.status == "completed"
+    assert (tmp_path / "test" / "a.py").read_text(encoding="utf-8") == "print('ok')\n"
+    lifecycle = [event for event in events if event.kind in {"tool_call", "tool_result", "tool_failed"}]
+    assert [(event.kind, event.data["call_id"]) for event in lifecycle] == [
+        ("tool_call", "call_write_nested"),
+        ("tool_result", "call_write_nested"),
+    ]
+    assert lifecycle[0].message == "write_file"
+    assert lifecycle[1].data["tool"] == "write_file"
+
+
+def test_nested_write_failure_returns_one_failed_result_and_keeps_parent(tmp_path: Path, monkeypatch) -> None:
+    files = WorkspaceFiles(tmp_path)
+
+    def fail_create(_path: Path, _content: str) -> None:
+        raise ToolError("simulated file creation failure")
+
+    monkeypatch.setattr(files, "_exclusive_create", fail_create)
+    runner = AgentRunner(
+        NestedWriteThenAnswerPlanner(),
+        build_tool_registry(tmp_path, workspace_files=files),
+    )
+    runtime = runner.new_runtime(
+        task="write nested file",
+        interrupt=lambda _request: InterruptDecision("continue"),
+    )
+
+    state = runner.run(runtime)
+
+    failed = next(
+        tool
+        for message in state.history
+        if isinstance(message, AssistantMessage)
+        for tool in message.tool_messages
+        if tool.call_id == "call_write_nested"
+    )
+    assert failed.status == "failed"
+    assert failed.content == "write_file failed: simulated file creation failure"
+    assert (tmp_path / "test").is_dir()
+    assert not (tmp_path / "test" / "a.py").exists()
+    lifecycle = [event for event in state.events if event.kind in {"tool_call", "tool_result", "tool_failed"}]
+    assert [(event.kind, event.data["call_id"]) for event in lifecycle] == [
+        ("tool_call", "call_write_nested"),
+        ("tool_failed", "call_write_nested"),
+    ]
 
 
 class ExplodingStreamingPlanner:

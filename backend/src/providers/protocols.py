@@ -303,7 +303,14 @@ class MessagesAdapter:
                 for tool in message.tool_messages:
                     blocks.append({"type": "tool_use", "id": tool.call_id, "name": tool.name, "input": tool.arguments})
                     if tool.status != "pending" and tool.content is not None:
-                        results.append({"type": "tool_result", "tool_use_id": tool.call_id, "content": tool.content})
+                        results.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool.call_id,
+                                "content": tool.content,
+                                **({"is_error": True} if tool.status == "failed" else {}),
+                            }
+                        )
                 if blocks:
                     messages.append({"role": "assistant", "content": blocks})
                 if results:

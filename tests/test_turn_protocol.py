@@ -41,7 +41,7 @@ from backend.planning.prompts import load_title_prompt
 from backend.planning.rule_based import RuleBasedPlanner
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime import AgentApplication, AgentRunner, ConversationService, build_application
-from backend.runtime.core.context import AgentRuntime, PreparedResponse
+from backend.runtime.core.context import AgentRuntime, PreparedResponse, _chat_messages_from_nodes
 from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
@@ -447,7 +447,7 @@ def test_writer_emits_one_baseline_then_exact_incremental_operations() -> None:
     assert child.parent_id == turn.id
 
 
-def test_model_context_projects_only_successful_turn_items() -> None:
+def test_model_context_projects_success_items_and_complete_failed_tool_pairs() -> None:
     node = RuntimeState.create(
         session_id="session_context",
         thread_id="session_context",
@@ -484,8 +484,11 @@ def test_model_context_projects_only_successful_turn_items() -> None:
                         {
                             "type": "tool_result",
                             "call_id": "call_failed",
+                            "tool": "write_file",
                             "content": "denied",
                             "status": "failed",
+                            "retryable": False,
+                            "failure_code": "user_denied",
                         },
                         {
                             "type": "tool_call",
@@ -514,9 +517,105 @@ def test_model_context_projects_only_successful_turn_items() -> None:
     assert isinstance(projected[1], AssistantMessage)
     assert projected[1].content == "kept"
     assert projected[1].reasoning is None
-    assert [(tool.call_id, tool.content, tool.status) for tool in projected[1].tool_messages] == [
-        ("call_ok", "done", "succeeded")
+    assert [
+        (tool.call_id, tool.content, tool.status, tool.retryable, tool.failure_code)
+        for tool in projected[1].tool_messages
+    ] == [
+        ("call_ok", "done", "succeeded", None, None),
+        ("call_failed", "denied", "failed", False, "user_denied"),
     ]
+
+
+def test_model_context_omits_malformed_tool_pairs() -> None:
+    tool_items = [
+        {
+            "type": "tool_call",
+            "call_id": "orphan",
+            "name": "glob",
+            "arguments": {},
+            "status": "success",
+        },
+        {
+            "type": "tool_call",
+            "call_id": "duplicate",
+            "name": "read_file",
+            "arguments": {},
+            "status": "success",
+        },
+        {
+            "type": "tool_result",
+            "call_id": "duplicate",
+            "content": "first",
+            "status": "success",
+        },
+        {
+            "type": "tool_result",
+            "call_id": "duplicate",
+            "content": "second",
+            "status": "success",
+        },
+        {
+            "type": "tool_result",
+            "call_id": "reversed",
+            "content": "too early",
+            "status": "success",
+        },
+        {
+            "type": "tool_call",
+            "call_id": "reversed",
+            "name": "grep",
+            "arguments": {},
+            "status": "success",
+        },
+        {
+            "type": "tool_call",
+            "call_id": "wrong_name",
+            "name": "write_file",
+            "arguments": {},
+            "status": "failed",
+        },
+        {
+            "type": "tool_result",
+            "call_id": "wrong_name",
+            "tool": "edit_file",
+            "content": "failed",
+            "status": "failed",
+        },
+        {
+            "type": "tool_call",
+            "call_id": "wrong_status",
+            "name": "write_file",
+            "arguments": {},
+            "status": "success",
+        },
+        {
+            "type": "tool_result",
+            "call_id": "wrong_status",
+            "tool": "write_file",
+            "content": "failed",
+            "status": "failed",
+        },
+    ]
+    node = RuntimeState.create(
+        session_id="session_malformed_tools",
+        thread_id="session_malformed_tools",
+        user_content="inspect",
+        data=[
+            [
+                {"role": "user", "content": [{"type": "text", "text": "inspect", "status": "success"}]},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "kept", "status": "success"}, *tool_items],
+                },
+            ]
+        ],
+    )
+
+    projected = _chat_messages_from_nodes([node])
+
+    assert isinstance(projected[1], AssistantMessage)
+    assert projected[1].content == "kept"
+    assert projected[1].tool_messages == []
 
 
 def test_late_tool_failure_after_steering_settles_the_previous_assistant_call() -> None:

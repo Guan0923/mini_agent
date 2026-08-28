@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Lock
 from time import sleep
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ import pytest
 from backend.domain import RunState
 from backend.runtime.core.context import AgentRuntime
 from backend.runtime.subagents import LockedToolExecutor, SubagentCoordinator, WorkspaceWriteLock
-from backend.tools import ToolError
+from backend.tools import ToolError, build_tool_registry
 
 
 class _IdleTools:
@@ -132,6 +133,51 @@ def test_locked_executor_serializes_same_path_writes() -> None:
     with ThreadPoolExecutor(max_workers=2) as workers:
         futures = [workers.submit(executor.invoke, "write_file", {"path": "same.txt"}, True) for _ in range(2)]
         assert [future.result() for future in futures] == ["written", "written"]
+    assert maximum == 1
+
+
+def test_locked_executor_allows_writes_with_a_shared_missing_parent(tmp_path: Path) -> None:
+    executor = LockedToolExecutor(build_tool_registry(tmp_path), WorkspaceWriteLock(), tmp_path)
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        futures = [
+            workers.submit(
+                executor.invoke,
+                "write_file",
+                {"path": f"shared/{name}.txt", "content": name},
+                True,
+            )
+            for name in ("one", "two")
+        ]
+        assert all("Created shared/" in future.result() for future in futures)
+
+    assert (tmp_path / "shared" / "one.txt").read_text(encoding="utf-8") == "one"
+    assert (tmp_path / "shared" / "two.txt").read_text(encoding="utf-8") == "two"
+
+
+def test_explicit_create_directory_excludes_other_workspace_writes() -> None:
+    active = 0
+    maximum = 0
+    guard = Lock()
+
+    class Tools(_IdleTools):
+        def invoke(self, _name: str, _arguments: dict[str, object], confirmed: bool = False) -> str:
+            nonlocal active, maximum
+            with guard:
+                active += 1
+                maximum = max(maximum, active)
+            sleep(0.02)
+            with guard:
+                active -= 1
+            return "done"
+
+    executor = LockedToolExecutor(Tools(), WorkspaceWriteLock())
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        futures = [
+            workers.submit(executor.invoke, "create_directory", {"path": "shared"}, True),
+            workers.submit(executor.invoke, "write_file", {"path": "other.txt"}, True),
+        ]
+        assert [future.result() for future in futures] == ["done", "done"]
     assert maximum == 1
 
 

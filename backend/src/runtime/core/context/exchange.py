@@ -96,14 +96,48 @@ def successful_items(items: Sequence[object]) -> list[Mapping[str, Any]]:
     return [item for item in items if isinstance(item, Mapping) and item.get("status") == "success"]
 
 
+def _assistant_items(items: Sequence[object]) -> list[Mapping[str, Any]]:
+    """Keep complete ordinary Items plus valid completed tool call/result pairs."""
+
+    mapped = [item for item in items if isinstance(item, Mapping)]
+    tool_items: dict[str, list[tuple[int, Mapping[str, Any]]]] = {}
+    for index, item in enumerate(mapped):
+        if item.get("type") not in {"tool_call", "tool_result"}:
+            continue
+        call_id = item.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            tool_items.setdefault(call_id, []).append((index, item))
+
+    valid_tool_indices: set[int] = set()
+    for entries in tool_items.values():
+        if len(entries) != 2:
+            continue
+        (call_index, call), (result_index, tool_result) = entries
+        if call.get("type") != "tool_call" or tool_result.get("type") != "tool_result":
+            continue
+        status = call.get("status")
+        if status not in {"success", "failed"} or tool_result.get("status") != status:
+            continue
+        if "tool" in tool_result and tool_result.get("tool") != call.get("name"):
+            continue
+        valid_tool_indices.update({call_index, result_index})
+
+    return [
+        item
+        for index, item in enumerate(mapped)
+        if index in valid_tool_indices
+        or (item.get("type") not in {"tool_call", "tool_result"} and item.get("status") == "success")
+    ]
+
+
 def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMessage]:
     """Project each selected Turn version into the existing planner port."""
 
     result: list[ChatMessage] = []
     for node in nodes:
         for message in node.selected_messages:
-            blocks = successful_items(message.get("content", []))
             if message.get("role") == "user":
+                blocks = successful_items(message.get("content", []))
                 user_text = "".join(
                     str(item.get("text") or item.get("summary") or "")
                     for item in blocks
@@ -120,6 +154,7 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                     result.append(UserMessage(content=user_text))
                 continue
 
+            blocks = _assistant_items(message.get("content", []))
             summary = next((str(item.get("summary") or "") for item in blocks if item.get("type") == "compaction"), "")
             if summary:
                 result.append(UserMessage(content=f"{CHECKPOINT_PREAMBLE}\n\n{summary}"))
@@ -150,7 +185,7 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                     tool.content = (
                         content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
                     )
-                    tool.status = "succeeded"
+                    tool.status = "succeeded" if item.get("status") == "success" else "failed"
                     tool.retryable = item.get("retryable") if isinstance(item.get("retryable"), bool) else None
                     tool.failure_code = item.get("failure_code") if isinstance(item.get("failure_code"), str) else None
                 elif kind == "error":

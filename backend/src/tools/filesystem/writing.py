@@ -6,6 +6,27 @@ from ..base import ToolError
 
 
 class FileWriteMixin:
+    def create_directory(self, path: str) -> str:
+        """Recursively create one workspace directory without following links."""
+
+        parts = self._relative_parts(path, allow_root=False)
+        directory_path = self.workspace
+        for part in parts:
+            directory_path /= part
+            if directory_path.is_symlink():
+                raise ToolError("Symbolic links are not supported for writes.")
+            if directory_path.exists() and not directory_path.is_dir():
+                raise ToolError(f"Not a directory: {self._display_candidate(directory_path)}")
+
+        directory_path = self._resolve_inside(directory_path, allow_root=False)
+        if directory_path.is_dir():
+            return f"Directory already exists: {self._display_path(directory_path)}."
+        try:
+            directory_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ToolError(f"Could not create directory {path}: {exc}") from exc
+        return f"Created directory {self._display_path(directory_path)}."
+
     def write_file(self, path: str, content: str, overwrite: bool = False) -> str:
         """Create a new UTF-8 file or explicitly replace an existing file."""
 
@@ -15,7 +36,9 @@ class FileWriteMixin:
             raise ToolError("overwrite must be a boolean.")
         file_path = self._write_path(path)
         if not file_path.parent.is_dir():
-            raise ToolError(f"Parent directory does not exist: {self._display_candidate(file_path.parent)}")
+            parent = file_path.parent.relative_to(self.workspace).as_posix()
+            self.create_directory(parent)
+            file_path = self._write_path(path)
         if file_path.exists() and not file_path.is_file():
             raise ToolError(f"Not a file: {path}")
 
