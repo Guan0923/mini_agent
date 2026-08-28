@@ -192,6 +192,23 @@ def list_turns(session_id: str, request: Request) -> list[dict[str, object]]:
     return [item.to_dict() for item in store.load_nodes(session_id) if item.session_id == session_id]
 
 
+@router.get("/{turn_id}/trace")
+def get_turn_trace(turn_id: str, data_idx: int, request: Request) -> dict[str, object]:
+    store = session_store(request.app.state.web)
+    turn = _turn(store, turn_id)
+    if data_idx < 0 or data_idx >= len(turn.data):
+        raise HTTPException(status_code=422, detail="data_idx 超出 Turn 版本范围。")
+    try:
+        requests = store.load_turn_trace(turn.session_id, turn.id, data_idx)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "turn": turn.to_dict(),
+        "data_idx": data_idx,
+        "requests": [item.to_dict() for item in requests],
+    }
+
+
 @router.get("/{turn_id}/stream")
 def stream_running_turn(turn_id: str, request: Request) -> StreamingResponse:
     state: WebAppState = request.app.state.web

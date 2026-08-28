@@ -70,7 +70,7 @@ class RuntimeState:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
-    def to_dict(self, *, include_runtime_messages: bool = True) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "workspace_root": self.workspace_root,
@@ -97,11 +97,7 @@ class RuntimeState:
                 }
                 for spec in self.tool_specs
             ],
-            "current_run": (
-                self.current_run.to_dict(include_runtime_messages=include_runtime_messages)
-                if self.current_run
-                else None
-            ),
+            "current_run": (self.current_run.to_dict() if self.current_run else None),
             "run_history": [summary.__dict__ for summary in self.run_history],
             "active_message": message_to_dict(self.active_message) if self.active_message else None,
             "active_tool_index": self.active_tool_index,

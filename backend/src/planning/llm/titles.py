@@ -47,6 +47,8 @@ class TitleMixin:
             "max_tokens": _TITLE_OUTPUT_TOKENS,
         }
         try:
+            runtime.exchange.context["trace_base_system_prompt"] = load_title_prompt()
+            runtime.exchange.context["trace_user_preferences"] = ""
             prepared = self._request(
                 runtime,
                 [SystemMessage(content=load_title_prompt()), UserMessage(content=first_user_text)],

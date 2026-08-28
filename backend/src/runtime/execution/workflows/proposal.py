@@ -24,7 +24,6 @@ from .common import (
     _publish_assistant_message,
     _publish_repairs,
     _publish_tool_recovery,
-    _record_reasoning,
     _start_assistant,
     _truncate,
 )
@@ -67,7 +66,6 @@ class PlanProposalWorkflow(PlanControlMixin):
             else:
                 streamed = close()
             _publish_repairs(runtime, capabilities)
-            _record_reasoning(runtime, response, streamed.reasoning)
             _publish_assistant_message(runtime, response, streamed)
             if cancel_if_requested(runtime):
                 _fail_pending_tools(runtime, response, "Not executed because the run was cancelled.")

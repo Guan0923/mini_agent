@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { App as AntApp, FloatButton, Grid } from "antd";
+import { App as AntApp, Button, Dropdown, FloatButton, Grid } from "antd";
 import { VerticalAlignBottomOutlined } from "@ant-design/icons";
 import {
   compactTurn,
@@ -27,6 +27,7 @@ import type {
   RuntimeStateNode,
 } from "../../types";
 import { ChatMessageList } from "./ChatMessageList";
+import TracePage from "./TracePage";
 import { composerAction, type ChatPageProps } from "./contracts";
 import { useComposerFiles } from "./useComposerFiles";
 import { useMessageEditing } from "./useMessageEditing";
@@ -72,6 +73,7 @@ export default function ChatPage({
   const [commandMenuDismissedFor, setCommandMenuDismissedFor] = useState<string | null>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [dismissedTodoPanels, setDismissedTodoPanels] = useState<Set<string>>(() => new Set());
+  const [mainView, setMainView] = useState<"chat" | "trace">("chat");
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const scrollConversationIdRef = useRef<string | undefined>(undefined);
@@ -161,6 +163,10 @@ export default function ChatPage({
       return next;
     });
   }, [todoPanelKey]);
+  const currentThreadId = activeRuntimeNode?.thread_id ?? conversation?.threadId ?? conversation?.sessionId;
+  const traceTurns = (conversation?.runtimeNodes ?? []).filter(
+    (node): node is RuntimeStateNode => isRuntimeTurnNode(node) && node.thread_id === currentThreadId,
+  );
   const runtimeControls = useRuntimeControls({
     conversation,
     activeRuntimeNode,
@@ -539,6 +545,10 @@ export default function ChatPage({
     setCommandMenuDismissedFor(null);
     setActiveCommandIndex(0);
     setSettingsOpen(false);
+    if (name === "/trace") {
+      setMainView("trace");
+      return;
+    }
     if (name === "/help") {
       await insert(HELP_TEXT);
       return;
@@ -655,6 +665,22 @@ export default function ChatPage({
 
   return (
     <div className="chat-page">
+      <div className="trace-toolbar" role="navigation" aria-label="主内容视图">
+        <Dropdown
+          trigger={["click"]}
+          menu={{
+            selectable: true,
+            selectedKeys: currentThreadId ? [currentThreadId] : [],
+            items: currentThreadId ? [{ key: currentThreadId, label: currentThreadId }] : [],
+          }}
+          disabled={!currentThreadId}
+        >
+          <Button type="text">Thread</Button>
+        </Dropdown>
+        <Button type="text" aria-pressed={mainView === "chat"} onClick={() => setMainView("chat")}>Chat</Button>
+        <Button type="text" aria-pressed={mainView === "trace"} onClick={() => setMainView("trace")}>Trace</Button>
+      </div>
+      {mainView === "trace" ? <TracePage turns={traceTurns} /> : <>
       <div className="chat-content">
         <ChatMessageList
           messages={messages}
@@ -757,6 +783,7 @@ export default function ChatPage({
           }
         }}
       />
+      </>}
     </div>
   );
 }

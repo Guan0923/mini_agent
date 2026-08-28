@@ -33,12 +33,6 @@ def cancel_if_requested(runtime: AgentRuntime) -> bool:
                 tool.status = "failed"
                 tool.content = "Not executed because the run was cancelled."
                 tool.retryable = False
-                runtime.run.add_event(
-                    "tool_failed",
-                    f"{tool.name} failed",
-                    call_id=tool.call_id,
-                    error=tool.content,
-                )
                 publish = runtime.services.publish or (lambda _event: None)
                 publish(RuntimeEvent("tool_failed", tool.content, {"tool": tool.name, "call_id": tool.call_id}))
         if not any(message is active for message in runtime.state.messages):

@@ -45,10 +45,12 @@ class Tool:
     workspace_confined: bool = False
     retryable: bool = False
     context_handler: ToolHandler | None = None
+    trace_origin: dict[str, str] = field(default_factory=dict)
 
     @property
     def spec(self) -> ToolSpec:
-        return ToolSpec(self.name, self.description, self.parameters)
+        options = {"mini_agent": {"trace_origin": dict(self.trace_origin)}} if self.trace_origin else {}
+        return ToolSpec(self.name, self.description, self.parameters, options)
 
 
 class ToolExecutor(Protocol):

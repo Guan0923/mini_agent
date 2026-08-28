@@ -71,14 +71,8 @@ def test_denied_write_file_is_returned_to_the_model_without_ending_the_run() -> 
     assert denied.retryable is False
     assert denied.failure_code == "user_denied"
     assert denied.content == "The user denied this write_file tool call."
-    assert not any(event.kind == "cancelled" for event in state.events)
-    failure = next(event for event in state.events if event.kind == "tool_failed")
-    assert failure.data == {
-        "tool": "write_file",
-        "call_id": "call_0",
-        "error": "The user denied this write_file tool call.",
-        "failure_code": "user_denied",
-    }
+    assert state.stop_reason is None
+    assert state.tool_calls == 0
     persisted = type(runtime.state).from_dict(runtime.state.to_dict())
     persisted_denial = next(
         message.tool_messages[0]

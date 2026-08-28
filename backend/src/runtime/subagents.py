@@ -374,7 +374,6 @@ class SubagentCoordinator:
 
     @staticmethod
     def _event(runtime: AgentRuntime, kind: str, message: str, **data: Any) -> None:
-        runtime.run.add_event(kind, message, **data)
         publish = runtime.services.publish
         if publish is not None:
             publish(RuntimeEvent(kind, message, data))

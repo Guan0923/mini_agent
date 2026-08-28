@@ -51,6 +51,59 @@ async function distanceToBottom(locator: import("@playwright/test").Locator): Pr
   });
 }
 
+function tracePanel(page: import("@playwright/test").Page, label: string, index = 0) {
+  return page.getByText(label, { exact: true }).nth(index).locator(
+    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' ant-collapse-item ')][1]",
+  );
+}
+
+test("Trace audit expands real HTTP model, preference, Skill, MCP schema, and Turn Items", async ({ page }) => {
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Trace Audit E2E" } });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Trace Audit E2E", exact: true }).click();
+  await send(page, "$trace-audit trace audit e2e");
+  await expect(page.locator(".message.assistant").last()).toContainText("Trace response from HTTP.");
+
+  await page.getByRole("button", { name: "Trace", exact: true }).click();
+  await expect(page.getByLabel("聊天输入")).toHaveCount(0);
+  await expect(page.getByText("Preference", { exact: true })).toBeVisible();
+  await expect(page.getByText("Skill", { exact: true })).toBeVisible();
+  await expect(page.getByText("MCP", { exact: true })).toBeVisible();
+
+  const preference = tracePanel(page, "Preference");
+  await preference.locator(".ant-collapse-header").click();
+  await expect(preference.locator(".trace-value")).toContainText("Trace E2E preference: concise local audit.");
+
+  const skill = tracePanel(page, "Skill");
+  await skill.locator(".ant-collapse-header").click();
+  await expect(skill.locator(".trace-value")).toContainText("complete local Skill instructions");
+  await expect(skill.locator(".trace-value")).toContainText('"source": "user"');
+
+  const mcp = tracePanel(page, "MCP");
+  await mcp.locator(".ant-collapse-header").click();
+  await expect(mcp.locator(".trace-value")).toContainText('"server": "trace"');
+  await expect(mcp.locator(".trace-value")).toContainText('"tool": "inspect_trace"');
+
+  const effectiveSystem = tracePanel(page, "System", 1);
+  await effectiveSystem.locator(".ant-collapse-header").click();
+  await expect(effectiveSystem.locator(".trace-value")).toContainText("Active project Skills");
+  await expect(effectiveSystem.locator(".trace-value")).toContainText("User Agent Preferences");
+
+  const reasoning = page.getByText("Assistant Reasoning", { exact: true }).last().locator(
+    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' ant-collapse-item ')][1]",
+  );
+  await reasoning.locator(".ant-collapse-header").click();
+  await expect(reasoning.locator(".trace-value")).toContainText("Trace reasoning from HTTP.");
+
+  const response = page.getByText("Assistant Response", { exact: true }).last().locator(
+    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' ant-collapse-item ')][1]",
+  );
+  await response.locator(".ant-collapse-header").click();
+  await expect(response.locator(".trace-value")).toContainText("Trace response from HTTP.");
+});
+
 test("chat stays bottom-anchored and exposes a centered translucent return button only while reading above", async ({ page }) => {
   const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Playwright Scroll Anchor" } });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();

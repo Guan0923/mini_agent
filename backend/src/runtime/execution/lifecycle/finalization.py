@@ -29,11 +29,7 @@ def finish_run(runtime: AgentRuntime, *, started_at: float) -> RunState:
                 run.provenance.attempt,
             )
         )
-    run.add_event("run_finished", "Run finished", status=run.status)
     if runtime.services.publish is not None:
-        counts: dict[str, int] = {}
-        for message in run.runtime_messages:
-            counts[message.kind] = counts.get(message.kind, 0) + 1
         runtime.services.publish(
             RuntimeEvent(
                 "run_finished",
@@ -43,10 +39,9 @@ def finish_run(runtime: AgentRuntime, *, started_at: float) -> RunState:
                     "final_answer": run.final_answer or "",
                     "duration_ms": round((perf_counter() - started_at) * 1000, 3),
                     "usage": runtime.state.usage,
-                    "event_counts": counts,
-                    "model_calls": counts.get("model_request", 0),
-                    "tool_calls": counts.get("tool_call", 0),
-                    "retries": counts.get("retry", 0) + counts.get("model_retry", 0),
+                    "model_calls": run.model_calls,
+                    "tool_calls": run.tool_calls,
+                    "retries": run.retries,
                     "active_skills": [{"name": skill.name, "sha256": skill.sha256} for skill in run.active_skills],
                 },
             )

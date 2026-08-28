@@ -37,7 +37,7 @@ def assistant_content(status: RunStatus, answer: str | None) -> str:
 def encode_runtime_state(state: RuntimeState) -> str:
     """Serialize one resumable runtime without duplicated audit messages."""
 
-    return json.dumps(state.to_dict(include_runtime_messages=False), ensure_ascii=False)
+    return json.dumps(state.to_dict(), ensure_ascii=False)
 
 
 def decode_runtime_state(payload: str | bytes | bytearray) -> RuntimeState:

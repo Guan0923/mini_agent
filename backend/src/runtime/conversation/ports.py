@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from backend.domain import RunProvenance, RunStatus, RuntimeMessage, Session, SessionSummary
+from backend.domain import RunProvenance, RunStatus, Session, SessionSummary
 
 from ..core.context import RuntimeState
 from ..core.ports import RuntimeStore
@@ -49,8 +49,6 @@ class SessionStore(RuntimeStore, Protocol):
     def load_runtime(self, session_id: str) -> RuntimeState | None: ...
 
     def resume_runtime(self, source: RuntimeState, resumed: RuntimeState) -> None: ...
-
-    def load_runtime_messages(self, session_id: str, run_id: str | None = None) -> list[RuntimeMessage]: ...
 
     def start_turn(
         self,

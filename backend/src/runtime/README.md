@@ -9,7 +9,6 @@
 - `node_bridge/`：Runtime 事件到持久化 Node/Item 的桥接。
 - `persistence/`、`planning/`：checkpoint/recording 与 Plan mode。
 - `capability_settings.py`：`SkillSettings`、`SubagentSettings` 解析并校验可选能力配置。
-- `presentation.py`：`RunPresentationTracker` 将瞬态 Runtime 事件投影为稳定、有序的 UI segment。
 - `subagent_bridge.py`：`ParentRuntimeBridge` 在父运行线程上串行转发子 Agent 事件和审批。
 - `subagent_tools.py`：`WorkspaceWriteLock` 与 `LockedToolExecutor` 隔离并发子 Agent 的同路径写入和命令执行。
 - 根文件 `executor.py`、`state_tree.py`、`job_events.py`、`subagents.py` 提供 Runtime 组合入口和专用桥接。

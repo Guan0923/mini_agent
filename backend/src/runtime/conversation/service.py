@@ -310,7 +310,6 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
             assistant.content = f"{assistant.content}\n\n{FAILED_TERMINAL_MESSAGE}".strip()
         run.history = self.runtime.state.messages
         run.final_answer = FAILED_TERMINAL_MESSAGE
-        run.add_event("error", FAILED_TERMINAL_MESSAGE, error_type=error.__class__.__name__)
         self.runtime.state.status = "idle"
         self.runtime.state.usage = self.runtime.state.turn_usage
         self.runtime.state.turn_usage = None
@@ -324,7 +323,6 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
                     {"error_type": error.__class__.__name__, "unexpected": True},
                 )
             )
-            run.add_event("run_finished", "Run finished", status=run.status)
             publish(RuntimeEvent("run_finished", run.status, {"final_answer": run.final_answer}))
         self.runtime.save()
         if self.session_store is not None and self.active_session is not None:

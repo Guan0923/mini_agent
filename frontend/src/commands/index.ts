@@ -12,6 +12,7 @@ export const COMMANDS: CommandDefinition[] = [
   { name: "/help", label: "帮助", description: "查看使用说明" },
   { name: "/skills", label: "技能", description: "列出已发现的技能" },
   { name: "/compact", label: "压缩", description: "压缩当前会话上下文" },
+  { name: "/trace", label: "审计", description: "打开当前 Thread 的 Turn Trace" },
 ];
 
 

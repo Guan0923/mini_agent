@@ -1,8 +1,19 @@
-import type { RuntimeStateNode, RuntimeTreeNode, SidebarThread } from "../../types";
+import type { RuntimeStateNode, RuntimeTreeNode, SidebarThread, TurnTraceResponse } from "../../types";
 import { requestJson } from "../transport/request";
 
 export async function listTurns(sessionId: string): Promise<RuntimeTreeNode[]> {
   return requestJson(`/api/turns?session_id=${encodeURIComponent(sessionId)}`);
+}
+
+export async function getTurnTrace(
+  turnId: string,
+  dataIdx: number,
+  signal?: AbortSignal,
+): Promise<TurnTraceResponse> {
+  return requestJson(
+    `/api/turns/${encodeURIComponent(turnId)}/trace?data_idx=${encodeURIComponent(String(dataIdx))}`,
+    { signal },
+  );
 }
 
 export async function patchTurnCurrentData(turnId: string, currentDataIdx: number): Promise<RuntimeStateNode> {

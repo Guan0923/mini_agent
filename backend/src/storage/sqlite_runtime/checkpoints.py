@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from backend.domain import RunProvenance, RunStatus, RuntimeMessage
+from backend.domain import RunProvenance, RunStatus
 from backend.domain.state import utc_now
 from backend.runtime.core.context import RuntimeState
 
@@ -93,14 +93,14 @@ class SQLiteCheckpointMixin:
 
     def _save_state(self, state: RuntimeState, reason: str) -> None:
         timestamp = utc_now()
-        full_payload = state.to_dict(include_runtime_messages=False)
-        reduced_payload = state.to_dict(include_runtime_messages=False)
-        # Messages and runtime messages have independent local objects, so a
-        # checkpoint does not duplicate the growing transcript.
+        full_payload = state.to_dict()
+        reduced_payload = state.to_dict()
+        # Messages have independent canonical Turn objects, so a checkpoint
+        # does not duplicate the growing transcript.
         reduced_payload.pop("messages", None)
         reduced_payload.pop("run_history", None)
         if reduced_payload.get("current_run"):
-            for key in ("history", "actions", "events", "runtime_messages", "subagent_batches"):
+            for key in ("history", "actions", "subagent_batches"):
                 reduced_payload["current_run"].pop(key, None)
         with self._connection(state.session_id) as connection:
             self._assert_writable(connection)
@@ -110,13 +110,11 @@ class SQLiteCheckpointMixin:
             )
             run = state.current_run
             if run is not None:
-                run_payload = run.to_dict(include_runtime_messages=False)
+                run_payload = run.to_dict()
                 run_payload.update(
                     {"run_id": run.run_id, "task": run.task, "status": run.status, "updated_at": timestamp}
                 )
                 self._put_json_object(connection, state.session_id, "run", run.run_id, run_payload, timestamp)
-                for message in run.runtime_messages:
-                    self._put_runtime_message(connection, state.session_id, run.run_id, message)
             self._touch_session(connection, state.session_id, timestamp)
             if run is not None:
                 checkpoint = {"run_id": run.run_id, "reason": reason, "state": reduced_payload, "created_at": timestamp}
@@ -134,43 +132,7 @@ class SQLiteCheckpointMixin:
             payload = self._json_object(connection, session_id, "runtime_state", session_id)
         if payload is None:
             return None
-        state = decode_runtime_state(json.dumps(payload, ensure_ascii=False))
-        if state.current_run is not None:
-            state.current_run.runtime_messages = self.load_runtime_messages(session_id, state.current_run.run_id)
-        return state
-
-    def append_runtime_message(self, session_id: str, run_id: str, message: RuntimeMessage) -> None:
-        with self._connection(session_id) as connection:
-            self._assert_writable(connection)
-            if self._json_object(connection, session_id, "run", run_id) is None:
-                raise ValueError(f"Unknown session run: {run_id}")
-            self._put_runtime_message(connection, session_id, run_id, message)
-            self._touch_session(connection, session_id, message.timestamp)
-
-    def load_runtime_messages(self, session_id: str, run_id: str | None = None) -> list[RuntimeMessage]:
-        with self._connection(session_id) as connection:
-            values = [
-                value
-                for value in self._json_values(connection, session_id, "runtime_message")
-                if run_id is None or str(value.get("run_id") or "") == run_id
-            ]
-        values.sort(
-            key=lambda item: (
-                str(item.get("run_id") or ""),
-                int(item.get("sequence", 0)),
-                str(item.get("created_at") or ""),
-            )
-        )
-        return [
-            RuntimeMessage(
-                int(item.get("sequence", 0)),
-                str(item.get("kind") or ""),
-                str(item.get("message") or ""),
-                str(item.get("created_at") or utc_now()),
-                dict(item.get("data") or {}),
-            )
-            for item in values
-        ]
+        return decode_runtime_state(json.dumps(payload, ensure_ascii=False))
 
     def resume_runtime(self, source: RuntimeState, resumed: RuntimeState) -> None:
         self._save_state(source, f"run_{source.current_run.status}" if source.current_run else "resume")
@@ -207,22 +169,3 @@ class SQLiteCheckpointMixin:
             "created_at": timestamp,
         }
         self._put_json_object(connection, session_id, "turn_message", f"{run_id}:{sequence}", payload, timestamp)
-
-    def _put_runtime_message(
-        self, connection: sqlite3.Connection, session_id: str, run_id: str, message: RuntimeMessage
-    ) -> None:
-        payload = {
-            "run_id": run_id,
-            "sequence": message.sequence,
-            "kind": message.kind,
-            "message": message.message,
-            "data": message.data,
-            "created_at": message.timestamp,
-        }
-        object_id = f"{run_id}:{message.sequence}"
-        existing = self._json_object(connection, session_id, "runtime_message", object_id)
-        if existing is not None:
-            if existing == payload:
-                return
-            raise ValueError("Runtime messages are immutable and cannot be replaced.")
-        self._put_json_object(connection, session_id, "runtime_message", object_id, payload, message.timestamp)

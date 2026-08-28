@@ -834,6 +834,43 @@ describe("ChatPage queued message flushing", () => {
   });
 });
 
+describe("ChatPage Trace navigation", () => {
+  it("shows the text toolbar and hides the Composer in Trace view", async () => {
+    render(<Harness onRun={vi.fn()} onRewind={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "Thread" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Chat" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
+  });
+
+  it("opens Trace through /trace without dispatching a chat run", async () => {
+    const user = userEvent.setup();
+    const onRun = vi.fn();
+    render(<Harness onRun={onRun} onRewind={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("聊天输入"), "/trace");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(onRun).not.toHaveBeenCalled();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Trace" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps the Thread dropdown scoped to the current thread", async () => {
+    const user = userEvent.setup();
+    render(<Harness onRun={vi.fn()} onRewind={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Thread" }));
+
+    expect(await screen.findByRole("menuitem", { name: "session-rewind" })).toBeInTheDocument();
+    expect(screen.getAllByRole("menuitem")).toHaveLength(1);
+  });
+});
+
 describe("ChatPage composer action matrix", () => {
   it.each([
     ["running", true, "send", false],

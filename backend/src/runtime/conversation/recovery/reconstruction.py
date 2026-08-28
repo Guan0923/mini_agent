@@ -9,12 +9,42 @@ from backend.domain import (
     Session,
     new_run_id,
 )
+from backend.domain.runtime_state import RuntimeState as RuntimeTreeState
 from backend.domain.state import utc_now
 
 from ...core.context import RunSummary, RuntimeState
 
 
-def build_preview(session: Session, state: RuntimeState | None) -> ResumePreview:
+def _indeterminate_call_ids(turn: RuntimeTreeState | None) -> tuple[str, ...]:
+    if turn is None:
+        return ()
+    messages = turn.data[turn.current_data_idx]
+    finished = {
+        str(item.get("call_id"))
+        for message in messages
+        for item in message.get("content", [])
+        if item.get("type") == "tool_result" and item.get("status") in {"success", "failed"} and item.get("call_id")
+    }
+    return tuple(
+        sorted(
+            {
+                str(item.get("call_id"))
+                for message in messages
+                for item in message.get("content", [])
+                if item.get("type") == "tool_call"
+                and item.get("status") == "running"
+                and item.get("call_id")
+                and str(item.get("call_id")) not in finished
+            }
+        )
+    )
+
+
+def build_preview(
+    session: Session,
+    state: RuntimeState | None,
+    turn: RuntimeTreeState | None = None,
+) -> ResumePreview:
     run = state.current_run if state is not None else None
     if run is None:
         return ResumePreview(
@@ -30,17 +60,7 @@ def build_preview(session: Session, state: RuntimeState | None) -> ResumePreview
             "idle",
         )
     checkpoint = run.checkpoint
-    called = {
-        str(message.data.get("call_id"))
-        for message in run.runtime_messages
-        if message.kind == "tool_call" and message.data.get("call_id")
-    }
-    finished = {
-        str(message.data.get("call_id"))
-        for message in run.runtime_messages
-        if message.kind in {"tool_result", "tool_failed"} and message.data.get("call_id")
-    }
-    uncertain = tuple(sorted(called - finished))
+    uncertain = _indeterminate_call_ids(turn)
     process_interrupted = state.status == "running" and run.status == "running"
     status = "failed" if process_interrupted else run.status
     stop_reason = "process_interrupted" if process_interrupted else run.stop_reason
@@ -64,7 +84,10 @@ def build_preview(session: Session, state: RuntimeState | None) -> ResumePreview
     )
 
 
-def reconstruct_attempt(state: RuntimeState) -> tuple[RuntimeState, RuntimeState]:
+def reconstruct_attempt(
+    state: RuntimeState,
+    turn: RuntimeTreeState | None = None,
+) -> tuple[RuntimeState, RuntimeState]:
     """Return archived source and a safe new attempt without replaying pending tools."""
 
     if state.current_run is None or state.current_run.status not in {"running", "failed", "cancelled"}:
@@ -84,29 +107,19 @@ def reconstruct_attempt(state: RuntimeState) -> tuple[RuntimeState, RuntimeState
         source_run.stop_reason = "process_interrupted"
         source.status = "idle"
 
-    called = {
-        str(message.data.get("call_id"))
-        for message in old_run.runtime_messages
-        if message.kind == "tool_call" and message.data.get("call_id")
-    }
-    finished = {
-        str(message.data.get("call_id"))
-        for message in old_run.runtime_messages
-        if message.kind in {"tool_result", "tool_failed"} and message.data.get("call_id")
-    }
-    indeterminate: list[str] = []
+    canonical_indeterminate = set(_indeterminate_call_ids(turn))
+    indeterminate: list[str] = sorted(canonical_indeterminate)
     active = resumed.active_message
     if active is not None:
         for tool in active.tool_messages:
             if tool.status != "pending":
                 continue
-            if tool.call_id in called - finished:
+            if tool.call_id in canonical_indeterminate:
                 tool.status = "indeterminate"
                 tool.content = (
                     "Outcome is indeterminate because the process stopped after the tool call began. "
                     "Do not replay this call automatically; inspect current state first."
                 )
-                indeterminate.append(tool.call_id)
             else:
                 tool.status = "failed"
                 tool.content = "Not executed before the previous process stopped."
@@ -149,43 +162,6 @@ def reconstruct_attempt(state: RuntimeState) -> tuple[RuntimeState, RuntimeState
                         task["status"] = "indeterminate"
         message = "Previous process stopped before the workflow reached a terminal state."
         source_run.final_answer = source_run.final_answer or message
-        source_run.add_event("run_interrupted", message)
-        source_run.add_runtime_message(
-            "run_interrupted",
-            message,
-            timestamp=interrupted_at,
-            data={
-                "session_id": source.session_id,
-                "run_id": source_run.run_id,
-                "workflow_id": source_run.provenance.workflow_id,
-                "workflow_attempt": source_run.provenance.attempt,
-                "workflow_trigger": source_run.provenance.trigger,
-                "workspace_root": source_run.provenance.workspace_root or source.workspace_root,
-                "source_session_id": source_run.provenance.source_session_id,
-                "source_run_id": source_run.provenance.source_run_id,
-                "status": source_run.status,
-            },
-        )
-    for call_id in indeterminate:
-        message = "Tool outcome is indeterminate after process interruption."
-        source_run.add_event("tool_indeterminate", message, call_id=call_id)
-        source_run.add_runtime_message(
-            "tool_indeterminate",
-            message,
-            timestamp=interrupted_at,
-            data={
-                "session_id": source.session_id,
-                "run_id": source_run.run_id,
-                "workflow_id": source_run.provenance.workflow_id,
-                "workflow_attempt": source_run.provenance.attempt,
-                "workflow_trigger": source_run.provenance.trigger,
-                "workspace_root": source_run.provenance.workspace_root or source.workspace_root,
-                "source_session_id": source_run.provenance.source_session_id,
-                "source_run_id": source_run.provenance.source_run_id,
-                "call_id": call_id,
-                "status": "indeterminate",
-            },
-        )
 
     resumed.active_message = None
     resumed.active_tool_index = None
@@ -206,8 +182,6 @@ def reconstruct_attempt(state: RuntimeState) -> tuple[RuntimeState, RuntimeState
         stop_reason=None,
         final_answer=None,
         handoff=None,
-        events=[],
-        runtime_messages=[],
         provenance={
             "workflow_id": old_run.provenance.workflow_id,
             "attempt": old_run.provenance.attempt + 1,

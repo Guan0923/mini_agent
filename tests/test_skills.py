@@ -323,13 +323,14 @@ def test_explicit_skill_bypasses_automatic_selection(tmp_path: Path) -> None:
         skill_catalog=catalog,
     )
 
-    state = runner.run(runner.new_runtime(task="Use $alpha for this task."))
+    events = []
+    state = runner.run(runner.new_runtime(task="Use $alpha for this task.", on_event=events.append))
 
     assert state.status == "completed"
     assert [skill.name for skill in state.active_skills] == ["alpha"]
     assert planner.selection_calls == 0
     assert state.model_turns == 1
-    event = next(event for event in state.events if event.kind == "skills_selected")
+    event = next(event for event in events if event.kind == "skills_selected")
     assert event.data["explicit"] == ["alpha"]
     assert event.data["automatic"] == []
 
@@ -476,13 +477,14 @@ def test_handoff_skills_skip_reselection(tmp_path: Path) -> None:
         )
     )
     runner = AgentRunner(planner, ToolRegistry(), skill_catalog=catalog)
-    runtime = runner.new_runtime(task="Implement", active_skills=[inherited])
+    events = []
+    runtime = runner.new_runtime(task="Implement", active_skills=[inherited], on_event=events.append)
 
     state = runner.run(runtime)
 
     assert state.active_skills == [inherited]
     assert planner.selection_calls == 0
-    event = next(event for event in state.events if event.kind == "skills_selected")
+    event = next(event for event in events if event.kind == "skills_selected")
     assert event.data["source"] == "handoff"
 
 

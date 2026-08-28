@@ -23,11 +23,8 @@ def test_runner_refuses_command_when_strict_sandbox_is_unhealthy(tmp_path: Path)
     )
 
     assert state.status == "cancelled"
-    assert any(
-        event.kind == "run_segment"
-        and any("Sandbox runtime is not healthy" in str(tool.get("error", "")) for tool in event.data.get("tools", []))
-        for event in events
-    )
+    assert state.tool_calls == 0
+    assert any(event.kind == "hook_completed" and event.data.get("decision") == "reject" for event in events)
 
 
 class ProviderFailurePlanner:
@@ -205,8 +202,7 @@ def test_tool_errors_feed_back_to_the_planner(tmp_path: Path) -> None:
     assert state.status == "completed"
     assert state.final_answer == "recovered"
     assert "[Tool error]" in planner.histories[1][-1]["content"]
-    recoveries = [event for event in state.events if event.kind == "tool_recovery"]
-    assert [event.data["attempt"] for event in recoveries] == [1]
+    assert state.tool_calls == 2
 
 
 class ConsecutiveFailurePlanner:
@@ -228,8 +224,7 @@ def test_tool_recovery_continues_until_tool_budget(tmp_path: Path) -> None:
 
     assert state.status == "failed"
     assert len(state.actions) == 3
-    recoveries = [event for event in state.events if event.kind == "tool_recovery"]
-    assert [event.data["attempt"] for event in recoveries] == [1, 2, 3]
+    assert state.tool_calls == 0
     assert not any(event.kind in {"tool_failed", "tool_recovery"} for event in events)
 
 

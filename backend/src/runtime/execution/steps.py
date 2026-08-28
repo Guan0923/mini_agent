@@ -79,7 +79,7 @@ class ToolStepExecutor:
             sandbox_config=runtime.services.sandbox_config or {},
             sandbox_user_id=runtime.services.sandbox_user_id,
             interrupt=runtime.services.interrupt,
-            record_event=lambda kind, message, data: run.add_event(kind, message, **dict(data)),
+            record_event=lambda _kind, _message, _data: None,
             publish=publish,
         )
         before = before_tool_hook_manager.execute(context, publish)
@@ -117,9 +117,7 @@ class ToolStepExecutor:
         tools = runtime.services.tools
         publish = runtime.services.publish or (lambda _event: None)
         started_at = perf_counter()
-        run.add_event(
-            "tool_call", f"Calling {tool}", call_id=tool_message.call_id, arguments=dict(tool_message.arguments)
-        )
+        started_at_timestamp = runtime.services.clock()
         publish(
             RuntimeEvent(
                 "tool_call",
@@ -128,7 +126,7 @@ class ToolStepExecutor:
                     "call_id": tool_message.call_id,
                     "arguments": tool_message.arguments,
                     "attempt": 1,
-                    "started_at": run.events[-1].timestamp,
+                    "started_at": started_at_timestamp,
                 },
             )
         )
@@ -161,14 +159,6 @@ class ToolStepExecutor:
             tool_message.retryable = retryable
             run.completed_steps.append(len(run.actions))
             duration_ms = round((perf_counter() - started_at) * 1000, 3)
-            run.add_event(
-                "tool_result",
-                f"{tool} succeeded",
-                call_id=tool_message.call_id,
-                result=result,
-                duration_ms=duration_ms,
-                attempts=1,
-            )
             publish(
                 RuntimeEvent(
                     "tool_result",
@@ -230,7 +220,6 @@ class ToolStepExecutor:
             "error": error,
             "failure_code": USER_DENIED_FAILURE_CODE,
         }
-        runtime.run.add_event("tool_failed", f"{tool} denied", **data)
         publish = runtime.services.publish or (lambda _event: None)
         publish(RuntimeEvent("tool_failed", error, data))
         runtime.save()
@@ -250,7 +239,6 @@ class ToolStepExecutor:
         retryable: bool | None = None,
         duration_ms: float | None = None,
     ) -> ToolStepResult:
-        run = runtime.run
         message = runtime.state.active_message
         index = runtime.state.active_tool_index
         call_id = ""
@@ -263,7 +251,6 @@ class ToolStepExecutor:
         data: dict[str, object] = {"call_id": call_id, "error": error}
         if duration_ms is not None:
             data["duration_ms"] = duration_ms
-        run.add_event("tool_failed", f"{tool} failed", **data)
         publish = runtime.services.publish or (lambda _event: None)
         publish(RuntimeEvent("tool_failed", error, {"tool": tool, **data}))
         runtime.save()

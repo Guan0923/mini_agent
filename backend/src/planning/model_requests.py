@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Protocol
 
-from backend.domain import ToolSpec
+from backend.domain import ToolSpec, TracePersistenceError, TurnTraceRequest
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 from backend.runtime.core.contracts import WorkflowModeChanged
 from backend.runtime.core.events import RuntimeEvent
@@ -21,7 +21,13 @@ from backend.runtime.core.hooks import (
     after_model_hook_manager,
     before_model_hook_manager,
 )
-from backend.runtime.persistence.recording import model_error_data, model_request_data, model_response_data
+from backend.runtime.persistence.recording import (
+    model_error_data,
+    model_request_data,
+    model_response_data,
+    neutral_message_record,
+    turn_trace_audit_value,
+)
 
 
 class RuntimeCompletionClient(Protocol):
@@ -167,6 +173,9 @@ class ModelRequestExecutor:
                 parameters,
             )
 
+        self._persist_turn_trace(runtime, parameters)
+        runtime.run.model_calls += 1
+
         if getattr(self._client, "records_runtime_events", False):
             return self._client.run(runtime)
 
@@ -197,6 +206,73 @@ class ModelRequestExecutor:
             )
         )
         return prepared
+
+    @staticmethod
+    def _persist_turn_trace(runtime: AgentRuntime, parameters: dict) -> None:
+        """Fail closed before transport when a bound Turn audit cannot be persisted."""
+
+        run = runtime.run
+        if not run.turn_id:
+            return
+        store = runtime.services.runtime_store
+        save = getattr(store, "save_turn_trace", None)
+        sequence_for = getattr(store, "next_turn_trace_sequence", None)
+        if not callable(save) or not callable(sequence_for):
+            raise TracePersistenceError("Local trace persistence is unavailable; the model request was not sent.")
+        exchange = runtime.exchange
+        exchange_id = exchange.exchange_id or ""
+        if not exchange_id:
+            raise TracePersistenceError("Local trace exchange identity is unavailable; the model request was not sent.")
+        effective_system = next(
+            (
+                str(getattr(message, "content", "") or "")
+                for message in exchange.messages
+                if getattr(message, "role", None) == "system"
+            ),
+            "",
+        )
+        config = runtime.request_config()
+        try:
+            sequence = sequence_for(runtime.state.session_id, run.turn_id, run.data_idx)
+            trace = TurnTraceRequest(
+                turn_id=run.turn_id,
+                thread_id=run.thread_id,
+                data_idx=run.data_idx,
+                exchange_id=exchange_id,
+                sequence=sequence,
+                timestamp=runtime.services.clock(),
+                provider=str(runtime.state.provider or "unknown"),
+                provider_name=str(config.get("provider_name") or runtime.state.provider_name or "unknown"),
+                model=str(config.get("model") or runtime.state.model or "unknown"),
+                operation=str(exchange.operation or "unknown"),
+                output_mode=str(exchange.output_mode),
+                stream=bool(exchange.stream),
+                base_system_prompt=str(exchange.context.get("trace_base_system_prompt") or effective_system),
+                effective_system_prompt=effective_system,
+                messages=turn_trace_audit_value([neutral_message_record(message) for message in exchange.messages]),
+                user_preferences=str(turn_trace_audit_value(exchange.context.get("trace_user_preferences") or "")),
+                skills=turn_trace_audit_value([skill.to_dict() for skill in run.active_skills]),
+                tools=turn_trace_audit_value(
+                    [ModelRequestExecutor._trace_tool(tool) for tool in exchange.allowed_tools]
+                ),
+                request_parameters=turn_trace_audit_value(parameters),
+            )
+            save(runtime.state.session_id, trace)
+        except TracePersistenceError:
+            raise
+        except Exception as exc:
+            raise TracePersistenceError("Local trace persistence failed; the model request was not sent.") from exc
+
+    @staticmethod
+    def _trace_tool(tool: ToolSpec) -> dict[str, object]:
+        audit = tool.provider_options.get("mini_agent", {}).get("trace_origin")
+        origin = dict(audit) if isinstance(audit, Mapping) else {"kind": "local", "tool": tool.name}
+        return {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+            "origin": origin,
+        }
 
     @staticmethod
     def _hook_outcome(prepared: PreparedResponse) -> HookOutcome:

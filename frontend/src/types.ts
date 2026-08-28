@@ -104,6 +104,48 @@ export interface RuntimeTurnNode {
 export type RuntimeTreeNode = RuntimeRootNode | RuntimeTurnNode;
 export type RuntimeStateNode = RuntimeTurnNode;
 
+export interface TurnTraceToolOrigin {
+  kind: "local" | "mcp";
+  server?: string;
+  tool: string;
+}
+
+export interface TurnTraceTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  origin: TurnTraceToolOrigin;
+}
+
+export interface TurnTraceRequest {
+  schema_version: number;
+  turn_id: string;
+  thread_id: string;
+  data_idx: number;
+  exchange_id: string;
+  sequence: number;
+  timestamp: string;
+  provider: string;
+  provider_name: string;
+  model: string;
+  operation: string;
+  output_mode: string;
+  stream: boolean;
+  base_system_prompt: string;
+  effective_system_prompt: string;
+  messages: Array<Record<string, unknown>>;
+  user_preferences: string;
+  skills: Array<Record<string, unknown>>;
+  tools: TurnTraceTool[];
+  request_parameters: Record<string, unknown>;
+}
+
+export interface TurnTraceResponse {
+  turn: RuntimeStateNode;
+  data_idx: number;
+  requests: TurnTraceRequest[];
+}
+
 export type NodeFrameType = "turn.snapshot" | "turn.delta";
 
 export type RuntimeNodePatch = Partial<Omit<RuntimeStateNode,

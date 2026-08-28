@@ -304,7 +304,6 @@ class AgentRunner:
 
     def _resume_dispatch(self, runtime: AgentRuntime) -> None:
         run = runtime.run
-        run.add_event("run_resumed", "Run resumed", source_run_id=run.provenance.source_run_id)
         assert runtime.services.publish is not None
         runtime.services.publish(
             RuntimeEvent(
@@ -324,7 +323,6 @@ class AgentRunner:
 
     def _dispatch(self, runtime: AgentRuntime) -> None:
         runtime.apply_pending_runtime_config()
-        runtime.run.add_event("run_started", "Run started")
         assert runtime.services.publish is not None
         settings = runtime.state.runner_settings
         runtime.services.publish(

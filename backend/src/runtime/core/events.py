@@ -50,7 +50,6 @@ RuntimeEventKind = Literal[
     "plan",
     "error",
     "run_finished",
-    "run_segment",
     "approval_requested",
     "approval_granted",
     "user_input_requested",
