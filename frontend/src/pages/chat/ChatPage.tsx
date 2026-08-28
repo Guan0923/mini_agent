@@ -167,6 +167,11 @@ export default function ChatPage({
   const traceTurns = (conversation?.runtimeNodes ?? []).filter(
     (node): node is RuntimeStateNode => isRuntimeTurnNode(node) && node.thread_id === currentThreadId,
   );
+  const hasTurnTree = traceTurns.length > 0;
+  const visibleMainView = hasTurnTree ? mainView : "chat";
+  useEffect(() => {
+    if (!hasTurnTree) setMainView("chat");
+  }, [conversation?.id, hasTurnTree]);
   const runtimeControls = useRuntimeControls({
     conversation,
     activeRuntimeNode,
@@ -665,22 +670,22 @@ export default function ChatPage({
 
   return (
     <div className="chat-page">
-      <div className="trace-toolbar" role="navigation" aria-label="主内容视图">
+      {hasTurnTree && currentThreadId ? <div className="trace-toolbar" role="navigation" aria-label="主内容视图">
         <Dropdown
           trigger={["click"]}
           menu={{
             selectable: true,
-            selectedKeys: currentThreadId ? [currentThreadId] : [],
-            items: currentThreadId ? [{ key: currentThreadId, label: currentThreadId }] : [],
+            selectedKeys: [currentThreadId],
+            items: [{ key: currentThreadId, label: currentThreadId }],
           }}
-          disabled={!currentThreadId}
         >
           <Button type="text">Thread</Button>
         </Dropdown>
-        <Button type="text" aria-pressed={mainView === "chat"} onClick={() => setMainView("chat")}>Chat</Button>
-        <Button type="text" aria-pressed={mainView === "trace"} onClick={() => setMainView("trace")}>Trace</Button>
-      </div>
-      {mainView === "trace" ? <TracePage turns={traceTurns} /> : <>
+        <span className="trace-toolbar-thread-id" title={currentThreadId}>{currentThreadId}</span>
+        <Button type="text" aria-pressed={visibleMainView === "chat"} onClick={() => setMainView("chat")}>Chat</Button>
+        <Button type="text" aria-pressed={visibleMainView === "trace"} onClick={() => setMainView("trace")}>Trace</Button>
+      </div> : null}
+      {visibleMainView === "trace" ? <TracePage turns={traceTurns} /> : <>
       <div className="chat-content">
         <ChatMessageList
           messages={messages}

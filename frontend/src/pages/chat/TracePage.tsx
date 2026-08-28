@@ -215,13 +215,17 @@ export default function TracePage({ turns }: TracePageProps) {
     label: (
       <span className="trace-turn-label">
         <Tag color={selectedTurn.status === "failed" ? "red" : "blue"}>Turn</Tag>
-        <span>{selectedTurn.id}</span>
+        <span className="trace-turn-id" title={selectedTurn.id}>{selectedTurn.id}</span>
         <Tag color={selectedTurn.status === "failed" ? "red" : undefined}>{selectedTurn.status}</Tag>
         <time>{selectedTurn.timestamp}</time>
       </span>
     ),
     children: innerItems.length > 0
-      ? <Collapse className="trace-inner-collapse" items={innerItems} />
+      ? <Collapse
+          className="trace-inner-collapse"
+          classNames={{ title: "trace-collapse-title" }}
+          items={innerItems}
+        />
       : <Empty description="该版本没有审计快照或 Item" />,
   }];
 
@@ -255,7 +259,13 @@ export default function TracePage({ turns }: TracePageProps) {
       </div>
       {error ? <Alert type="error" showIcon title={`Trace 加载失败：${error}`} /> : null}
       {loading && !response ? <div className="trace-loading"><Spin /></div> : null}
-      <Collapse key={selectedTurn.id} className="trace-turn-collapse" defaultActiveKey={[selectedTurn.id]} items={outerItems} />
+      <Collapse
+        key={selectedTurn.id}
+        className="trace-turn-collapse"
+        classNames={{ title: "trace-collapse-title" }}
+        defaultActiveKey={[selectedTurn.id]}
+        items={outerItems}
+      />
     </div>
   );
 }

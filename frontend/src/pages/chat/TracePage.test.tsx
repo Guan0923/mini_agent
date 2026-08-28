@@ -140,6 +140,24 @@ describe("TracePage", () => {
     await waitFor(() => expect(getTurnTrace).toHaveBeenCalledWith("turn-old", 1, expect.any(AbortSignal)));
   });
 
+  it("marks outer and inner Collapse titles for single-line truncation", async () => {
+    const longTurnId = `turn-${"x".repeat(180)}`;
+    const longPreview = `system-${"very-long-trace-content-".repeat(40)}`;
+    const latest = turn(longTurnId, "2026-08-28T00:00:00Z");
+    vi.mocked(getTurnTrace).mockImplementation(async (_turnId, dataIdx) => {
+      const value = response(latest, dataIdx);
+      value.requests[0].base_system_prompt = longPreview;
+      return value;
+    });
+    const { container } = render(<AntApp><TracePage turns={[latest]} /></AntApp>);
+
+    await waitFor(() => expect(screen.getByTitle(longPreview)).toBeInTheDocument());
+    const semanticTitles = container.querySelectorAll(".trace-collapse-title");
+    expect(semanticTitles.length).toBeGreaterThan(1);
+    expect(screen.getByTitle(longTurnId)).toHaveClass("trace-turn-id");
+    expect(screen.getByTitle(longPreview)).toHaveClass("trace-preview");
+  });
+
   it("polls a running Turn and stops after it reaches a terminal status", async () => {
     vi.useFakeTimers();
     const running = turn("turn-running", "2026-08-28T00:00:00Z", "running");

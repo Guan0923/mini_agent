@@ -66,11 +66,35 @@ test("Trace audit expands real HTTP model, preference, Skill, MCP schema, and Tu
   await send(page, "$trace-audit trace audit e2e");
   await expect(page.locator(".message.assistant").last()).toContainText("Trace response from HTTP.");
 
+  await page.setViewportSize({ width: 480, height: 800 });
   await page.getByRole("button", { name: "Trace", exact: true }).click();
   await expect(page.getByLabel("聊天输入")).toHaveCount(0);
   await expect(page.getByText("Preference", { exact: true })).toBeVisible();
   await expect(page.getByText("Skill", { exact: true })).toBeVisible();
   await expect(page.getByText("MCP", { exact: true })).toBeVisible();
+
+  const traceCollapse = page.locator(".trace-turn-collapse");
+  const outerHeader = traceCollapse.locator(":scope > .ant-collapse-item > .ant-collapse-header");
+  const outerTitle = outerHeader.locator(".trace-collapse-title");
+  const effectiveSystem = tracePanel(page, "System", 1);
+  const innerHeader = effectiveSystem.locator(".ant-collapse-header");
+  const innerTitle = innerHeader.locator(".trace-collapse-title");
+  const systemPreview = effectiveSystem.locator(".trace-preview");
+  await expect(traceCollapse).toBeVisible();
+  await expect(systemPreview).toHaveCSS("overflow", "hidden");
+  await expect(systemPreview).toHaveCSS("text-overflow", "ellipsis");
+  await expect(systemPreview).toHaveCSS("white-space", "nowrap");
+  const fullSystemPreview = await systemPreview.getAttribute("title");
+  expect(fullSystemPreview?.length).toBeGreaterThan(100);
+
+  for (const [header, title] of [[outerHeader, outerTitle], [innerHeader, innerTitle]] as const) {
+    await expect.poll(async () => {
+      const [headerBox, titleBox] = await Promise.all([header.boundingBox(), title.boundingBox()]);
+      if (!headerBox || !titleBox) return false;
+      return titleBox.x >= headerBox.x && titleBox.x + titleBox.width <= headerBox.x + headerBox.width + 1;
+    }).toBe(true);
+  }
+  await expect.poll(() => traceCollapse.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 
   const preference = tracePanel(page, "Preference");
   await preference.locator(".ant-collapse-header").click();
@@ -86,10 +110,10 @@ test("Trace audit expands real HTTP model, preference, Skill, MCP schema, and Tu
   await expect(mcp.locator(".trace-value")).toContainText('"server": "trace"');
   await expect(mcp.locator(".trace-value")).toContainText('"tool": "inspect_trace"');
 
-  const effectiveSystem = tracePanel(page, "System", 1);
   await effectiveSystem.locator(".ant-collapse-header").click();
   await expect(effectiveSystem.locator(".trace-value")).toContainText("Active project Skills");
   await expect(effectiveSystem.locator(".trace-value")).toContainText("User Agent Preferences");
+  await expect(effectiveSystem.locator(".trace-value")).toContainText(fullSystemPreview!);
 
   const reasoning = page.getByText("Assistant Reasoning", { exact: true }).last().locator(
     "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' ant-collapse-item ')][1]",
@@ -170,9 +194,17 @@ test("first main Turn receives a dedicated model-generated title", async ({ page
 
   await page.goto("/app");
   await page.getByRole("button", { name: "新对话", exact: true }).click();
+  await expect(page.getByRole("navigation", { name: "主内容视图" })).toHaveCount(0);
+  await expect(page.getByLabel("聊天输入")).toBeVisible();
   await send(page, "请生成这个对话的模型标题");
 
   await expect(page.getByRole("button", { name: "浏览器生成的新标题很", exact: true })).toBeVisible();
+  const nodes = await fetchRuntimeNodes(page, (await sidebar.json() as { session_id: string }).session_id);
+  const firstTurn = nodes.find(isRuntimeTurnResponse);
+  expect(firstTurn).toBeDefined();
+  await expect(page.getByRole("navigation", { name: "主内容视图" })).toBeVisible();
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(firstTurn!.thread_id);
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveAttribute("title", firstTurn!.thread_id);
 });
 
 test("Todo panel auto-finishes and offers cleanup only for an incomplete terminal Turn", async ({ page }) => {
