@@ -92,9 +92,9 @@ def _compile_network_probe(workspace: Path) -> Path:
     return output
 
 
-def _network_command(probe: Path, target_port: int, *, use_proxy: bool) -> str:
+def _network_command(probe: Path, target_host: str, target_port: int, *, use_proxy: bool) -> str:
     mode = "proxy" if use_proxy else "direct"
-    return f'"{probe}" {target_port} {mode}'
+    return f'"{probe}" {target_host} {target_port} {mode}'
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -116,10 +116,11 @@ def main(argv: list[str] | None = None) -> int:
         is_windows=True,
         path_auditor=_ControlledRuntimeAuditor() if args.controlled_runtime_smoke else None,
     )
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _LoopbackHandler)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-    target_port = int(server.server_address[1])
+    servers = [ThreadingHTTPServer(("127.0.0.1", 0), _LoopbackHandler) for _ in range(2)]
+    server_threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
+    for server_thread in server_threads:
+        server_thread.start()
+    target_ports = [int(server.server_address[1]) for server in servers]
     results: list[dict[str, object]] = []
     outside = Path(tempfile.gettempdir()).resolve().parent / f"mini-agent-outside-{uuid.uuid4().hex}.tmp"
     try:
@@ -171,11 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             for file_mode in FileAccessMode:
                 for network_mode in NetworkMode:
                     suffix = f"{file_mode.value}-{network_mode.value}-{uuid.uuid4().hex[:8]}"
-                    rules = (
-                        (NetworkRule("127.0.0.1", target_port),)
-                        if network_mode is NetworkMode.RESTRICTED_NETWORK
-                        else ()
-                    )
+                    rules = (NetworkRule("127.0.0.1"),) if network_mode is NetworkMode.RESTRICTED_NETWORK else ()
 
                     def policy(label: str) -> SandboxPolicy:
                         return SandboxPolicy(
@@ -198,20 +195,35 @@ def main(argv: list[str] | None = None) -> int:
                         policy("identity"),
                         'whoami & echo TEMP=%TEMP% & icacls "%TEMP%" & whoami /groups',
                     )
-                    proxy_rc, proxy_body, proxy_error = _run(
+                    proxy_results = [
+                        _run(
+                            launcher,
+                            policy(f"proxy-{index}"),
+                            _network_command(
+                                network_probe,
+                                "127.0.0.1",
+                                target_port,
+                                use_proxy=network_mode is not NetworkMode.FULL_NETWORK,
+                            ),
+                        )
+                        for index, target_port in enumerate(target_ports)
+                    ]
+                    alias_rc, alias_body, alias_error = _run(
                         launcher,
-                        policy("proxy"),
+                        policy("alias"),
                         _network_command(
                             network_probe,
-                            target_port,
+                            "localhost",
+                            target_ports[0],
                             use_proxy=network_mode is not NetworkMode.FULL_NETWORK,
                         ),
                     )
                     direct_rc, direct_body, direct_error = _run(
                         launcher,
                         policy("direct"),
-                        _network_command(network_probe, target_port, use_proxy=False),
+                        _network_command(network_probe, "127.0.0.1", target_ports[0], use_proxy=False),
                     )
+                    proxy_requests = [rc == 0 and "sandbox-ok" in body for rc, body, _error in proxy_results]
                     row = {
                         "file_mode": file_mode.value,
                         "network_mode": network_mode.value,
@@ -219,20 +231,23 @@ def main(argv: list[str] | None = None) -> int:
                         "temp_write": temp_rc == 0,
                         "outside_write": outside_rc == 0 and outside.exists(),
                         "identity": identity.splitlines()[0].strip().casefold() if identity.splitlines() else "",
-                        "proxy_request": proxy_rc == 0 and "sandbox-ok" in proxy_body,
+                        "proxy_requests": proxy_requests,
+                        "unlisted_alias_request": alias_rc == 0 and "sandbox-ok" in alias_body,
                         "direct_request": direct_rc == 0 and "sandbox-ok" in direct_body,
                         "diagnostic": {
                             "workspace_rc": workspace_rc,
                             "temp_rc": temp_rc,
                             "outside_rc": outside_rc,
                             "identity_rc": identity_rc,
-                            "proxy_rc": proxy_rc,
+                            "proxy_rcs": [rc for rc, _body, _error in proxy_results],
+                            "alias_rc": alias_rc,
                             "direct_rc": direct_rc,
                             "workspace_error": workspace_error.strip()[:200],
                             "temp_error": temp_error.strip()[:200],
                             "outside_error": outside_error.strip()[:200],
                             "identity_error": identity_error.strip()[:200],
-                            "proxy_error": proxy_error.strip()[:500],
+                            "proxy_errors": [error.strip()[:500] for _rc, _body, error in proxy_results],
+                            "alias_error": alias_error.strip()[:500],
                             "direct_error": direct_error.strip()[:500],
                             "identity_output": identity.strip()[:3000],
                         },
@@ -242,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
                     expected_workspace = file_mode is not FileAccessMode.READ_ONLY
                     expected_proxy = network_mode is not NetworkMode.NO_NETWORK
                     expected_direct = network_mode is NetworkMode.FULL_NETWORK
+                    expected_alias = network_mode is NetworkMode.FULL_NETWORK
                     expected_identity = (
                         "codexsandboxonline" if network_mode is NetworkMode.FULL_NETWORK else "codexsandboxoffline"
                     )
@@ -250,7 +266,8 @@ def main(argv: list[str] | None = None) -> int:
                         row["temp_write"] is True,
                         row["outside_write"] is False,
                         identity_rc == 0 and str(row["identity"]).endswith(expected_identity),
-                        row["proxy_request"] is expected_proxy,
+                        all(result is expected_proxy for result in proxy_requests),
+                        row["unlisted_alias_request"] is expected_alias,
                         row["direct_request"] is expected_direct,
                     )
                     results.append(row)
@@ -258,9 +275,11 @@ def main(argv: list[str] | None = None) -> int:
                         print(json.dumps({"status": "failed", "case": row}, ensure_ascii=True, indent=2))
                         return 1
     finally:
-        server.shutdown()
-        server.server_close()
-        server_thread.join(timeout=5)
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        for server_thread in server_threads:
+            server_thread.join(timeout=5)
         if outside.exists():
             outside.unlink()
     print(json.dumps({"status": "passed", "cases": results}, ensure_ascii=False, indent=2))

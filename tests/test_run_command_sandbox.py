@@ -235,50 +235,86 @@ def test_launcher_uses_two_phase_broker_for_every_file_and_network_mode(
 
 
 def test_proxy_authenticates_pins_dns_and_allows_explicit_loopback() -> None:
-    target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    target.bind(("127.0.0.1", 0))
-    target.listen(1)
-    target_port = target.getsockname()[1]
-    target_thread = threading.Thread(target=_serve_http_once, args=(target,), daemon=True)
-    target_thread.start()
+    targets: list[socket.socket] = []
+    target_threads: list[threading.Thread] = []
+    for _ in range(2):
+        target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        target.bind(("127.0.0.1", 0))
+        target.listen(1)
+        targets.append(target)
+        thread = threading.Thread(target=_serve_http_once, args=(target,), daemon=True)
+        thread.start()
+        target_threads.append(thread)
+    target_ports = [int(target.getsockname()[1]) for target in targets]
     proxy_port = _free_port()
     resolutions: list[tuple[str, int]] = []
 
     def resolver(host: str, port: int, **_kwargs):
         resolutions.append((host, port))
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", target_port))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port))]
 
     proxy = RunCommandProxy(proxy_port, resolver=resolver)
     proxy.start()
-    credential = proxy.issue("job-1", (NetworkRule("allowed.test", target_port),), ttl_seconds=30)
+    credential = proxy.issue("job-1", (NetworkRule("allowed.test"),), ttl_seconds=30)
     authorization = base64.b64encode(f"{credential.username}:{credential.password}".encode()).decode()
     try:
+        for target_port in target_ports:
+            with socket.create_connection(("127.0.0.1", proxy_port), timeout=2) as client:
+                client.sendall(
+                    (
+                        f"GET http://allowed.test:{target_port}/ok HTTP/1.1\r\n"
+                        f"Host: allowed.test:{target_port}\r\n"
+                        f"Proxy-Authorization: Basic {authorization}\r\n\r\n"
+                    ).encode()
+                )
+                response = _receive_all(client)
+            assert b"200 OK" in response
+            assert b"proxy-ok" in response
+        assert resolutions == [("allowed.test", port) for port in target_ports]
+
         with socket.create_connection(("127.0.0.1", proxy_port), timeout=2) as client:
             client.sendall(
                 (
-                    f"GET http://allowed.test:{target_port}/ok HTTP/1.1\r\n"
-                    f"Host: allowed.test:{target_port}\r\nProxy-Authorization: Basic {authorization}\r\n\r\n"
+                    f"GET http://denied.test:{target_ports[0]}/ HTTP/1.1\r\n"
+                    f"Host: denied.test:{target_ports[0]}\r\n"
+                    f"Proxy-Authorization: Basic {authorization}\r\n\r\n"
                 ).encode()
             )
-            response = _receive_all(client)
-        assert b"200 OK" in response
-        assert b"proxy-ok" in response
-        assert resolutions == [("allowed.test", target_port)]
+            assert b"403" in _receive_all(client)
 
         with socket.create_connection(("127.0.0.1", proxy_port), timeout=2) as client:
-            client.sendall(f"GET http://allowed.test:{target_port}/ HTTP/1.1\r\nHost: allowed.test\r\n\r\n".encode())
+            client.sendall(
+                f"GET http://allowed.test:{target_ports[0]}/ HTTP/1.1\r\nHost: allowed.test\r\n\r\n".encode()
+            )
             assert b"407" in _receive_all(client)
     finally:
         proxy.close()
-        target.close()
-        target_thread.join(timeout=2)
+        for target in targets:
+            target.close()
+        for thread in target_threads:
+            thread.join(timeout=2)
 
 
-def test_proxy_optional_port_rule_overrides_specific_rules() -> None:
-    rules = (NetworkRule("example.test", 443), NetworkRule("example.test"))
+@pytest.mark.parametrize(
+    ("configured", "candidate"),
+    [
+        ("EXAMPLE.TEST.", "example.test"),
+        ("localhost", "LOCALHOST."),
+        ("127.0.0.1", "127.0.0.1"),
+        ("0:0:0:0:0:0:0:1", "::1"),
+        ("10.0.0.8", "10.0.0.8"),
+        ("192.168.1.20", "192.168.1.20"),
+    ],
+)
+def test_proxy_matches_exact_host_rules_for_public_and_local_targets(configured: str, candidate: str) -> None:
+    assert RunCommandProxy._allowed((NetworkRule(configured),), candidate)
 
-    assert RunCommandProxy._allowed(rules, "EXAMPLE.TEST.", 8443)
-    assert not RunCommandProxy._allowed((NetworkRule("example.test", 443),), "example.test", 8443)
+
+def test_proxy_does_not_extend_a_rule_to_subdomains_or_aliases() -> None:
+    rules = (NetworkRule("example.test"), NetworkRule("127.0.0.1"))
+
+    assert not RunCommandProxy._allowed(rules, "sub.example.test")
+    assert not RunCommandProxy._allowed(rules, "localhost")
 
 
 def test_broker_reservation_rejects_hash_tampering_and_expiry(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from backend.api.routes.settings import SandboxConfigPayload
 from backend.domain import SystemMessage, ToolSpec, UserMessage
@@ -159,7 +160,7 @@ def test_v2_sandbox_config_migrates_only_command_network_and_limits(tmp_path: Pa
             "file_mode": "full_access",
             "full_access_acknowledged": True,
             "network_mode": "restricted_network",
-            "network_allowlist": [{"host": "127.0.0.1"}, {"host": "example.test", "port": 443}],
+            "network_allowlist": [{"host": "127.0.0.1"}, {"host": "EXAMPLE.test.", "port": 443}],
             "limits": {"wall_seconds": 60},
         }
     )
@@ -167,11 +168,26 @@ def test_v2_sandbox_config_migrates_only_command_network_and_limits(tmp_path: Pa
     assert normalized["policy_version"] == 3
     assert normalized["network_allowlist"] == [
         {"host": "127.0.0.1"},
-        {"host": "example.test", "port": 443},
+        {"host": "example.test"},
     ]
     assert normalized["limits"]["wall_seconds"] == 60
     assert "file_mode" not in normalized
     assert "full_access_acknowledged" not in normalized
+
+
+def test_sandbox_network_rule_api_accepts_only_host_and_at_most_64_rules() -> None:
+    rule_schema = SandboxConfigPayload.model_json_schema()["$defs"]["SandboxNetworkRulePayload"]
+    assert set(rule_schema["properties"]) == {"host"}
+    assert SandboxConfigPayload.model_fields["network_allowlist"].metadata[0].max_length == 64
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        SandboxConfigPayload(
+            network_mode="restricted_network",
+            network_allowlist=[{"host": "example.test", "port": 443}],
+        )
+
+    with pytest.raises(ValidationError, match="at most 64 items"):
+        SandboxConfigPayload(network_allowlist=[{"host": f"host-{index}.example"} for index in range(65)])
 
 
 def test_provider_names_are_case_insensitive_unique_and_renamable(tmp_path: Path) -> None:

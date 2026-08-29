@@ -44,7 +44,6 @@ from .policy import (
     TerminalKind,
     ensure_disk_reserve,
     normalize_permission_mode,
-    resolve_network_rules,
 )
 from .runtime.admission import AggregateLimits, ResourceRequest, SandboxAdmission, SandboxAdmissionTimeout
 from .runtime.launcher import SandboxLauncher
@@ -105,6 +104,5 @@ __all__ = [
     "windows_service_sid",
     "authorization_hash",
     "normalize_permission_mode",
-    "resolve_network_rules",
     "ensure_disk_reserve",
 ]

@@ -39,7 +39,6 @@ from backend.sandbox import (
     WindowsDpapiProvider,
     WindowsNamedPipeServer,
     normalize_permission_mode,
-    resolve_network_rules,
 )
 from backend.sandbox.broker_service import BrokerCredentialPackage, build_ready_marker
 from backend.sandbox.runtime.leases import CommandLease
@@ -74,13 +73,25 @@ def test_full_access_file_mode_is_independent_from_network_mode(tmp_path: Path, 
     assert len(policy.policy_hash()) == hashlib.sha256().digest_size * 2
 
 
-def test_restricted_network_rejects_non_public_resolution() -> None:
-    def resolver(host: str, port: int, **kwargs: object) -> list[tuple[object, ...]]:
-        del host, kwargs
-        return [(2, 1, 6, "", ("127.0.0.1", port))]
+@pytest.mark.parametrize(
+    ("raw", "canonical"),
+    [
+        ("EXAMPLE.Test.", "example.test"),
+        ("localhost.", "localhost"),
+        ("127.0.0.1", "127.0.0.1"),
+        ("0:0:0:0:0:0:0:1", "::1"),
+        ("10.20.30.40", "10.20.30.40"),
+        ("192.168.1.20", "192.168.1.20"),
+    ],
+)
+def test_network_rule_canonicalizes_exact_public_and_local_targets(raw: str, canonical: str) -> None:
+    assert NetworkRule(raw).host == canonical
 
-    with pytest.raises(Exception, match="non-public"):
-        resolve_network_rules((NetworkRule("localhost", 80),), resolver=resolver)
+
+@pytest.mark.parametrize("host", ["*.example.test", "10.0.0.0/8", "example..test"])
+def test_network_rule_rejects_wildcards_cidr_and_empty_labels(host: str) -> None:
+    with pytest.raises(Exception, match="network host is invalid"):
+        NetworkRule(host)
 
 
 def test_authorization_grant_stores_only_hash() -> None:

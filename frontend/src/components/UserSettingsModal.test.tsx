@@ -199,7 +199,38 @@ describe("UserSettingsModal", () => {
     expect(screen.getAllByRole("spinbutton")).toHaveLength(7);
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /检\s*查/ })).toBeInTheDocument();
-    expect(screen.queryByText(/健康/)).not.toBeInTheDocument();
+    expect(screen.getByText("沙箱已就绪", { exact: true })).toBeInTheDocument();
+    const resourceGrid = screen.getByTestId("sandbox-resource-limits");
+    expect(resourceGrid.children).toHaveLength(7);
+    for (const item of Array.from(resourceGrid.children)) {
+      expect(item).toHaveClass("ant-col-xs-24", "ant-col-sm-12");
+    }
+  });
+
+  it("edits host-only command allowlist rules that grant every port", async () => {
+    const hostOnlySettings = {
+      ...structuredClone(settings),
+      sandbox_config: {
+        ...structuredClone(settings.sandbox_config),
+        network_mode: "restricted_network" as const,
+        network_allowlist: [{ host: "127.0.0.1" }],
+      },
+    };
+    api.getSettings.mockResolvedValue(hostOnlySettings);
+    renderModal();
+    await screen.findByDisplayValue("旧名字");
+    await userEvent.click(screen.getByRole("menuitem", { name: "沙箱" }));
+
+    const host = screen.getByRole("textbox", { name: "白名单主机 1" });
+    expect(host).toHaveValue("127.0.0.1");
+    expect(screen.queryByLabelText("白名单端口 1")).not.toBeInTheDocument();
+    expect(screen.getByText(/允许该目标的全部端口/)).toBeInTheDocument();
+    await userEvent.clear(host);
+    await userEvent.type(host, "localhost");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(api.updateSandboxConfig).toHaveBeenCalledTimes(1));
+    expect(api.updateSandboxConfig.mock.calls[0][0].network_allowlist).toEqual([{ host: "localhost" }]);
   });
 
   it("saves command network policy independently from Turn file permission", async () => {

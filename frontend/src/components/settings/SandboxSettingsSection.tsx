@@ -1,4 +1,4 @@
-import { Alert, Button, Form, Input, InputNumber, Select, Space, Typography } from "antd";
+import { Alert, Button, Col, Form, Input, InputNumber, Row, Select, Space, Tag, Typography } from "antd";
 import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import type { SandboxLimits, SandboxNetworkRule } from "../../api";
 import type { UserSettingsState } from "./useUserSettingsState";
@@ -74,10 +74,11 @@ export function SandboxSettingsSection({ state }: SectionProps) {
   return (
     <Form layout="vertical">
       <Typography.Title level={4}>沙箱</Typography.Title>
-      <Space style={{ marginBottom: 16 }} wrap>
+      <Space align="center" style={{ marginBottom: 16 }} wrap>
         <Button loading={state.sandboxHealth.checking} onClick={() => void state.sandboxHealth.check()}>
           检查
         </Button>
+        {state.sandboxHealth.phase === "healthy" ? <Tag color="success">沙箱已就绪</Tag> : null}
         {state.sandboxHealth.phase === "unhealthy" ? (
           <Button
             type="primary"
@@ -120,30 +121,21 @@ export function SandboxSettingsSection({ state }: SectionProps) {
       </Form.Item>
 
       <Typography.Title level={5}>网络白名单</Typography.Title>
-      <Typography.Paragraph type="secondary">白名单始终保留，仅在“仅白名单”网络模式下生效。</Typography.Paragraph>
+      <Typography.Paragraph type="secondary">
+        每条精确 IP 或域名规则允许该目标的全部端口，也可显式允许本机、环回和局域网地址；仅在“仅白名单”网络模式下生效。
+      </Typography.Paragraph>
       {config.network_allowlist.length === 0 ? (
         <Typography.Paragraph type="secondary">暂无白名单规则</Typography.Paragraph>
       ) : (
         <Space orientation="vertical" style={{ width: "100%", marginBottom: 12 }}>
           {config.network_allowlist.map((rule, index) => (
-            <Space key={index} wrap>
+            <Space key={index} style={{ width: "100%" }}>
               <Input
                 aria-label={`白名单主机 ${index + 1}`}
-                placeholder="example.com"
+                placeholder="127.0.0.1 或 example.com"
+                style={{ flex: 1 }}
                 value={rule.host}
                 onChange={(event) => updateAllowlist(index, { host: event.target.value })}
-              />
-              <InputNumber
-                aria-label={`白名单端口 ${index + 1}`}
-                min={1}
-                max={65535}
-                precision={0}
-                value={rule.port ?? null}
-                placeholder="全部端口"
-                onChange={(port) => {
-                  if (port === null) updateAllowlist(index, { port: undefined });
-                  else if (typeof port === "number" && Number.isInteger(port)) updateAllowlist(index, { port });
-                }}
               />
               <Button
                 type="text"
@@ -175,23 +167,28 @@ export function SandboxSettingsSection({ state }: SectionProps) {
       </Button>
 
       <Typography.Title level={5} style={{ marginTop: 24 }}>资源限制</Typography.Title>
-      {limitFields.map((field) => (
-        <Form.Item key={field.key} label={field.label} extra={field.hint}>
-          <InputNumber
-            aria-label={field.label}
-            min={field.min}
-            max={field.max}
-            precision={0}
-            value={config.limits[field.key]}
-            onChange={(value) => {
-              if (typeof value !== "number" || !Number.isInteger(value)) return;
-              state.updateSettings({
-                sandbox_config: { ...config, limits: { ...config.limits, [field.key]: value } },
-              });
-            }}
-          />
-        </Form.Item>
-      ))}
+      <Row data-testid="sandbox-resource-limits" gutter={[12, 0]}>
+        {limitFields.map((field) => (
+          <Col key={field.key} xs={24} sm={12}>
+            <Form.Item label={field.label} extra={field.hint}>
+              <InputNumber
+                aria-label={field.label}
+                min={field.min}
+                max={field.max}
+                precision={0}
+                style={{ width: "100%" }}
+                value={config.limits[field.key]}
+                onChange={(value) => {
+                  if (typeof value !== "number" || !Number.isInteger(value)) return;
+                  state.updateSettings({
+                    sandbox_config: { ...config, limits: { ...config.limits, [field.key]: value } },
+                  });
+                }}
+              />
+            </Form.Item>
+          </Col>
+        ))}
+      </Row>
     </Form>
   );
 }

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import ipaddress
 import logging
 import secrets
 import select
@@ -17,7 +16,7 @@ from urllib.parse import urlsplit
 import h11
 
 from ..errors import SandboxInitializationError
-from ..policy import NetworkRule
+from ..policy import NetworkRule, canonical_network_host
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +164,7 @@ class RunCommandProxy:
                 return
             method = request.method.decode("ascii", errors="strict").upper()
             host, port, target = self._target(request, method)
-            if not self._allowed(grant.rules, host, port):
+            if not self._allowed(grant.rules, host):
                 self._send_error(client, 403, b"Proxy target denied")
                 return
             upstream = self._connect_once(host, port)
@@ -239,12 +238,9 @@ class RunCommandProxy:
         return parsed.hostname, port, path.encode("ascii")
 
     @staticmethod
-    def _allowed(rules: tuple[NetworkRule, ...], host: str, port: int) -> bool:
-        candidate = _canonical_host(host)
-        host_rules = [rule for rule in rules if _canonical_host(rule.host) == candidate]
-        return bool(host_rules) and (
-            any(rule.port is None for rule in host_rules) or any(rule.port == port for rule in host_rules)
-        )
+    def _allowed(rules: tuple[NetworkRule, ...], host: str) -> bool:
+        candidate = canonical_network_host(host)
+        return any(rule.host == candidate for rule in rules)
 
     def _connect_once(self, host: str, port: int) -> socket.socket:
         answers = self._resolver(host, port, type=socket.SOCK_STREAM)
@@ -289,14 +285,6 @@ class RunCommandProxy:
     def _purge_expired(self) -> None:
         now = self._clock()
         self._grants = {name: grant for name, grant in self._grants.items() if grant.expires_at > now}
-
-
-def _canonical_host(value: str) -> str:
-    host = value.rstrip(".").casefold()
-    try:
-        return str(ipaddress.ip_address(host.split("%", 1)[0]))
-    except ValueError:
-        return host.encode("idna").decode("ascii")
 
 
 __all__ = ["ProxyCredential", "RunCommandProxy"]

@@ -7,7 +7,6 @@ import ipaddress
 import json
 import os
 import shutil
-import socket
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -58,23 +57,27 @@ def normalize_permission_mode(value: object, *, default: FileAccessMode = FileAc
 @dataclass(frozen=True, slots=True)
 class NetworkRule:
     host: str
-    port: int | None = None
 
     def __post_init__(self) -> None:
-        host = self.host.strip().lower()
-        if not host or len(host) > 253 or any(ch.isspace() for ch in host):
+        object.__setattr__(self, "host", canonical_network_host(self.host))
+
+
+def canonical_network_host(value: str) -> str:
+    """Canonicalize one exact IP or hostname allowlist target."""
+
+    host = value.strip().rstrip(".").casefold()
+    if not host or len(host) > 253 or any(ch.isspace() for ch in host) or "*" in host or "/" in host:
+        raise SandboxPolicyError("network host is invalid")
+    try:
+        return str(ipaddress.ip_address(host.split("%", 1)[0]))
+    except ValueError:
+        try:
+            canonical = host.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise SandboxPolicyError("network host is invalid") from exc
+        if not canonical or len(canonical) > 253 or any(not label for label in canonical.split(".")):
             raise SandboxPolicyError("network host is invalid")
-        if self.port is not None and (
-            isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535
-        ):
-            raise SandboxPolicyError("network port must be omitted or between 1 and 65535")
-        object.__setattr__(self, "host", host)
-
-
-@dataclass(frozen=True, slots=True)
-class ResolvedNetworkRule:
-    address: str
-    port: int
+        return canonical
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,10 +215,7 @@ class SandboxPolicy:
             "job_id": self.job_id,
             "file_mode": self.file_mode.value,
             "network_mode": self.network_mode.value,
-            "network_allowlist": [
-                {"host": rule.host, **({"port": rule.port} if rule.port is not None else {})}
-                for rule in self.network_allowlist
-            ],
+            "network_allowlist": [{"host": rule.host} for rule in self.network_allowlist],
             "limits": self.limits.to_dict(),
             "terminal": self.terminal.value,
             "proxy_port": self.proxy_port,
@@ -393,53 +393,18 @@ def remove_temp_dir(path: Path) -> bool:
         return False
 
 
-def resolve_network_rules(
-    rules: tuple[NetworkRule, ...],
-    *,
-    resolver=None,
-) -> tuple[ResolvedNetworkRule, ...]:
-    """Resolve restricted-network names before a Job enters the sandbox."""
-
-    resolve = resolver or socket.getaddrinfo
-    result: set[tuple[str, int]] = set()
-    for rule in rules:
-        if rule.port is None:
-            raise SandboxPolicyError("network rule port is required for direct resolution")
-        try:
-            answers = resolve(rule.host, rule.port, type=socket.SOCK_STREAM)
-        except OSError as exc:
-            raise SandboxPolicyError("network hostname could not be resolved") from exc
-        for answer in answers:
-            sockaddr = answer[4] if len(answer) > 4 else None
-            address = sockaddr[0] if isinstance(sockaddr, tuple) and sockaddr else None
-            if isinstance(address, str) and address:
-                try:
-                    parsed = ipaddress.ip_address(address.split("%", 1)[0])
-                except ValueError as exc:
-                    raise SandboxPolicyError("network hostname resolved to an invalid address") from exc
-                if not parsed.is_global:
-                    raise SandboxPolicyError("restricted network cannot target localhost or non-public addresses")
-                result.add((str(parsed), rule.port))
-                if len(result) > 256:
-                    raise SandboxPolicyError("network allowlist resolved to too many addresses")
-    if not result:
-        raise SandboxPolicyError("network allowlist resolved to no addresses")
-    return tuple(ResolvedNetworkRule(address, port) for address, port in sorted(result))
-
-
 __all__ = [
     "FileAccessMode",
     "NetworkMode",
     "NetworkRule",
-    "ResolvedNetworkRule",
     "PermissionMode",
     "ResourceLimits",
     "SandboxLimits",
     "SandboxJobContext",
     "SandboxPolicy",
     "TerminalKind",
+    "canonical_network_host",
     "normalize_permission_mode",
     "remove_temp_dir",
-    "resolve_network_rules",
     "ensure_disk_reserve",
 ]

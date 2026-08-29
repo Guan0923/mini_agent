@@ -94,11 +94,7 @@ def _command_decision(context: ToolHookContext) -> SandboxExecutionDecision:
         proxy_port = int(context.sandbox_config.get("proxy_port", 17831))
         raw_rules = context.sandbox_config.get("network_allowlist")
         network_allowlist = (
-            tuple(
-                NetworkRule(str(item.get("host") or ""), item.get("port"))
-                for item in raw_rules
-                if isinstance(item, Mapping)
-            )
+            tuple(NetworkRule(str(item.get("host") or "")) for item in raw_rules if isinstance(item, Mapping))
             if isinstance(raw_rules, (list, tuple))
             else ()
         )

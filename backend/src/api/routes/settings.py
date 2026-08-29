@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 import requests
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, StrictBool, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 
 from backend.domain import DEFAULT_TIME_ZONE, validate_time_zone
 
@@ -51,13 +51,14 @@ class SandboxLimitsPayload(BaseModel):
 
 
 class SandboxNetworkRulePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     host: str = Field(min_length=1, max_length=253)
-    port: StrictInt | None = Field(default=None, ge=1, le=65535)
 
 
 class SandboxConfigPayload(BaseModel):
     network_mode: Literal["no_network", "restricted_network", "full_network"] = "no_network"
-    network_allowlist: list[SandboxNetworkRulePayload] = Field(default_factory=list, max_length=128)
+    network_allowlist: list[SandboxNetworkRulePayload] = Field(default_factory=list, max_length=64)
     limits: SandboxLimitsPayload = Field(default_factory=SandboxLimitsPayload)
 
 

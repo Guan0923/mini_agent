@@ -52,7 +52,6 @@ export interface SandboxLimits {
 
 export interface SandboxNetworkRule {
   host: string;
-  port?: number;
 }
 
 export interface SandboxConfig {

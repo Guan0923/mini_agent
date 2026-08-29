@@ -792,6 +792,7 @@ test("Sandbox health gate recovers through the real status and repair HTTP flow"
   expect((await repairResponse).ok()).toBeTruthy();
   await expect(page.getByText("E2E Broker service stopped", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /修\s*复/ })).toHaveCount(0);
+  await expect(page.getByText("沙箱已就绪", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Close" }).click();
   await expect(page.locator(".sandbox-health-failure")).toHaveCount(0);

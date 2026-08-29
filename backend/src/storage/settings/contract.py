@@ -95,11 +95,10 @@ def normalize_sandbox_config(
         if not isinstance(item, Mapping):
             raise ValueError("network_allowlist entries must be objects")
         try:
-            raw_port = item.get("port")
-            rule = NetworkRule(str(item.get("host") or ""), raw_port)
+            rule = NetworkRule(str(item.get("host") or ""))
         except (TypeError, ValueError) as exc:
             raise ValueError("network_allowlist entry is invalid") from exc
-        allowlist.append({"host": rule.host, **({"port": rule.port} if rule.port is not None else {})})
+        allowlist.append({"host": rule.host})
     if network is NetworkMode.RESTRICTED_NETWORK and not allowlist:
         raise ValueError("restricted_network requires at least one network rule")
     raw_proxy_port = result.get("proxy_port", 17831)
