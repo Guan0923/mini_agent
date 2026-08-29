@@ -12,12 +12,30 @@ from backend.configuration import ConfigurationError, section
 @dataclass(frozen=True)
 class SkillSettings:
     enabled: bool = True
+    disabled: frozenset[str] = frozenset()
 
     @classmethod
     def from_config(cls, values: Mapping[str, object]) -> SkillSettings:
         raw = section(values, "capabilities").get("skills", True)
         if not isinstance(raw, bool):
             raise ConfigurationError("capabilities.skills must be boolean.")
+        disabled = section(values, "skills").get("disabled", [])
+        if not isinstance(disabled, list) or not all(isinstance(item, str) for item in disabled):
+            raise ConfigurationError("skills.disabled must be an array of directory names.")
+        if any(not item or item in {".", ".."} or "/" in item or "\\" in item for item in disabled):
+            raise ConfigurationError("skills.disabled must contain only directory names.")
+        return cls(raw, frozenset(disabled))
+
+
+@dataclass(frozen=True)
+class McpCapabilitySettings:
+    enabled: bool = False
+
+    @classmethod
+    def from_config(cls, values: Mapping[str, object]) -> McpCapabilitySettings:
+        raw = section(values, "capabilities").get("mcp", False)
+        if not isinstance(raw, bool):
+            raise ConfigurationError("capabilities.mcp must be boolean.")
         return cls(raw)
 
 

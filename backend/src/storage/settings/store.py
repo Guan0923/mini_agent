@@ -19,10 +19,13 @@ from .contract import (
     DEFAULT_PROVIDER_CONFIG,
     DEFAULT_RUNTIME_CONFIG,
     DEFAULT_SANDBOX_CONFIG,
+    DEFAULT_SKILL_CONFIG,
     normalize_agent_config,
+    normalize_capability_config,
     normalize_provider_config,
     normalize_runtime_config,
     normalize_sandbox_config,
+    normalize_skill_config,
     timezone_options,
 )
 from .crypto import decrypt_secret, encrypt_secret
@@ -54,6 +57,7 @@ class LocalSettingsStore:
                 "runtime": {"log_full_messages": True, **DEFAULT_RUNTIME_CONFIG},
                 "sandbox": dict(DEFAULT_SANDBOX_CONFIG),
                 "capabilities": dict(DEFAULT_CAPABILITY_CONFIG),
+                "skills": dict(DEFAULT_SKILL_CONFIG),
             }
         )
         with self._connection() as connection:
@@ -140,7 +144,32 @@ class LocalSettingsStore:
 
     def capability_config(self) -> dict[str, object]:
         raw = self.config_store.read().get("capabilities")
-        return dict(raw) if isinstance(raw, Mapping) else dict(DEFAULT_CAPABILITY_CONFIG)
+        return normalize_capability_config(
+            raw if isinstance(raw, Mapping) else DEFAULT_CAPABILITY_CONFIG,
+            {},
+        )
+
+    def update_capability_config(self, values: Mapping[str, object]) -> dict[str, object]:
+        result = normalize_capability_config(self.capability_config(), values)
+        self.config_store.replace_section("capabilities", result)
+        return result
+
+    def skill_config(self) -> dict[str, object]:
+        raw = self.config_store.read().get("skills")
+        return normalize_skill_config(raw if isinstance(raw, Mapping) else DEFAULT_SKILL_CONFIG)
+
+    def update_skill_enabled(self, directory: str, enabled: bool) -> dict[str, object]:
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be boolean")
+        current = self.skill_config()
+        disabled = {str(item) for item in current["disabled"]}
+        if enabled:
+            disabled.discard(directory)
+        else:
+            disabled.add(directory)
+        result = normalize_skill_config({"disabled": sorted(disabled)})
+        self.config_store.replace_section("skills", result)
+        return result
 
     def agent_preferences(self) -> str:
         agent = self.agent_config()

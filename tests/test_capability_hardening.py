@@ -73,16 +73,16 @@ def test_user_mcp_servers_are_started_and_project_file_is_ignored(tmp_path: Path
     _write_mcp(workspace / ".mini_agent" / "mcp.toml")
 
     app_factory._external_resources(paths, {})
-    assert started == [()]
+    assert started == []
 
     _write_mcp(paths.mcp_file, plaintext=False)
     app_factory._external_resources(
         paths,
-        {},
+        {"capabilities": {"mcp": True}},
     )
-    assert len(started) == 2
-    assert len(started[1]) == 1
-    assert started[1][0].name == "demo"
+    assert len(started) == 1
+    assert len(started[0]) == 1
+    assert started[0][0].name == "demo"
 
 
 def test_external_mcp_server_starts_without_command_sandbox(tmp_path: Path, monkeypatch) -> None:
@@ -93,7 +93,7 @@ def test_external_mcp_server_starts_without_command_sandbox(tmp_path: Path, monk
     started = []
     monkeypatch.setattr(app_factory, "start_external_tools", lambda configs, *_args, **_kwargs: started.extend(configs))
 
-    app_factory._external_resources(paths, {})
+    app_factory._external_resources(paths, {"capabilities": {"mcp": True}})
 
     assert [server.name for server in started] == ["demo"]
 

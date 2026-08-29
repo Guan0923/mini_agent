@@ -2,7 +2,15 @@ import type { AgentConfig, ProviderConfig, SandboxConfig, UserSettings } from ".
 import type { SandboxHealthState } from "../../app/useSandboxHealth";
 import type { LocalProfile } from "../../types";
 
-export type SettingsSection = "profile" | "agent" | "runtime" | "sandbox" | "provider_add" | "provider_manage";
+export type SettingsSection =
+  | "profile"
+  | "agent"
+  | "runtime"
+  | "sandbox"
+  | "skills"
+  | "mcp"
+  | "provider_add"
+  | "provider_manage";
 
 export type ProviderDraft = {
   provider_name: string;

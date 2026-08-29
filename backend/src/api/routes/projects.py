@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-import threading
 from pathlib import Path
 from typing import Literal
 
@@ -16,16 +15,12 @@ from backend.configuration import LocalConfigStore
 from backend.skills.trust import ProjectSkillTrustStore
 from backend.storage.projects import Project, ProjectStore
 
+from ..directory_picker import DirectoryPickerBusyError, pick_directory
 from ..session_store import mutation_error as _mutation_error
 from ..session_store import session_store as _store
 from ..session_store import summary_payload as _summary
 
 router = APIRouter(prefix="/api")
-_picker_lock = threading.Lock()
-
-
-class _PickerBusyError(RuntimeError):
-    """Raised when another local folder picker is already open."""
 
 
 class ProjectSessionRequest(BaseModel):
@@ -61,36 +56,7 @@ def _project_payload(project: Project, store: ProjectStore | None = None) -> dic
 
 
 def _pick_directory(request: Request) -> Path | None:
-    if not _picker_lock.acquire(blocking=False):
-        raise _PickerBusyError("已有一个文件夹选择窗口正在打开。")
-    try:
-        injected = getattr(request.app.state.web, "project_picker", None)
-        if injected is not None:
-            try:
-                selected = injected()
-                if selected is None or not str(selected):
-                    return None
-                return Path(selected)
-            except OSError:
-                raise
-            except Exception as exc:
-                raise OSError("当前环境无法打开系统文件夹选择器。") from exc
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            try:
-                root.withdraw()
-                root.attributes("-topmost", True)
-                selected = filedialog.askdirectory(title="选择 Mini-Agent 项目文件夹", mustexist=True)
-            finally:
-                root.destroy()
-        except Exception as exc:
-            raise OSError("当前环境无法打开系统文件夹选择器。") from exc
-        return Path(selected) if selected else None
-    finally:
-        _picker_lock.release()
+    return pick_directory(request, title="选择 Mini-Agent 项目文件夹")
 
 
 def _project_store(request: Request) -> ProjectStore:
@@ -140,7 +106,7 @@ def list_projects(
 def create_project(request: Request) -> Response | dict[str, object]:
     try:
         selected = _pick_directory(request)
-    except _PickerBusyError as exc:
+    except DirectoryPickerBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -266,7 +232,7 @@ def change_project_path(
     _ensure_project_idle(request, project_id)
     try:
         selected = _pick_directory(request)
-    except _PickerBusyError as exc:
+    except DirectoryPickerBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

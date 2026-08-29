@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from pathlib import Path
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS, validate_time_zone
 from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, normalize_terminal_type
@@ -38,7 +39,8 @@ DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
     "tokenizer_model": "",
     "api_key_configured": False,
 }
-DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {"skills": True}
+DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {"skills": True, "mcp": False}
+DEFAULT_SKILL_CONFIG: dict[str, object] = {"disabled": []}
 DEFAULT_RUNTIME_CONFIG: dict[str, object] = {"max_tool_calls": 32, "terminal_type": DEFAULT_TERMINAL_TYPE}
 DEFAULT_SANDBOX_CONFIG: dict[str, object] = {
     "policy_version": 3,
@@ -47,6 +49,41 @@ DEFAULT_SANDBOX_CONFIG: dict[str, object] = {
     "proxy_port": 17831,
     "limits": SandboxLimits().to_dict(),
 }
+
+
+def normalize_capability_config(current: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:
+    """Merge the user-facing capability switches with strict booleans."""
+
+    result = dict(current)
+    for name, default in DEFAULT_CAPABILITY_CONFIG.items():
+        result.setdefault(name, default)
+    unknown = set(values) - set(DEFAULT_CAPABILITY_CONFIG)
+    if unknown:
+        raise ValueError(f"unsupported capability setting: {sorted(unknown)[0]}")
+    for name, value in values.items():
+        if not isinstance(value, bool):
+            raise ValueError(f"capabilities.{name} must be boolean")
+        result[name] = value
+    for name in DEFAULT_CAPABILITY_CONFIG:
+        value = result[name]
+        if not isinstance(value, bool):
+            raise ValueError(f"capabilities.{name} must be boolean")
+    return result
+
+
+def normalize_skill_config(values: Mapping[str, object]) -> dict[str, object]:
+    """Validate the stable directory identifiers disabled by the user."""
+
+    raw = values.get("disabled", [])
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise ValueError("skills.disabled must be an array of directory names")
+    disabled: list[str] = []
+    for item in raw:
+        if not item or item in {".", ".."} or Path(item).name != item:
+            raise ValueError("skills.disabled must contain only directory names")
+        if item not in disabled:
+            disabled.append(item)
+    return {"disabled": sorted(disabled)}
 
 
 def normalize_runtime_config(current: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:

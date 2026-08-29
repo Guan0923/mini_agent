@@ -190,6 +190,18 @@ def valid_tool_name(value: str) -> bool:
     return len(value) <= 64 and _NAME_PATTERN.fullmatch(value) is not None
 
 
+def valid_server_name(value: str) -> bool:
+    return bool(value) and len(value) <= 64 and _NAME_PATTERN.fullmatch(value) is not None
+
+
+def valid_environment_name(value: str) -> bool:
+    return _ENV_NAME_PATTERN.fullmatch(value) is not None
+
+
+def sensitive_environment_name(value: str) -> bool:
+    return _SENSITIVE_ENV_KEY_PATTERN.search(value) is not None
+
+
 def _positive_number(values: Mapping[str, object], name: str, default: float) -> float:
     raw = values.get(name, default)
     if isinstance(raw, bool) or not isinstance(raw, int | float):

@@ -17,6 +17,18 @@ const api = vi.hoisted(() => ({
   deleteProviderConfig: vi.fn(),
   discoverProviderModels: vi.fn(),
   setTimezone: vi.fn(),
+  getSkillSettings: vi.fn(),
+  setSkillsEnabled: vi.fn(),
+  setSkillEnabled: vi.fn(),
+  importSkill: vi.fn(),
+  deleteSkill: vi.fn(),
+  getMcpSettings: vi.fn(),
+  setMcpEnabled: vi.fn(),
+  createMcpServer: vi.fn(),
+  updateMcpServer: vi.fn(),
+  setMcpServerEnabled: vi.fn(),
+  deleteMcpServer: vi.fn(),
+  testMcpServer: vi.fn(),
 }));
 
 vi.mock("../api", () => api);
@@ -123,6 +135,8 @@ describe("UserSettingsModal", () => {
     api.updateSandboxConfig.mockResolvedValue(settings.sandbox_config);
     api.updateProviderConfig.mockResolvedValue(settings.provider_config);
     api.discoverProviderModels.mockResolvedValue({ models: [] });
+    api.getSkillSettings.mockResolvedValue({ enabled: true, skills: [] });
+    api.getMcpSettings.mockResolvedValue({ enabled: false, servers: [] });
   });
 
   it("renders the settings spinner inside the full content-area loading container", () => {
@@ -150,6 +164,8 @@ describe("UserSettingsModal", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
     expect(screen.getByText(/openai/)).toBeInTheDocument();
 
+    expect(screen.getByRole("menuitem", { name: "Skill" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "MCP" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "云同步" })).not.toBeInTheDocument();
   });
 

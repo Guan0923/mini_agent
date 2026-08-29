@@ -5,7 +5,9 @@ import {
   RuntimeSettingsSection,
 } from "./settings/GeneralSettingsSections";
 import { ProviderAddSection, ProviderManageSection } from "./settings/ProviderSettingsSections";
+import { McpSettingsSection } from "./settings/McpSettingsSection";
 import { SandboxSettingsSection } from "./settings/SandboxSettingsSection";
+import { SkillSettingsSection } from "./settings/SkillSettingsSection";
 import type { SettingsSection, UserSettingsModalProps } from "./settings/contracts";
 import { useUserSettingsState } from "./settings/useUserSettingsState";
 
@@ -14,6 +16,8 @@ const menuItems = [
   { key: "agent", label: "Agent 配置" },
   { key: "runtime", label: "运行配置" },
   { key: "sandbox", label: "沙箱" },
+  { key: "skills", label: "Skill" },
+  { key: "mcp", label: "MCP" },
   { key: "provider_add", label: "添加提供商" },
   { key: "provider_manage", label: "Provider 与模型" },
 ];
@@ -37,6 +41,8 @@ export default function UserSettingsModal(props: UserSettingsModalProps) {
         {state.section === "agent" ? <AgentSettingsSection state={state} /> : null}
         {state.section === "runtime" ? <RuntimeSettingsSection state={state} /> : null}
         {state.section === "sandbox" ? <SandboxSettingsSection state={state} /> : null}
+        {state.section === "skills" ? <SkillSettingsSection /> : null}
+        {state.section === "mcp" ? <McpSettingsSection /> : null}
         {state.section === "provider_add" ? <ProviderAddSection state={state} /> : null}
         {state.section === "provider_manage" ? <ProviderManageSection state={state} /> : null}
         {state.error ? <Typography.Text type="danger">{state.error}</Typography.Text> : null}
@@ -54,7 +60,7 @@ export default function UserSettingsModal(props: UserSettingsModalProps) {
       mask={{ closable: true }}
       keyboard={false}
       onCancel={state.requestClose}
-      footer={state.section === "provider_manage" ? null : (
+      footer={["provider_manage", "skills", "mcp"].includes(state.section) ? null : (
         <Space>
           <Button
             type="primary"

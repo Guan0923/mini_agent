@@ -47,6 +47,11 @@ export async function requestJson<T>(url: string, init: RequestInit = {}): Promi
   return res.json() as Promise<T>;
 }
 
+export async function requestOptionalJson<T>(url: string, init: RequestInit = {}): Promise<T | null> {
+  const res = await request(url, init);
+  return res.status === 204 ? null : res.json() as Promise<T>;
+}
+
 export async function requestVoid(url: string, init: RequestInit = {}): Promise<void> {
   await request(url, init);
 }

@@ -53,17 +53,21 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
     from .chat.decisions import router as decisions_router
     from .routes.agent_threads import router as agent_threads_router
     from .routes.jobs import router as jobs_router
+    from .routes.mcp_settings import router as mcp_settings_router
     from .routes.projects import router as projects_router
     from .routes.right_panel import router as right_panel_router
     from .routes.sandbox import router as sandbox_router
     from .routes.settings import router as settings_router
     from .routes.sidebar_threads import router as sidebar_threads_router
+    from .routes.skill_settings import router as skill_settings_router
     from .routes.turns import router as turns_router
     from .session_files import router as session_files_router
     from .shared.benchmark import create_benchmark_app
     from .shared.info import router as info_router
 
     app.include_router(settings_router)
+    app.include_router(skill_settings_router)
+    app.include_router(mcp_settings_router)
     app.include_router(agent_threads_router)
     app.include_router(decisions_router)
     app.include_router(jobs_router)

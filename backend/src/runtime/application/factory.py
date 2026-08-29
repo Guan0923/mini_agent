@@ -24,7 +24,7 @@ from backend.storage.sqlite import SQLiteSessionStore
 from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry, delegation_tools
 from backend.tools.terminal import effective_terminal_type
 
-from ..capability_settings import SkillSettings, SubagentSettings
+from ..capability_settings import McpCapabilitySettings, SkillSettings, SubagentSettings
 from ..core.config import RunnerSettings, log_full_messages_from_toml
 from ..execution.runner import AgentRunner
 from ..subagents import SubagentCoordinator
@@ -75,7 +75,7 @@ def build_application(
     resolved = _settings_for(resolved_paths, settings, config_override)
     store = SQLiteSessionStore(resolved_paths, agent_thread_index)
     skill_settings = SkillSettings.from_config(config)
-    read_file_roots = (resolved_paths.skills_dir,) if skill_settings.enabled else ()
+    read_file_roots = _user_skill_read_roots(resolved_paths, skill_settings)
     files = WorkspaceFiles(workspace, project_workspace=project_cwd, read_file_roots=read_file_roots)
     runner_args = (
         workspace,
@@ -162,7 +162,7 @@ def _build_subagent_runner(
     skill_settings = SkillSettings.from_config(config)
     subagent_settings = SubagentSettings.from_config(config)
     sandbox_launcher, sandbox_config = _sandbox_runtime(config, paths=resolved_paths)
-    read_file_roots = (resolved_paths.skills_dir,) if skill_settings.enabled else ()
+    read_file_roots = _user_skill_read_roots(resolved_paths, skill_settings)
     workspace_files = files or WorkspaceFiles(
         workspace,
         project_workspace=project_cwd,
@@ -274,7 +274,7 @@ def _build_runner(
     sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: dict[str, object] | None = None,
 ) -> AgentRunner:
-    skills = SkillCatalog.discover(global_root=paths.skills_dir) if skill_settings.enabled else SkillCatalog()
+    skills = _user_skill_catalog(paths, skill_settings)
     project_skill_gate = (
         ProjectSkillGate(
             project_cwd or workspace,
@@ -325,6 +325,8 @@ def _external_resources(
     job_registry: JobRegistry | None = None,
     job_scope: JobScope | None = None,
 ) -> ExternalMcpResources:
+    if not McpCapabilitySettings.from_config(config).enabled:
+        return ExternalMcpResources()
     plan = prepare_mcp_plan(paths)
     servers = plan.effective_servers()
     kwargs = {}
@@ -333,6 +335,19 @@ def _external_resources(
     if job_scope is not None:
         kwargs["job_scope"] = job_scope
     return start_external_tools(servers, McpSettings.from_config(config), **kwargs)
+
+
+def _user_skill_catalog(paths: ClientPaths, settings: SkillSettings) -> SkillCatalog:
+    if not settings.enabled:
+        return SkillCatalog()
+    discovered = SkillCatalog.discover(global_root=paths.skills_dir)
+    return SkillCatalog(
+        tuple(item for item in discovered.definitions() if item.manifest.parent.name not in settings.disabled)
+    )
+
+
+def _user_skill_read_roots(paths: ClientPaths, settings: SkillSettings) -> tuple[Path, ...]:
+    return tuple(item.manifest.parent for item in _user_skill_catalog(paths, settings).definitions())
 
 
 def _sandbox_runtime(

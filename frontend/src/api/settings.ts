@@ -1,5 +1,5 @@
 import type { LocalProfile } from "../types";
-import { requestJson } from "./transport/request";
+import { requestJson, requestOptionalJson, requestVoid } from "./transport/request";
 
 export type UserProfile = LocalProfile;
 
@@ -80,8 +80,128 @@ export interface UserSettings {
   timezone_options: TimezoneOption[];
 }
 
+export interface SkillSettingsItem {
+  directory: string;
+  name: string;
+  description: string;
+  metadata: Record<string, string>;
+  allowed_tools: string[];
+  root: string;
+  enabled: boolean;
+}
+
+export interface SkillSettingsResponse {
+  enabled: boolean;
+  skills: SkillSettingsItem[];
+}
+
+export interface McpSecretStatus {
+  name: string;
+  configured: boolean;
+}
+
+export interface McpServerSettings {
+  name: string;
+  command: string;
+  args: string[];
+  cwd: string | null;
+  env: Record<string, string>;
+  secret_env: McpSecretStatus[];
+  enabled: boolean;
+}
+
+export interface McpSettingsResponse {
+  enabled: boolean;
+  servers: McpServerSettings[];
+}
+
+export interface McpServerInput {
+  command: string;
+  args: string[];
+  cwd: string | null;
+  env: Record<string, string>;
+  secrets: Record<string, string>;
+  remove_secrets: string[];
+  enabled: boolean;
+}
+
 export function getSettings(): Promise<UserSettings> {
   return requestJson<UserSettings>("/api/settings");
+}
+
+export function getSkillSettings(): Promise<SkillSettingsResponse> {
+  return requestJson<SkillSettingsResponse>("/api/settings/skills");
+}
+
+export function setSkillsEnabled(enabled: boolean): Promise<SkillSettingsResponse> {
+  return requestJson<SkillSettingsResponse>("/api/settings/skills/enabled", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export function setSkillEnabled(directory: string, enabled: boolean): Promise<SkillSettingsResponse> {
+  return requestJson<SkillSettingsResponse>(`/api/settings/skills/${encodeURIComponent(directory)}/enabled`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export function importSkill(): Promise<{ directory: string } | null> {
+  return requestOptionalJson<{ directory: string }>("/api/settings/skills/import", { method: "POST" });
+}
+
+export function deleteSkill(directory: string): Promise<void> {
+  return requestVoid(`/api/settings/skills/${encodeURIComponent(directory)}`, { method: "DELETE" });
+}
+
+export function getMcpSettings(): Promise<McpSettingsResponse> {
+  return requestJson<McpSettingsResponse>("/api/settings/mcp");
+}
+
+export function setMcpEnabled(enabled: boolean): Promise<McpSettingsResponse> {
+  return requestJson<McpSettingsResponse>("/api/settings/mcp/enabled", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export function createMcpServer(values: McpServerInput & { name: string }): Promise<McpServerSettings> {
+  return requestJson<McpServerSettings>("/api/settings/mcp/servers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(values),
+  });
+}
+
+export function updateMcpServer(name: string, values: McpServerInput): Promise<McpServerSettings> {
+  return requestJson<McpServerSettings>(`/api/settings/mcp/servers/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(values),
+  });
+}
+
+export function setMcpServerEnabled(name: string, enabled: boolean): Promise<McpServerSettings> {
+  return requestJson<McpServerSettings>(`/api/settings/mcp/servers/${encodeURIComponent(name)}/enabled`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export function deleteMcpServer(name: string): Promise<void> {
+  return requestVoid(`/api/settings/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
+
+export function testMcpServer(name: string): Promise<{ tools: string[]; count: number }> {
+  return requestJson<{ tools: string[]; count: number }>(
+    `/api/settings/mcp/servers/${encodeURIComponent(name)}/test`,
+    { method: "POST" },
+  );
 }
 
 export function getProfile(): Promise<UserProfile> {
