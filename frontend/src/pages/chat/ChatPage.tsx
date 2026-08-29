@@ -34,6 +34,8 @@ import { composerAction, type ChatPageProps } from "./contracts";
 import { useComposerFiles } from "./useComposerFiles";
 import { useMessageEditing } from "./useMessageEditing";
 import { useRuntimeControls } from "./useRuntimeControls";
+import AgentThreadPicker from "./AgentThreadPicker";
+import { useAgentThreadView } from "./useAgentThreadView";
 
 export { composerAction } from "./contracts";
 
@@ -45,7 +47,8 @@ function isScrollContainerAtBottom(scrollContainer: HTMLDivElement): boolean {
 }
 
 export default function ChatPage({
-  conversation,
+  conversation: canonicalConversation,
+  agentThreadNavigation = false,
   displayMode: configuredDisplayMode,
   providerConfig,
   mode: selectedMode,
@@ -53,7 +56,7 @@ export default function ChatPage({
   onUpdate,
   onNew,
   onNavigate,
-  onEnsureSession = async (id) => conversation?.sessionId ?? id,
+  onEnsureSession = async (id) => canonicalConversation?.sessionId ?? id,
   onFork,
   onRewind,
   onSelectSession = async (id) => id,
@@ -68,7 +71,23 @@ export default function ChatPage({
   sandboxHealth = { phase: "healthy", detail: null },
 }: ChatPageProps) {
   const { message } = AntApp.useApp();
-  const mode = selectedMode ?? "agent";
+  const agentThreadView = useAgentThreadView({
+    canonical: canonicalConversation,
+    enabled: agentThreadNavigation,
+    onUpdate,
+  });
+  const conversation = agentThreadView.conversation;
+  const [agentModeByThread, setAgentModeByThread] = useState<Record<string, ChatMode>>({});
+  const mode = agentThreadView.isSubagent && agentThreadView.selectedThreadId
+    ? agentModeByThread[agentThreadView.selectedThreadId] ?? selectedMode ?? "agent"
+    : selectedMode ?? "agent";
+  const changeViewMode = useCallback((value: ChatMode) => {
+    if (agentThreadView.isSubagent && agentThreadView.selectedThreadId) {
+      setAgentModeByThread((current) => ({ ...current, [agentThreadView.selectedThreadId!]: value }));
+      return;
+    }
+    onModeChange(value);
+  }, [agentThreadView.isSubagent, agentThreadView.selectedThreadId, onModeChange]);
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false && (typeof window === "undefined" || window.innerWidth < 768);
   const chatPageRef = useRef<HTMLDivElement | null>(null);
@@ -122,7 +141,7 @@ export default function ChatPage({
   // composer in its running interaction mode from the moment the flush
   // request is sent until its SSE cleanup, including the tiny interval
   // between the optimistic user bubble and the first turn.snapshot frame.
-  const busy = Boolean(runningProp) || queueSubmitting;
+  const busy = agentThreadView.isSubagent ? false : Boolean(runningProp) || queueSubmitting;
   const sandboxBlocked = sandboxHealth.phase !== "healthy";
   const interactionBusy = busy || compactionPending || sandboxBlocked;
   const composerFiles = useComposerFiles({
@@ -157,7 +176,9 @@ export default function ChatPage({
     clearComposer,
   } = composerFiles;
   const todo = useMemo(() => latestTodoList(messages), [messages]);
-  const filteredCommands = commandSuggestions(input);
+  const filteredCommands = commandSuggestions(input).filter(
+    (command) => !agentThreadView.isSubagent || command.name !== "/compact",
+  );
   const commandMenuVisible = !interactionBusy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
   // The file menu is mutually exclusive with the slash-command menu and only
   // appears while the caret still sits inside an `@` trigger.
@@ -212,7 +233,7 @@ export default function ChatPage({
     busy: busy || sandboxBlocked,
     providerConfig,
     mode,
-    onModeChange,
+    onModeChange: changeViewMode,
     onFailure: (error) => setLast({ error: `运行配置更新失败：${String((error as Error).message ?? error)}` }),
   });
   const {
@@ -233,8 +254,8 @@ export default function ChatPage({
     conversation,
     interactionBusy,
     activeRuntimeNode,
-    onRewind,
-    onFork,
+    onRewind: agentThreadView.isSubagent ? undefined : onRewind,
+    onFork: agentThreadView.isSubagent ? undefined : onFork,
     onUpdate,
     runPrompt,
     onError: (error) => setLast({ error: String((error as Error).message ?? error) }),
@@ -256,11 +277,11 @@ export default function ChatPage({
   } = messageEditing;
   const hasDraft = Boolean(input.trim() || references.length > 0 || pendingUploads.some((upload) => upload.status === "done"));
   const composerActionState = composerAction(
-    activeRuntimeNode?.status,
+    agentThreadView.isSubagent ? undefined : activeRuntimeNode?.status,
     hasDraft,
     pendingUploads.some((upload) => upload.status === "uploading"),
   );
-  const actionMode = composerActionState.mode;
+  const actionMode = agentThreadView.isSubagent ? "send" : composerActionState.mode;
   const projectUnavailable = conversation?.projectId !== undefined && conversation.projectAvailable === false;
 
   const syncBottomState = useCallback((scrollContainer: HTMLDivElement) => {
@@ -303,6 +324,7 @@ export default function ChatPage({
       !sandboxBlocked
       && !queueFlushRef.current
       && !queueAutoBlockedRef.current
+      && !agentThreadView.isSubagent
       && queuedMessages.length > 0
       && conversation?.id
       && (status === "success" || status === "failed")
@@ -312,6 +334,10 @@ export default function ChatPage({
       void flushQueuedMessages();
     }
   }, [activeRuntimeNode?.id, activeRuntimeNode?.status, busy, queuedMessages.length, conversation?.id, sandboxBlocked]);
+
+  useEffect(() => {
+    if (agentThreadView.streamError) void message.error(`Subagent 实时流重连中：${agentThreadView.streamError}`);
+  }, [agentThreadView.streamError, message]);
 
   useEffect(() => {
     if (!conversation?.id || !activeRuntimeNode) return;
@@ -598,6 +624,10 @@ export default function ChatPage({
       return;
     }
     if (name === "/compact") {
+      if (agentThreadView.isSubagent) {
+        void message.info("Subagent 仅使用自动上下文压缩。");
+        return;
+      }
       if (!conversation || !activeRuntimeNode) return;
       setCompactionPending(true);
       try {
@@ -640,6 +670,23 @@ export default function ChatPage({
     const command = parseCommand(prompt);
     if (command && prompt) {
       await executeCommand(command.name, command.argument);
+      return;
+    }
+    if (agentThreadView.isSubagent) {
+      try {
+        await agentThreadView.sendMessage({
+          content: prompt,
+          references: mergedReferences.length > 0 ? mergedReferences : undefined,
+          mode,
+          permissionMode,
+          providerName: requestProviderName,
+          model: requestModel,
+        });
+        clearComposer();
+        setPendingUploads([]);
+      } catch (error) {
+        void message.error(`Agent 消息发送失败：${String((error as Error).message ?? error)}`);
+      }
       return;
     }
     if (activeRuntimeNode?.status === "running") {
@@ -696,19 +743,30 @@ export default function ChatPage({
 
   return (
     <div ref={chatPageRef} className={`chat-page${compact ? " chat-page--compact" : ""}`}>
-      {hasTurnTree && currentThreadId ? <div className="trace-toolbar" role="navigation" aria-label="主内容视图">
-        <Dropdown
-          trigger={["click"]}
-          menu={{
-            selectable: true,
-            selectedKeys: [currentThreadId],
-            items: [{ key: currentThreadId, label: currentThreadId }],
-          }}
-        >
-          <Tooltip title={compact ? `Thread：${currentThreadId}` : undefined}>
-            <Button type="text" aria-label="Thread" icon={compact ? <BranchesOutlined /> : undefined}>{compact ? null : "Thread"}</Button>
-          </Tooltip>
-        </Dropdown>
+      {(hasTurnTree || (agentThreadNavigation && conversation?.sessionId)) && currentThreadId ? <div className="trace-toolbar" role="navigation" aria-label="主内容视图">
+        {agentThreadNavigation && conversation?.sessionId && agentThreadView.rootThreadId && agentThreadView.selectedThreadId ? (
+          <AgentThreadPicker
+            sessionId={conversation.sessionId}
+            rootThreadId={agentThreadView.rootThreadId}
+            selectedThreadId={agentThreadView.selectedThreadId}
+            compact={compact}
+            invalidation={agentThreadView.treeInvalidation}
+            onSelect={agentThreadView.selectThread}
+          />
+        ) : (
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              selectable: true,
+              selectedKeys: [currentThreadId],
+              items: [{ key: currentThreadId, label: currentThreadId }],
+            }}
+          >
+            <Tooltip title={compact ? `Thread：${currentThreadId}` : undefined}>
+              <Button type="text" aria-label="Thread" icon={compact ? <BranchesOutlined /> : undefined}>{compact ? null : "Thread"}</Button>
+            </Tooltip>
+          </Dropdown>
+        )}
         <span className="trace-toolbar-thread-id" title={currentThreadId}>{currentThreadId}</span>
         <Tooltip title={compact ? "Chat" : undefined}>
           <Button type="text" aria-label="Chat" icon={compact ? <CommentOutlined /> : undefined} aria-pressed={visibleMainView === "chat"} onClick={() => setMainView("chat")}>{compact ? null : "Chat"}</Button>
@@ -733,7 +791,7 @@ export default function ChatPage({
           editRef={editRef}
           rewindPending={rewindPending}
           editingSubmitting={editingSubmitting}
-          canEdit={Boolean(onRewind)}
+          canEdit={!agentThreadView.isSubagent && Boolean(onRewind)}
           setEditingDraft={setEditingDraft}
           cancelEdit={cancelEdit}
           saveEdit={saveEdit}
@@ -742,7 +800,7 @@ export default function ChatPage({
           messageVersion={messageVersion}
           changeMessageVersion={changeMessageVersion}
           onDecision={chooseDecision}
-          onFork={onFork ? forkMessage : undefined}
+          onFork={!agentThreadView.isSubagent && onFork ? forkMessage : undefined}
           sandboxFailure={sandboxHealth.phase === "unhealthy" ? sandboxHealth.detail ?? "健康检查未通过。" : null}
         />
         {!isAtBottom ? (
@@ -802,10 +860,11 @@ export default function ChatPage({
         sessionId={conversation?.sessionId}
         pendingUploads={pendingUploads}
         uploadsUploading={pendingUploads.some((upload) => upload.status === "uploading")}
-        queuedMessages={queuedMessages}
-        onQueueSend={sendQueuedMessage}
-        onQueueEdit={editQueuedMessage}
+        queuedMessages={agentThreadView.isSubagent ? [] : queuedMessages}
+        onQueueSend={agentThreadView.isSubagent ? undefined : sendQueuedMessage}
+        onQueueEdit={agentThreadView.isSubagent ? undefined : editQueuedMessage}
         onQueueDelete={(item) => {
+          if (agentThreadView.isSubagent) return;
           if (item.state !== "pending" || !conversation?.threadId) return;
           void deleteQueuedMessage(conversation.threadId, item.id)
             .then(() => updateQueue((items) => items.filter((candidate) => candidate.id !== item.id)))

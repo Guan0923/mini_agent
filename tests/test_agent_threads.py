@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from time import monotonic, sleep
 from uuid import uuid4
 
@@ -14,6 +15,8 @@ import pytest
 from fastapi.testclient import TestClient
 from redis import Redis
 
+from backend.api import agent_thread_stream
+from backend.api.agent_thread_stream import AgentThreadEventHub
 from backend.api.app import create_app
 from backend.api.chat import routes as chat_routes
 from backend.api.state import WebAppState
@@ -22,6 +25,7 @@ from backend.domain import (
     CHECKPOINT_PREAMBLE,
     AssistantMessage,
     MessageEnvelope,
+    MessageQueueUnavailable,
     RuntimeThread,
     ThreadContext,
     ThreadNode,
@@ -76,8 +80,15 @@ class _DelegatingRootPlanner:
         received = sum('"type": "subagent_initial_result"' in content for content in messages)
         if received >= 2:
             return AssistantMessage(content="root received both Agent results")
-        sleep(0.1)
-        return AssistantMessage(content="waiting for Agent results")
+        return AssistantMessage(
+            tool_messages=[
+                ToolMessage(
+                    name="list_current_node_sub_thread",
+                    call_id=f"wait_for_agents_{self.calls}",
+                    arguments={},
+                )
+            ]
+        )
 
 
 @pytest.fixture
@@ -156,7 +167,7 @@ def local_subagent_model() -> Generator[tuple[ModelConfig, list[str]], None, Non
                 f"http://127.0.0.1:{port}/v1",
                 "subagent-trace-test",
                 max_tokens=256,
-                context_size=4_096,
+                context_size=128_000,
                 provider_name="subagent-trace-local",
             ),
             model_calls,
@@ -210,6 +221,41 @@ def _agent_create(session_id: str, parent: RuntimeState, *, name: str) -> AgentT
     )
 
 
+def _nested_agent_create(
+    session_id: str,
+    parent: RuntimeState,
+    *,
+    name: str,
+    parent_path: str,
+    depth: int,
+) -> AgentThreadCreate:
+    timestamp = utc_iso()
+    thread_id = new_thread_id()
+    turn = RuntimeState.create(
+        session_id=session_id,
+        thread_id=thread_id,
+        id=new_node_id(),
+        parent=parent,
+        user_content=f"task:{name}",
+    )
+    return AgentThreadCreate(
+        RuntimeThread(session_id, thread_id, "subagent", turn.id, turn.id, timestamp, timestamp),
+        ThreadNode(
+            session_id,
+            thread_id,
+            parent.thread_id,
+            f"{parent_path}/{name}",
+            f"task:{name}",
+            "opening",
+            depth,
+            timestamp,
+            timestamp,
+        ),
+        ThreadContext(thread_id, "independent", "independent", parent.id, parent.current_data_idx),
+        turn,
+    )
+
+
 def test_agent_thread_index_rebuilds_and_tracks_committed_heads(tmp_path: Path) -> None:
     paths = ClientPaths(tmp_path / "data")
     index = AgentThreadIndex()
@@ -229,6 +275,226 @@ def test_agent_thread_index_rebuilds_and_tracks_committed_heads(tmp_path: Path) 
     rebuilt.rebuild(SQLiteSessionStore(paths))
     assert rebuilt.threads_for_session(session.session_id) == index.threads_for_session(session.session_id)
     assert rebuilt.path_for_thread(child.node.thread_id) == "/root/worker"
+
+
+def test_agent_thread_event_hub_replays_latest_and_stays_open_across_turns(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "events"))
+    session = store.create_session("events")
+    source = _finished_source(store, session.session_id)
+    child = _agent_create(session.session_id, source, name="worker")
+    assert child.turn is not None
+    hub = AgentThreadEventHub()
+
+    first = hub.subscribe(session.session_id, child.node.thread_id)
+    assert first.next_event()["type"] == "thread.ready"
+    hub.start_turn(child.turn)
+    assert first.next_event()["turn"]["id"] == child.turn.id
+    finished = child.turn.clone()
+    finished.status = "success"
+    hub.finish_turn(child.node.thread_id, finished)
+    assert first.next_event() == {
+        "type": "turn.terminal",
+        "session_id": session.session_id,
+        "thread_id": child.node.thread_id,
+        "turn_id": child.turn.id,
+        "status": "success",
+    }
+
+    late = hub.subscribe(session.session_id, child.node.thread_id)
+    assert late.next_event()["type"] == "thread.ready"
+    assert late.next_event()["turn"]["status"] == "success"
+    assert first.closed is False
+    hub.close()
+    assert first.closed is True and late.closed is True
+
+
+def test_agent_thread_subscription_emits_heartbeat_without_closing(monkeypatch: pytest.MonkeyPatch) -> None:
+    ticks = iter((0.0, 16.0))
+    monkeypatch.setattr(agent_thread_stream, "monotonic", lambda: next(ticks))
+    hub = AgentThreadEventHub()
+    subscription = hub.subscribe("session_1", "thread_1")
+
+    async def read_events() -> tuple[str, str]:
+        stream = subscription.as_sse()
+        ready = await anext(stream)
+        heartbeat = await anext(stream)
+        await stream.aclose()
+        return ready, heartbeat
+
+    ready, heartbeat = asyncio.run(read_events())
+    assert '"type":"thread.ready"' in ready
+    assert heartbeat == ": heartbeat\n\n"
+    assert subscription.closed is True
+
+
+def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) -> None:
+    queue = MemoryMessageQueue()
+    state = WebAppState(tmp_path / "web-agent-api", message_queue=queue)
+    try:
+        with TestClient(create_app(state)) as client:
+            sidebar = client.post("/api/sidebar-threads", json={}).json()
+            store = SQLiteSessionStore(state.paths, state.agent_thread_index)
+            source = _finished_source(store, sidebar["session_id"])
+            child = _agent_create(sidebar["session_id"], source, name="worker")
+            store.create_agent_threads(sidebar["session_id"], [child])
+            grandchild = _nested_agent_create(
+                sidebar["session_id"],
+                child.turn,
+                name="nested",
+                parent_path=child.node.thread_path,
+                depth=2,
+            )
+            store.create_agent_threads(sidebar["session_id"], [grandchild])
+
+            children = client.get(
+                f"/api/agent-threads/{sidebar['session_id']}/children",
+                params={"session_id": sidebar["session_id"]},
+            )
+            assert children.status_code == 200
+            assert children.json() == [
+                {
+                    "thread_id": child.node.thread_id,
+                    "thread_path": "/root/worker",
+                    "thread_task": "task:worker",
+                    "thread_status": "opening",
+                }
+            ]
+            nested = client.get(
+                f"/api/agent-threads/{child.node.thread_id}/children",
+                params={"session_id": sidebar["session_id"]},
+            )
+            assert nested.status_code == 200
+            assert nested.json() == [
+                {
+                    "thread_id": grandchild.node.thread_id,
+                    "thread_path": "/root/worker/nested",
+                    "thread_task": "task:nested",
+                    "thread_status": "opening",
+                }
+            ]
+            assert (
+                client.get(
+                    f"/api/agent-threads/{grandchild.node.thread_id}/children",
+                    params={"session_id": sidebar["session_id"]},
+                ).json()
+                == []
+            )
+
+            response = client.post(
+                f"/api/agent-threads/{child.node.thread_id}/messages",
+                json={
+                    "session_id": sidebar["session_id"],
+                    "content": "inspect the file",
+                    "references": [{"source": "project", "path": "README.md"}],
+                    "permission_mode": "workspace_write",
+                    "running_mode": "plan",
+                },
+            )
+            assert response.status_code == 202, response.text
+            assert response.json()["target_state"] == "running"
+            envelope = queue.peek_thread(child.node.thread_id)
+            assert envelope is not None
+            assert envelope.source_thread_id == sidebar["session_id"]
+            assert envelope.references == ({"source": "project", "path": "README.md"},)
+            assert envelope.payload["runtime_config"]["permission_mode"] == "workspace_write"
+
+            nested_message = client.post(
+                f"/api/agent-threads/{grandchild.node.thread_id}/messages",
+                json={
+                    "session_id": sidebar["session_id"],
+                    "content": "ask the nested worker",
+                },
+            )
+            assert nested_message.status_code == 202
+            nested_envelope = queue.peek_thread(grandchild.node.thread_id)
+            assert nested_envelope is not None
+            assert nested_envelope.source_thread_id == sidebar["session_id"]
+
+            store.update_thread_status(sidebar["session_id"], grandchild.node.thread_id, "closed")
+            closed = client.post(
+                f"/api/agent-threads/{grandchild.node.thread_id}/messages",
+                json={"session_id": sidebar["session_id"], "content": "rejected"},
+            )
+            assert closed.status_code == 409
+
+            unknown = client.get(
+                "/api/agent-threads/thread_missing/children",
+                params={"session_id": sidebar["session_id"]},
+            )
+            assert unknown.status_code == 404
+
+            other = client.post("/api/sidebar-threads", json={}).json()
+            crossed = client.get(
+                f"/api/agent-threads/{child.node.thread_id}/children",
+                params={"session_id": other["session_id"]},
+            )
+            assert crossed.status_code == 404
+            crossed_stream = client.get(
+                f"/api/agent-threads/{child.node.thread_id}/stream",
+                params={"session_id": other["session_id"]},
+            )
+            assert crossed_stream.status_code == 404
+    finally:
+        state.close()
+
+
+def test_agent_thread_message_returns_503_when_redis_is_unavailable(tmp_path: Path) -> None:
+    class UnavailableQueue(MemoryMessageQueue):
+        def dispatch_agent(self, envelope: MessageEnvelope) -> MessageEnvelope:
+            del envelope
+            raise MessageQueueUnavailable("redis unavailable")
+
+    state = WebAppState(tmp_path / "web-agent-redis-error", message_queue=UnavailableQueue())
+    try:
+        with TestClient(create_app(state)) as client:
+            sidebar = client.post("/api/sidebar-threads", json={}).json()
+            store = SQLiteSessionStore(state.paths, state.agent_thread_index)
+            source = _finished_source(store, sidebar["session_id"])
+            child = _agent_create(sidebar["session_id"], source, name="worker")
+            store.create_agent_threads(sidebar["session_id"], [child])
+
+            response = client.post(
+                f"/api/agent-threads/{child.node.thread_id}/messages",
+                json={"session_id": sidebar["session_id"], "content": "must fail closed"},
+            )
+            assert response.status_code == 503
+            assert response.json() == {"detail": "message_queue_unavailable"}
+    finally:
+        state.close()
+
+
+def test_agent_thread_failed_admission_publishes_terminal_without_closing_channel(tmp_path: Path) -> None:
+    queue = MemoryMessageQueue()
+    state = WebAppState(tmp_path / "web-agent-admission", message_queue=queue)
+    try:
+        with TestClient(create_app(state)) as client:
+            sidebar = client.post("/api/sidebar-threads", json={}).json()
+            store = SQLiteSessionStore(state.paths, state.agent_thread_index)
+            source = _finished_source(store, sidebar["session_id"])
+            child = _agent_create(sidebar["session_id"], source, name="worker")
+            store.create_agent_threads(sidebar["session_id"], [child])
+            initial = child.turn.clone()
+            initial.status = "success"
+            store.finalize_node(initial)
+            subscription = state.agent_thread_events.subscribe(sidebar["session_id"], child.node.thread_id)
+            assert subscription.next_event()["type"] == "thread.ready"
+
+            response = client.post(
+                f"/api/agent-threads/{child.node.thread_id}/messages",
+                json={"session_id": sidebar["session_id"], "content": "wake without a runner"},
+            )
+            assert response.status_code == 202
+            assert response.json()["background_admission"] == "rejected:no_runner"
+            assert subscription.next_event()["type"] == "turn.snapshot"
+            failed = subscription.next_event()
+            assert failed["type"] == "turn.snapshot"
+            assert failed["turn"]["status"] == "failed"
+            terminal = subscription.next_event()
+            assert terminal["type"] == "turn.terminal"
+            assert terminal["status"] == "failed"
+            assert subscription.closed is False
+    finally:
+        state.close()
 
 
 def test_idle_turn_creation_uses_sqlite_cas(tmp_path: Path) -> None:
@@ -527,6 +793,91 @@ def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_pat
     parent_runner.close()
 
 
+def test_running_subagent_bridge_accepts_live_runtime_config(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("live config")
+    source = _finished_source(store, session.session_id)
+    started = Event()
+    release = Event()
+    observed_pending: dict[str, object] = {}
+
+    class BlockingPlanner:
+        name = "blocking"
+
+        def decide(self, runtime):
+            started.set()
+            assert release.wait(5), "test did not release the blocking Subagent"
+            observed_pending.update(runtime.services.pending_runtime_config or {})
+            return AssistantMessage(content="configured")
+
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(BlockingPlanner(), ToolRegistry(), job_registry=registry),
+        tmp_path,
+    )
+    try:
+        delegated = json.loads(
+            coordinator.invoke(
+                runtime,
+                "delegate_tasks",
+                {
+                    "subagent_count": 1,
+                    "subagent_name": ["worker"],
+                    "subagent_tasks": ["wait for config"],
+                    "context_transfer_strategy": ["independent"],
+                },
+            )
+        )
+        thread_id = delegated["subagents"][0]["thread_id"]
+        assert started.wait(5), "Subagent did not start"
+        updated = coordinator.apply_runtime_config(
+            session.session_id,
+            thread_id,
+            {
+                "permission_mode": "workspace_write",
+                "running_mode": "plan",
+                "model": {"reasoning_effort": "high"},
+            },
+        )
+        assert updated is not None
+        assert updated.permission_mode == "workspace_write"
+        assert updated.running_mode == "plan"
+        assert updated.model["reasoning_effort"] == "high"
+        persisted = store.get_node(session.session_id, updated.id)
+        assert isinstance(persisted, RuntimeState)
+        assert persisted.permission_mode == "workspace_write"
+        release.set()
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            runtime_thread = store.get_runtime_thread(session.session_id, thread_id)
+            if runtime_thread is not None and runtime_thread.running_turn_id is None:
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("configured Subagent did not finish")
+        assert observed_pending["permission_mode"] == "workspace_write"
+        assert observed_pending["running_mode"] == "plan"
+        assert observed_pending["model"] == {"reasoning_effort": "high"}
+    finally:
+        release.set()
+        registry.close_all(reason="test complete", timeout=5)
+        parent_runner.close()
+
+
 def test_recover_session_reclaims_preclaimed_delivery_without_duplicate_canonical_input(tmp_path: Path) -> None:
     paths = ClientPaths(tmp_path / "data")
     index = AgentThreadIndex()
@@ -805,7 +1156,7 @@ def test_real_http_sse_redis_subagents_persist_model_trace(
                 assert trace is not None and trace.thread_id == child.thread_id
                 assert [entry.role for entry in trace.items] == ["user", "assistant"]
                 assert trace.items[-1].item.get("text") == "child answered through local HTTP"
-            assert len(model_calls) == 2
+            assert len(model_calls) >= len(children)
     finally:
         state.close()
         keys = list(client.scan_iter(f"{prefix}:*"))

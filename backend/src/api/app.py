@@ -51,6 +51,7 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
     )
 
     from .chat.decisions import router as decisions_router
+    from .routes.agent_threads import router as agent_threads_router
     from .routes.jobs import router as jobs_router
     from .routes.projects import router as projects_router
     from .routes.right_panel import router as right_panel_router
@@ -63,6 +64,7 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
     from .shared.info import router as info_router
 
     app.include_router(settings_router)
+    app.include_router(agent_threads_router)
     app.include_router(decisions_router)
     app.include_router(jobs_router)
     app.include_router(sandbox_router)

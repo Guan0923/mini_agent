@@ -171,6 +171,31 @@ export interface RuntimeNodeDeltaFrame {
 
 export type RuntimeNodeFrame = RuntimeNodeSnapshotFrame | RuntimeNodeDeltaFrame;
 
+export interface AgentThreadSummary {
+  thread_id: string;
+  thread_path: string;
+  thread_task: string;
+  thread_status: "opening" | "closed";
+}
+
+export type AgentThreadStreamEvent = RuntimeNodeFrame
+  | { type: "thread.ready"; session_id: string; thread_id: string }
+  | {
+      type: "turn.terminal";
+      session_id: string;
+      thread_id: string;
+      turn_id: string;
+      status: RuntimeNodeStatus;
+    };
+
+export interface AgentThreadMessageResponse {
+  delivery_id: string;
+  accepted: boolean;
+  target_state: "running" | "started" | "idle" | "closed";
+  turn_id?: string | null;
+  background_admission?: string;
+}
+
 export interface SidebarThread {
   thread_id: string;
   session_id: string;
@@ -214,6 +239,8 @@ export interface ChatMessage {
   timelineTime?: number;
   timelineText?: string;
   timelineSource?: "user" | "steering";
+  deliveryId?: string;
+  pending?: boolean;
 }
 
 export interface Conversation {

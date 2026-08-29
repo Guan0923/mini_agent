@@ -35,6 +35,31 @@ def delegation_tools(max_tasks_per_batch: int = 8) -> tuple[Tool, Tool, Tool, To
             ),
         }
     }
+    optional_references = {
+        "references": {
+            "type": "array",
+            "maxItems": 100,
+            "description": "Structured project or upload file references delivered with the message.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "enum": ["project", "upload"],
+                        "description": "Whether the referenced path belongs to the project or Session uploads.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1000,
+                        "description": "Workspace-relative project path or Session upload path.",
+                    },
+                },
+                "required": ["source", "path"],
+                "additionalProperties": False,
+            },
+        }
+    }
     return (
         Tool(
             "delegate_tasks",
@@ -101,6 +126,7 @@ def delegation_tools(max_tasks_per_batch: int = 8) -> tuple[Tool, Tool, Tool, To
             object_schema(
                 {
                     **optional_sending_source,
+                    **optional_references,
                     "target_thread_id": {
                         "type": "string",
                         "minLength": 1,

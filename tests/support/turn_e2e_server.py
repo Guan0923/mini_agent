@@ -25,12 +25,12 @@ from backend.mcp.client import start_external_tools  # noqa: E402
 from backend.mcp.config import McpServerConfig  # noqa: E402
 from backend.planning import LLMPlanner, RuleBasedPlanner  # noqa: E402
 from backend.providers import LLMClient, ModelConfig  # noqa: E402
-from backend.runtime import build_application  # noqa: E402
+from backend.runtime import AgentRunner, build_application  # noqa: E402
 from backend.runtime.application import factory as application_factory  # noqa: E402
 from backend.runtime.core.context import PreparedResponse  # noqa: E402
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME  # noqa: E402
 from backend.sandbox import BrokerStatus  # noqa: E402
-from backend.tools import Tool, ToolRegistry  # noqa: E402
+from backend.tools import Tool, ToolRegistry, delegation_tools  # noqa: E402
 from backend.tools.default_tools.todo import todo_tools  # noqa: E402
 
 _temporary_root = tempfile.TemporaryDirectory(prefix="mini-agent-turn-e2e-")
@@ -101,11 +101,15 @@ TRACE_MODEL_CONFIG = ModelConfig(
     f"http://127.0.0.1:{TRACE_MODEL_PORT}/v1",
     "trace-e2e-model",
     max_tokens=512,
-    context_size=8_192,
+    context_size=128_000,
     provider_name="trace-http",
 )
 TRACE_MODEL_CALLS = 0
 TRACE_MCP_TOOL_NAME = ""
+AGENT_THREAD_NAV_TASK = "agent thread navigation e2e"
+AGENT_THREAD_DIRECT_TASK = "agent thread direct e2e"
+AGENT_THREAD_NESTED_TASK = "agent thread nested e2e"
+AGENT_THREAD_RESPONSE = "Agent Thread response from local HTTP."
 
 
 class TraceModelHandler(BaseHTTPRequestHandler):
@@ -123,12 +127,49 @@ class TraceModelHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         TRACE_MODEL_CALLS += 1
+        serialized_messages = json.dumps(payload.get("messages", []), ensure_ascii=False).lower()
+        agent_thread_request = AGENT_THREAD_NESTED_TASK in serialized_messages
         has_tool_result = any(
             isinstance(message, dict) and message.get("role") == "tool" for message in payload.get("messages", [])
         )
         if payload.get("stream"):
             events = (
                 [
+                    {
+                        "id": "agent-thread-e2e",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "trace-e2e-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "role": "assistant",
+                                    "reasoning_content": "Agent Thread reasoning from local HTTP.",
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                        "usage": None,
+                    },
+                    {
+                        "id": "agent-thread-e2e",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "trace-e2e-model",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": AGENT_THREAD_RESPONSE},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": None,
+                    },
+                    {"choices": [], "usage": {"input_tokens": 6, "output_tokens": 5, "total_tokens": 11}},
+                ]
+                if agent_thread_request
+                else [
                     {
                         "id": "trace-e2e",
                         "object": "chat.completion.chunk",
@@ -284,6 +325,54 @@ APPROVED_PLAN_TASK = f"<approved_plan>\n{PLAN_REVIEW_MARKDOWN}\n</approved_plan>
 ORDERED_REASONING = "推理内容持续更新并保持右侧最新字符可见。" * 12
 
 
+def _received_subagent_result(runtime) -> bool:
+    return any(
+        '"type": "subagent_initial_result"' in str(message.content or "") for message in runtime.model_messages()
+    )
+
+
+class AgentThreadE2EPlanner:
+    """Create one nested Agent, then use the real loopback model for its Turns."""
+
+    name = "agent-thread-e2e"
+
+    def __init__(self) -> None:
+        readonly_tool = delegation_tools()[3].spec
+        self._model_planner = LLMPlanner(LLMClient(TRACE_MODEL_CONFIG), [readonly_tool], [readonly_tool])
+
+    def decide(self, runtime):
+        task = runtime.run.task.strip()
+        if task != AGENT_THREAD_DIRECT_TASK:
+            return self._model_planner.decide(runtime)
+        if runtime.run.model_turns == 1:
+            return AssistantMessage(
+                tool_messages=[
+                    ToolMessage(
+                        name="delegate_tasks",
+                        call_id="delegate_nested_e2e",
+                        arguments={
+                            "subagent_count": 1,
+                            "subagent_name": ["nested"],
+                            "subagent_tasks": [AGENT_THREAD_NESTED_TASK],
+                            "context_transfer_strategy": ["independent"],
+                        },
+                    )
+                ]
+            )
+        if _received_subagent_result(runtime):
+            return AssistantMessage(content="Direct Agent received the nested result.")
+        sleep(0.05)
+        return AssistantMessage(
+            tool_messages=[
+                ToolMessage(
+                    name="list_current_node_sub_thread",
+                    call_id=f"wait_nested_e2e_{runtime.run.model_turns}",
+                    arguments={},
+                )
+            ]
+        )
+
+
 class DeterministicCompactionClient:
     """Local fake model that exercises the real non-streaming LLM summary path."""
 
@@ -316,6 +405,34 @@ class CooperativePausePlanner(LLMPlanner):
 
     def decide(self, runtime):
         task = runtime.run.task.strip()
+        if task == AGENT_THREAD_NAV_TASK:
+            if runtime.run.model_turns == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="delegate_tasks",
+                            call_id="delegate_direct_e2e",
+                            arguments={
+                                "subagent_count": 1,
+                                "subagent_name": ["direct"],
+                                "subagent_tasks": [AGENT_THREAD_DIRECT_TASK],
+                                "context_transfer_strategy": ["independent"],
+                            },
+                        )
+                    ]
+                )
+            if _received_subagent_result(runtime):
+                return AssistantMessage(content="Agent Thread tree is ready.")
+            sleep(0.05)
+            return AssistantMessage(
+                tool_messages=[
+                    ToolMessage(
+                        name="list_current_node_sub_thread",
+                        call_id=f"wait_direct_e2e_{runtime.run.model_turns}",
+                        arguments={},
+                    )
+                ]
+            )
         if "trace audit e2e" in task:
             return self._trace_planner.decide(runtime)
         if runtime.run.mode == "plan" and task == PLAN_REVIEW_TASK:
@@ -479,6 +596,10 @@ def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
         resolved_workspace,
         planner_name="rule",
         paths=state.paths,
+        job_registry=state.job_registry,
+        sandbox_session_id=session_id,
+        agent_thread_index=state.agent_thread_index,
+        subagent_coordinator=state.subagent_coordinator,
     )
     application.runner.planner = CooperativePausePlanner()
 
@@ -509,8 +630,19 @@ def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
             Tool("slow_tool", "Run one deterministic slow tool.", slow_tool),
             Tool("forbidden_tool", "Must be skipped after steering.", lambda: "Forbidden tool executed."),
             *todo_tools(),
+            *delegation_tools(),
             trace_mcp_tool,
         ]
+    )
+    state.subagent_coordinator.bind_session(
+        session_id,
+        lambda: AgentRunner(
+            AgentThreadE2EPlanner(),
+            ToolRegistry(list(delegation_tools())),
+            workspace_root=str(resolved_workspace),
+            job_registry=state.job_registry,
+        ),
+        resolved_workspace,
     )
     return application
 

@@ -156,6 +156,17 @@
   box-shadow: 0 0 0 1px rgba(79, 107, 255, 0.28);
 }
 
+.message.user.is-pending .user-bubble {
+  opacity: 0.72;
+}
+
+.agent-message-pending {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .message-edit {
   width: min(560px, calc(100vw - 40px));
   max-width: 100%;

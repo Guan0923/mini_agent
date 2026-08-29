@@ -182,6 +182,148 @@ test("Trace audit lists two real Turns oldest first and loads them independently
   expect(trace.items.filter((entry) => entry.item.type === "tool_result")).toHaveLength(1);
 });
 
+test("Agent Thread tree streams an idle nested Agent message and keeps Chat and Trace aligned", async ({ page }) => {
+  const resetResponse = await page.request.post("/api/test/trace-model-reset");
+  expect(resetResponse.ok(), `${resetResponse.status()} ${await resetResponse.text()}`).toBeTruthy();
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Agent Thread Navigation" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string; thread_id: string };
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Agent Thread Navigation", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("agent thread navigation e2e");
+  const rootTurnResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await rootTurnResponse).ok()).toBeTruthy();
+  await expect(page.locator(".message.assistant").last()).toContainText("Agent Thread tree is ready.", {
+    timeout: 15_000,
+  });
+
+  await page.getByRole("button", { name: "Thread", exact: true }).click();
+  let tree = page.getByRole("tree", { name: "Agent Thread 树" });
+  const rootItem = tree.getByText("root", { exact: true }).locator("xpath=ancestor::*[@role='treeitem'][1]");
+  const rootChildrenResponse = page.waitForResponse((response) =>
+    response.url().includes(`/api/agent-threads/${encodeURIComponent(sidebar.thread_id)}/children`),
+  );
+  await rootItem.locator(".ant-tree-switcher").click();
+  const rootChildren = await rootChildrenResponse;
+  expect(rootChildren.ok(), `${rootChildren.status()} ${await rootChildren.text()}`).toBeTruthy();
+  const directSummary = (await rootChildren.json() as Array<{ thread_id: string }>)[0];
+  expect(directSummary?.thread_id).toBeTruthy();
+  const directLabel = tree.getByText("direct · opening", { exact: true });
+  await expect(directLabel).toBeVisible();
+  await expect(tree.getByText("nested · opening", { exact: true })).toHaveCount(0);
+  const directItem = directLabel.locator("xpath=ancestor::*[@role='treeitem'][1]");
+  const directChildrenResponse = page.waitForResponse((response) =>
+    response.url().includes(`/api/agent-threads/${encodeURIComponent(directSummary.thread_id)}/children`),
+  );
+  await directItem.locator(".ant-tree-switcher").click();
+  const directChildren = await directChildrenResponse;
+  expect(directChildren.ok(), `${directChildren.status()} ${await directChildren.text()}`).toBeTruthy();
+  const nestedSummary = (await directChildren.json() as Array<{ thread_id: string }>)[0];
+  expect(nestedSummary?.thread_id).toBeTruthy();
+  await tree.getByText("nested · opening", { exact: true }).click();
+
+  const nestedThreadId = nestedSummary.thread_id;
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(nestedThreadId);
+  await expect(page.locator(".message.assistant").last()).toContainText(
+    "Agent Thread response from local HTTP.", { timeout: 15_000 },
+  );
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "暂停", exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Thread", exact: true }).click();
+  tree = page.getByRole("tree", { name: "Agent Thread 树" });
+  await tree.getByText("root", { exact: true }).click();
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(sidebar.thread_id);
+
+  let releaseStream: (() => void) | undefined;
+  const streamGate = new Promise<void>((resolve) => { releaseStream = resolve; });
+  const streamPattern = `**/api/agent-threads/${nestedThreadId}/stream*`;
+  await page.route(streamPattern, async (route) => {
+    await streamGate;
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Thread", exact: true }).click();
+  tree = page.getByRole("tree", { name: "Agent Thread 树" });
+  await tree.getByText("root", { exact: true }).locator("xpath=ancestor::*[@role='treeitem'][1]")
+    .locator(".ant-tree-switcher").click();
+  const reloadedDirect = tree.getByText("direct · opening", { exact: true });
+  await reloadedDirect.locator("xpath=ancestor::*[@role='treeitem'][1]").locator(".ant-tree-switcher").click();
+  const blockedStreamRequest = page.waitForRequest((request) => request.url().includes(
+    `/api/agent-threads/${nestedThreadId}/stream`,
+  ));
+  await tree.getByText("nested · opening", { exact: true }).click();
+  await blockedStreamRequest;
+
+  const uploadResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().includes(`/api/sessions/${sidebar.session_id}/files`),
+  );
+  await page.locator('input[type="file"]').setInputFiles("../README.md");
+  expect((await uploadResponse).ok()).toBeTruthy();
+  await expect(page.getByText("README.md", { exact: true })).toBeVisible();
+  const followUp = "idle nested Agent follow-up with upload";
+  await page.getByLabel("聊天输入").fill(followUp);
+  const messageRequest = page.waitForRequest((request) =>
+    request.method() === "POST" && request.url().includes(`/api/agent-threads/${nestedThreadId}/messages`),
+  );
+  const messageResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST"
+      && response.url().includes(`/api/agent-threads/${nestedThreadId}/messages`),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  const postedMessage = (await messageRequest).postDataJSON() as {
+    content: string;
+    references: Array<{ source: string; path: string }>;
+  };
+  expect(postedMessage.content).toBe(followUp);
+  expect(postedMessage.references).toHaveLength(1);
+  expect(postedMessage.references[0]).toMatchObject({ source: "upload" });
+  expect((await messageResponse).status()).toBe(202);
+  await expect(page.locator(".message.user.is-pending")).toContainText(followUp);
+  await expect(page.locator(".agent-message-pending")).toContainText("正在交给主 Agent 转发");
+  await expect(page.locator(".composer-uploads")).toHaveCount(0);
+
+  releaseStream?.();
+  await expect(page.locator(".message.user.is-pending")).toHaveCount(0, { timeout: 15_000 });
+  await page.unroute(streamPattern);
+  await expect(page.locator(".message.user").filter({ hasText: followUp })).toHaveCount(1);
+  await expect(page.locator(".message.assistant").last()).toContainText(
+    "Agent Thread response from local HTTP.", { timeout: 15_000 },
+  );
+
+  const nestedTurns = (await fetchRuntimeNodes(page, sidebar.session_id))
+    .filter(isRuntimeTurnResponse)
+    .filter((node) => node.thread_id === nestedThreadId)
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
+  expect(nestedTurns).toHaveLength(2);
+  const latestUser = nestedTurns[1].data[nestedTurns[1].current_data_idx]
+    .find((message) => message.role === "user");
+  expect(latestUser?.content[0].references).toEqual(postedMessage.references);
+
+  await page.getByRole("button", { name: "Trace", exact: true }).click();
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(nestedThreadId);
+  await expect(page.locator(".trace-turn-collapse > .ant-collapse-item")).toHaveCount(2);
+  const userTrace = page.getByText("User Message", { exact: true }).last().locator(
+    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' ant-collapse-item ')][1]",
+  );
+  await userTrace.locator(".ant-collapse-header").click();
+  await expect(userTrace.locator(".trace-value")).toContainText(followUp);
+  const assistantTrace = page.getByText("Assistant Response", { exact: true }).last().locator(
+    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' ant-collapse-item ')][1]",
+  );
+  await assistantTrace.locator(".ant-collapse-header").click();
+  await expect(assistantTrace.locator(".trace-value")).toContainText("Agent Thread response from local HTTP.");
+
+  const modelCalls = await page.request.get("/api/test/trace-model-calls");
+  expect(modelCalls.ok()).toBeTruthy();
+  expect((await modelCalls.json() as { calls: number }).calls).toBeGreaterThanOrEqual(2);
+});
+
 test("chat stays bottom-anchored and exposes a centered translucent return button only while reading above", async ({ page }) => {
   const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Playwright Scroll Anchor" } });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();
@@ -248,7 +390,8 @@ test("first main Turn receives a dedicated model-generated title", async ({ page
 
   await page.goto("/app");
   await page.getByRole("button", { name: "新对话", exact: true }).click();
-  await expect(page.getByRole("navigation", { name: "主内容视图" })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "主内容视图" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Thread", exact: true })).toBeVisible();
   await expect(page.getByLabel("聊天输入")).toBeVisible();
   await send(page, "请生成这个对话的模型标题");
 

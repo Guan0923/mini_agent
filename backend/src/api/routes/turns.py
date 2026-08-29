@@ -583,6 +583,8 @@ def patch_turn_config(turn_id: str, body: TurnConfigPatch, request: Request) -> 
     try:
         updated = bridge.apply_runtime_config(changes) if bridge is not None else None
         if updated is None:
+            updated = state.subagent_coordinator.apply_runtime_config(node.session_id, node.thread_id, changes)
+        if updated is None:
             writer_node = node.clone()
             for key, value in changes.items():
                 setattr(writer_node, key, value)

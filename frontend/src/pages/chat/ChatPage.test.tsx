@@ -1,12 +1,20 @@
 import { App as AntApp, Modal } from "antd";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { projectTurnPath } from "../../app/runtime/runtimeDetailProjection";
 import { TURN_PROTOCOL_VERSION } from "../../app/runtime/runtimeNodeNormalization";
 import type { QueuedMessage } from "../../app/types";
-import { compactTurn, patchRuntimeConfig, steerTurn } from "../../api";
+import {
+  compactTurn,
+  getSessionNodes,
+  listAgentThreadChildren,
+  patchRuntimeConfig,
+  sendAgentThreadMessage,
+  steerTurn,
+  streamAgentThread,
+} from "../../api";
 import type {
   ChatMessage,
   ChatMode,
@@ -22,8 +30,12 @@ import ChatPage, { CHAT_COMPACT_WIDTH, composerAction } from "./ChatPage";
 vi.mock("../../api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../api")>(),
   compactTurn: vi.fn(),
+  getSessionNodes: vi.fn(),
+  listAgentThreadChildren: vi.fn(),
   patchRuntimeConfig: vi.fn(),
+  sendAgentThreadMessage: vi.fn(),
   steerTurn: vi.fn().mockResolvedValue(undefined),
+  streamAgentThread: vi.fn(),
 }));
 
 function turn(id: string, userText: string, parent?: RuntimeStateNode): RuntimeStateNode {
@@ -103,6 +115,48 @@ function Harness({
       <output data-testid="runtime-node-ids">{conversation.runtimeNodes?.map((node) => node.id).join(",")}</output>
       <output data-testid="active-turn-id">{conversation.activeTurnId}</output>
       <output data-testid="visible-message-text">{conversation.messages.map((message) => message.content).join("|")}</output>
+    </AntApp>
+  );
+}
+
+function SubagentHarness({ onRun = vi.fn() }: { onRun?: ReturnType<typeof vi.fn> }) {
+  const root = turn("turn-root-agent", "root task");
+  root.status = "running";
+  const child = {
+    ...turn("turn-child-agent", "child task", root),
+    thread_id: "thread-child-agent",
+    parent_thread_id: root.thread_id,
+    status: "running" as const,
+  };
+  const [conversation, setConversation] = useState<Conversation>({
+    id: "session-rewind",
+    sessionId: "session-rewind",
+    threadId: "session-rewind",
+    title: "Agent Threads",
+    runtimeNodes: [root, child],
+    activeTurnId: root.id,
+    lastNodeId: root.id,
+    messagesLoaded: true,
+    messages: projectTurnPath(
+      new Map([[`${root.session_id}:${root.id}`, root]]),
+      root.id,
+    ),
+  });
+  return (
+    <AntApp>
+      <ChatPage
+        conversation={conversation}
+        agentThreadNavigation
+        running
+        onUpdate={(_id, updater) => setConversation((current) => updater(current))}
+        onNew={async () => conversation.id}
+        onNavigate={() => undefined}
+        onRun={async (request) => { onRun(request); }}
+        onRewind={vi.fn()}
+        onFork={vi.fn()}
+      />
+      <output data-testid="subagent-canonical-thread">{conversation.threadId}</output>
+      <output data-testid="subagent-canonical-active">{conversation.activeTurnId}</output>
     </AntApp>
   );
 }
@@ -1104,6 +1158,103 @@ describe("ChatPage Trace navigation", () => {
       window.ResizeObserver = originalResizeObserver;
       vi.mocked(patchRuntimeConfig).mockReset();
     }
+  });
+});
+
+describe("ChatPage Agent Thread navigation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getSessionNodes).mockResolvedValue([]);
+    vi.mocked(listAgentThreadChildren).mockImplementation(async (_sessionId, threadId) => (
+      threadId === "session-rewind"
+        ? [{
+            thread_id: "thread-child-agent",
+            thread_path: "/root/worker",
+            thread_task: "child task",
+            thread_status: "opening",
+          }]
+        : []
+    ));
+    vi.mocked(streamAgentThread).mockImplementation((_sessionId, _threadId, onEvent, signal) => {
+      onEvent({ type: "thread.ready", session_id: "session-rewind", thread_id: "thread-child-agent" });
+      return new Promise<"aborted">((resolve) => {
+        signal.addEventListener("abort", () => resolve("aborted"), { once: true });
+      });
+    });
+    vi.mocked(sendAgentThreadMessage).mockResolvedValue({
+      delivery_id: "delivery-child",
+      accepted: true,
+      target_state: "running",
+      turn_id: "turn-child-agent",
+    });
+  });
+
+  async function selectChild(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: "Thread" }));
+    const tree = await screen.findByRole("tree", { name: "Agent Thread 树" });
+    const root = within(tree).getByText("root").closest('[role="treeitem"]')!;
+    fireEvent.click(root.querySelector(".ant-tree-switcher")!);
+    await user.click(await within(tree).findByText("worker · opening"));
+    await waitFor(() => expect(streamAgentThread).toHaveBeenCalledTimes(1));
+  }
+
+  it("keeps Chat, Trace, and the send-only Composer on the selected Subagent", async () => {
+    const user = userEvent.setup();
+    const onRun = vi.fn();
+    render(<SubagentHarness onRun={onRun} />);
+    expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument();
+
+    await selectChild(user);
+    expect(screen.getByTitle("thread-child-agent")).toBeInTheDocument();
+    expect(screen.getByText("child task")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "暂停" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("subagent-canonical-thread")).toHaveTextContent("session-rewind");
+    expect(screen.getByTestId("subagent-canonical-active")).toHaveTextContent("turn-root-agent");
+
+    await user.click(screen.getByRole("button", { name: "Trace" }));
+    expect(screen.getByTitle("thread-child-agent")).toBeInTheDocument();
+    expect(screen.queryByLabelText("聊天输入")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Chat" }));
+
+    await user.type(screen.getByLabelText("聊天输入"), "follow up");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(sendAgentThreadMessage).toHaveBeenCalledWith(
+      "thread-child-agent",
+      expect.objectContaining({
+        sessionId: "session-rewind",
+        content: "follow up",
+      }),
+    ));
+    expect(onRun).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Thread" }));
+    await user.click(await screen.findByText("root"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "暂停" })).toBeInTheDocument());
+  });
+
+  it("restores the Subagent draft and displays the API failure", async () => {
+    vi.mocked(sendAgentThreadMessage).mockRejectedValueOnce(new Error("redis offline"));
+    const user = userEvent.setup();
+    render(<SubagentHarness />);
+    await selectChild(user);
+
+    const composer = screen.getByLabelText("聊天输入");
+    await user.type(composer, "keep this draft");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("Agent 消息发送失败：redis offline")).toBeInTheDocument();
+    expect(composer).toHaveTextContent("keep this draft");
+  });
+
+  it("keeps the non-navigation Thread control from loading the Agent tree", async () => {
+    const user = userEvent.setup();
+    render(<Harness onRun={vi.fn()} onRewind={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Thread" }));
+    expect(screen.queryByRole("tree", { name: "Agent Thread 树" })).not.toBeInTheDocument();
+    expect(listAgentThreadChildren).not.toHaveBeenCalled();
   });
 });
 
