@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from backend.domain import AssistantMessage, SkillSnapshot, SystemMessage, UserMessage
@@ -126,6 +128,27 @@ def test_empty_user_agent_preferences_are_not_injected() -> None:
 
     system = client.message_requests[0][0]
     assert "User Agent Preferences" not in (system.content or "")
+
+
+def test_model_context_includes_session_and_project_workspace_paths(tmp_path: Path) -> None:
+    client = RecordingClient()
+    planner = LLMPlanner(client, [], [])
+    session_workspace = (tmp_path / "session").resolve()
+    project_workspace = (tmp_path / "project").resolve()
+    runtime = AgentRunner(
+        planner,
+        ToolRegistry(),
+        workspace_root=str(session_workspace),
+        project_cwd=str(project_workspace),
+    ).new_runtime(task="Inspect both workspaces")
+
+    planner.decide(runtime)
+
+    system = client.message_requests[0][0]
+    content = system.content or ""
+    assert f"- cwd: {session_workspace}" in content
+    assert f"- project_cwd: {project_workspace}" in content
+    assert "Omitting glob.path or grep.path searches both available workspaces." in content
 
 
 def test_title_request_uses_only_its_dedicated_system_prompt_and_first_user_text() -> None:

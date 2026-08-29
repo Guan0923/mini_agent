@@ -48,6 +48,7 @@ class RuntimeState:
 
     session_id: str
     workspace_root: str | None = None
+    project_cwd: str | None = None
     timezone: str = DEFAULT_TIME_ZONE
     messages: list[ChatMessage] = field(default_factory=list)
     provider: str = "unknown"
@@ -74,6 +75,7 @@ class RuntimeState:
         return {
             "session_id": self.session_id,
             "workspace_root": self.workspace_root,
+            "project_cwd": self.project_cwd,
             "timezone": self.timezone,
             "messages": [message_to_dict(message) for message in self.messages],
             "provider": self.provider,
@@ -134,6 +136,7 @@ class RuntimeState:
         return cls(
             session_id=str(data["session_id"]),
             workspace_root=(str(data["workspace_root"]) if data.get("workspace_root") is not None else None),
+            project_cwd=(str(data["project_cwd"]) if data.get("project_cwd") is not None else None),
             timezone=str(data.get("timezone") or DEFAULT_TIME_ZONE),
             messages=messages_from_dicts([dict(item) for item in data.get("messages", [])]),
             provider=(

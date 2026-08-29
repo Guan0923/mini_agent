@@ -47,6 +47,7 @@ class RunProvenance:
     attempt: int = 1
     trigger: RunTrigger = "embedding"
     workspace_root: str | None = None
+    project_cwd: str | None = None
     source_session_id: str | None = None
     source_run_id: str | None = None
 

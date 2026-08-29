@@ -11,7 +11,7 @@ from .writing import FileWriteMixin
 
 
 class WorkspaceFiles(FileReadMixin, FileWriteMixin, WorkspacePathMixin, FileIOMixin):
-    """Perform deterministic text-file operations inside one workspace."""
+    """Perform deterministic text-file operations inside approved workspaces."""
 
     _MAX_READ_LINES = 1_000
     _MAX_OUTPUT_CHARS = 20_000
@@ -35,6 +35,18 @@ class WorkspaceFiles(FileReadMixin, FileWriteMixin, WorkspacePathMixin, FileIOMi
         "venv",
     }
 
-    def __init__(self, workspace: Path, *, read_file_roots: tuple[Path, ...] = ()) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        project_workspace: Path | None = None,
+        read_file_roots: tuple[Path, ...] = (),
+    ) -> None:
         self.workspace = workspace.resolve()
+        roots = [self.workspace]
+        if project_workspace is not None:
+            project_root = project_workspace.resolve()
+            if project_root not in roots:
+                roots.append(project_root)
+        self.workspaces = tuple(roots)
         self.read_file_roots = tuple(root.resolve() for root in read_file_roots)

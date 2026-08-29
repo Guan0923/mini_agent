@@ -50,7 +50,7 @@ def test_permission_modes_use_only_the_three_level_contract(tmp_path: Path) -> N
     assert normalize_permission_mode(None) is PermissionMode.READ_ONLY
     assert PermissionMode is FileAccessMode
     assert SandboxLimits is ResourceLimits
-    assert SandboxJobContext("user-1", SandboxPolicy(tmp_path, "session", "job")).job_kind == "command"
+    assert SandboxJobContext("user-1", SandboxPolicy((tmp_path,), "session", "job")).job_kind == "command"
 
 
 def test_limits_validate_hard_bounds() -> None:
@@ -63,7 +63,7 @@ def test_limits_validate_hard_bounds() -> None:
 def test_full_access_file_mode_is_independent_from_network_mode(tmp_path: Path, network_mode: NetworkMode) -> None:
     allowlist = (NetworkRule("example.test"),) if network_mode is NetworkMode.RESTRICTED_NETWORK else ()
     policy = SandboxPolicy(
-        tmp_path,
+        (tmp_path,),
         "session",
         "job",
         network_mode=network_mode,
@@ -454,7 +454,7 @@ def test_resource_monitor_fails_closed_when_sampling_breaks() -> None:
 
 
 def test_policy_environment_does_not_inherit_profile_locations(tmp_path: Path) -> None:
-    policy = SandboxPolicy(tmp_path, "session", "job")
+    policy = SandboxPolicy((tmp_path,), "session", "job")
     environment = policy.environment(
         {
             "PATH": "C:\\Windows",
@@ -487,7 +487,7 @@ def test_sandbox_admission_times_out_and_releases() -> None:
 
 
 def test_windows_launcher_fails_closed_without_broker(tmp_path: Path) -> None:
-    policy = SandboxPolicy(tmp_path, "session", "job")
+    policy = SandboxPolicy((tmp_path,), "session", "job")
     launcher = SandboxLauncher(is_windows=True)
     with pytest.raises(SandboxInitializationError):
         launcher.launch(["cmd.exe", "/c", "echo ok"], policy)
@@ -511,7 +511,7 @@ def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> No
             return True
 
     broker = Broker()
-    policy = SandboxPolicy(tmp_path, "session", "job")
+    policy = SandboxPolicy((tmp_path,), "session", "job")
     temp_dir = tmp_path / "scratch" / "job"
     temp_dir.mkdir(parents=True)
     broker.temp_dir = temp_dir
@@ -530,7 +530,7 @@ def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> No
         "S-1-5-5-1-2",
         "S-1-5-21-1-2-3-1001",
         "S-1-5-80-1-2-3-4-5",
-        str(tmp_path),
+        (str(tmp_path),),
         str(temp_dir),
         "read_only",
         "S-1-5-21-10-20-30-40",

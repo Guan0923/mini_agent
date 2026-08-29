@@ -29,6 +29,7 @@ _TURN_CONFIG_FIELDS = frozenset(
         "running_mode",
         "usage",
         "cwd",
+        "project_cwd",
         "timestamp",
         "status",
         "current_data_idx",

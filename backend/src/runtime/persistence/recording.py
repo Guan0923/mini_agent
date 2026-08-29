@@ -45,6 +45,7 @@ _IDENTIFIER_KEYS = frozenset(
         "workflow_attempt",
         "workflow_trigger",
         "workspace_root",
+        "project_cwd",
         "source_session_id",
         "source_run_id",
         "session_id",

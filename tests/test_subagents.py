@@ -73,7 +73,7 @@ def test_persistent_subagent_tool_contract_exposes_only_the_read_query_in_plan_m
         )
 
 
-def test_locked_executor_serializes_same_path_writes() -> None:
+def test_locked_executor_serializes_same_path_writes(tmp_path: Path) -> None:
     active = 0
     maximum = 0
     guard = Lock()
@@ -89,9 +89,11 @@ def test_locked_executor_serializes_same_path_writes() -> None:
                 active -= 1
             return "written"
 
-    executor = LockedToolExecutor(Tools(), WorkspaceWriteLock())
+    executor = LockedToolExecutor(Tools(), WorkspaceWriteLock(), tmp_path)
     with ThreadPoolExecutor(max_workers=2) as workers:
-        futures = [workers.submit(executor.invoke, "write_file", {"path": "same.txt"}, True) for _ in range(2)]
+        futures = [
+            workers.submit(executor.invoke, "write_file", {"path": str(tmp_path / "same.txt")}, True) for _ in range(2)
+        ]
         assert [future.result() for future in futures] == ["written", "written"]
     assert maximum == 1
 
@@ -104,18 +106,18 @@ def test_locked_executor_allows_writes_with_a_shared_missing_parent(tmp_path: Pa
             workers.submit(
                 executor.invoke,
                 "write_file",
-                {"path": f"shared/{name}.txt", "content": name},
+                {"path": str(tmp_path / "shared" / f"{name}.txt"), "content": name},
                 True,
             )
             for name in ("one", "two")
         ]
-        assert all("Created shared/" in future.result() for future in futures)
+        assert all("Created " in future.result() for future in futures)
 
     assert (tmp_path / "shared" / "one.txt").read_text(encoding="utf-8") == "one"
     assert (tmp_path / "shared" / "two.txt").read_text(encoding="utf-8") == "two"
 
 
-def test_explicit_create_directory_excludes_other_workspace_writes() -> None:
+def test_explicit_create_directory_excludes_other_workspace_writes(tmp_path: Path) -> None:
     active = 0
     maximum = 0
     guard = Lock()
@@ -131,11 +133,11 @@ def test_explicit_create_directory_excludes_other_workspace_writes() -> None:
                 active -= 1
             return "done"
 
-    executor = LockedToolExecutor(Tools(), WorkspaceWriteLock())
+    executor = LockedToolExecutor(Tools(), WorkspaceWriteLock(), tmp_path)
     with ThreadPoolExecutor(max_workers=2) as workers:
         futures = [
-            workers.submit(executor.invoke, "create_directory", {"path": "shared"}, True),
-            workers.submit(executor.invoke, "write_file", {"path": "other.txt"}, True),
+            workers.submit(executor.invoke, "create_directory", {"path": str(tmp_path / "shared")}, True),
+            workers.submit(executor.invoke, "write_file", {"path": str(tmp_path / "other.txt")}, True),
         ]
         assert [future.result() for future in futures] == ["done", "done"]
     assert maximum == 1

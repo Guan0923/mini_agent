@@ -375,7 +375,7 @@ def test_root_and_turn_shapes_are_strict() -> None:
         RuntimeRootState.from_dict({**root.to_dict(), "status": "success"})
 
     turn = make_turn(parent=root)
-    assert turn.version == APP_VERSION == "0.0.1"
+    assert turn.version == APP_VERSION == "0.0.2"
     assert turn.parent_id == root.id
     assert turn.parent_session_id == turn.parent_thread_id == root.session_id
     assert turn.compaction_id == turn.id
@@ -398,6 +398,43 @@ def test_root_and_turn_shapes_are_strict() -> None:
     )
     with pytest.raises(RuntimeStateValidationError, match="Item status"):
         RuntimeState.from_dict(legacy_tool_status)
+
+
+def test_turn_workspace_paths_round_trip_persist_fork_and_compact(tmp_path: Path) -> None:
+    session_workspace = (tmp_path / "session-workspace").resolve()
+    project_workspace = (tmp_path / "project-workspace").resolve()
+    session_workspace.mkdir()
+    project_workspace.mkdir()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
+    session = store.create_session("workspace paths")
+    root = store.ensure_root_node(session.session_id, id="turn_workspace_root")
+    turn = RuntimeState.create(
+        session_id=session.session_id,
+        thread_id=session.session_id,
+        id="turn_workspace",
+        parent=root,
+        user_content="hello",
+        cwd=str(session_workspace),
+        project_cwd=str(project_workspace),
+    )
+
+    restored = RuntimeState.from_dict(turn.to_dict())
+    store.create_node(turn)
+    persisted = store.find_node(turn.id)
+    assert isinstance(persisted, RuntimeState)
+    assert (persisted.cwd, persisted.project_cwd) == (str(session_workspace), str(project_workspace))
+
+    tree = RuntimeStateTree([root, turn])
+    forked = tree.fork(turn, id="turn_workspace_fork", thread_id="thread_workspace_fork")
+    compacted = tree.compact(turn, "summary", id="turn_workspace_compact")
+    assert (restored.cwd, restored.project_cwd) == (str(session_workspace), str(project_workspace))
+    assert (forked.cwd, forked.project_cwd) == (str(session_workspace), str(project_workspace))
+    assert (compacted.cwd, compacted.project_cwd) == (str(session_workspace), str(project_workspace))
+
+    invalid = turn.to_dict()
+    invalid["project_cwd"] = "relative/project"
+    with pytest.raises(RuntimeStateValidationError, match="project_cwd must be an absolute path"):
+        RuntimeState.from_dict(invalid)
 
 
 def test_writer_emits_one_baseline_then_exact_incremental_operations() -> None:
@@ -1479,7 +1516,6 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
             return AgentApplication(
                 AgentRunner(LLMPlanner(llm_client, [], []), ToolRegistry(state.session_workspace(source.session_id))),
                 session_store(state),
-                None,
             )
 
         monkeypatch.setattr(turn_routes, "build_local_application", compact_application)
@@ -1513,7 +1549,6 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
                     ToolRegistry(state.session_workspace(source.session_id)),
                 ),
                 session_store(state),
-                None,
             )
 
         monkeypatch.setattr(turn_routes, "build_local_application", failing_application)

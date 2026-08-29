@@ -25,7 +25,6 @@ from backend.tools import ToolExecutor, WorkspaceFiles, build_tool_registry, del
 from backend.tools.terminal import effective_terminal_type
 
 from ..capability_settings import SkillSettings, SubagentSettings
-from ..conversation.references import FileReferenceExpander
 from ..core.config import RunnerSettings, log_full_messages_from_toml
 from ..execution.runner import AgentRunner
 from ..subagents import SubagentCoordinator
@@ -57,7 +56,7 @@ def build_application(
     session_provisioner: object | None = None,
     session_provisioner_cleanup: object | None = None,
     project_id: str | None = None,
-    upload_root: Path | None = None,
+    project_cwd: Path | None = None,
     job_registry: JobRegistry | None = None,
     job_parent_id: str | None = None,
     sandbox_session_id: str | None = None,
@@ -77,8 +76,7 @@ def build_application(
     store = SQLiteSessionStore(resolved_paths, agent_thread_index)
     skill_settings = SkillSettings.from_config(config)
     read_file_roots = (resolved_paths.skills_dir,) if skill_settings.enabled else ()
-    files = WorkspaceFiles(workspace, read_file_roots=read_file_roots)
-    upload_files = WorkspaceFiles(upload_root) if upload_root is not None else None
+    files = WorkspaceFiles(workspace, project_workspace=project_cwd, read_file_roots=read_file_roots)
     runner_args = (
         workspace,
         planner_name,
@@ -88,12 +86,12 @@ def build_application(
         files,
         resolved_paths,
         user_preferences,
-        upload_files,
     )
     if model_config is None:
         runner = _build_subagent_runner(
             *runner_args,
             **({"project_id": project_id} if project_id else {}),
+            **({"project_cwd": project_cwd} if project_cwd is not None else {}),
             **({"job_registry": job_registry} if job_registry is not None else {}),
             **({"job_parent_id": job_parent_id} if job_parent_id is not None else {}),
             **({"sandbox_session_id": sandbox_session_id} if sandbox_session_id is not None else {}),
@@ -104,6 +102,7 @@ def build_application(
             *runner_args,
             model_config=model_config,
             **({"project_id": project_id} if project_id else {}),
+            **({"project_cwd": project_cwd} if project_cwd is not None else {}),
             **({"job_registry": job_registry} if job_registry is not None else {}),
             **({"job_parent_id": job_parent_id} if job_parent_id is not None else {}),
             **({"sandbox_session_id": sandbox_session_id} if sandbox_session_id is not None else {}),
@@ -112,7 +111,6 @@ def build_application(
     return AgentApplication(
         runner,
         store,
-        FileReferenceExpander(files),
         default_timezone,
         session_provisioner,
         session_provisioner_cleanup,
@@ -149,10 +147,10 @@ def _build_subagent_runner(
     files: WorkspaceFiles | None = None,
     paths: ClientPaths | None = None,
     user_preferences: str = "",
-    upload_files: WorkspaceFiles | None = None,
     *,
     model_config: ModelConfig | None = None,
     project_id: str | None = None,
+    project_cwd: Path | None = None,
     job_registry: JobRegistry | None = None,
     job_parent_id: str | None = None,
     terminal_type: str | None = None,
@@ -165,7 +163,11 @@ def _build_subagent_runner(
     subagent_settings = SubagentSettings.from_config(config)
     sandbox_launcher, sandbox_config = _sandbox_runtime(config, paths=resolved_paths)
     read_file_roots = (resolved_paths.skills_dir,) if skill_settings.enabled else ()
-    workspace_files = files or WorkspaceFiles(workspace, read_file_roots=read_file_roots)
+    workspace_files = files or WorkspaceFiles(
+        workspace,
+        project_workspace=project_cwd,
+        read_file_roots=read_file_roots,
+    )
 
     coordinator = subagent_coordinator or SubagentCoordinator(
         settings=subagent_settings,
@@ -180,8 +182,12 @@ def _build_subagent_runner(
             settings,
             build_tool_registry(
                 workspace,
-                workspace_files=WorkspaceFiles(workspace, read_file_roots=read_file_roots),
-                upload_files=upload_files,
+                workspace_files=WorkspaceFiles(
+                    workspace,
+                    project_workspace=project_cwd,
+                    read_file_roots=read_file_roots,
+                ),
+                project_workspace=project_cwd,
                 terminal_type=terminal_type,
                 sandbox_config=sandbox_config,
                 extra_tools=delegation_tools(subagent_settings.max_tasks_per_batch),
@@ -193,6 +199,7 @@ def _build_subagent_runner(
             user_preferences=user_preferences,
             model_config=model_config,
             project_id=project_id,
+            project_cwd=project_cwd,
             job_registry=job_registry,
             job_parent_id=job_parent_id,
             sandbox_launcher=sandbox_launcher,
@@ -212,7 +219,7 @@ def _build_subagent_runner(
         tools = build_tool_registry(
             workspace,
             workspace_files=workspace_files,
-            upload_files=upload_files,
+            project_workspace=project_cwd,
             terminal_type=terminal_type,
             sandbox_config=sandbox_config,
             extra_tools=(
@@ -233,13 +240,14 @@ def _build_subagent_runner(
             user_preferences=user_preferences,
             model_config=model_config,
             project_id=project_id,
+            project_cwd=project_cwd,
             job_registry=job_registry,
             job_parent_id=job_parent_id,
             sandbox_launcher=sandbox_launcher,
             sandbox_config=sandbox_config,
         )
         if sandbox_session_id is not None:
-            coordinator.bind_session(sandbox_session_id, child_factory, workspace)
+            coordinator.bind_session(sandbox_session_id, child_factory, workspace, project_cwd)
         return runner
     except Exception:
         external.close()
@@ -260,6 +268,7 @@ def _build_runner(
     user_preferences: str = "",
     model_config: ModelConfig | None = None,
     project_id: str | None = None,
+    project_cwd: Path | None = None,
     job_registry: JobRegistry | None = None,
     job_parent_id: str | None = None,
     sandbox_launcher: SandboxLauncher | None = None,
@@ -268,7 +277,7 @@ def _build_runner(
     skills = SkillCatalog.discover(global_root=paths.skills_dir) if skill_settings.enabled else SkillCatalog()
     project_skill_gate = (
         ProjectSkillGate(
-            workspace,
+            project_cwd or workspace,
             project_id,
             ProjectSkillTrustStore(LocalConfigStore(paths.config_file)),
         )
@@ -298,6 +307,7 @@ def _build_runner(
         skills_enabled=skill_settings.enabled,
         project_skill_gate=project_skill_gate,
         workspace_root=str(workspace.resolve()),
+        project_cwd=str(project_cwd.resolve()) if project_cwd is not None else None,
         subagents=subagents,
         resources=resources,
         job_registry=job_registry,

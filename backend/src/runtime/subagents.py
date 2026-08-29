@@ -46,6 +46,7 @@ class ChildRunner(Protocol):
 class _SessionBinding:
     runner_factory: Callable[[], ChildRunner]
     workspace: Path
+    project_workspace: Path | None = None
 
 
 class _CanonicalRuntimeStore:
@@ -112,9 +113,14 @@ class SubagentCoordinator:
         session_id: str,
         runner_factory: Callable[[], ChildRunner],
         workspace: Path,
+        project_workspace: Path | None = None,
     ) -> None:
         with self._state_lock:
-            self._bindings[session_id] = _SessionBinding(runner_factory, workspace.resolve())
+            self._bindings[session_id] = _SessionBinding(
+                runner_factory,
+                workspace.resolve(),
+                project_workspace.resolve() if project_workspace is not None else None,
+            )
         self.recover_session(session_id)
 
     @classmethod
@@ -186,6 +192,7 @@ class SubagentCoordinator:
         timestamp = utc_iso()
         permission_mode = source_turn.permission_mode or runtime.state.permission_mode
         workspace = source_turn.cwd or runtime.state.workspace_root or ""
+        project_workspace = source_turn.project_cwd or runtime.state.project_cwd or ""
         batch = []
         created = []
         from backend.storage.sqlite_agent_threads import AgentThreadCreate
@@ -205,6 +212,7 @@ class SubagentCoordinator:
                 permission_mode=permission_mode,
                 running_mode="agent",
                 cwd=workspace,
+                project_cwd=project_workspace,
             )
             runtime_thread = RuntimeThread(
                 runtime.state.session_id,
@@ -433,6 +441,7 @@ class SubagentCoordinator:
             permission_mode=parent.permission_mode,
             running_mode="agent",
             cwd=parent.cwd,
+            project_cwd=parent.project_cwd,
         )
         node.data[0][0]["delivery_id"] = envelope.delivery_id
         node = RuntimeState.from_dict(node.to_dict())
@@ -526,7 +535,12 @@ class SubagentCoordinator:
     ) -> None:
         runner = binding.runner_factory()
         runner.subagents = self
-        runner.tools = LockedToolExecutor(runner.tools, self._locks, binding.workspace)
+        runner.tools = LockedToolExecutor(
+            runner.tools,
+            self._locks,
+            binding.workspace,
+            binding.project_workspace,
+        )
         mailbox = None
         bridge = RuntimeEventNodeBridge(
             self._store,
@@ -538,6 +552,7 @@ class SubagentCoordinator:
             permission_mode=turn.permission_mode,
             running_mode="agent",
             cwd=turn.cwd,
+            project_cwd=turn.project_cwd,
             isolated_thread_context=True,
             emit=lambda _frame: None,
         )

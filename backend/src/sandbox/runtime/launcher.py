@@ -85,13 +85,14 @@ class SandboxLauncher:
             raise SandboxPolicyError("argv must contain non-empty strings")
         policy.validate(is_windows=self.is_windows or self.allow_local_backend)
         job_context = SandboxJobContext(user_id=user_id, policy=policy, job_kind="command")
-        ensure_disk_reserve(policy.workspace, required_bytes=policy.limits.disk_mib * 1024 * 1024)
+        for workspace in policy.workspaces:
+            ensure_disk_reserve(workspace, required_bytes=policy.limits.disk_mib * 1024 * 1024)
         if self.is_windows and self.broker is None and not self.allow_local_backend:
             raise SandboxInitializationError("Windows Sandbox Broker is not initialized")
-        launch_cwd_path = Path(cwd or policy.workspace).resolve(strict=True)
+        launch_cwd_path = Path(cwd or policy.workspaces[0]).resolve(strict=True)
         launch_cwd = str(launch_cwd_path)
-        if not _inside_workspace(launch_cwd_path, policy.workspace):
-            raise SandboxPolicyError("job cwd is outside the workspace")
+        if not _inside_any_workspace(launch_cwd_path, policy.workspaces):
+            raise SandboxPolicyError("job cwd is outside the workspaces")
         temp_dir = policy.create_temp_dir()
         env = policy.environment(self.environment if environment is None else environment, temp_dir=temp_dir)
         request = ResourceRequest(
@@ -139,7 +140,7 @@ class SandboxLauncher:
                 temp_cap_sid = str(capability_sids["temp"])
                 capability_digest = str(reservation["capability_digest"])
                 audit = self.path_auditor.scan(
-                    workspace=policy.workspace,
+                    workspaces=policy.workspaces,
                     temp_dir=temp_dir,
                     environment=self.environment,
                     account_sid=account_sid,
@@ -151,7 +152,7 @@ class SandboxLauncher:
                     logon_sid,
                     account_sid,
                     service_sid,
-                    str(policy.workspace),
+                    tuple(str(workspace) for workspace in policy.workspaces),
                     str(temp_dir),
                     policy.file_mode.value,
                     workspace_cap_sid,
@@ -179,16 +180,18 @@ class SandboxLauncher:
                             SandboxAuditFailure.PATH_UNPROTECTED,
                             risk_paths=(str(deny_path),),
                         )
-                self.acl_manager.grant_lease(policy.workspace, account_sid, policy.file_mode)
-                if policy.file_mode is FileAccessMode.WORKSPACE_WRITE:
-                    self.acl_manager.grant_capability_write(policy.workspace, workspace_cap_sid)
+                for workspace in policy.workspaces:
+                    self.acl_manager.grant_lease(workspace, account_sid, policy.file_mode)
+                    if policy.file_mode is FileAccessMode.WORKSPACE_WRITE:
+                        self.acl_manager.grant_capability_write(workspace, workspace_cap_sid)
                 self.acl_manager.grant_lease(temp_dir, account_sid, FileAccessMode.WORKSPACE_WRITE)
                 if policy.file_mode is not FileAccessMode.FULL_ACCESS:
                     self.acl_manager.grant_capability_write(temp_dir, temp_cap_sid)
                 verify_audit_identities(self.acl_manager, audit.identities)
                 proxy = self._configure_proxy(policy, env)
                 with self._broker_launch_lock:
-                    self.acl_manager.grant_execute_lease(policy.workspace, service_sid)
+                    for workspace in policy.workspaces:
+                        self.acl_manager.grant_execute_lease(workspace, service_sid)
                     try:
                         process = self.broker.launch(
                             argv=list(argv),
@@ -200,7 +203,8 @@ class SandboxLauncher:
                             user_id=job_context.user_id,
                         )
                     finally:
-                        self.acl_manager.revoke_lease(policy.workspace, service_sid)
+                        for workspace in policy.workspaces:
+                            self.acl_manager.revoke_lease(workspace, service_sid)
             else:
                 process = subprocess.Popen(
                     list(argv),
@@ -329,9 +333,10 @@ class SandboxLauncher:
             self._recovered_instances.add(key)
 
 
-def _inside_workspace(candidate: Path, workspace: Path) -> bool:
+def _inside_any_workspace(candidate: Path, workspaces: tuple[Path, ...]) -> bool:
     try:
-        return candidate.resolve(strict=False).is_relative_to(workspace.resolve(strict=True))
+        resolved = candidate.resolve(strict=False)
+        return any(resolved.is_relative_to(workspace.resolve(strict=True)) for workspace in workspaces)
     except (OSError, RuntimeError):
         return False
 

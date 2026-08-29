@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from backend.domain.runtime_state import (
@@ -123,8 +125,14 @@ def test_runtime_bridge_appends_canonical_user_before_starting_the_next_assistan
     assert completed.data[0][-1]["content"] == [{"type": "text", "text": "new answer", "status": "success"}]
 
 
-def test_runtime_model_history_includes_every_same_turn_message_and_file_reference() -> None:
+def test_runtime_model_history_maps_structured_references_to_absolute_workspace_paths(tmp_path: Path) -> None:
     turn = make_running_turn()
+    session_workspace = tmp_path / "session"
+    project_workspace = tmp_path / "project"
+    (session_workspace / "uploads").mkdir(parents=True)
+    project_workspace.mkdir()
+    turn.cwd = str(session_workspace.resolve())
+    turn.project_cwd = str(project_workspace.resolve())
     turn.data[0][1]["content"] = [{"type": "text", "text": "first answer", "status": "success"}]
     turn.data[0].extend(
         [
@@ -136,7 +144,10 @@ def test_runtime_model_history_includes_every_same_turn_message_and_file_referen
                         "type": "text",
                         "text": "redirect",
                         "status": "success",
-                        "references": [{"source": "project", "path": "README.md"}],
+                        "references": [
+                            {"source": "project", "path": "README.md"},
+                            {"source": "upload", "path": "notes.txt"},
+                        ],
                     }
                 ],
             },
@@ -150,4 +161,17 @@ def test_runtime_model_history_includes_every_same_turn_message_and_file_referen
 
     history = _chat_messages_from_nodes([turn])
     assert [message.role for message in history] == ["user", "assistant", "user", "assistant"]
-    assert history[2].content == "redirect\n\nFile references:\n- @README.md (project)"
+    assert history[2].content == (
+        "redirect\n\nFile references:\n"
+        f"- @{(project_workspace / 'README.md').resolve().as_posix()} (project)\n"
+        f"- @{(session_workspace / 'uploads' / 'notes.txt').resolve().as_posix()} (upload)"
+    )
+
+
+def test_plain_text_at_path_is_not_expanded_before_model_projection() -> None:
+    turn = make_running_turn()
+    turn.data[0][0]["content"][0]["text"] = "Please inspect @secret.txt"
+
+    history = _chat_messages_from_nodes([RuntimeState.from_dict(turn.to_dict())])
+
+    assert history[0].content == "Please inspect @secret.txt"

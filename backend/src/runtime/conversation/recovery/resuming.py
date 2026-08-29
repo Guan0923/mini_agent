@@ -119,6 +119,12 @@ def resume_session(
         raise RuntimeError(
             f"Workflow belongs to workspace {state.workspace_root}; current workspace is {current_workspace}."
         )
+    current_project_cwd = getattr(conversation.runner, "project_cwd", None)
+    if (state.project_cwd or None) != (current_project_cwd or None):
+        raise RuntimeError(
+            f"Workflow belongs to project workspace {state.project_cwd or 'none'}; "
+            f"current project workspace is {current_project_cwd or 'none'}."
+        )
     run = state.current_run
     turn = None
     if run is not None and run.turn_id:

@@ -237,14 +237,7 @@ def test_external_tool_still_requires_approval_in_workspace_write(tool_name: str
     assert approvals[0].data["tool"] == tool_name
 
 
-@pytest.mark.parametrize(
-    ("tool_name", "arguments"),
-    [
-        ("create_directory", {"path": "created/nested"}),
-        ("write_file", {"path": "written.txt", "content": "created"}),
-        ("edit_file", {"path": "edited.txt", "old_text": "before", "new_text": "after"}),
-    ],
-)
+@pytest.mark.parametrize("tool_name", ["create_directory", "write_file", "edit_file"])
 @pytest.mark.parametrize(
     ("permission_mode", "expected_approvals"),
     [("read_only", 1), ("workspace_write", 0), ("full_access", 0)],
@@ -252,12 +245,27 @@ def test_external_tool_still_requires_approval_in_workspace_write(tool_name: str
 def test_workspace_file_mutation_approval_matrix_executes_real_handler(
     tmp_path: Path,
     tool_name: str,
-    arguments: dict[str, object],
     permission_mode: str,
     expected_approvals: int,
 ) -> None:
+    paths = {
+        "create_directory": tmp_path / "created" / "nested",
+        "write_file": tmp_path / "written.txt",
+        "edit_file": tmp_path / "edited.txt",
+    }
+    arguments: dict[str, object] = {"path": str(paths[tool_name])}
+    if tool_name == "write_file":
+        arguments["content"] = "created"
     if tool_name == "edit_file":
         (tmp_path / "edited.txt").write_text("before", encoding="utf-8")
+        arguments.update(
+            {
+                "start_line": 1,
+                "end_line": 1,
+                "expected_lines": ["before"],
+                "replacement_lines": ["after"],
+            }
+        )
 
     class FileToolPlanner:
         def __init__(self) -> None:
@@ -416,7 +424,7 @@ def test_real_sandbox_command_timeout_cleans_process_resources(tmp_path: Path) -
     launcher = SandboxLauncher(is_windows=os.name == "nt", allow_local_backend=True, environment=os.environ)
     decision = SandboxExecutionDecision(
         launcher=launcher,
-        workspace=tmp_path,
+        workspaces=(tmp_path,),
         session_id="session-timeout",
         user_id="local",
         file_mode=PermissionMode.READ_ONLY,
@@ -435,4 +443,32 @@ def test_real_sandbox_command_timeout_cleans_process_resources(tmp_path: Path) -
             timeout_seconds=1,
         )
 
+    assert launcher._temp_dirs == {}
+
+
+def test_real_local_sandbox_command_starts_from_project_workspace(tmp_path: Path) -> None:
+    session_workspace = tmp_path / "session"
+    project_workspace = tmp_path / "project"
+    session_workspace.mkdir()
+    project_workspace.mkdir()
+    launcher = SandboxLauncher(is_windows=os.name == "nt", allow_local_backend=True, environment=os.environ)
+    decision = SandboxExecutionDecision(
+        launcher=launcher,
+        workspaces=(session_workspace, project_workspace),
+        session_id="session-project-cwd",
+        user_id="local",
+        file_mode=PermissionMode.READ_ONLY,
+        network_mode=NetworkMode.NO_NETWORK,
+        network_allowlist=(),
+        proxy_port=17831,
+        limits=SandboxLimits(),
+    )
+    command = WorkspaceCommand(project_workspace)
+
+    output = command.run_with_context(
+        ToolInvocationContext(session_id="session-project-cwd", sandbox_decision=decision),
+        "cd" if os.name == "nt" else "pwd",
+    )
+
+    assert os.path.normcase(str(project_workspace.resolve())) in os.path.normcase(output)
     assert launcher._temp_dirs == {}

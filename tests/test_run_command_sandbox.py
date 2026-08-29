@@ -192,11 +192,15 @@ def test_launcher_uses_two_phase_broker_for_every_file_and_network_mode(
     network_mode: NetworkMode,
 ) -> None:
     calls: list[tuple] = []
+    session_workspace = tmp_path / "session"
+    project_workspace = tmp_path / "project"
+    session_workspace.mkdir()
+    project_workspace.mkdir()
     broker = _Broker(calls)
     proxy = _Proxy(calls)
     rules = (NetworkRule("127.0.0.1"),) if network_mode is NetworkMode.RESTRICTED_NETWORK else ()
     policy = SandboxPolicy(
-        tmp_path,
+        (session_workspace, project_workspace),
         "session",
         f"job-{file_mode.value}-{network_mode.value}",
         file_mode=file_mode,
@@ -212,12 +216,21 @@ def test_launcher_uses_two_phase_broker_for_every_file_and_network_mode(
         path_auditor=_Audit(),
     )
 
-    process = launcher.launch(["cmd.exe", "/c", "echo ok"], policy, user_id="local")
+    process = launcher.launch(
+        ["cmd.exe", "/c", "echo ok"],
+        policy,
+        cwd=project_workspace,
+        user_id="local",
+    )
 
     reserve = next(call for call in calls if call[0] == "reserve")
     launch = next(call for call in calls if call[0] == "launch")
     assert reserve[1]["file_mode"] == file_mode.value
     assert reserve[1]["network_mode"] == network_mode.value
+    assert reserve[1]["workspaces"] == [str(session_workspace), str(project_workspace)]
+    assert reserve[1]["cwd"] == str(project_workspace)
+    granted_roots = {call[1] for call in calls if call[0] == "grant"}
+    assert {session_workspace, project_workspace}.issubset(granted_roots)
     assert calls.index(reserve) < next(index for index, call in enumerate(calls) if call[0] == "grant")
     assert next(index for index, call in enumerate(calls) if call[0] == "grant") < calls.index(launch)
     if network_mode is NetworkMode.FULL_NETWORK:
@@ -232,6 +245,8 @@ def test_launcher_uses_two_phase_broker_for_every_file_and_network_mode(
 
     assert launcher.cleanup(process)
     assert any(call[0] == "release" for call in calls)
+    revoked_roots = {call[1] for call in calls if call[0] == "revoke"}
+    assert {session_workspace, project_workspace}.issubset(revoked_roots)
 
 
 def test_proxy_authenticates_pins_dns_and_allows_explicit_loopback() -> None:
@@ -359,7 +374,7 @@ def test_broker_reservation_rejects_hash_tampering_and_expiry(tmp_path: Path) ->
         clock=lambda: now[0],
     )
     policy = {
-        **SandboxPolicy(tmp_path, "session", "job", network_mode=NetworkMode.NO_NETWORK).to_dict(),
+        **SandboxPolicy((tmp_path,), "session", "job", network_mode=NetworkMode.NO_NETWORK).to_dict(),
         "cwd": str(tmp_path),
         "temp_dir": str(tmp_path),
     }

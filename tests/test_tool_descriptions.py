@@ -19,7 +19,6 @@ EXPECTED_LOCAL_TOOLS = [
     "write_file",
     "edit_file",
     "run_command",
-    "read_upload_file",
     "delegate_tasks",
     "send_agent_message",
     "set_thread_node_status",
@@ -50,11 +49,9 @@ def _missing_property_descriptions(schema: dict[str, Any], prefix: str = "") -> 
 
 
 def test_all_local_tools_and_named_parameters_have_descriptions(tmp_path: Path) -> None:
-    upload_root = tmp_path / "uploads"
-    upload_root.mkdir()
     registry = build_tool_registry(
         tmp_path,
-        upload_files=WorkspaceFiles(upload_root),
+        workspace_files=WorkspaceFiles(tmp_path),
         extra_tools=delegation_tools(),
     )
     specs = [*registry.specs(), REQUEST_USER_INPUT_SPEC, REQUEST_PLAN_REVIEW_SPEC]

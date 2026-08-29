@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from backend.domain import DEFAULT_TIME_ZONE
 
-from ..conversation.ports import SessionStore, TaskPreprocessor
+from ..conversation.ports import SessionStore
 from ..conversation.service import ConversationService
 from ..execution import RuntimeRunner
 
@@ -16,7 +16,6 @@ from ..execution import RuntimeRunner
 class AgentApplication:
     runner: RuntimeRunner
     session_store: SessionStore
-    task_preprocessor: TaskPreprocessor
     default_timezone: str = DEFAULT_TIME_ZONE
     session_provisioner: Callable[..., object] | None = None
     session_provisioner_cleanup: Callable[[str], None] | None = None
@@ -31,7 +30,6 @@ class AgentApplication:
         return ConversationService(
             self.runner,
             self.session_store,
-            self.task_preprocessor,
             session_id,
             self.default_timezone,
             session_provisioner=self.session_provisioner,

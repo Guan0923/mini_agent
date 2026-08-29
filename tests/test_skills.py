@@ -101,7 +101,7 @@ def test_application_capability_controls_catalog_and_read_file_whitelist(
     )
     try:
         assert disabled.runner.skill_catalog.names() == ()
-        with pytest.raises(ToolError, match="allowed read root"):
+        with pytest.raises(ToolError, match="approved workspace"):
             disabled.runner.tools.invoke("read_file", {"path": str(manifest)})
     finally:
         disabled.close()

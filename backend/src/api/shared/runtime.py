@@ -31,6 +31,7 @@ def build_local_application(
     session_provisioner: Callable[..., object] | None = None,
     session_provisioner_cleanup: Callable[[str], None] | None = None,
     project_id: str | None = None,
+    project_cwd: Path | None = None,
     job_registry: JobRegistry | None = None,
     job_parent_id: str | None = None,
 ) -> AgentApplication:
@@ -66,7 +67,7 @@ def build_local_application(
         "session_provisioner": session_provisioner,
         "session_provisioner_cleanup": session_provisioner_cleanup,
         "project_id": project_id or None,
-        "upload_root": _session_upload_root(state, session_id),
+        "project_cwd": project_cwd,
         "job_registry": job_registry or getattr(state, "job_registry", None),
         "job_parent_id": job_parent_id,
         "sandbox_session_id": session_id,
@@ -87,7 +88,8 @@ def build_local_application(
             for name, value in builder_options.items()
             if name in signature.parameters and signature.parameters[name].kind is not inspect.Parameter.POSITIONAL_ONLY
         }
-    application = application_builder(workspace or state.session_workspace(session_id), **builder_options)
+    state.paths.ensure_session(session_id)
+    application = application_builder(workspace or state.paths.session_workspace(session_id), **builder_options)
     # Provider credentials are resolved lazily for each model boundary.  The
     # selected provider name comes from the dynamic node; this callback keeps
     # secrets in the per-user settings database and out of RuntimeState.
@@ -104,19 +106,6 @@ def build_local_application(
         if callable(setter):
             setter(resolver)
     return application
-
-
-def _session_upload_root(state: WebAppState, session_id: str) -> Path | None:
-    """Resolve the session's canonical upload directory for the upload tool."""
-
-    paths = state.paths
-    try:
-        paths.ensure_session(session_id)
-    except Exception:
-        # A freshly created session may not have a durable workspace yet;
-        # uploads simply stay unavailable until the session is provisioned.
-        return None
-    return paths.session_uploads(session_id)
 
 
 def _project_session_provisioner(state: WebAppState):

@@ -18,7 +18,7 @@ _NETWORK_ERROR_TYPES = frozenset(
         "TimeoutError",
     }
 )
-_TOOL_ERROR_TYPES = frozenset({"ToolError", "ConfirmationRequired", "TaskPreparationError"})
+_TOOL_ERROR_TYPES = frozenset({"ToolError", "ConfirmationRequired"})
 _HIDDEN_RECOVERABLE_EVENTS = frozenset({"tool_recovery", "model_repair", "model_retry"})
 
 

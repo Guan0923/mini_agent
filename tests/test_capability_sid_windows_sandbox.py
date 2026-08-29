@@ -147,16 +147,23 @@ class _AuditAcl:
 
 def test_world_writable_audit_skips_allowed_roots_and_deduplicates(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
+    project_workspace = tmp_path / "project"
     temp_dir = tmp_path / "temp"
     outside = tmp_path / "outside"
-    for path in (workspace, temp_dir, outside):
+    for path in (workspace, project_workspace, temp_dir, outside):
         path.mkdir()
-    acl = _AuditAcl({str(workspace), str(temp_dir), str(outside)})
+    acl = _AuditAcl({str(workspace), str(project_workspace), str(temp_dir), str(outside)})
     auditor = WorldWritablePathAuditor(acl)
-    auditor._candidate_roots = lambda *_args: (workspace, temp_dir, outside, outside)  # type: ignore[method-assign]
+    auditor._candidate_roots = lambda *_args: (  # type: ignore[method-assign]
+        workspace,
+        project_workspace,
+        temp_dir,
+        outside,
+        outside,
+    )
 
     result = auditor.scan(
-        workspace=workspace,
+        workspaces=(workspace, project_workspace),
         temp_dir=temp_dir,
         environment={},
         account_sid="account",
@@ -164,7 +171,7 @@ def test_world_writable_audit_skips_allowed_roots_and_deduplicates(tmp_path: Pat
     )
 
     assert result.deny_paths == (outside.resolve(),)
-    assert result.checked_paths == 3
+    assert result.checked_paths == 4
 
 
 def test_world_writable_audit_fails_closed_on_item_limit(tmp_path: Path) -> None:
@@ -179,7 +186,7 @@ def test_world_writable_audit_fails_closed_on_item_limit(tmp_path: Path) -> None
 
     with pytest.raises(SandboxAuditError) as caught:
         auditor.scan(
-            workspace=workspace,
+            workspaces=(workspace,),
             temp_dir=temp_dir,
             environment={},
             account_sid="account",
@@ -198,7 +205,7 @@ def test_world_writable_audit_fails_closed_on_acl_error(tmp_path: Path) -> None:
 
     with pytest.raises(SandboxAuditError) as caught:
         auditor.scan(
-            workspace=workspace,
+            workspaces=(workspace,),
             temp_dir=temp_dir,
             environment={},
             account_sid="account",

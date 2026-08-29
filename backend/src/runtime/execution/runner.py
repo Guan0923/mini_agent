@@ -58,6 +58,7 @@ class AgentRunner:
         skill_auto_select: bool = False,
         project_skill_gate: object | None = None,
         workspace_root: str | None = None,
+        project_cwd: str | None = None,
         subagents: object | None = None,
         resources: tuple[object, ...] = (),
         provider_config_resolver=None,
@@ -75,6 +76,7 @@ class AgentRunner:
         self.skill_auto_select = skill_auto_select
         self.project_skill_gate = project_skill_gate
         self.workspace_root = workspace_root
+        self.project_cwd = project_cwd
         self.subagents = subagents
         self._resources = resources
         self.provider_config_resolver = provider_config_resolver
@@ -133,7 +135,11 @@ class AgentRunner:
             turn_start_index=turn_start_index,
             history=history,
             active_skills=list(active_skills or ()),
-            provenance=RunProvenance(trigger="embedding", workspace_root=self.workspace_root),
+            provenance=RunProvenance(
+                trigger="embedding",
+                workspace_root=self.workspace_root,
+                project_cwd=self.project_cwd,
+            ),
         )
         runtime.state.status = "running"
         runtime.services.job_scope = self.job_scope.child(
@@ -158,6 +164,7 @@ class AgentRunner:
         state = RuntimeState(
             session_id=session_id,
             workspace_root=self.workspace_root,
+            project_cwd=self.project_cwd,
             messages=list(messages or []),
             runner_settings=self.settings,
             tool_specs=specs,

@@ -63,6 +63,7 @@ class RequestMixin:
     ) -> list:
         runtime.exchange.context["trace_base_system_prompt"] = system.content or ""
         runtime.exchange.context["trace_user_preferences"] = self.user_preferences
+        system = self._with_workspace_context(runtime, system)
         system = self._with_user_preferences(system)
         system = self._with_available_user_skills(runtime, system)
         trace_system_message = system.content or ""
@@ -119,6 +120,7 @@ class RequestMixin:
 
         runtime.exchange.context["trace_base_system_prompt"] = system.content or ""
         runtime.exchange.context["trace_user_preferences"] = self.user_preferences
+        system = self._with_workspace_context(runtime, system)
         system = self._with_user_preferences(system)
         runtime.exchange.context["trace_system_message"] = system.content or ""
         system = self._with_active_skills(runtime, system)
@@ -143,6 +145,24 @@ class RequestMixin:
         return SystemMessage(
             name=system.name,
             content=(system.content or "") + policy,
+            provider_options=system.provider_options,
+        )
+
+    @staticmethod
+    def _with_workspace_context(runtime: AgentRuntime, system: SystemMessage) -> SystemMessage:
+        cwd = str(runtime.state.workspace_root or "")
+        project_cwd = str(runtime.state.project_cwd or "")
+        if not cwd:
+            return system
+        lines = [
+            "## Workspace paths",
+            f"- cwd: {cwd}",
+            f"- project_cwd: {project_cwd or '(none)'}",
+            "Use absolute paths for file tools. Omitting glob.path or grep.path searches both available workspaces.",
+        ]
+        return SystemMessage(
+            name=system.name,
+            content=(system.content or "") + "\n\n" + "\n".join(lines),
             provider_options=system.provider_options,
         )
 

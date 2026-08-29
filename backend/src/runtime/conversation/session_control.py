@@ -164,6 +164,8 @@ class ConversationSessionController:
         # safety checks).
         if state.workspace_root is None:
             state.workspace_root = getattr(self.runner, "workspace_root", None)
+        if state.project_cwd is None:
+            state.project_cwd = getattr(self.runner, "project_cwd", None)
         runtime = self.runner.empty_runtime(session_id=session_id, runtime_store=self.session_store)
         runtime.state = state
         self.runtime = self.runner.bind(runtime)

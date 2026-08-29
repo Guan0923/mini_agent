@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 from uuid import uuid4
 
-APP_VERSION = "0.0.1"
+APP_VERSION = "0.0.2"
 DEFAULT_FIRST_KEPT_ITEM_SIZE = 8
 DEFAULT_COMPACTION_RETENTION = DEFAULT_FIRST_KEPT_ITEM_SIZE
 FAILED_TERMINAL_MESSAGE = "An unknown error caused the system to encounter an exception."
@@ -124,15 +124,18 @@ def _string(raw: Mapping[str, Any], name: str, default: str = "") -> str:
     return value
 
 
-def _normalize_cwd(value: str) -> str:
+def _normalize_cwd(value: str, *, name: str = "cwd") -> str:
     if not isinstance(value, str):
-        raise RuntimeStateValidationError("cwd must be a string.")
+        raise RuntimeStateValidationError(f"{name} must be a string.")
     if not value:
         return ""
     try:
-        return os.path.normpath(str(Path(value).expanduser().resolve(strict=False)))
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise RuntimeStateValidationError(f"{name} must be an absolute path.")
+        return os.path.normpath(str(candidate.resolve(strict=False)))
     except (OSError, RuntimeError) as exc:
-        raise RuntimeStateValidationError("cwd must be a valid path.") from exc
+        raise RuntimeStateValidationError(f"{name} must be a valid path.") from exc
 
 
 def _normalize_model(value: Mapping[str, Any] | None) -> dict[str, Any]:

@@ -440,25 +440,21 @@ def test_registry_wraps_unexpected_handler_exceptions_as_tool_error() -> None:
         registry.invoke("boom_tool", {})
 
 
-def test_upload_file_tool_reads_only_inside_uploads_root(tmp_path: Path) -> None:
+def test_uploaded_file_is_read_through_absolute_workspace_path(tmp_path: Path) -> None:
     from backend.tools import WorkspaceFiles, build_tool_registry
 
     upload_root = tmp_path / "uploads"
     upload_root.mkdir()
     (upload_root / "notes.md").write_text("line one\nline two\n", encoding="utf-8")
-    registry = build_tool_registry(tmp_path, upload_files=WorkspaceFiles(upload_root))
+    registry = build_tool_registry(tmp_path, workspace_files=WorkspaceFiles(tmp_path))
 
-    assert "read_upload_file" in registry.names()
-    assert "read_upload_file" in registry.read_only_names()
-    result = registry.invoke("read_upload_file", {"path": "notes.md"})
+    assert "read_upload_file" not in registry.names()
+    result = registry.invoke("read_file", {"path": str(upload_root / "notes.md")})
     assert "line one" in result
     assert "lines 1-2 of 2" in result
 
-    with pytest.raises(ToolError, match="inside the workspace"):
-        registry.invoke("read_upload_file", {"path": "../outside.txt"})
 
-
-def test_build_application_registers_upload_tool_when_root_provided(
+def test_build_application_reads_uploads_with_read_file(
     tmp_path: Path,
     local_sandbox_runtime: None,
 ) -> None:
@@ -469,12 +465,12 @@ def test_build_application_registers_upload_tool_when_root_provided(
     upload_root = tmp_path / "uploads"
     upload_root.mkdir()
     (upload_root / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
-    application = build_application(tmp_path, paths=paths, planner_name="rule", upload_root=upload_root)
+    application = build_application(tmp_path, paths=paths, planner_name="rule")
     try:
         runner = application.runner
         tool_names = runner.tools.names()
-        assert "read_upload_file" in tool_names
-        result = runner.tools.invoke("read_upload_file", {"path": "data.csv"})
+        assert "read_upload_file" not in tool_names
+        result = runner.tools.invoke("read_file", {"path": str(upload_root / "data.csv")})
         assert "1,2" in result
     finally:
         application.close()

@@ -109,6 +109,7 @@ class ToolHookContext:
     name: str
     arguments: Mapping[str, Any]
     workspace_root: str
+    project_cwd: str
     permission_mode: str
     requires_confirmation: bool
     read_only: bool

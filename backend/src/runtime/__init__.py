@@ -39,8 +39,6 @@ _EXPORTS = {
     "SessionStore": ("conversation.ports", "SessionStore"),
     "SteeringHandler": ("core.contracts", "SteeringHandler"),
     "SuspensionHandler": ("core.contracts", "SuspensionHandler"),
-    "TaskPreparationError": ("conversation.service", "TaskPreparationError"),
-    "TaskPreprocessor": ("conversation.ports", "TaskPreprocessor"),
     "ToolHookContext": ("core.hooks", "ToolHookContext"),
     "ToolHookResult": ("core.hooks", "ToolHookResult"),
     "before_run_hook_manager": ("core.hooks", "before_run_hook_manager"),

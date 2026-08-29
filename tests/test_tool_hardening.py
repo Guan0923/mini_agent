@@ -1,6 +1,7 @@
 """Regression tests for bounded and security-sensitive tool behavior."""
 
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -14,20 +15,23 @@ def _payload(result: str) -> str:
 
 
 def test_read_file_resumes_one_long_line_without_losing_content(tmp_path: Path) -> None:
-    (tmp_path / "long.txt").write_text("x" * 45_000 + "\nsecond\n", encoding="utf-8")
+    path = tmp_path / "long.txt"
+    path.write_text("x" * 45_000 + "\nsecond\n", encoding="utf-8")
     files = WorkspaceFiles(tmp_path)
 
-    first = files.read_file("long.txt", start_line=1, max_lines=1)
-    second = files.read_file("long.txt", start_line=1, start_column=20_001, max_lines=1)
-    third = files.read_file("long.txt", start_line=1, start_column=40_001, max_lines=1)
+    column = 1
+    reconstructed = ""
+    while True:
+        result = files.read_file(str(path), start_line=1, start_column=column, max_lines=1)
+        body = _payload(result)
+        assert body.startswith("1 | ")
+        reconstructed += body.removeprefix("1 | ")
+        continuation = re.search(r"continue with start_line=1 and start_column=(\d+)", result)
+        if continuation is None:
+            break
+        column = int(continuation.group(1))
 
-    assert first.startswith("long.txt: lines 1-1 of 2\n")
-    assert _payload(first) == "x" * 20_000
-    assert "continue with start_line=1 and start_column=20001" in first
-    assert _payload(second) == "x" * 20_000
-    assert "continue with start_line=1 and start_column=40001" in second
-    assert _payload(third) == "x" * 5_000 + "\n"
-    assert "output truncated" not in third
+    assert reconstructed == "x" * 45_000 + "\n"
 
 
 def test_read_file_validates_columns_and_streams_universal_newlines(tmp_path: Path, monkeypatch) -> None:
@@ -36,11 +40,11 @@ def test_read_file_validates_columns_and_streams_universal_newlines(tmp_path: Pa
     monkeypatch.setattr(WorkspaceFiles, "_TEXT_CHUNK_CHARS", 1)
     files = WorkspaceFiles(tmp_path)
 
-    assert files.read_file("note.txt", start_line=1, start_column=2, max_lines=2) == (
-        "note.txt: lines 1-2 of 2, starting at column 2\nne\ntwo"
+    assert files.read_file(str(path), start_line=1, start_column=2, max_lines=2) == (
+        f"{path.resolve().as_posix()}: lines 1-2 of 2, starting at column 2\n1 | ne\n2 | two"
     )
     with pytest.raises(ToolError, match="start_column"):
-        files.read_file("note.txt", start_line=1, start_column=5)
+        files.read_file(str(path), start_line=1, start_column=5)
 
 
 def test_iterative_glob_supports_deep_valid_patterns_and_rejects_excessive_depth(tmp_path: Path) -> None:
@@ -48,7 +52,7 @@ def test_iterative_glob_supports_deep_valid_patterns_and_rejects_excessive_depth
     files = WorkspaceFiles(tmp_path)
     valid_pattern = "/".join(["**"] * 200 + ["*.py"])
 
-    assert files.glob(valid_pattern) == "app.py"
+    assert files.glob(valid_pattern) == (tmp_path / "app.py").resolve().as_posix()
     with pytest.raises(ToolError, match="path segments"):
         files.glob("/".join(["**"] * 257))
 
@@ -94,8 +98,8 @@ def test_overwrite_and_edit_preserve_posix_permissions(tmp_path: Path) -> None:
     path.chmod(0o751)
     files = WorkspaceFiles(tmp_path)
 
-    files.write_file("script.sh", "replacement\n", overwrite=True)
+    files.write_file(str(path), "replacement\n", overwrite=True)
     assert stat.S_IMODE(path.stat().st_mode) == 0o751
 
-    files.edit_file("script.sh", "replacement", "edited")
+    files.edit_file(str(path), 1, 1, ["replacement"], ["edited"])
     assert stat.S_IMODE(path.stat().st_mode) == 0o751

@@ -71,6 +71,7 @@ class ToolStepExecutor:
             name=tool,
             arguments=tool_message.arguments,
             workspace_root=runtime.state.workspace_root or "",
+            project_cwd=runtime.state.project_cwd or "",
             permission_mode=runtime.state.permission_mode,
             requires_confirmation=requires_confirmation,
             read_only=read_only,

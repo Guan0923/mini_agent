@@ -20,7 +20,6 @@ from backend.domain import (
     new_run_id,
     new_session_id,
 )
-from backend.tools import ToolError
 
 from ..core.context import text_messages
 from ..core.contracts import CancellationHandler, EventHandler, InterruptHandler, SteeringHandler
@@ -29,7 +28,7 @@ from ..execution import RuntimeRunner
 from ..node_bridge import RuntimeEventNodeBridge
 from ..persistence.recording import persistent_event
 from .bridge_support import ConversationNodeBridgeMixin
-from .ports import SessionStore, TaskPreprocessor
+from .ports import SessionStore
 from .recovery.resuming import prepare_resume
 from .recovery.resuming import resume_session as resume_conversation
 from .session_control import ConversationSessionController
@@ -41,23 +40,17 @@ def _handoff_user_prompt(task: str, *, mode: RunMode) -> str:
     return f"<approved_plan>\n{task}\n</approved_plan>"
 
 
-class TaskPreparationError(ValueError):
-    pass
-
-
 class ConversationService(ConversationNodeBridgeMixin, ConversationSessionController):
     def __init__(
         self,
         runner: RuntimeRunner,
         session_store: SessionStore | None = None,
-        task_preprocessor: TaskPreprocessor | None = None,
         session_id: str | None = None,
         default_timezone: str = "Asia/Shanghai",
         session_provisioner: Callable[[SessionStore, str, Session], Session | None] | None = None,
         session_provisioner_cleanup: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(runner, session_store, session_id, default_timezone=default_timezone)
-        self._task_preprocessor = task_preprocessor
         self._session_provisioner = session_provisioner
         self._session_provisioner_cleanup = session_provisioner_cleanup
         # Web streaming installs its bridge before invoking this service so it
@@ -83,9 +76,8 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         delivery_id: str | None = None,
         on_started: Callable[[], None] | None = None,
     ) -> RunState:
-        prepared = self._prepare(task, structured=bool(references))
         state = self._run_single_turn(
-            prepared,
+            task,
             mode=mode,
             on_event=on_event,
             interrupt=interrupt,
@@ -165,6 +157,7 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         provenance = RunProvenance(
             trigger=trigger,
             workspace_root=getattr(self.runner, "workspace_root", None),
+            project_cwd=getattr(self.runner, "project_cwd", None),
             source_session_id=source_session_id,
             source_run_id=source_run_id,
         )
@@ -302,14 +295,6 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
             request_parameters=request_parameters,
             resume_confirmed=resume_confirmed,
         )
-
-    def _prepare(self, task: str, *, structured: bool = False) -> str:
-        if self._task_preprocessor is None:
-            return task
-        try:
-            return self._task_preprocessor.expand(task, structured=structured)
-        except ToolError as exc:
-            raise TaskPreparationError(str(exc)) from exc
 
     def _record_unexpected_failure(
         self,

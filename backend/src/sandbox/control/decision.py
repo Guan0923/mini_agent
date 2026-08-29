@@ -14,7 +14,7 @@ class SandboxExecutionDecision:
     """Fully approved inputs needed to construct one command job policy."""
 
     launcher: SandboxLauncher
-    workspace: Path
+    workspaces: tuple[Path, ...]
     session_id: str
     user_id: str
     file_mode: PermissionMode
@@ -25,7 +25,7 @@ class SandboxExecutionDecision:
 
     def command_policy(self, job_id: str, terminal: TerminalKind) -> SandboxPolicy:
         return SandboxPolicy(
-            workspace=self.workspace,
+            workspaces=self.workspaces,
             session_id=self.session_id,
             job_id=job_id,
             file_mode=self.file_mode,

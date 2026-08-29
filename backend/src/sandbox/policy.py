@@ -156,7 +156,7 @@ _MIN_FREE_DISK_BYTES = 10 * 1024 * 1024 * 1024
 
 @dataclass(frozen=True, slots=True)
 class SandboxPolicy:
-    workspace: Path
+    workspaces: tuple[Path, ...]
     session_id: str
     job_id: str
     file_mode: FileAccessMode = FileAccessMode.READ_ONLY
@@ -167,7 +167,14 @@ class SandboxPolicy:
     proxy_port: int = 17831
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "workspace", Path(self.workspace))
+        normalized_workspaces: list[Path] = []
+        for raw_workspace in self.workspaces:
+            workspace = Path(raw_workspace).resolve()
+            if workspace not in normalized_workspaces:
+                normalized_workspaces.append(workspace)
+        if not normalized_workspaces:
+            raise SandboxPolicyError("at least one workspace is required")
+        object.__setattr__(self, "workspaces", tuple(normalized_workspaces))
         if not isinstance(self.file_mode, FileAccessMode):
             object.__setattr__(self, "file_mode", normalize_permission_mode(self.file_mode))
         if not isinstance(self.network_mode, NetworkMode):
@@ -204,13 +211,14 @@ class SandboxPolicy:
         ):
             raise SandboxPolicyError("proxy_port must be between 1 and 65535")
         self.limits.validate()
-        workspace = _safe_directory(self.workspace)
-        if workspace != self.workspace.resolve():
-            raise SandboxPolicyError("workspace path must resolve to a regular directory")
+        for workspace in self.workspaces:
+            safe_workspace = _safe_directory(workspace)
+            if safe_workspace != workspace.resolve():
+                raise SandboxPolicyError("workspace path must resolve to a regular directory")
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "workspace": str(self.workspace),
+            "workspaces": [str(workspace) for workspace in self.workspaces],
             "session_id": self.session_id,
             "job_id": self.job_id,
             "file_mode": self.file_mode.value,
