@@ -2,6 +2,7 @@ import { App as AntApp } from "antd";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getTurnTrace } from "../../api";
+import { TURN_PROTOCOL_VERSION } from "../../app/runtime/runtimeNodeNormalization";
 import type { RuntimeStateNode, TurnTraceItem, TurnTraceResponse } from "../../types";
 import TracePage from "./TracePage";
 
@@ -18,7 +19,7 @@ function turn(id: string, timestamp: string, status: RuntimeStateNode["status"] 
     parent_session_id: "",
     id,
     parent_id: "",
-    version: "0.0.1",
+    version: TURN_PROTOCOL_VERSION,
     firstKeptItemSize: 8,
     compactionId: id,
     user: "",
@@ -35,6 +36,7 @@ function turn(id: string, timestamp: string, status: RuntimeStateNode["status"] 
     running_mode: "agent",
     usage: { input_tokens: 1, cached_tokens: 0, output_tokens: 1, reasoning_tokens: 0, total_tokens: 2 },
     cwd: "C:\\workspace",
+    project_cwd: "",
     timestamp,
     status,
     current_data_idx: 1,

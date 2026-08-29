@@ -75,7 +75,7 @@ DEFAULT_MODEL: dict[str, Any] = {
     "context_length": 128000,
     "output_length": 8192,
     "thinking": "enable",
-    "temperature": 1.0,
+    "temperature": 0.0,
 }
 
 

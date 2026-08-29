@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { pauseTurn, streamAttachedTurn, streamChat } from "../api";
 import type { Conversation, RuntimeStateNode } from "../types";
 import { createRunController } from "./runController";
+import { TURN_PROTOCOL_VERSION } from "./runtime/runtimeNodeNormalization";
 
 vi.mock("../api", async () => {
   const actual = await vi.importActual<typeof import("../api")>("../api");
@@ -24,7 +25,7 @@ function turn(): RuntimeStateNode {
     parent_session_id: "",
     id: "turn_1",
     parent_id: "",
-    version: "0.0.1",
+    version: TURN_PROTOCOL_VERSION,
     firstKeptItemSize: 8,
     compactionId: "turn_1",
     user: "user_1",
@@ -34,6 +35,7 @@ function turn(): RuntimeStateNode {
     running_mode: "agent",
     usage: { input_tokens: 0, cached_tokens: 0, output_tokens: 0, reasoning_tokens: 0, total_tokens: 0 },
     cwd: "C:\\workspace",
+    project_cwd: "",
     timestamp: "2026-08-26T00:00:00Z",
     status: "running",
     current_data_idx: 0,

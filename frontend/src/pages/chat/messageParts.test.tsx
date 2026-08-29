@@ -100,6 +100,15 @@ function renderAssistant(message: ChatMessage, display: DisplayMode = "developer
 }
 
 describe("assistant Item presentation", () => {
+  it("keeps Turn execution errors inside the assistant message bubble", () => {
+    const message = assistant([]);
+    message.error = "Turn execution failed";
+    const { container } = render(renderAssistant(message));
+
+    expect(screen.getByText("⚠️ Turn execution failed")).toBeInTheDocument();
+    expect(container.querySelector(".message.assistant .bubble .ant-alert-error")).toBeInTheDocument();
+  });
+
   it("hides Skill metadata and shows the running indicator instead of none", () => {
     render(renderAssistant(assistant([
       { type: "skill_snapshot", event: "skills_selected", text: "none", skills: [], status: "success" },

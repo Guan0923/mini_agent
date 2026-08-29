@@ -1,10 +1,13 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { App as AntApp } from "antd";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionInfo } from "../api";
 import type { ProjectInfo } from "../api/projects";
 import type { RuntimeRootNode, RuntimeStateNode } from "../types";
 import type { AgentShellProps } from "./AgentShell";
 import AgentApp from "./AgentApp";
+import { TURN_PROTOCOL_VERSION } from "./runtime/runtimeNodeNormalization";
 
 const api = vi.hoisted(() => ({
   archiveSession: vi.fn(),
@@ -89,7 +92,7 @@ function turn(
     parent_session_id: parent?.session_id ?? "",
     id: turnId,
     parent_id: parent?.id ?? "",
-    version: "0.0.1",
+    version: TURN_PROTOCOL_VERSION,
     firstKeptItemSize: 8,
     compactionId: turnId,
     user: "user-1",
@@ -106,6 +109,7 @@ function turn(
     running_mode: "agent",
     usage: { input_tokens: 1, cached_tokens: 0, output_tokens: 1, reasoning_tokens: 0, total_tokens: 2 },
     cwd: "C:\\workspace",
+    project_cwd: "",
     timestamp: "2026-08-26T00:00:00Z",
     status: "success",
     current_data_idx: 0,
@@ -116,8 +120,9 @@ function turn(
   };
 }
 
-async function renderReady(): Promise<void> {
-  render(<AgentApp />);
+async function renderReady(strict = false): Promise<void> {
+  const app = <AntApp><AgentApp /></AntApp>;
+  render(strict ? <StrictMode>{app}</StrictMode> : app);
   await waitFor(() => expect(shell.props?.projectsLoaded).toBe(true));
 }
 
@@ -206,6 +211,29 @@ describe("AgentApp new conversation initialization", () => {
     });
 
     expect(shell.props?.current?.title).toBe("第一条用户消息");
+  });
+
+  it("shows action errors through one keyed global Message, including in StrictMode", async () => {
+    const initial = { ...session("session-error"), thread_id: "session-error" };
+    api.listSessions.mockResolvedValue([initial]);
+    api.archiveSession
+      .mockRejectedValueOnce(new Error("first action failed"))
+      .mockRejectedValueOnce(new Error("second action failed"))
+      .mockRejectedValueOnce(new Error("first action failed"));
+    await renderReady(true);
+    await waitFor(() => expect(shell.props?.current?.id).toBe(initial.session_id));
+
+    await act(async () => shell.props!.onArchive(initial.session_id));
+    await waitFor(() => expect(screen.getByText("first action failed")).toBeInTheDocument());
+    expect(document.querySelector(".global-error")).not.toBeInTheDocument();
+
+    await act(async () => shell.props!.onArchive(initial.session_id));
+    await waitFor(() => expect(screen.getByText("second action failed")).toBeInTheDocument());
+    expect(document.querySelectorAll(".ant-message-notice")).toHaveLength(1);
+
+    await act(async () => shell.props!.onArchive(initial.session_id));
+    await waitFor(() => expect(screen.getByText("first action failed")).toBeInTheDocument());
+    expect(document.querySelectorAll(".ant-message-notice")).toHaveLength(1);
   });
 
   it("keeps the active rewind boundary when sidebar summaries and the full Turn tree reload", async () => {

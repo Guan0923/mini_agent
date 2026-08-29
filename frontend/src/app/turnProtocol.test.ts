@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Conversation, RuntimeNodeFrame, RuntimeRootNode, RuntimeStateNode } from "../types";
 import { integrateRuntimeNodeUpdates, messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "./runtime/runtimeDetailProjection";
 import { applyRuntimeNodeFrame, runtimeNodeAccumulator } from "./runtime/runtimeNodeReducer";
-import { isRuntimeRootNode, normalizeRuntimeNode } from "./runtime/runtimeNodeNormalization";
+import { isRuntimeRootNode, normalizeRuntimeNode, normalizeRuntimeNodeModel, TURN_PROTOCOL_VERSION } from "./runtime/runtimeNodeNormalization";
 
 function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
   return {
@@ -12,7 +12,7 @@ function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
     parent_session_id: "",
     id: "turn_1",
     parent_id: "",
-    version: "0.0.1",
+    version: TURN_PROTOCOL_VERSION,
     firstKeptItemSize: 8,
     compactionId: "turn_1",
     user: "user_1",
@@ -22,6 +22,7 @@ function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
     running_mode: "agent",
     usage: { input_tokens: 1, cached_tokens: 0, output_tokens: 1, reasoning_tokens: 0, total_tokens: 2 },
     cwd: "C:\\workspace",
+    project_cwd: "C:\\project",
     timestamp: "2026-08-25T00:00:00+00:00",
     status: "success",
     current_data_idx: 0,
@@ -34,6 +35,28 @@ function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
 }
 
 describe("Turn protocol projection", () => {
+  it("accepts only protocol 0.0.2 with a string project_cwd", () => {
+    expect(TURN_PROTOCOL_VERSION).toBe("0.0.2");
+    expect(normalizeRuntimeNode(turn()).project_cwd).toBe("C:\\project");
+    expect(() => normalizeRuntimeNode(turn({ version: "0.0.1" }))).toThrow("Unsupported Turn version");
+
+    const missingProjectCwd = { ...turn() } as Partial<RuntimeStateNode>;
+    delete missingProjectCwd.project_cwd;
+    expect(() => normalizeRuntimeNode(missingProjectCwd as RuntimeStateNode)).toThrow(
+      "Invalid Turn field: project_cwd",
+    );
+    expect(() => normalizeRuntimeNode(turn({ project_cwd: 42 as unknown as string }))).toThrow(
+      "Invalid Turn field: project_cwd",
+    );
+  });
+
+  it("defaults a missing model temperature to zero", () => {
+    const model = { ...turn().model } as Partial<RuntimeStateNode["model"]>;
+    delete model.temperature;
+
+    expect(normalizeRuntimeNodeModel(model).temperature).toBe(0);
+  });
+
   it("accepts the strict three-field root and skips it during projection", () => {
     const root: RuntimeRootNode = { session_id: "session_1", thread_id: "session_1", id: "turn_root" };
     expect(isRuntimeRootNode(normalizeRuntimeNode(root))).toBe(true);
@@ -234,6 +257,28 @@ describe("Turn protocol projection", () => {
       turn_id: "turn_1",
       revision: 1,
     })).toThrow("must contain a patch or operation");
+  });
+
+  it("accepts project_cwd delta patches and rejects non-string values", () => {
+    const accumulator = runtimeNodeAccumulator();
+    applyRuntimeNodeFrame(accumulator, { type: "turn.snapshot", revision: 0, turn: turn({ status: "running" }) });
+
+    const updated = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 1,
+      patch: { project_cwd: "C:\\next-project" },
+    });
+    expect(updated.project_cwd).toBe("C:\\next-project");
+
+    expect(() => applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 2,
+      patch: { project_cwd: 42 },
+    } as unknown as RuntimeNodeFrame)).toThrow("patch value is invalid for project_cwd");
   });
 
   it("projects assistant Items without grouping or reordering repeated types", () => {

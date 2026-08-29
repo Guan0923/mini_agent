@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { App as AntApp } from "antd";
 import {
   createSession,
   getSettings,
@@ -35,7 +36,10 @@ import type {
   LocalProfile,
 } from "../types";
 
+export const ACTION_ERROR_MESSAGE_KEY = "mini-agent-action-error";
+
 function AgentApp() {
+  const { message } = AntApp.useApp();
   const [profile, setProfile] = useState<LocalProfile>({ display_name: "本地用户", agent_preferences: "" });
   const [page, setPage] = useState<Page>("chat");
   const storageKey = STORAGE_KEY;
@@ -58,6 +62,12 @@ function AgentApp() {
   const sandboxHealth = useSandboxHealth();
   const [queuedMessages, setQueuedMessages] = useState<Map<string, QueuedMessage[]>>(() => new Map());
   const [panelConversations, setPanelConversations] = useState<Record<string, Conversation>>({});
+
+  useEffect(() => {
+    if (!actionError) return;
+    void message.error({ content: actionError, key: ACTION_ERROR_MESSAGE_KEY });
+    setActionError(null);
+  }, [actionError, message]);
 
   useEffect(() => {
     let active = true;
@@ -643,7 +653,6 @@ function AgentApp() {
       draftMode={draftMode}
       displayMode={displayMode}
       providerConfig={providerConfig}
-      actionError={actionError}
       settingsOpen={settingsOpen}
       setSettingsOpen={setSettingsOpen}
       onProfileChange={setProfile}
@@ -683,7 +692,6 @@ function AgentApp() {
       queuedMessages={queuedMessages}
       onQueuedMessagesChange={updateQueuedMessages}
       onQueuedMessagesRefresh={refreshQueuedMessages}
-      onClearError={() => setActionError(null)}
       onDisplayModeUpdate={(config) => setDisplayMode(effectiveDisplayMode(config.display_mode))}
       onProviderConfigUpdate={setProviderConfig}
       sandboxHealth={sandboxHealth}
