@@ -105,7 +105,21 @@ def local_subagent_model() -> Generator[tuple[ModelConfig, list[str]], None, Non
             if self.path != "/v1/chat/completions":
                 self.send_error(404)
                 return
-            model_calls.append(str(payload.get("model") or ""))
+            requested_model = str(payload.get("model") or "")
+            model_calls.append(requested_model)
+            if requested_model == "unknown":
+                body = json.dumps(
+                    {
+                        "message": 'Model "unknown" is not supported by any configured account in this group',
+                        "type": "model_not_found",
+                    }
+                ).encode()
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if payload.get("stream"):
                 events = [
                     {
@@ -1148,6 +1162,8 @@ def test_real_http_sse_redis_subagents_persist_model_trace(
                 assert runtime_thread is not None and runtime_thread.current_turn_id is not None
                 child_turn = store.get_node(sidebar["session_id"], runtime_thread.current_turn_id)
                 assert isinstance(child_turn, RuntimeState) and child_turn.status == "success"
+                assert child_turn.provider_name == "subagent-trace-local"
+                assert child_turn.model["current_model"] == "subagent-trace-test"
                 trace = store.load_turn_trace(
                     sidebar["session_id"],
                     child_turn.id,
@@ -1156,7 +1172,57 @@ def test_real_http_sse_redis_subagents_persist_model_trace(
                 assert trace is not None and trace.thread_id == child.thread_id
                 assert [entry.role for entry in trace.items] == ["user", "assistant"]
                 assert trace.items[-1].item.get("text") == "child answered through local HTTP"
-            assert len(model_calls) >= len(children)
+            assert model_calls == ["subagent-trace-test"] * len(children)
+
+            target = children[0]
+            follow_up = http.post(
+                f"/api/agent-threads/{target.thread_id}/messages",
+                json={
+                    "session_id": sidebar["session_id"],
+                    "content": "run with the selected follow-up model",
+                    "model": {
+                        "reasoning_effort": "medium",
+                        "current_model": "subagent-trace-follow-up",
+                        "context_length": 128_000,
+                        "output_length": 256,
+                        "thinking": "enable",
+                        "temperature": 0.0,
+                    },
+                    "permission_mode": "read_only",
+                    "running_mode": "agent",
+                },
+            )
+            assert follow_up.status_code == 202, follow_up.text
+            delivery = follow_up.json()
+            assert delivery["target_state"] == "started"
+
+            deadline = monotonic() + 10
+            while monotonic() < deadline:
+                runtime_thread = store.get_runtime_thread(sidebar["session_id"], target.thread_id)
+                if (
+                    runtime_thread is not None
+                    and runtime_thread.running_turn_id is None
+                    and runtime_thread.current_turn_id == delivery["turn_id"]
+                ):
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail("local HTTP Subagent follow-up did not finish")
+
+            follow_up_turn = store.get_node(sidebar["session_id"], delivery["turn_id"])
+            assert isinstance(follow_up_turn, RuntimeState) and follow_up_turn.status == "success"
+            assert follow_up_turn.provider_name == "subagent-trace-local"
+            assert follow_up_turn.model["current_model"] == "subagent-trace-follow-up"
+            assert model_calls[-1] == "subagent-trace-follow-up"
+            follow_up_trace = store.load_turn_trace(
+                sidebar["session_id"],
+                follow_up_turn.id,
+                follow_up_turn.current_data_idx,
+            )
+            assert follow_up_trace is not None
+            assert follow_up_trace.thread_id == target.thread_id
+            assert [entry.role for entry in follow_up_trace.items] == ["user", "assistant"]
+            assert follow_up_trace.items[-1].item.get("text") == "child answered through local HTTP"
     finally:
         state.close()
         keys = list(client.scan_iter(f"{prefix}:*"))
