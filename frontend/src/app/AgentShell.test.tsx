@@ -1,7 +1,26 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Grid } from "antd";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import AgentShell, { type AgentShellProps } from "./AgentShell";
+import AgentShell, {
+  DEFAULT_RIGHT_PANEL_WIDTH,
+  RIGHT_PANEL_CLOSE_THRESHOLD,
+  rightPanelResizeOutcome,
+  type AgentShellProps,
+} from "./AgentShell";
+
+const rightPanelApi = vi.hoisted(() => ({
+  getRightPanel: vi.fn(),
+  updateRightPanel: vi.fn(),
+  createSideChat: vi.fn(),
+  createPanelTerminal: vi.fn(),
+  renameRightPanelWindow: vi.fn(),
+  closeRightPanelWindow: vi.fn(),
+}));
+
+vi.mock("../api", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../api")>(),
+  ...rightPanelApi,
+}));
 
 vi.mock("../components/AppSidebar", () => ({
   default: (props: { collapsed?: boolean; onToggleCollapse?: () => void }) => (
@@ -18,6 +37,11 @@ vi.mock("../components/UserSettingsModal", () => ({ default: () => null }));
 
 beforeEach(() => {
   vi.spyOn(Grid, "useBreakpoint").mockReturnValue({ md: true } as ReturnType<typeof Grid.useBreakpoint>);
+  rightPanelApi.getRightPanel.mockResolvedValue({
+    state: { session_id: "session", width: 420, collapsed: false, active_window_id: null },
+    windows: [],
+    capabilities: { terminal_available: true, terminal_unavailable_reason: null },
+  });
 });
 
 afterEach(() => {
@@ -29,6 +53,7 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     profile: { display_name: "本地用户", agent_preferences: "" },
     page: "chat",
     current: null,
+    panelConversations: {},
     activeConversations: [],
     projects: [],
     removedProjects: [],
@@ -59,11 +84,16 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     onProfileUpdate: vi.fn().mockResolvedValue(undefined),
     onUpdate: vi.fn(),
     onModeChange: vi.fn(),
+    onPanelModeChange: vi.fn(),
+    onHydratePanelConversation: vi.fn().mockResolvedValue(undefined),
+    onForgetPanelConversation: vi.fn(),
     onEnsureSession: vi.fn().mockResolvedValue("session"),
     onFork: vi.fn().mockResolvedValue(undefined),
     onRewind: vi.fn().mockResolvedValue(undefined),
+    onRewindPanel: vi.fn().mockResolvedValue(undefined),
     onSelectSession: vi.fn().mockResolvedValue("session"),
     onReload: vi.fn().mockResolvedValue(undefined),
+    onReloadPanel: vi.fn().mockResolvedValue(undefined),
     onRefresh: vi.fn().mockResolvedValue(undefined),
     onRun: vi.fn().mockResolvedValue(undefined),
     onStopRun: vi.fn(),
@@ -107,5 +137,61 @@ describe("AgentShell sidebar collapse", () => {
 
     expect(setItem).not.toHaveBeenCalledWith(expect.stringContaining("sidebar"), expect.anything());
     setItem.mockRestore();
+  });
+});
+
+describe("AgentShell right panel sizing", () => {
+  it("uses 420px by default and collapses only below 280px", () => {
+    expect(DEFAULT_RIGHT_PANEL_WIDTH).toBe(420);
+    expect(RIGHT_PANEL_CLOSE_THRESHOLD).toBe(280);
+    expect(rightPanelResizeOutcome(279, 560)).toEqual({
+      previewWidth: 560,
+      patch: { collapsed: true },
+    });
+    expect(rightPanelResizeOutcome(280, 560)).toEqual({
+      previewWidth: 280,
+      patch: { width: 280, collapsed: false },
+    });
+  });
+
+  it("renders the controlled desktop Splitter at the persisted width", async () => {
+    const current = {
+      id: "main",
+      title: "main",
+      sessionId: "session",
+      threadId: "session",
+      activeTurnId: "turn-main",
+      lastNodeId: "turn-main",
+      messages: [],
+      messagesLoaded: true,
+      runtimeNodes: [{ id: "turn-main", session_id: "session", thread_id: "session", cwd: "C:\\work" }],
+    } as AgentShellProps["current"];
+    const { container } = render(<AgentShell {...makeProps({ current })} />);
+
+    await waitFor(() => expect(container.querySelector(".ant-splitter")).toBeInTheDocument());
+    const panels = container.querySelectorAll<HTMLElement>(".ant-splitter-panel");
+    expect(panels).toHaveLength(2);
+    expect(panels[1].style.flexBasis).toBe("420px");
+  });
+
+  it("uses a full-width Drawer on mobile and hides the closed-edge launcher while open", async () => {
+    vi.mocked(Grid.useBreakpoint).mockReturnValue({ md: false } as ReturnType<typeof Grid.useBreakpoint>);
+    const current = {
+      id: "main",
+      title: "main",
+      sessionId: "session",
+      threadId: "session",
+      activeTurnId: "turn-main",
+      lastNodeId: "turn-main",
+      messages: [],
+      messagesLoaded: true,
+      runtimeNodes: [{ id: "turn-main", session_id: "session", thread_id: "session", cwd: "C:\\work" }],
+    } as AgentShellProps["current"];
+    const { container } = render(<AgentShell {...makeProps({ current })} />);
+
+    await waitFor(() => expect(document.querySelector(".ant-drawer-open")).toBeInTheDocument());
+    expect(container.querySelector(".ant-splitter")).not.toBeInTheDocument();
+    expect(document.querySelector<HTMLElement>(".ant-drawer-content-wrapper")?.style.width).toBe("100%");
+    expect(screen.queryByLabelText("打开右侧边栏菜单")).not.toBeInTheDocument();
   });
 });

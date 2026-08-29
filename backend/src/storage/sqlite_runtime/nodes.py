@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 
 from backend.domain.runtime_state import (
     RuntimeNode,
@@ -25,6 +26,50 @@ def _require_runtime_turn(node: RuntimeNode | None, turn_id: str) -> TreeRuntime
     if isinstance(node, RuntimeRootState):
         raise ValueError("A root Turn is only an ancestry anchor.")
     return node
+
+
+def _successful_snapshot_messages(source: TreeRuntimeState) -> list[dict[str, object]]:
+    messages = deepcopy(source.data[source.current_data_idx])
+    tool_items: dict[str, list[tuple[int, int, dict[str, object]]]] = {}
+    for message_index, message in enumerate(messages):
+        for item_index, item in enumerate(message["content"]):
+            if item.get("type") not in {"tool_call", "tool_result"}:
+                continue
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            tool_items.setdefault(call_id, []).append((message_index, item_index, item))
+    complete_items: set[tuple[int, int]] = set()
+    for entries in tool_items.values():
+        if len(entries) != 2:
+            continue
+        (call_message, call_index, call), (result_message, result_index, result) = entries
+        if call.get("type") != "tool_call" or result.get("type") != "tool_result":
+            continue
+        if call.get("status") != "success" or result.get("status") != "success":
+            continue
+        if "tool" in result and result.get("tool") != call.get("name"):
+            continue
+        complete_items.update({(call_message, call_index), (result_message, result_index)})
+    for message_index, message in enumerate(messages):
+        filtered: list[dict[str, object]] = []
+        for item_index, item in enumerate(message["content"]):
+            if item.get("status") != "success":
+                continue
+            if (
+                item.get("type") in {"tool_call", "tool_result"}
+                and (
+                    message_index,
+                    item_index,
+                )
+                not in complete_items
+            ):
+                continue
+            filtered.append(item)
+        message["content"] = filtered
+    if messages[-1]["role"] != "assistant":
+        messages.append(message_payload("assistant"))
+    return messages
 
 
 class SQLiteNodeMixin:
@@ -351,6 +396,27 @@ class SQLiteNodeMixin:
         )
         self.create_finalized_nodes([forked])
         return forked
+
+    def build_side_chat_anchor(
+        self,
+        turn_id: str,
+        *,
+        new_turn_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> TreeRuntimeState:
+        """Build a terminal hidden fork snapshot without interrupting a running source Turn."""
+
+        source = _require_runtime_turn(self.find_node(turn_id), turn_id)
+        anchor = RuntimeStateTree(self.load_nodes(source.session_id)).fork(
+            source,
+            id=new_turn_id or new_node_id(),
+            thread_id=thread_id or new_thread_id(),
+        )
+        anchor.data = [_successful_snapshot_messages(source)]
+        anchor.current_data_idx = 0
+        anchor.status = "paused" if source.status == "running" else source.status
+        anchor.timestamp = utc_iso()
+        return TreeRuntimeState.from_dict(anchor.to_dict())
 
     def create_compact_turn(self, turn_id: str, summary: str, *, new_turn_id: str | None = None) -> TreeRuntimeState:
         source = _require_runtime_turn(self.find_node(turn_id), turn_id)

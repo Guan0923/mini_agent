@@ -9,6 +9,7 @@ from __future__ import annotations
 from .sqlite_agent_threads import SQLiteAgentThreadMixin
 from .sqlite_approvals import SQLiteApprovalMixin
 from .sqlite_base import SQLiteBaseMixin
+from .sqlite_right_panel import SQLiteRightPanelMixin
 from .sqlite_runtime import SQLiteRuntimeMixin
 from .sqlite_schema import SQLiteSchemaMixin
 from .sqlite_sessions import SQLiteSessionMixin
@@ -21,6 +22,7 @@ class SQLiteSessionStore(
     SQLiteAgentThreadMixin,
     SQLiteSessionMixin,
     SQLiteSidebarThreadMixin,
+    SQLiteRightPanelMixin,
     SQLiteRuntimeMixin,
     SQLiteSchemaMixin,
 ):

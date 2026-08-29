@@ -287,8 +287,9 @@ async def create_turn(body: CreateTurnRequest, request: Request) -> StreamingRes
     store = session_store(state)
     require_active_session(store, body.session_id)
     sidebar = store.get_sidebar_thread(body.thread_id)
-    if sidebar is None or sidebar.session_id != body.session_id or sidebar.state != "active":
-        raise HTTPException(status_code=409, detail="SidebarThread 不可用。")
+    panel_window = store.active_right_panel_window_for_thread(body.session_id, body.thread_id)
+    if (sidebar is None or sidebar.session_id != body.session_id or sidebar.state != "active") and panel_window is None:
+        raise HTTPException(status_code=409, detail="Thread 不可用。")
     if store.find_node(body.id) is not None:
         raise HTTPException(status_code=409, detail="Turn id 已存在。")
     parent = _turn(store, body.parent_id) if body.parent_id else None

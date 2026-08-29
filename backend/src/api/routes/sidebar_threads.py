@@ -83,9 +83,20 @@ def _require(store, thread_id: str):
     return item
 
 
+def _require_queue_thread(store, thread_id: str):
+    item = store.get_sidebar_thread(thread_id)
+    if item is not None:
+        return item
+    for summary in store.list_sessions(state="all"):
+        panel = store.active_right_panel_window_for_thread(summary.session_id, thread_id)
+        if panel is not None:
+            return panel
+    raise HTTPException(status_code=404, detail="未知 Thread。")
+
+
 @router.get("/{thread_id}/queued-messages")
 def list_queued_messages(thread_id: str, request: Request) -> list[dict[str, object]]:
-    _require(session_store(request.app.state.web), thread_id)
+    _require_queue_thread(session_store(request.app.state.web), thread_id)
     try:
         return [item.to_dict() for item in request.app.state.web.message_queue.list(thread_id)]
     except Exception as exc:
@@ -96,7 +107,7 @@ def list_queued_messages(thread_id: str, request: Request) -> list[dict[str, obj
 def create_queued_message(
     thread_id: str, body: CreateQueuedMessageRequest, request: Request, response: Response
 ) -> dict[str, object]:
-    _require(session_store(request.app.state.web), thread_id)
+    _require_queue_thread(session_store(request.app.state.web), thread_id)
     references = _queue_references(body.references)
     item = QueuedMessage(str(body.id), thread_id, _validate_queue_content(body.content, references), references)
     try:
@@ -111,7 +122,7 @@ def create_queued_message(
 def update_queued_message(
     thread_id: str, message_id: str, body: QueuedMessageBody, request: Request
 ) -> dict[str, object]:
-    _require(session_store(request.app.state.web), thread_id)
+    _require_queue_thread(session_store(request.app.state.web), thread_id)
     references = _queue_references(body.references)
     try:
         item = request.app.state.web.message_queue.update(
@@ -127,7 +138,7 @@ def update_queued_message(
 
 @router.delete("/{thread_id}/queued-messages/{message_id}", status_code=204)
 def delete_queued_message(thread_id: str, message_id: str, request: Request) -> Response:
-    _require(session_store(request.app.state.web), thread_id)
+    _require_queue_thread(session_store(request.app.state.web), thread_id)
     try:
         request.app.state.web.message_queue.delete(thread_id, message_id)
     except Exception as exc:

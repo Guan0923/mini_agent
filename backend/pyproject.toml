@@ -24,7 +24,9 @@ dependencies = [
     "tokenizers>=0.21,<1",
     "tiktoken>=0.9,<1",
     "uvicorn>=0.34,<1",
+    "websockets>=15,<16",
     "pywin32>=308; sys_platform == 'win32'",
+    "pywinpty>=2.0.14,<3; sys_platform == 'win32'",
     "tzdata>=2025.2; sys_platform == 'win32'",
 ]
 

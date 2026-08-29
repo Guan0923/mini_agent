@@ -62,7 +62,7 @@ sandbox_broker = SwitchableTestBroker()
 
 class TestBrokerFactory:
     @classmethod
-    def from_system(cls):
+    def from_system(cls, **_kwargs):
         return sandbox_broker
 
 

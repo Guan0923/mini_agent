@@ -172,7 +172,9 @@ export default function ChatPage({
   }, [todoPanelKey]);
   const currentThreadId = activeRuntimeNode?.thread_id ?? conversation?.threadId ?? conversation?.sessionId;
   const traceTurns = (conversation?.runtimeNodes ?? []).filter(
-    (node): node is RuntimeStateNode => isRuntimeTurnNode(node) && node.thread_id === currentThreadId,
+    (node): node is RuntimeStateNode => isRuntimeTurnNode(node)
+      && node.thread_id === currentThreadId
+      && node.id !== conversation?.hiddenBeforeTurnId,
   );
   const hasTurnTree = traceTurns.length > 0;
   const visibleMainView = hasTurnTree ? mainView : "chat";

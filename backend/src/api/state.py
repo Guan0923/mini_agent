@@ -62,6 +62,9 @@ class WebAppState:
         self.message_queue = message_queue or RedisMessageQueue.from_url()
         self.redis_pool = getattr(getattr(self.message_queue, "client", None), "connection_pool", None)
         self.mailbox = self.message_queue
+        from .terminal_manager import TerminalManager
+
+        self.terminal_manager = TerminalManager(self.message_queue)
         self.agent_thread_index = AgentThreadIndex()
 
         self.active_runtime_configs: dict[str, dict[str, object]] = {}
@@ -305,6 +308,7 @@ class WebAppState:
 
     def close(self) -> None:
         self.job_registry.close_all(reason="web application closed", timeout=5.0)
+        self.terminal_manager.close_all()
         closed: set[int] = set()
         for resource in (self.settings, self.projects, self.message_queue):
             if id(resource) in closed:
