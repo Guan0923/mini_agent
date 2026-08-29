@@ -31,6 +31,17 @@
   font-weight: 600;
 }
 
+.chat-page--compact .trace-toolbar {
+  padding-inline: 8px;
+}
+
+.chat-page--compact .trace-toolbar .ant-btn {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+}
+
 .trace-toolbar-thread-id {
   flex: 0 1 auto;
   min-width: 0;

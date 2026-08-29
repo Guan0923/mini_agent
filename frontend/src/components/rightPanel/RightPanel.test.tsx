@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RightPanelPayload, RightPanelWindow } from "../../types";
-import RightPanel, { type RightPanelController, useRightPanel } from "./RightPanel";
+import RightPanel, { RightPanelLauncher, type RightPanelController, useRightPanel } from "./RightPanel";
 
 const api = vi.hoisted(() => ({
   getRightPanel: vi.fn(),
@@ -86,6 +86,25 @@ beforeEach(() => {
 });
 
 describe("RightPanel tabs", () => {
+  it("opens the panel directly from the main launcher without creating a window", () => {
+    const controller: RightPanelController = {
+      payload: payload([], true),
+      loading: false,
+      createWindow: vi.fn(),
+      closeWindow: vi.fn(),
+      renameWindow: vi.fn(),
+      setActive: vi.fn(),
+      setLayout: vi.fn(),
+    };
+    render(<RightPanelLauncher controller={controller} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "打开右侧边栏" }));
+
+    expect(controller.setLayout).toHaveBeenCalledWith({ collapsed: false });
+    expect(controller.createWindow).not.toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
   it("keeps the panel open and shows both choices after closing the last tab", async () => {
     const { container } = render(<StatefulPanel initial={payload([sideWindow("window-1", "侧聊 1")])} />);
 

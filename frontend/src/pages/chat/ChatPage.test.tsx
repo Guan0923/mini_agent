@@ -10,12 +10,13 @@ import type {
   ChatMessage,
   ChatMode,
   Conversation,
+  ReasoningEffort,
   RuntimeRootNode,
   RuntimeStateNode,
   TodoStatus,
   ToolEvent,
 } from "../../types";
-import ChatPage, { composerAction } from "./ChatPage";
+import ChatPage, { CHAT_COMPACT_WIDTH, composerAction } from "./ChatPage";
 
 vi.mock("../../api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../api")>(),
@@ -1012,6 +1013,95 @@ describe("ChatPage Trace navigation", () => {
 
     expect(await screen.findByRole("menuitem", { name: "session-rewind" })).toBeInTheDocument();
     expect(screen.getAllByRole("menuitem")).toHaveLength(1);
+  });
+
+  it("switches the toolbar and runtime controls only below 700px", async () => {
+    const user = userEvent.setup();
+    const originalResizeObserver = window.ResizeObserver;
+    let chatResizeCallback: ResizeObserverCallback | undefined;
+    class MockResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe = (target: Element) => {
+        if (target.matches(".chat-page")) chatResizeCallback = this.callback;
+      };
+      unobserve() {}
+      disconnect() {}
+    }
+    window.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+    vi.mocked(patchRuntimeConfig).mockImplementation(async (_sessionId, patch) => {
+      const accepted = turn("turn-config", "configure");
+      accepted.status = "running";
+      accepted.running_mode = patch.running_mode ?? "agent";
+      accepted.permission_mode = patch.permission_mode ?? "read_only";
+      accepted.model.reasoning_effort = (patch.model?.reasoning_effort as ReasoningEffort | undefined) ?? "medium";
+      return accepted;
+    });
+    const view = render(<ConfigHarness />);
+    try {
+      expect(CHAT_COMPACT_WIDTH).toBe(700);
+      expect(screen.getByRole("combobox", { name: "运行模式" })).toBeInTheDocument();
+
+      act(() => chatResizeCallback?.([
+        { contentRect: { width: 699 } } as ResizeObserverEntry,
+      ], {} as ResizeObserver));
+
+      expect(screen.queryByRole("combobox", { name: "运行模式" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Thread" }).querySelector(".anticon-branches")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Chat" }).querySelector(".anticon-comment")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Trace" }).querySelector(".anticon-node-index")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "运行模式：Agent" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "权限模式：只读" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "思考等级：中" })).toBeInTheDocument();
+
+      for (const [name, tooltip] of [
+        ["Thread", "Thread：session-rewind"],
+        ["Chat", "Chat"],
+        ["Trace", "Trace"],
+        ["运行模式：Agent", "运行模式：Agent"],
+        ["权限模式：只读", "权限模式：只读"],
+        ["思考等级：中", "思考等级：中"],
+      ] as const) {
+        await user.hover(screen.getByRole("button", { name }));
+        expect(await screen.findByRole("tooltip")).toHaveTextContent(tooltip);
+        await user.unhover(screen.getByRole("button", { name }));
+        await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
+      }
+
+      await user.click(screen.getByRole("button", { name: "运行模式：Agent" }));
+      expect(await screen.findByRole("menuitem", { name: "Agent" })).toHaveClass("ant-dropdown-menu-item-selected");
+      await user.click(screen.getByRole("menuitem", { name: "Plan" }));
+      await waitFor(() => expect(patchRuntimeConfig).toHaveBeenCalledWith(
+        "session-rewind",
+        expect.objectContaining({ running_mode: "plan" }),
+      ));
+
+      await user.click(screen.getByRole("button", { name: "权限模式：只读" }));
+      expect(await screen.findByRole("menuitem", { name: "只读" })).toHaveClass("ant-dropdown-menu-item-selected");
+      await user.click(screen.getByRole("menuitem", { name: "工作区读写" }));
+      await waitFor(() => expect(patchRuntimeConfig).toHaveBeenCalledWith(
+        "session-rewind",
+        expect.objectContaining({ permission_mode: "workspace_write" }),
+      ));
+
+      await user.click(screen.getByRole("button", { name: "思考等级：中" }));
+      expect(await screen.findByRole("menuitem", { name: "中（medium）" })).toHaveClass("ant-dropdown-menu-item-selected");
+      await user.click(screen.getByRole("menuitem", { name: "高（high）" }));
+      await waitFor(() => expect(patchRuntimeConfig).toHaveBeenCalledWith(
+        "session-rewind",
+        expect.objectContaining({ model: { reasoning_effort: "high" } }),
+      ));
+
+      act(() => chatResizeCallback?.([
+        { contentRect: { width: 700 } } as ResizeObserverEntry,
+      ], {} as ResizeObserver));
+
+      expect(screen.getByRole("combobox", { name: "运行模式" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Thread" })).toHaveTextContent("Thread");
+    } finally {
+      view.unmount();
+      window.ResizeObserver = originalResizeObserver;
+      vi.mocked(patchRuntimeConfig).mockReset();
+    }
   });
 });
 

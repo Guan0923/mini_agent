@@ -141,26 +141,14 @@ interface RightPanelAvailability {
 
 export function RightPanelLauncher({
   controller,
-  sourceAvailable,
-  terminalAvailable,
-  terminalReason,
-}: { controller: RightPanelController } & RightPanelAvailability) {
-  const { message } = App.useApp();
-  const run = (kind: "side_chat" | "terminal") => void controller.createWindow(kind).catch((error) => {
-    void message.error(String((error as Error).message ?? error));
-  });
-  const items = [
-    ...(controller.payload?.state.collapsed ? [{
-      key: "open",
-      label: "打开右栏",
-      onClick: () => controller.setLayout({ collapsed: false }),
-    }] : []),
-    ...creationItems(run, sourceAvailable, terminalAvailable, terminalReason),
-  ];
+}: { controller: RightPanelController }) {
   return (
-    <Dropdown trigger={["click"]} menu={{ items }}>
-      <Button className="right-panel-launcher" icon={<PlusOutlined />} aria-label="打开右侧边栏菜单" />
-    </Dropdown>
+    <Button
+      className="right-panel-launcher"
+      icon={<PlusOutlined />}
+      aria-label="打开右侧边栏"
+      onClick={() => controller.setLayout({ collapsed: false })}
+    />
   );
 }
 

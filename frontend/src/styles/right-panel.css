@@ -6,8 +6,11 @@
 }
 
 .right-panel-shell {
+  display: flex;
   height: 100%;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background: #fff;
   border-left: 1px solid var(--border);
 }
@@ -22,7 +25,10 @@
 
 .right-panel-tabs {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
+  width: 100%;
+  min-width: 0;
 }
 
 .right-panel-tabs > .ant-tabs-nav {
@@ -33,6 +39,17 @@
 .right-panel-tabs > .ant-tabs-content-holder {
   flex: 1 1 auto;
   overflow: hidden;
+}
+
+.right-panel-tabs .ant-tabs-tab {
+  max-width: 160px;
+}
+
+.right-panel-tabs .ant-tabs-tab-btn {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .right-panel-empty {
@@ -82,9 +99,18 @@
   height: 100%;
 }
 
-.right-panel-side-chat,
-.right-panel-side-chat .chat-page {
+.right-panel-side-chat {
+  display: flex;
+  flex-direction: column;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.right-panel-side-chat .chat-page {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
   min-height: 0;
 }
 

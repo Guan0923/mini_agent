@@ -1,5 +1,5 @@
 import type { RightPanelPayload, RightPanelWindow, RuntimeStateNode } from "../types";
-import { jsonBody, requestJson } from "./transport/request";
+import { jsonBody, requestJson, requestVoid } from "./transport/request";
 
 export interface CreatedSideChat {
   window: RightPanelWindow;
@@ -54,7 +54,7 @@ export function renameRightPanelWindow(sessionId: string, windowId: string, titl
 }
 
 export async function closeRightPanelWindow(sessionId: string, windowId: string): Promise<void> {
-  await requestJson(`${base(sessionId)}/windows/${encodeURIComponent(windowId)}`, { method: "DELETE" });
+  await requestVoid(`${base(sessionId)}/windows/${encodeURIComponent(windowId)}`, { method: "DELETE" });
 }
 
 export function terminalWebSocketUrl(terminalId: string, afterSequence: number): string {

@@ -31,8 +31,8 @@ async function sendMessage(scope: Locator | Page, page: Page, text: string): Pro
   await expect(scope.getByRole("button", { name: "发送", exact: true })).toBeVisible({ timeout: 15_000 });
 }
 
-async function openCreationMenu(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "打开右侧边栏菜单" }).click();
+async function openRightPanel(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "打开右侧边栏" }).click();
 }
 
 test("side chat hides its anchor history, survives refresh, and leaves choices after its last tab closes", async ({ page }) => {
@@ -42,18 +42,43 @@ test("side chat hides its anchor history, survives refresh, and leaves choices a
   await page.goto("/app");
   await page.getByRole("button", { name: title, exact: true }).click();
   await sendMessage(page, page, "main history must stay hidden from side chat");
+  await expect(page.getByRole("combobox", { name: "运行模式" })).toBeVisible();
 
-  await openCreationMenu(page);
+  await openRightPanel(page);
+  await expect(page.getByRole("menu")).toHaveCount(0);
   const createResponsePromise = page.waitForResponse((response) =>
     response.request().method() === "POST" && response.url().includes("/api/right-panel/")
       && response.url().endsWith("/side-chats"),
   );
-  await page.getByRole("menuitem", { name: /侧边聊天/ }).click();
+  await page.getByRole("button", { name: /创建侧边聊天/ }).click();
   const createResponse = await createResponsePromise;
   expect(createResponse.ok(), `${createResponse.status()} ${await createResponse.text()}`).toBeTruthy();
 
   const panel = page.locator(".right-panel-side-chat");
   await expect(panel).toBeVisible();
+  const mainChat = page.locator(".ant-splitter-panel").first().locator(".chat-page");
+  await expect(mainChat.getByRole("button", { name: /运行模式：Agent/ })).toBeVisible();
+  await expect(panel.getByRole("button", { name: /运行模式：Agent/ })).toBeVisible();
+  await expect(panel.getByRole("button", { name: /权限模式：只读/ })).toBeVisible();
+  await expect(panel.getByRole("button", { name: /思考等级：中/ })).toBeVisible();
+  const readLayout = () => panel.evaluate((element) => {
+    const composer = element.querySelector<HTMLElement>("[data-composer-seat]");
+    const content = element.querySelector<HTMLElement>(".chat-content");
+    const panelBox = element.getBoundingClientRect();
+    const composerBox = composer?.getBoundingClientRect();
+    const contentBox = content?.getBoundingClientRect();
+    return {
+      bottomGap: composerBox ? Math.abs(panelBox.bottom - composerBox.bottom) : -1,
+      contentHeight: contentBox?.height ?? 0,
+      contentBeforeComposer: Boolean(contentBox && composerBox && contentBox.bottom <= composerBox.top + 1),
+      horizontalOverflow: element.scrollWidth - element.clientWidth,
+    };
+  });
+  await expect.poll(async () => (await readLayout()).bottomGap).toBeLessThanOrEqual(1);
+  const layout = await readLayout();
+  expect(layout.contentHeight).toBeGreaterThan(0);
+  expect(layout.contentBeforeComposer).toBeTruthy();
+  expect(layout.horizontalOverflow).toBeLessThanOrEqual(1);
   await expect(panel.locator(".message")).toHaveCount(0);
   await expect(panel).not.toContainText("main history must stay hidden from side chat");
 
@@ -78,7 +103,8 @@ test("side chat hides its anchor history, survives refresh, and leaves choices a
   );
   await page.locator(".right-panel-tabs .ant-tabs-tab-remove").click();
   const deleteResponse = await deleteResponsePromise;
-  expect(deleteResponse.ok(), `${deleteResponse.status()} ${await deleteResponse.text()}`).toBeTruthy();
+  expect(deleteResponse.status()).toBe(204);
+  await expect(page.getByText("Unexpected end of JSON input")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /创建侧边聊天/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /打开终端/ })).toBeVisible();
   await expect(page.locator(".right-panel-shell")).toBeVisible();
@@ -87,6 +113,35 @@ test("side chat hides its anchor history, survives refresh, and leaves choices a
   await expect(page.getByRole("button", { name: /创建侧边聊天/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /打开终端/ })).toBeVisible();
   await expect(page.locator(".right-panel-shell")).toBeVisible();
+});
+
+test("desktop resize clamps the preview at 280px, collapses below it, and restores the saved width", async ({ page }) => {
+  const title = "Right Panel Resize E2E";
+  await createConversation(page, title);
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: title, exact: true }).click();
+  await sendMessage(page, page, "create a Turn before resizing the panel");
+  await openRightPanel(page);
+
+  const shell = page.locator(".right-panel-shell");
+  const dragger = page.locator(".ant-splitter-bar").first();
+  await expect(shell).toBeVisible();
+  const savedWidth = (await shell.boundingBox())?.width ?? 0;
+  const draggerBox = await dragger.boundingBox();
+  expect(savedWidth).toBeGreaterThan(400);
+  expect(draggerBox).not.toBeNull();
+
+  await page.mouse.move(draggerBox!.x + draggerBox!.width / 2, draggerBox!.y + draggerBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(draggerBox!.x + 220, draggerBox!.y + draggerBox!.height / 2, { steps: 8 });
+  await expect.poll(async () => (await shell.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(279);
+  await page.mouse.up();
+
+  await expect(page.getByRole("button", { name: "打开右侧边栏" })).toBeVisible();
+  await openRightPanel(page);
+  await expect(shell).toBeVisible();
+  await expect.poll(async () => (await shell.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(savedWidth - 1);
 });
 
 test("mobile right panel uses a full-width Drawer and keeps the empty creation state", async ({ page }) => {
@@ -99,8 +154,7 @@ test("mobile right panel uses a full-width Drawer and keeps the empty creation s
   await page.getByRole("button", { name: title, exact: true }).click();
   await sendMessage(page, page, "create a Turn before opening the mobile panel");
 
-  await openCreationMenu(page);
-  await page.getByRole("menuitem", { name: "打开右栏", exact: true }).click();
+  await openRightPanel(page);
 
   const drawer = page.locator(".ant-drawer-content-wrapper:visible");
   await expect(drawer).toBeVisible();
@@ -111,7 +165,7 @@ test("mobile right panel uses a full-width Drawer and keeps the empty creation s
 
   await drawer.locator(".ant-drawer-close").click();
   await expect(drawer).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "打开右侧边栏菜单" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "打开右侧边栏" })).toBeVisible();
 });
 
 test("real cmd terminal starts in the Turn cwd, replays after refresh, and closes from its tab", async ({ page }) => {
@@ -129,12 +183,12 @@ test("real cmd terminal starts in the Turn cwd, replays after refresh, and close
   const sourceTurn = turns.find((item) => item.thread_id === sessionId);
   expect(sourceTurn?.cwd).toBeTruthy();
 
-  await openCreationMenu(page);
+  await openRightPanel(page);
   const createResponsePromise = page.waitForResponse((response) =>
     response.request().method() === "POST" && response.url().includes("/api/right-panel/")
       && response.url().endsWith("/terminals"),
   );
-  await page.getByRole("menuitem", { name: /终端/ }).click();
+  await page.getByRole("button", { name: /打开终端/ }).click();
   const createResponse = await createResponsePromise;
   expect(createResponse.ok(), `${createResponse.status()} ${await createResponse.text()}`).toBeTruthy();
 
@@ -163,7 +217,7 @@ test("real cmd terminal starts in the Turn cwd, replays after refresh, and close
   );
   await page.locator(".right-panel-tabs .ant-tabs-tab-remove").click();
   const deleteResponse = await deleteResponsePromise;
-  expect(deleteResponse.ok(), `${deleteResponse.status()} ${await deleteResponse.text()}`).toBeTruthy();
+  expect(deleteResponse.status()).toBe(204);
   await expect(page.getByRole("button", { name: /创建侧边聊天/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /打开终端/ })).toBeVisible();
 

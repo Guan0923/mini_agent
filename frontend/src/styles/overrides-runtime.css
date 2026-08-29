@@ -75,30 +75,49 @@
   border-radius: 50%;
 }
 
-.run-settings-trigger {
-  min-width: 36px;
-  min-height: 36px;
+.chat-page--compact .composer {
+  padding-inline: 12px;
+  padding-bottom: 14px;
 }
 
-.run-settings-drawer {
-  max-height: min(70vh, 460px);
+.chat-page--compact .composer-toolbar {
+  gap: 2px;
+  min-height: 42px;
+  padding: 0 42px 8px 8px;
 }
 
-.run-settings-drawer .composer-settings-controls {
+.composer-compact-settings {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  padding: 4px 0 12px;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
 }
 
-.run-settings-drawer .composer-settings-controls > .ant-space-item:last-child {
-  margin-left: 0;
+.composer-compact-settings .ant-space-item {
+  display: flex;
+  align-items: center;
 }
 
-.run-settings-drawer .mode-picker,
-.run-settings-drawer .composer-picker {
-  width: 100%;
-  max-width: none;
+.chat-page--compact .composer-toolbar .icon-action,
+.composer-compact-setting.ant-btn {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+
+.composer-compact-usage {
+  flex: 0 0 auto;
+}
+
+.chat-page--compact .composer-box .send-btn {
+  right: 8px;
+  bottom: 8px;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
 }
 
 .timezone-select,

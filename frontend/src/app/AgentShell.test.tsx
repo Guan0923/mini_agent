@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AgentShell, {
   DEFAULT_RIGHT_PANEL_WIDTH,
   RIGHT_PANEL_CLOSE_THRESHOLD,
+  rightPanelPreviewWidth,
   rightPanelResizeOutcome,
   type AgentShellProps,
 } from "./AgentShell";
@@ -145,6 +146,9 @@ describe("AgentShell right panel sizing", () => {
   it("uses 420px by default and collapses only below 280px", () => {
     expect(DEFAULT_RIGHT_PANEL_WIDTH).toBe(420);
     expect(RIGHT_PANEL_CLOSE_THRESHOLD).toBe(280);
+    expect(rightPanelPreviewWidth(279)).toBe(280);
+    expect(rightPanelPreviewWidth(280)).toBe(280);
+    expect(rightPanelPreviewWidth(560)).toBe(560);
     expect(rightPanelResizeOutcome(279, 560)).toEqual({
       previewWidth: 560,
       patch: { collapsed: true },
@@ -193,6 +197,6 @@ describe("AgentShell right panel sizing", () => {
     await waitFor(() => expect(document.querySelector(".ant-drawer-open")).toBeInTheDocument());
     expect(container.querySelector(".ant-splitter")).not.toBeInTheDocument();
     expect(document.querySelector<HTMLElement>(".ant-drawer-content-wrapper")?.style.width).toBe("100%");
-    expect(screen.queryByLabelText("打开右侧边栏菜单")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("打开右侧边栏")).not.toBeInTheDocument();
   });
 });

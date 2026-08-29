@@ -64,7 +64,6 @@ export function useRuntimeControls({
     reasoning: false,
   });
   const runtimeConfigPendingRef = useRef(runtimeConfigPending);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [openSettingsSelect, setOpenSettingsSelect] = useState<SettingsSelectKey | null>(null);
   const fullAccessConfirmRef = useRef<{ destroy: () => void } | null>(null);
   const canPatchRuntimeConfig = activeRuntimeNode?.status === "running";
@@ -230,8 +229,6 @@ export function useRuntimeControls({
     permissionMode,
     reasoningEffort,
     runtimeConfigPending,
-    settingsOpen,
-    setSettingsOpen,
     openSettingsSelect,
     setOpenSettingsSelect,
     activeUsage,

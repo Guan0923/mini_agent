@@ -33,13 +33,22 @@ export async function errorFrom(res: Response): Promise<string> {
   return (await errorDetailsFrom(res)).message;
 }
 
-export async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+async function request(url: string, init: RequestInit): Promise<Response> {
   const res = await fetch(apiUrl(url), init);
   if (!res.ok) {
     const details = await errorDetailsFrom(res);
     throw new ApiError(res.status, details.message, details.code);
   }
+  return res;
+}
+
+export async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const res = await request(url, init);
   return res.json() as Promise<T>;
+}
+
+export async function requestVoid(url: string, init: RequestInit = {}): Promise<void> {
+  await request(url, init);
 }
 
 export function jsonBody(body: unknown): RequestInit {

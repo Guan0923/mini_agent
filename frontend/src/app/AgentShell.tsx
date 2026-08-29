@@ -1,6 +1,6 @@
 import { Alert, Button, Drawer, Grid, Layout, Splitter } from "antd";
 import { CloseOutlined, MenuOutlined } from "@ant-design/icons";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { LocalProfile, RightPanelWindow } from "../types";
 import type { AgentConfig, ProviderConfig } from "../api";
 import type { ChatRunRequest } from "./types";
@@ -18,6 +18,10 @@ import RightPanel, { RightPanelLauncher, useRightPanel } from "../components/rig
 
 export const DEFAULT_RIGHT_PANEL_WIDTH = 420;
 export const RIGHT_PANEL_CLOSE_THRESHOLD = 280;
+
+export function rightPanelPreviewWidth(width: number) {
+  return Math.max(width, RIGHT_PANEL_CLOSE_THRESHOLD);
+}
 
 export function rightPanelResizeOutcome(width: number, savedWidth: number) {
   return width < RIGHT_PANEL_CLOSE_THRESHOLD
@@ -91,6 +95,7 @@ export default function AgentShell(props: AgentShellProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [chatRevealKey, setChatRevealKey] = useState(0);
   const [previewPanelWidth, setPreviewPanelWidth] = useState(DEFAULT_RIGHT_PANEL_WIDTH);
+  const rawPanelWidthRef = useRef(DEFAULT_RIGHT_PANEL_WIDTH);
   const panel = useRightPanel(
     props.current?.sessionId,
     props.current?.activeTurnId ?? props.current?.lastNodeId,
@@ -105,7 +110,9 @@ export default function AgentShell(props: AgentShellProps) {
     if (props.page === "chat") setChatRevealKey((current) => current + 1);
   }, [props.page]);
   useEffect(() => {
-    setPreviewPanelWidth(panel.payload?.state.width || DEFAULT_RIGHT_PANEL_WIDTH);
+    const width = panel.payload?.state.width || DEFAULT_RIGHT_PANEL_WIDTH;
+    rawPanelWidthRef.current = width;
+    setPreviewPanelWidth(width);
   }, [props.current?.sessionId, panel.payload?.state.width]);
   const closeMobile = () => setMobileSidebarOpen(false);
   const navigate = (page: Page) => {
@@ -249,11 +256,17 @@ export default function AgentShell(props: AgentShellProps) {
           {!isMobile && panelOpen ? (
             <Splitter
               style={{ width: "100%", height: "100%" }}
-              onResize={(sizes) => setPreviewPanelWidth(Number(sizes[1]) || 0)}
-              onResizeEnd={(sizes) => {
+              onResize={(sizes) => {
                 const width = Number(sizes[1]) || 0;
+                rawPanelWidthRef.current = width;
+                setPreviewPanelWidth(rightPanelPreviewWidth(width));
+              }}
+              onResizeEnd={(sizes) => {
+                const reportedWidth = Number(sizes[1]) || 0;
+                const width = rawPanelWidthRef.current || reportedWidth;
                 const outcome = rightPanelResizeOutcome(width, panel.payload?.state.width ?? DEFAULT_RIGHT_PANEL_WIDTH);
                 panel.setLayout(outcome.patch);
+                rawPanelWidthRef.current = outcome.previewWidth;
                 setPreviewPanelWidth(outcome.previewWidth);
               }}
             >
@@ -263,8 +276,8 @@ export default function AgentShell(props: AgentShellProps) {
               </Splitter.Panel>
             </Splitter>
           ) : mainContent}
-          {!isMobile && props.page === "chat" && props.current?.sessionId && !panelOpen ? <RightPanelLauncher controller={panel} sourceAvailable={sourceAvailable} terminalAvailable={terminalAvailable} terminalReason={terminalReason} /> : null}
-          {isMobile && props.page === "chat" && props.current?.sessionId && !panelOpen ? <RightPanelLauncher controller={panel} sourceAvailable={sourceAvailable} terminalAvailable={terminalAvailable} terminalReason={terminalReason} /> : null}
+          {!isMobile && props.page === "chat" && props.current?.sessionId && !panelOpen ? <RightPanelLauncher controller={panel} /> : null}
+          {isMobile && props.page === "chat" && props.current?.sessionId && !panelOpen ? <RightPanelLauncher controller={panel} /> : null}
           {isMobile && props.current?.sessionId ? (
             <Drawer
               title="右侧边栏"

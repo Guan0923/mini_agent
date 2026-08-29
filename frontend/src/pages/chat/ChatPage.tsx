@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { App as AntApp, Button, Dropdown, FloatButton, Grid } from "antd";
-import { VerticalAlignBottomOutlined } from "@ant-design/icons";
+import { App as AntApp, Button, Dropdown, FloatButton, Grid, Tooltip } from "antd";
+import { BranchesOutlined, CommentOutlined, NodeIndexOutlined, VerticalAlignBottomOutlined } from "@ant-design/icons";
 import {
   compactTurn,
   createQueuedMessage,
@@ -38,6 +38,7 @@ import { useRuntimeControls } from "./useRuntimeControls";
 export { composerAction } from "./contracts";
 
 const BOTTOM_THRESHOLD_PX = 24;
+export const CHAT_COMPACT_WIDTH = 700;
 
 function isScrollContainerAtBottom(scrollContainer: HTMLDivElement): boolean {
   return scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight <= BOTTOM_THRESHOLD_PX;
@@ -70,6 +71,10 @@ export default function ChatPage({
   const mode = selectedMode ?? "agent";
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false && (typeof window === "undefined" || window.innerWidth < 768);
+  const chatPageRef = useRef<HTMLDivElement | null>(null);
+  const measuredChatWidthRef = useRef<number | null>(null);
+  const [compact, setCompact] = useState(isMobile);
+  const compactRef = useRef(isMobile);
   const [queueSubmitting, setQueueSubmitting] = useState(false);
   const [compactionPending, setCompactionPending] = useState(false);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
@@ -87,6 +92,26 @@ export default function ChatPage({
   const queueAutoBlockedRef = useRef(false);
   const acknowledgedDeliveryIdsRef = useRef(new Set<string>());
   const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const element = chatPageRef.current;
+    if (!element) return;
+    const applyWidth = (width: number) => {
+      if (width > 0) measuredChatWidthRef.current = width;
+      const measuredWidth = measuredChatWidthRef.current;
+      const next = isMobile || (measuredWidth != null && measuredWidth < CHAT_COMPACT_WIDTH);
+      if (compactRef.current === next) return;
+      compactRef.current = next;
+      setCompact(next);
+    };
+    applyWidth(element.getBoundingClientRect().width);
+    if (typeof ResizeObserver !== "function") return;
+    const observer = new ResizeObserver((entries) => {
+      applyWidth(entries[0]?.contentRect.width ?? element.getBoundingClientRect().width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [isMobile]);
 
   useEffect(() => {
     setEditingQueuedMessageId(null);
@@ -194,8 +219,6 @@ export default function ChatPage({
     permissionMode,
     reasoningEffort,
     runtimeConfigPending,
-    settingsOpen,
-    setSettingsOpen,
     openSettingsSelect,
     setOpenSettingsSelect,
     activeUsage,
@@ -553,7 +576,6 @@ export default function ChatPage({
     clearComposer();
     setCommandMenuDismissedFor(null);
     setActiveCommandIndex(0);
-    setSettingsOpen(false);
     if (name === "/trace") {
       setMainView("trace");
       return;
@@ -673,7 +695,7 @@ export default function ChatPage({
   }
 
   return (
-    <div className="chat-page">
+    <div ref={chatPageRef} className={`chat-page${compact ? " chat-page--compact" : ""}`}>
       {hasTurnTree && currentThreadId ? <div className="trace-toolbar" role="navigation" aria-label="主内容视图">
         <Dropdown
           trigger={["click"]}
@@ -683,11 +705,17 @@ export default function ChatPage({
             items: [{ key: currentThreadId, label: currentThreadId }],
           }}
         >
-          <Button type="text">Thread</Button>
+          <Tooltip title={compact ? `Thread：${currentThreadId}` : undefined}>
+            <Button type="text" aria-label="Thread" icon={compact ? <BranchesOutlined /> : undefined}>{compact ? null : "Thread"}</Button>
+          </Tooltip>
         </Dropdown>
         <span className="trace-toolbar-thread-id" title={currentThreadId}>{currentThreadId}</span>
-        <Button type="text" aria-pressed={visibleMainView === "chat"} onClick={() => setMainView("chat")}>Chat</Button>
-        <Button type="text" aria-pressed={visibleMainView === "trace"} onClick={() => setMainView("trace")}>Trace</Button>
+        <Tooltip title={compact ? "Chat" : undefined}>
+          <Button type="text" aria-label="Chat" icon={compact ? <CommentOutlined /> : undefined} aria-pressed={visibleMainView === "chat"} onClick={() => setMainView("chat")}>{compact ? null : "Chat"}</Button>
+        </Tooltip>
+        <Tooltip title={compact ? "Trace" : undefined}>
+          <Button type="text" aria-label="Trace" icon={compact ? <NodeIndexOutlined /> : undefined} aria-pressed={visibleMainView === "trace"} onClick={() => setMainView("trace")}>{compact ? null : "Trace"}</Button>
+        </Tooltip>
       </div> : null}
       {visibleMainView === "trace" ? <TracePage key={currentThreadId} turns={traceTurns} /> : <>
       <div className="chat-content">
@@ -730,7 +758,7 @@ export default function ChatPage({
       <Composer
         input={input}
         busy={interactionBusy}
-        isMobile={isMobile}
+        compact={compact}
         filteredCommands={filteredCommands}
         commandMenuVisible={commandMenuVisible}
         activeCommandIndex={activeCommandIndex}
@@ -747,7 +775,6 @@ export default function ChatPage({
         usageTotalTokens={activeUsage?.total ?? null}
         usageContextLength={activeUsage?.context}
         openSettingsSelect={openSettingsSelect}
-        settingsOpen={settingsOpen}
         editorRef={editorRef}
         onEditorChange={handleEditorChange}
         onKeyDown={handleComposerKeyDown}
@@ -757,8 +784,6 @@ export default function ChatPage({
         onPermissionChange={(value) => void changePermissionMode(value)}
         onReasoningChange={(value) => void changeReasoningEffort(value)}
         onSettingsSelectChange={setOpenSettingsSelect}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onCloseSettings={() => setSettingsOpen(false)}
         onStop={pauseOrSteer}
         onSend={() => void send()}
         actionMode={actionMode}
