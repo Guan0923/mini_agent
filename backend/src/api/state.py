@@ -17,6 +17,9 @@ from backend.domain.runtime_state import (
 )
 from backend.domain.terminal import TERMINAL_LABELS
 from backend.jobs import JobRegistry
+from backend.runtime.agent_thread_index import AgentThreadIndex
+from backend.runtime.capability_settings import SubagentSettings
+from backend.runtime.subagents import SubagentCoordinator
 from backend.sandbox import WindowsBrokerClient
 from backend.storage.message_queue import MemoryMessageQueue, RedisMessageQueue
 from backend.storage.projects import ProjectStore
@@ -56,6 +59,7 @@ class WebAppState:
         self.message_queue = message_queue or RedisMessageQueue.from_url()
         self.redis_pool = getattr(getattr(self.message_queue, "client", None), "connection_pool", None)
         self.mailbox = self.message_queue
+        self.agent_thread_index = AgentThreadIndex()
 
         self.active_runtime_configs: dict[str, dict[str, object]] = {}
         self.active_runtime_bridges: dict[str, object] = {}
@@ -63,6 +67,17 @@ class WebAppState:
         self.active_turn_streams_lock = RLock()
         self.active_runtime_config_locks: dict[str, RLock] = {}
         self._reconcile_message_queue()
+        from backend.storage.sqlite import SQLiteSessionStore
+
+        agent_store = SQLiteSessionStore(self.paths, self.agent_thread_index)
+        self.agent_thread_index.rebuild(agent_store)
+        self.subagent_coordinator = SubagentCoordinator(
+            settings=SubagentSettings.from_config(self.settings.config_store.read()),
+            store=agent_store,
+            message_queue=self.message_queue,
+            index=self.agent_thread_index,
+            job_registry=self.job_registry,
+        )
 
     @staticmethod
     def _delivery_in_node(node: RuntimeState, delivery_id: str) -> bool:
@@ -145,7 +160,7 @@ class WebAppState:
     def _reconcile_message_queue(self) -> None:
         from backend.storage.sqlite import SQLiteSessionStore
 
-        store = SQLiteSessionStore(self.paths)
+        store = SQLiteSessionStore(self.paths, self.agent_thread_index)
         running_nodes: list[RuntimeState] = []
         for summary in store.list_sessions(state="all"):
             for node in store.load_nodes(summary.session_id):
@@ -158,6 +173,8 @@ class WebAppState:
         released_turns: set[str] = set()
         for claimed in pending:
             envelope = claimed.envelope
+            if envelope.target_kind == "thread":
+                continue
             node = store.find_node(envelope.target_id)
             sqlite_persisted = store.has_turn_delivery(envelope.session_id, envelope.delivery_id)
             canonical_persisted = isinstance(node, RuntimeState) and self._delivery_in_node(node, envelope.delivery_id)
@@ -198,7 +215,12 @@ class WebAppState:
             self._fail_interrupted_run(store, session_id)
         for node in running_nodes:
             current = store.find_node(node.id)
-            if isinstance(current, RuntimeState) and current.status == "running":
+            runtime_thread = store.get_runtime_thread(node.session_id, node.thread_id)
+            if (
+                isinstance(current, RuntimeState)
+                and current.status == "running"
+                and (runtime_thread is None or runtime_thread.origin_kind != "subagent")
+            ):
                 self._fail_interrupted_node(store, current)
 
         for turn_id in released_turns:

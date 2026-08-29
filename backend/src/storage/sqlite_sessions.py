@@ -48,6 +48,18 @@ class SQLiteSessionMixin:
                 self._put_json_object(
                     connection, session.session_id, "session", session.session_id, document, timestamp
                 )
+                self._ensure_runtime_thread_record(
+                    connection,
+                    session_id=session.session_id,
+                    thread_id=session.session_id,
+                    origin_kind="main",
+                    timestamp=timestamp,
+                )
+                connection.execute(
+                    "INSERT INTO thread_nodes(session_id,thread_id,parent_thread_id,thread_path,thread_task,thread_status,depth,created_at,updated_at) "
+                    "VALUES (?,?,NULL,'/root','','opening',0,?,?)",
+                    (session.session_id, session.session_id, timestamp, timestamp),
+                )
         except Exception:
             if not root_existed:
                 shutil.rmtree(root, ignore_errors=True)

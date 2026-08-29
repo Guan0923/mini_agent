@@ -105,7 +105,7 @@ class SQLiteCheckpointMixin:
         reduced_payload.pop("messages", None)
         reduced_payload.pop("run_history", None)
         if reduced_payload.get("current_run"):
-            for key in ("history", "actions", "subagent_batches"):
+            for key in ("history", "actions"):
                 reduced_payload["current_run"].pop(key, None)
         with self._connection(state.session_id) as connection:
             self._assert_writable(connection)

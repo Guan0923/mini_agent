@@ -63,13 +63,26 @@ class SQLiteNodeMixin:
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
             self._session_document(connection, node.session_id)
-            nodes = self._objects(connection, node.session_id, "runtime_node")
-            if any(
-                isinstance(item, TreeRuntimeState) and item.status == "running" and item.thread_id == node.thread_id
-                for item in nodes
-            ):
-                raise ValueError("A thread may have only one running Turn.")
+            self._ensure_runtime_thread_record(
+                connection,
+                session_id=node.session_id,
+                thread_id=node.thread_id,
+                origin_kind="main" if node.thread_id == node.session_id else "fork",
+                timestamp=node.timestamp,
+            )
+            self._claim_thread_turn(
+                connection,
+                session_id=node.session_id,
+                thread_id=node.thread_id,
+                turn_id=node.id,
+                timestamp=node.timestamp,
+            )
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+            if node.thread_id == node.session_id:
+                connection.execute(
+                    "UPDATE thread_nodes SET thread_task=?,updated_at=? WHERE thread_id=? AND thread_task=''",
+                    (str(node.user_message["content"][0].get("text") or ""), node.timestamp, node.thread_id),
+                )
             self._touch_session(connection, node.session_id, node.timestamp)
 
     def update_node(self, node: TreeRuntimeState) -> None:
@@ -79,6 +92,14 @@ class SQLiteNodeMixin:
             if existing is None:
                 raise KeyError(node.id)
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+            self._set_thread_head(
+                connection,
+                session_id=node.session_id,
+                thread_id=node.thread_id,
+                turn_id=node.id,
+                timestamp=node.timestamp,
+                clear_running=node.status in {"success", "paused", "failed"},
+            )
             self._touch_session(connection, node.session_id, utc_now())
 
     def create_finalized_nodes(self, nodes: list[TreeRuntimeState] | tuple[TreeRuntimeState, ...]) -> None:
@@ -112,7 +133,22 @@ class SQLiteNodeMixin:
                 staged[node.key] = node
             timestamp = nodes[-1].timestamp
             for node in nodes:
+                self._ensure_runtime_thread_record(
+                    connection,
+                    session_id=node.session_id,
+                    thread_id=node.thread_id,
+                    origin_kind="main" if node.thread_id == node.session_id else "fork",
+                    timestamp=node.timestamp,
+                )
                 self._put_json_object(connection, session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+                self._set_thread_head(
+                    connection,
+                    session_id=node.session_id,
+                    thread_id=node.thread_id,
+                    turn_id=node.id,
+                    timestamp=node.timestamp,
+                    clear_running=True,
+                )
             self._touch_session(connection, session_id, timestamp)
 
     def get_node(self, session_id: str, node_id: str) -> RuntimeNode | None:
@@ -164,6 +200,14 @@ class SQLiteNodeMixin:
             if node.status not in {"success", "paused", "failed"}:
                 raise ValueError("A Turn can only be finalized as success, paused, or failed.")
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+            self._set_thread_head(
+                connection,
+                session_id=node.session_id,
+                thread_id=node.thread_id,
+                turn_id=node.id,
+                timestamp=node.timestamp,
+                clear_running=True,
+            )
             self._touch_session(connection, node.session_id, node.timestamp)
 
     def append_turn_version(self, turn_id: str, user_item: Mapping[str, object]) -> TreeRuntimeState:
@@ -180,16 +224,13 @@ class SQLiteNodeMixin:
             if current is None:
                 raise KeyError(turn_id)
             stored = TreeRuntimeState.from_dict(current)
-            running = [
-                item
-                for item in self._objects(connection, node.session_id, "runtime_node")
-                if isinstance(item, TreeRuntimeState)
-                and item.thread_id == stored.thread_id
-                and item.status == "running"
-                and item.id != stored.id
-            ]
-            if running:
-                raise ValueError("A thread may have only one running Turn.")
+            self._claim_thread_turn(
+                connection,
+                session_id=stored.session_id,
+                thread_id=stored.thread_id,
+                turn_id=stored.id,
+                timestamp=utc_iso(),
+            )
             stored.data.append([user, assistant])
             stored.current_data_idx = len(stored.data) - 1
             stored.status = "running"
@@ -235,14 +276,13 @@ class SQLiteNodeMixin:
             raise ValueError("Only a paused Turn can be resumed.")
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
-            if any(
-                isinstance(item, TreeRuntimeState)
-                and item.thread_id == node.thread_id
-                and item.status == "running"
-                and item.id != node.id
-                for item in self._objects(connection, node.session_id, "runtime_node")
-            ):
-                raise ValueError("A thread may have only one running Turn.")
+            self._claim_thread_turn(
+                connection,
+                session_id=node.session_id,
+                thread_id=node.thread_id,
+                turn_id=node.id,
+                timestamp=utc_iso(),
+            )
             content = node.data[node.current_data_idx][1]["content"]
             if content and content[-1].get("type") == "error" and bool(content[-1].get("retryable")):
                 content.pop()

@@ -12,7 +12,7 @@ from redis import Redis
 from backend.api.app import create_app
 from backend.api.session_store import session_store
 from backend.api.state import WebAppState
-from backend.domain import DeliveryConflict, QueuedMessage
+from backend.domain import DeliveryConflict, MessageEnvelope, QueuedMessage
 from backend.domain.runtime_state import RuntimeState
 from backend.storage.message_queue import STALE_CLAIM_MS, RedisMessageQueue
 
@@ -231,6 +231,65 @@ def test_real_redis_dispatch_claim_ack_and_receipt_replay(redis_queue: RedisMess
             thread_id=thread_id,
             turn_id="turn-real",
         )
+
+
+def test_real_redis_agent_thread_dispatch_is_fifo_deduplicated_and_acknowledged(
+    redis_queue: RedisMessageQueue,
+) -> None:
+    first = MessageEnvelope(
+        "agent-one",
+        "agent",
+        "thread-source",
+        "thread",
+        "thread-target",
+        "session",
+        "thread-target",
+        {"content": "first", "references": []},
+        ("agent-one",),
+    )
+    second = MessageEnvelope(
+        "agent-two",
+        "agent",
+        "thread-source",
+        "thread",
+        "thread-target",
+        "session",
+        "thread-target",
+        {"content": "second", "references": []},
+        ("agent-two",),
+    )
+    assert redis_queue.dispatch_agent(first) == first
+    assert redis_queue.dispatch_agent(first) == first
+    redis_queue.dispatch_agent(second)
+    with pytest.raises(DeliveryConflict):
+        redis_queue.dispatch_agent(
+            MessageEnvelope(
+                "agent-one",
+                "agent",
+                "thread-source",
+                "thread",
+                "thread-target",
+                "session",
+                "thread-target",
+                {"content": "changed", "references": []},
+                ("agent-one",),
+            )
+        )
+
+    assert redis_queue.peek_thread("thread-target") == first
+    claimed_first = redis_queue.claim_thread("thread-target", "crashed-worker")
+    assert claimed_first is not None and claimed_first.envelope.content == "first"
+    assert redis_queue.claim_thread("thread-target", "worker") is None
+    recovered_first = redis_queue.claim_thread_recovery("thread-target", "replacement-worker")
+    assert recovered_first is not None and recovered_first.stream_id == claimed_first.stream_id
+    assert recovered_first.envelope.delivery_id == "agent-one"
+    redis_queue.ack(recovered_first)
+    claimed_second = redis_queue.claim_thread("thread-target", "worker")
+    assert claimed_second is not None and claimed_second.envelope.content == "second"
+    redis_queue.ack(claimed_second)
+    assert redis_queue.peek_thread("thread-target") is None
+    assert redis_queue.client.exists(redis_queue._thread_stream_key("thread-target")) == 0
+    assert 0 < redis_queue.client.ttl(redis_queue._receipt_key("agent-one")) <= 7 * 24 * 60 * 60
 
 
 def test_real_redis_reclaims_stale_delivery_and_returns_unconsumed_messages(redis_queue: RedisMessageQueue) -> None:

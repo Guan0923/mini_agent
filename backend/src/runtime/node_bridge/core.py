@@ -48,6 +48,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         thinking_level: str = "medium",
         references: Sequence[Mapping[str, str]] | None = None,
         delivery_id: str | None = None,
+        isolated_thread_context: bool = False,
         emit: Callable[[NodeFrame], None],
     ) -> None:
         self.store = store
@@ -75,6 +76,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         self.cwd = cwd
         self.references = [dict(item) for item in references or []]
         self.delivery_id = delivery_id or ""
+        self.isolated_thread_context = isolated_thread_context
         self.writer = NodeWriter(store, emit=emit)
         self.parent: RuntimeState | RuntimeRootState | None = None
         self.assistant: RuntimeState | None = None
@@ -112,6 +114,23 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         current = self._current()
         if current is None:
             return []
+        if self.isolated_thread_context:
+            nodes = [
+                node
+                for node in self.store.load_nodes(current.session_id)
+                if isinstance(node, RuntimeState) and node.thread_id == current.thread_id
+            ]
+            by_id = {node.id: node for node in nodes}
+            path: list[RuntimeState] = []
+            cursor: RuntimeState | None = current
+            seen: set[str] = set()
+            while cursor is not None and cursor.id not in seen:
+                seen.add(cursor.id)
+                path.append(cursor)
+                parent = by_id.get(cursor.parent_id)
+                cursor = parent if parent is not None and parent.thread_id == current.thread_id else None
+            path.reverse()
+            return [node.clone() for node in path]
         try:
             return RuntimeStateTree(self.store.load_nodes(current.session_id)).model_input(current)
         except (KeyError, RuntimeError, ValueError):

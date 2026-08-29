@@ -70,6 +70,8 @@ def build_local_application(
         "job_registry": job_registry or getattr(state, "job_registry", None),
         "job_parent_id": job_parent_id,
         "sandbox_session_id": session_id,
+        "agent_thread_index": getattr(state, "agent_thread_index", None),
+        "subagent_coordinator": getattr(state, "subagent_coordinator", None),
     }
     # Preserve compatibility with embedders/tests that accept only a subset
     # of the canonical application builder options.

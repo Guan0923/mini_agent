@@ -10,41 +10,81 @@ def _runtime_only(**_arguments: object) -> str:
     raise ToolError("This tool can only run inside an AgentRunner with subagents enabled.")
 
 
-def delegation_tools(max_tasks_per_batch: int = 8) -> tuple[Tool, Tool]:
-    """Return the model-visible tools used to delegate and inspect child work."""
+def delegation_tools(max_tasks_per_batch: int = 8) -> tuple[Tool, Tool, Tool, Tool]:
+    """Return persistent Agent-tree tools supplied by the runtime coordinator."""
 
-    task = object_schema(
-        {
-            "id": {"type": "string", "minLength": 1, "maxLength": 128},
-            "task": {"type": "string", "minLength": 1, "maxLength": 20_000},
-        },
-        ["id", "task"],
-    )
+    optional_source = {"source_thread_id": {"type": "string", "minLength": 1, "maxLength": 128}}
     return (
         Tool(
             "delegate_tasks",
             (
-                "Delegates independent, self-contained tasks to subagents. Each subagent has the full "
-                "workspace tool set. Use distinct ids and only group work that can proceed independently."
+                "Creates persistent child Agent Threads in this Session and starts their initial tasks in the "
+                "background. Results are delivered back automatically."
             ),
             _runtime_only,
             object_schema(
-                {"tasks": {"type": "array", "minItems": 1, "maxItems": max_tasks_per_batch, "items": task}},
-                ["tasks"],
+                {
+                    **optional_source,
+                    "subagent_count": {"type": "integer", "minimum": 1, "maximum": max_tasks_per_batch},
+                    "subagent_name": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": max_tasks_per_batch,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                    },
+                    "subagent_tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": max_tasks_per_batch,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 20_000},
+                    },
+                    "context_transfer_strategy": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": max_tasks_per_batch,
+                        "items": {
+                            "type": "string",
+                            "enum": ["share", "compaction_share", "independent"],
+                        },
+                    },
+                },
+                ["subagent_count", "subagent_name", "subagent_tasks", "context_transfer_strategy"],
             ),
             read_only=False,
         ),
         Tool(
-            "get_subagent_results",
-            "Reads a page of results from a completed subagent batch.",
+            "send_agent_message",
+            "Reliably sends one message to another opening node in the same Agent tree.",
             _runtime_only,
             object_schema(
                 {
-                    "batch_id": {"type": "string", "minLength": 1},
-                    "cursor": {"type": "integer", "minimum": 0, "default": 0},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                    "source_thread_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "target_thread_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "subagent_tasks": {"type": "string", "minLength": 1, "maxLength": 20_000},
                 },
-                ["batch_id"],
+                ["source_thread_id", "target_thread_id", "subagent_tasks"],
             ),
+            read_only=False,
+        ),
+        Tool(
+            "set_thread_node_status",
+            "Opens or closes one direct child Agent Thread. Closing pauses it at the next safe boundary.",
+            _runtime_only,
+            object_schema(
+                {
+                    **optional_source,
+                    "target_thread_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "thread_status": {"type": "string", "enum": ["opening", "closed"]},
+                },
+                ["target_thread_id", "thread_status"],
+            ),
+            read_only=False,
+        ),
+        Tool(
+            "list_current_node_sub_thread",
+            "Lists the direct child nodes of the current Agent Thread.",
+            _runtime_only,
+            object_schema(optional_source, []),
+            read_only=True,
         ),
     )

@@ -68,6 +68,8 @@ def build_application(
     job_registry: JobRegistry | None = None,
     job_parent_id: str | None = None,
     sandbox_session_id: str | None = None,
+    agent_thread_index: object | None = None,
+    subagent_coordinator: SubagentCoordinator | None = None,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     base_config = initialize_config(resolved_paths, workspace)
@@ -79,7 +81,7 @@ def build_application(
             else:
                 config[name] = value
     resolved = _settings_for(resolved_paths, settings, config_override)
-    store = SQLiteSessionStore(resolved_paths)
+    store = SQLiteSessionStore(resolved_paths, agent_thread_index)
     files = WorkspaceFiles(workspace)
     upload_files = WorkspaceFiles(upload_root) if upload_root is not None else None
     runner_args = (
@@ -100,6 +102,7 @@ def build_application(
             **({"job_registry": job_registry} if job_registry is not None else {}),
             **({"job_parent_id": job_parent_id} if job_parent_id is not None else {}),
             **({"sandbox_session_id": sandbox_session_id} if sandbox_session_id is not None else {}),
+            **({"subagent_coordinator": subagent_coordinator} if subagent_coordinator is not None else {}),
         )
     else:
         runner = _build_subagent_runner(
@@ -109,6 +112,7 @@ def build_application(
             **({"job_registry": job_registry} if job_registry is not None else {}),
             **({"job_parent_id": job_parent_id} if job_parent_id is not None else {}),
             **({"sandbox_session_id": sandbox_session_id} if sandbox_session_id is not None else {}),
+            **({"subagent_coordinator": subagent_coordinator} if subagent_coordinator is not None else {}),
         )
     return AgentApplication(
         runner,
@@ -158,12 +162,19 @@ def _build_subagent_runner(
     job_parent_id: str | None = None,
     terminal_type: str | None = None,
     sandbox_session_id: str | None = None,
+    subagent_coordinator: SubagentCoordinator | None = None,
 ) -> AgentRunner:
     terminal_type = terminal_type or _terminal_type_for_config(config)
     resolved_paths = paths or client_paths()
     skill_settings = SkillSettings.from_config(config)
     subagent_settings = SubagentSettings.from_config(config)
     sandbox_launcher, sandbox_config = _sandbox_runtime(config)
+
+    coordinator = subagent_coordinator or SubagentCoordinator(
+        settings=subagent_settings,
+        store=checkpoints,
+        job_registry=job_registry,
+    )
 
     def child_factory() -> AgentRunner:
         return _build_runner(
@@ -175,10 +186,12 @@ def _build_subagent_runner(
                 upload_files=upload_files,
                 terminal_type=terminal_type,
                 sandbox_config=sandbox_config,
+                extra_tools=delegation_tools(subagent_settings.max_tasks_per_batch),
             ),
             checkpoints,
             resolved_paths,
             skill_settings,
+            coordinator,
             user_preferences=user_preferences,
             model_config=model_config,
             project_id=project_id,
@@ -188,7 +201,6 @@ def _build_subagent_runner(
             sandbox_config=sandbox_config,
         )
 
-    coordinator = SubagentCoordinator(child_factory, workspace, subagent_settings)
     mcp_scope: JobScope | None = None
     if job_registry is not None:
         mcp_scope = job_registry.root_scope().child(JobScopeKind.SESSION, session_id=sandbox_session_id)
@@ -214,7 +226,7 @@ def _build_subagent_runner(
                 *external,
             ),
         )
-        return _build_runner(
+        runner = _build_runner(
             workspace,
             planner_name,
             settings,
@@ -232,6 +244,9 @@ def _build_subagent_runner(
             sandbox_launcher=sandbox_launcher,
             sandbox_config=sandbox_config,
         )
+        if sandbox_session_id is not None:
+            coordinator.bind_session(sandbox_session_id, child_factory, workspace)
+        return runner
     except Exception:
         external.close()
         raise

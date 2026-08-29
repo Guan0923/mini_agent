@@ -15,7 +15,7 @@ from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.sandbox import ApprovalStore, SandboxInitializationError
-from backend.storage.message_queue import RedisTurnMailbox
+from backend.storage.message_queue import RedisAgentMailbox
 from backend.storage.settings.crypto import SecretDecryptionError
 
 from ..active_turn_stream import ActiveTurnStream
@@ -126,7 +126,12 @@ def _stream(
         setattr(state, "active_turn_cancellations", active_turn_cancellations)
     cancellation_key = turn_id
     active_turn_cancellations[cancellation_key] = pause_controller
-    steering_inbox = RedisTurnMailbox(state.message_queue, turn_id, f"backend-{os.getpid()}-{threading.get_ident()}")
+    steering_inbox = RedisAgentMailbox(
+        state.message_queue,
+        turn_id,
+        thread_id,
+        f"backend-{os.getpid()}-{threading.get_ident()}",
+    )
     job_registry = getattr(state, "job_registry", None)
     job_holder: dict[str, ThreadJob | None] = {"job": None}
     bridge_ref: dict[str, RuntimeEventNodeBridge | None] = {"bridge": None}
