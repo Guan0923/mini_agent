@@ -299,7 +299,9 @@ def _stream(
                             else 8192,
                             "reasoning_effort": reasoning_effort,
                             "thinking": "enable",
-                            "temperature": 0.0,
+                            "temperature": getattr(selected_model_config, "temperature", 0.0)
+                            if selected_model_config
+                            else 0.0,
                             **(model_snapshot or {}),
                         },
                         permission_mode=permission_mode or "read_only",

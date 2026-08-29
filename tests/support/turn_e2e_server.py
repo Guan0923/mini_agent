@@ -105,6 +105,7 @@ TRACE_MODEL_CONFIG = ModelConfig(
     provider_name="trace-http",
 )
 TRACE_MODEL_CALLS = 0
+TRACE_MODEL_LAST_REQUEST: dict[str, object] = {}
 TRACE_MCP_TOOL_NAME = ""
 
 
@@ -115,7 +116,7 @@ class TraceModelHandler(BaseHTTPRequestHandler):
         return
 
     def do_POST(self) -> None:  # noqa: N802
-        global TRACE_MODEL_CALLS
+        global TRACE_MODEL_CALLS, TRACE_MODEL_LAST_REQUEST
 
         length = int(self.headers.get("Content-Length") or 0)
         payload = json.loads(self.rfile.read(length) or b"{}")
@@ -123,6 +124,7 @@ class TraceModelHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         TRACE_MODEL_CALLS += 1
+        TRACE_MODEL_LAST_REQUEST = payload
         has_tool_result = any(
             isinstance(message, dict) and message.get("role") == "tool" for message in payload.get("messages", [])
         )
@@ -316,6 +318,12 @@ class CooperativePausePlanner(LLMPlanner):
 
     def decide(self, runtime):
         task = runtime.run.task.strip()
+        if task == "provider parameters e2e":
+            return LLMPlanner(
+                LLMClient(state.settings.model_config(runtime.state.provider_name)),
+                [trace_mcp_tool.spec],
+                [trace_mcp_tool.spec],
+            ).decide(runtime)
         if "trace audit e2e" in task:
             return self._trace_planner.decide(runtime)
         if runtime.run.mode == "plan" and task == PLAN_REVIEW_TASK:
@@ -522,15 +530,21 @@ app = create_app(state)
 
 @app.post("/api/test/trace-model-reset")
 def reset_trace_model_calls() -> dict[str, int]:
-    global TRACE_MODEL_CALLS
+    global TRACE_MODEL_CALLS, TRACE_MODEL_LAST_REQUEST
 
     TRACE_MODEL_CALLS = 0
+    TRACE_MODEL_LAST_REQUEST = {}
     return {"calls": TRACE_MODEL_CALLS}
 
 
 @app.get("/api/test/trace-model-calls")
 def get_trace_model_calls() -> dict[str, int]:
     return {"calls": TRACE_MODEL_CALLS}
+
+
+@app.get("/api/test/trace-model-last-request")
+def get_trace_model_last_request() -> dict[str, object]:
+    return TRACE_MODEL_LAST_REQUEST
 
 
 @app.post("/api/test/sandbox-status")
@@ -542,9 +556,9 @@ def set_sandbox_status(values: dict[str, object]) -> dict[str, object]:
     ).to_dict()
 
 
-# create_app may mount a built frontend at "/". Keep the three test-only
+# create_app may mount a built frontend at "/". Keep the four test-only
 # control routes ahead of that catch-all mount in the Starlette route table.
-for _test_route in range(3):
+for _test_route in range(4):
     app.router.routes.insert(0, app.router.routes.pop())
 
 

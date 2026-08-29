@@ -94,6 +94,7 @@ export function useRuntimeControls({
         current_model: providerConfig.model,
         context_length: providerConfig.context_size,
         output_length: providerConfig.max_tokens,
+        temperature: providerConfig.temperature,
       }
     : runtimeModel.current_model && runtimeModel.current_model !== "unknown"
       ? { ...runtimeModel, reasoning_effort: reasoningEffort }
@@ -127,6 +128,7 @@ export function useRuntimeControls({
       && activeRuntimeModel.current_model === requestModel.current_model
       && activeRuntimeModel.context_length === requestModel.context_length
       && activeRuntimeModel.output_length === requestModel.output_length
+      && activeRuntimeModel.temperature === requestModel.temperature
     ) return;
     void updateRuntimeConfig({ provider_name: configuredProviderName, model: requestModel }).catch(onFailure);
   }, [
@@ -138,10 +140,12 @@ export function useRuntimeControls({
     activeRuntimeModel.current_model,
     activeRuntimeModel.context_length,
     activeRuntimeModel.output_length,
+    activeRuntimeModel.temperature,
     configuredProviderName,
     requestModel?.current_model,
     requestModel?.context_length,
     requestModel?.output_length,
+    requestModel?.temperature,
   ]);
 
   function setRuntimeConfigFieldPending(field: SettingsSelectKey, pending: boolean) {

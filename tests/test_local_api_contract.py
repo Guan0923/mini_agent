@@ -127,6 +127,9 @@ def test_provider_api_never_echoes_plaintext_and_reopens_the_encrypted_key(tmp_p
         "protocol": "responses",
         "base_url": "https://example.test/v1",
         "model": "demo",
+        "max_tokens": 2048,
+        "context_size": 65536,
+        "temperature": 0.7,
         "api_key": "provider-secret",
     }
     with TestClient(create_app(state)) as client:
@@ -134,6 +137,34 @@ def test_provider_api_never_echoes_plaintext_and_reopens_the_encrypted_key(tmp_p
         assert response.status_code == 200
         assert "provider-secret" not in response.text
         assert "api_key" not in response.json()
+        assert response.json()["max_tokens"] == 2048
+        assert response.json()["context_size"] == 65536
+        assert response.json()["temperature"] == 0.7
+
+        patched = client.patch(
+            f"/api/settings/providers/{response.json()['id']}",
+            json={"max_tokens": 4096, "context_size": 131072, "temperature": 1.2},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["max_tokens"] == 4096
+        assert patched.json()["context_size"] == 131072
+        assert patched.json()["temperature"] == 1.2
+        assert client.get("/api/settings").json()["provider_config"]["temperature"] == 1.2
+
+        assert (
+            client.patch(
+                f"/api/settings/providers/{response.json()['id']}",
+                json={"temperature": True},
+            ).status_code
+            == 422
+        )
+        assert (
+            client.patch(
+                f"/api/settings/providers/{response.json()['id']}",
+                json={"max_tokens": 4096, "context_size": 4096},
+            ).status_code
+            == 422
+        )
 
     with sqlite3.connect(root / "runtime" / "state.db") as connection:
         raw = str(connection.execute("SELECT provider_configs_json FROM provider_settings").fetchone()[0])
@@ -142,7 +173,11 @@ def test_provider_api_never_echoes_plaintext_and_reopens_the_encrypted_key(tmp_p
 
     reopened = WebAppState(root)
     try:
-        assert reopened.model_config("local-test").api_key == "provider-secret"
+        model_config = reopened.model_config("local-test")
+        assert model_config.api_key == "provider-secret"
+        assert model_config.max_tokens == 4096
+        assert model_config.context_size == 131072
+        assert model_config.temperature == 1.2
         assert "provider-secret" not in str(reopened.settings_payload())
     finally:
         reopened.close()

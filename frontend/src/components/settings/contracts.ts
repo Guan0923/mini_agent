@@ -11,11 +11,19 @@ export type ProviderDraft = {
   model: string;
   max_tokens: number;
   context_size: number;
+  temperature: number;
   tokenizer_model: string;
   api_key: string;
 };
 
-export type ProviderEditDraft = { provider_name: string; model: string; api_key: string };
+export type ProviderEditDraft = {
+  provider_name: string;
+  model: string;
+  max_tokens: number;
+  context_size: number;
+  temperature: number;
+  api_key: string;
+};
 
 export type ProviderModelFeedback = {
   status: "success" | "warning" | "error";
@@ -52,6 +60,7 @@ export const defaultProvider: ProviderConfig = {
   model: "",
   max_tokens: 8192,
   context_size: 1024000,
+  temperature: 0,
   tokenizer_model: "",
   api_key_configured: false,
 };
@@ -63,6 +72,7 @@ export const defaultProviderDraft: ProviderDraft = {
   model: defaultProvider.model,
   max_tokens: defaultProvider.max_tokens,
   context_size: defaultProvider.context_size,
+  temperature: defaultProvider.temperature,
   tokenizer_model: defaultProvider.tokenizer_model,
   api_key: "",
 };
@@ -93,6 +103,7 @@ export function normalizeSettings(next: UserSettings): UserSettings {
     return {
       ...provider,
       provider_name: providerName.toLowerCase() === "deepseek" ? "default" : providerName,
+      temperature: typeof provider.temperature === "number" ? provider.temperature : 0,
     };
   });
   const currentProvider = providers.find((provider) => provider.is_active)

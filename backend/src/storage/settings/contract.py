@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
 from backend.domain import DEFAULT_TIME_ZONE, TIME_ZONE_OPTIONS, validate_time_zone
@@ -33,6 +34,7 @@ DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
     "model": "",
     "max_tokens": 8192,
     "context_size": 1024000,
+    "temperature": 0.0,
     "tokenizer_model": "",
     "api_key_configured": False,
 }
@@ -169,8 +171,17 @@ def normalize_provider_config(current: Mapping[str, object], values: Mapping[str
         context_size = int(values.get("context_size", current.get("context_size", 1024000)))
     except (TypeError, ValueError) as exc:
         raise ValueError("token limits must be integers") from exc
+    raw_temperature = values.get("temperature", current.get("temperature", 0.0))
+    if isinstance(raw_temperature, bool):
+        raise ValueError("temperature must be a finite number between 0 and 2")
+    try:
+        temperature = float(raw_temperature)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("temperature must be a finite number between 0 and 2") from exc
     if not 1 <= max_tokens <= 384000 or context_size <= max_tokens:
         raise ValueError("invalid token limits")
+    if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+        raise ValueError("temperature must be a finite number between 0 and 2")
     if not base_url or not model:
         raise ValueError("base_url and model are required")
     return {
@@ -181,6 +192,7 @@ def normalize_provider_config(current: Mapping[str, object], values: Mapping[str
         "model": model,
         "max_tokens": max_tokens,
         "context_size": context_size,
+        "temperature": temperature,
         "tokenizer_model": tokenizer_model,
     }
 

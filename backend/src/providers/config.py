@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -58,6 +59,7 @@ class ModelConfig:
     context_size: int = 1_024_000
     tokenizer_model: str = ""
     protocol: str | None = None
+    temperature: float = 0.0
     protocol_explicit: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -71,15 +73,26 @@ class ModelConfig:
             raise ModelConfigurationError("base_url and model are required")
         if not 1 <= int(self.max_tokens) <= 384_000 or int(self.context_size) <= int(self.max_tokens):
             raise ModelConfigurationError("Invalid model token limits.")
+        if (
+            isinstance(self.temperature, bool)
+            or not isinstance(self.temperature, int | float)
+            or not math.isfinite(self.temperature)
+            or not 0 <= self.temperature <= 2
+        ):
+            raise ModelConfigurationError("temperature must be a finite number between 0 and 2")
         object.__setattr__(self, "protocol", protocol)
         object.__setattr__(self, "protocol_explicit", protocol_explicit)
         object.__setattr__(self, "provider", protocol)
         object.__setattr__(self, "provider_name", _normalize_provider_name(self.provider_name))
         object.__setattr__(self, "tokenizer_model", _normalize_tokenizer_model(self.tokenizer_model))
+        object.__setattr__(self, "temperature", float(self.temperature))
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, object]) -> ModelConfig:
         try:
+            raw_temperature = values.get("temperature", 0.0)
+            if isinstance(raw_temperature, bool):
+                raise TypeError("temperature must be numeric")
             return cls(
                 api_key=str(values.get("api_key") or ""),
                 base_url=str(values.get("base_url") or ""),
@@ -91,6 +104,7 @@ class ModelConfig:
                 context_size=int(values.get("context_size", 1_024_000)),
                 tokenizer_model=str(values.get("tokenizer_model") or ""),
                 protocol=str(values.get("protocol") or "chat_completions"),
+                temperature=float(raw_temperature),
             )
         except (TypeError, ValueError) as exc:
             raise ModelConfigurationError("Model configuration values are invalid.") from exc
@@ -104,8 +118,9 @@ class ModelConfig:
         try:
             max_tokens = int(values.get("MAX_TOKENS", "8192"))
             context_size = int(values.get("CONTEXT_SIZE", "1024000"))
+            temperature = float(values.get("TEMPERATURE", "0"))
         except ValueError as exc:
-            raise ModelConfigurationError("MAX_TOKENS and CONTEXT_SIZE must be integers.") from exc
+            raise ModelConfigurationError("MAX_TOKENS, CONTEXT_SIZE, and TEMPERATURE are invalid.") from exc
         return cls(
             values["API_KEY"],
             values["BASE_URL"],
@@ -116,6 +131,7 @@ class ModelConfig:
             context_size=context_size,
             tokenizer_model=values.get("TOKENIZER_MODEL", "").strip(),
             protocol=values.get("PROTOCOL", "chat_completions").strip().lower(),
+            temperature=temperature,
         )
 
     @classmethod
@@ -127,6 +143,9 @@ class ModelConfig:
         if missing:
             raise ModelConfigurationError(f"Missing {', '.join(missing)} in [model].")
         try:
+            raw_temperature = values.get("temperature", 0.0)
+            if isinstance(raw_temperature, bool):
+                raise TypeError("temperature must be numeric")
             return cls(
                 str(values["api_key"]),
                 str(values["base_url"]),
@@ -137,6 +156,7 @@ class ModelConfig:
                 context_size=int(values.get("context_size", 1_024_000)),
                 tokenizer_model=str(values.get("tokenizer_model", "")).strip(),
                 protocol=str(values.get("protocol", "chat_completions")).strip().lower(),
+                temperature=float(raw_temperature),
             )
         except (TypeError, ValueError) as exc:
             raise ModelConfigurationError("Invalid [model] configuration.") from exc

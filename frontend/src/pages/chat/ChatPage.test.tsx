@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { projectTurnPath } from "../../app/runtime/runtimeDetailProjection";
 import { TURN_PROTOCOL_VERSION } from "../../app/runtime/runtimeNodeNormalization";
 import type { QueuedMessage } from "../../app/types";
-import { compactTurn, patchRuntimeConfig, steerTurn } from "../../api";
+import { compactTurn, patchRuntimeConfig, steerTurn, type ProviderConfig } from "../../api";
 import type {
   ChatMessage,
   ChatMode,
@@ -233,11 +233,17 @@ function QueueHarness({
   );
 }
 
-function ConfigHarness() {
+function ConfigHarness({
+  providerConfig,
+  status = "running",
+}: {
+  providerConfig?: ProviderConfig;
+  status?: RuntimeStateNode["status"];
+} = {}) {
   const [mode, setMode] = useState<ChatMode>("agent");
   const [conversation, setConversation] = useState<Conversation>(() => {
     const node = turn("turn-config", "configure");
-    node.status = "running";
+    node.status = status;
     return {
       id: node.session_id,
       sessionId: node.session_id,
@@ -254,7 +260,8 @@ function ConfigHarness() {
     <AntApp>
       <ChatPage
         conversation={conversation}
-        running
+        running={status === "running"}
+        providerConfig={providerConfig}
         mode={mode}
         onModeChange={setMode}
         onUpdate={(_id, updater) => setConversation((current) => updater(current))}
@@ -664,6 +671,49 @@ describe("ChatPage running Turn configuration", () => {
     await act(async () => resolvePatch(accepted));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "运行模式" })).not.toBeDisabled());
     expect(screen.getByTestId("selected-mode")).toHaveTextContent("plan");
+  });
+
+  it("syncs current Provider model parameters only into a running Turn", async () => {
+    const providerConfig: ProviderConfig = {
+      id: "provider-local",
+      is_active: true,
+      provider_name: "local",
+      protocol: "chat_completions",
+      base_url: "https://example.test/v1",
+      model: "configured-model",
+      max_tokens: 1536,
+      context_size: 65536,
+      temperature: 0.7,
+      tokenizer_model: "",
+      api_key_configured: true,
+    };
+    vi.mocked(patchRuntimeConfig).mockImplementation(async (_sessionId, patch) => {
+      const accepted = turn("turn-config", "configure");
+      accepted.status = "running";
+      accepted.provider_name = patch.provider_name ?? accepted.provider_name;
+      accepted.model = { ...accepted.model, ...patch.model };
+      return accepted;
+    });
+
+    const runningView = render(<ConfigHarness providerConfig={providerConfig} />);
+    await waitFor(() => expect(patchRuntimeConfig).toHaveBeenCalledWith(
+      "session-rewind",
+      expect.objectContaining({
+        node_id: "turn-config",
+        provider_name: "local",
+        model: expect.objectContaining({
+          current_model: "configured-model",
+          output_length: 1536,
+          context_length: 65536,
+          temperature: 0.7,
+        }),
+      }),
+    ));
+    runningView.unmount();
+    vi.mocked(patchRuntimeConfig).mockClear();
+
+    render(<ConfigHarness providerConfig={providerConfig} status="success" />);
+    await waitFor(() => expect(patchRuntimeConfig).not.toHaveBeenCalled());
   });
 
   it("rolls back only the failed field", async () => {

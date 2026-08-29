@@ -8,6 +8,7 @@ from backend.api.session_store import session_store
 from backend.api.state import WebAppState
 from backend.domain.runtime_state import NodeWriter, RuntimeState
 from backend.planning import RuleBasedPlanner
+from backend.providers import ModelConfig
 from backend.runtime import AgentRunner
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.tools import ToolRegistry
@@ -94,6 +95,59 @@ def test_running_turn_config_patch_updates_active_runtime_pending_config(tmp_pat
         assert runtime.state.running_mode == "plan"
         assert runtime.state.permission_mode == "workspace_write"
         assert runtime.state.model_snapshot["reasoning_effort"] == "high"
+
+
+def test_running_turn_provider_patch_uses_provider_model_parameters_at_next_boundary(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web")
+    with TestClient(create_app(state)) as client:
+        sidebar = client.post("/api/sidebar-threads", json={}).json()
+        store = session_store(state)
+        bridge = RuntimeEventNodeBridge(
+            store,
+            session_id=sidebar["session_id"],
+            thread_id=sidebar["thread_id"],
+            turn_id="turn_provider_config",
+            prompt="switch provider",
+            emit=lambda _frame: None,
+        )
+        node = bridge.start()
+        runner = AgentRunner(
+            RuleBasedPlanner(),
+            ToolRegistry(),
+            provider_config_resolver=lambda _provider_name: ModelConfig(
+                "secret",
+                "https://example.test/v1",
+                "configured-model",
+                max_tokens=1536,
+                context_size=65536,
+                temperature=0.7,
+                provider_name="configured",
+            ),
+        )
+        runtime = runner.new_runtime(task="switch provider")
+        bridge.bind_runtime(runtime)
+        state.active_runtime_bridges[sidebar["thread_id"]] = bridge
+
+        response = client.patch(
+            f"/api/turns/{node.id}/config",
+            json={"provider_name": "configured"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["provider_name"] == "configured"
+        assert runtime.services.pending_runtime_config == {"provider_name": "configured"}
+        assert runtime.apply_pending_runtime_config() is True
+        assert runtime.state.model_snapshot["current_model"] == "configured-model"
+        assert runtime.state.model_snapshot["context_length"] == 65536
+        assert runtime.state.model_snapshot["output_length"] == 1536
+        assert runtime.state.model_snapshot["temperature"] == 0.7
+        assert runtime.state.request_parameters["max_tokens"] == 1536
+        assert runtime.state.request_parameters["temperature"] == 0.7
+
+        runtime.services.pending_runtime_config = {"model": {"temperature": 1.1}}
+        assert runtime.apply_pending_runtime_config() is True
+        assert runtime.state.model_snapshot["temperature"] == 1.1
+        assert runtime.state.request_parameters["temperature"] == 1.1
 
 
 def test_plan_decision_endpoint_rejects_old_choices(tmp_path: Path) -> None:

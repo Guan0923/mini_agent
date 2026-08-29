@@ -69,14 +69,32 @@ class ProviderConfigPayload(BaseModel):
     model: str = Field(default="", max_length=300)
     max_tokens: int = Field(default=8192, ge=1, le=384000)
     context_size: int = Field(default=1_024_000, ge=1)
+    temperature: float = Field(default=0.0, ge=0, le=2, allow_inf_nan=False)
     tokenizer_model: str = Field(default="", max_length=300)
     api_key: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def temperature_is_numeric(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("temperature must be a number")
+        return value
 
 
 class ProviderConfigPatch(BaseModel):
     provider_name: str | None = Field(default=None, min_length=1, max_length=80)
     model: str | None = Field(default=None, max_length=300)
+    max_tokens: int | None = Field(default=None, ge=1, le=384000)
+    context_size: int | None = Field(default=None, ge=1)
+    temperature: float | None = Field(default=None, ge=0, le=2, allow_inf_nan=False)
     api_key: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def temperature_is_numeric(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("temperature must be a number")
+        return value
 
 
 class ProviderModelDiscoveryPayload(BaseModel):

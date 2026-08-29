@@ -22,6 +22,7 @@ export interface ProviderConfig {
   model: string;
   max_tokens: number;
   context_size: number;
+  temperature: number;
   tokenizer_model: string;
   api_key_configured: boolean;
 }
@@ -156,7 +157,14 @@ export function addProviderConfig(config: ProviderInput): Promise<ProviderConfig
 
 export function updateProviderConfigById(
   id: string,
-  values: { provider_name?: string; model?: string; api_key?: string },
+  values: {
+    provider_name?: string;
+    model?: string;
+    max_tokens?: number;
+    context_size?: number;
+    temperature?: number;
+    api_key?: string;
+  },
 ): Promise<ProviderConfig> {
   return requestJson<ProviderConfig>(`/api/settings/providers/${encodeURIComponent(id)}`, {
     method: "PATCH",

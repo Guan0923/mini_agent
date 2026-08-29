@@ -53,6 +53,7 @@ const settings = {
     model: "demo",
     max_tokens: 8192,
     context_size: 1024000,
+    temperature: 0,
     tokenizer_model: "demo",
     api_key_configured: false,
   },
@@ -65,6 +66,7 @@ const settings = {
     model: "demo",
     max_tokens: 8192,
     context_size: 1024000,
+    temperature: 0,
     tokenizer_model: "demo",
     api_key_configured: false,
   }],
@@ -168,6 +170,108 @@ describe("UserSettingsModal", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
 
     expect(screen.getByText(/default · demo/)).toBeInTheDocument();
+  });
+
+  it("adds a Provider with token limits and an Ant Design Temperature slider", async () => {
+    const created = {
+      ...settings.provider_config,
+      id: "provider-created",
+      provider_name: "local",
+      provider: "local",
+      model: "new-model",
+      max_tokens: 2048,
+      context_size: 65536,
+      temperature: 0.7,
+      is_active: false,
+    };
+    api.addProviderConfig.mockResolvedValue(created);
+    renderModal();
+    await screen.findByDisplayValue("旧名字");
+    await userEvent.click(screen.getByRole("menuitem", { name: "添加提供商" }));
+
+    const slider = screen.getByRole("slider", { name: "Temperature" });
+    expect(slider).toHaveAttribute("aria-valuemin", "0");
+    expect(slider).toHaveAttribute("aria-valuemax", "2");
+    expect(slider).toHaveAttribute("aria-valuenow", "0");
+    expect(screen.getByText("Temperature（0.0）")).toBeInTheDocument();
+
+    await userEvent.clear(screen.getByRole("textbox", { name: "配置名称" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "配置名称" }), "local");
+    await userEvent.type(screen.getByRole("textbox", { name: "Base URL" }), "https://example.test/v1");
+    await userEvent.type(screen.getByRole("combobox", { name: "模型" }), "new-model");
+    await userEvent.clear(screen.getByRole("spinbutton", { name: "最大输出 token" }));
+    await userEvent.type(screen.getByRole("spinbutton", { name: "最大输出 token" }), "2048");
+    await userEvent.clear(screen.getByRole("spinbutton", { name: "上下文窗口" }));
+    await userEvent.type(screen.getByRole("spinbutton", { name: "上下文窗口" }), "65536");
+    for (let index = 0; index < 7; index += 1) {
+      fireEvent.keyDown(slider, { key: "ArrowRight", code: "ArrowRight", keyCode: 39, which: 39 });
+    }
+    expect(slider).toHaveAttribute("aria-valuenow", "0.7");
+    expect(screen.getByText("Temperature（0.7）")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(api.addProviderConfig).toHaveBeenCalledWith({
+      provider_name: "local",
+      protocol: "chat_completions",
+      base_url: "https://example.test/v1",
+      model: "new-model",
+      max_tokens: 2048,
+      context_size: 65536,
+      temperature: 0.7,
+      tokenizer_model: "",
+      api_key: "",
+    }));
+  });
+
+  it("updates all model parameters for the current Provider and publishes the saved state", async () => {
+    const updated = {
+      ...settings.provider_config,
+      provider_name: "openai",
+      max_tokens: 4096,
+      context_size: 131072,
+      temperature: 0.7,
+    };
+    api.updateProviderConfigById.mockResolvedValue(updated);
+    const onProviderConfigUpdate = vi.fn();
+    renderModal(vi.fn(), vi.fn(), onProviderConfigUpdate);
+    await screen.findByDisplayValue("旧名字");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
+    await userEvent.click(screen.getByText(/openai · demo/));
+
+    await userEvent.clear(screen.getByRole("spinbutton", { name: "最大输出 token openai" }));
+    await userEvent.type(screen.getByRole("spinbutton", { name: "最大输出 token openai" }), "4096");
+    await userEvent.clear(screen.getByRole("spinbutton", { name: "上下文窗口 openai" }));
+    await userEvent.type(screen.getByRole("spinbutton", { name: "上下文窗口 openai" }), "131072");
+    const slider = screen.getByRole("slider", { name: "Temperature openai" });
+    for (let index = 0; index < 7; index += 1) {
+      fireEvent.keyDown(slider, { key: "ArrowRight", code: "ArrowRight", keyCode: 39, which: 39 });
+    }
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(api.updateProviderConfigById).toHaveBeenCalledWith("provider-1", {
+      provider_name: "openai",
+      model: "demo",
+      max_tokens: 4096,
+      context_size: 131072,
+      temperature: 0.7,
+    }));
+    expect(onProviderConfigUpdate).toHaveBeenCalledWith(updated);
+  });
+
+  it("keeps Provider model-parameter edits visible when saving fails", async () => {
+    api.updateProviderConfigById.mockRejectedValueOnce(new Error("参数组合无效"));
+    renderModal();
+    await screen.findByDisplayValue("旧名字");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Provider 与模型" }));
+    await userEvent.click(screen.getByText(/openai · demo/));
+    await userEvent.clear(screen.getByRole("spinbutton", { name: "最大输出 token openai" }));
+    await userEvent.type(screen.getByRole("spinbutton", { name: "最大输出 token openai" }), "2048");
+
+    await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    expect(await screen.findByText("参数组合无效")).toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "最大输出 token openai" })).toHaveValue(2048);
   });
 
   it("shows detected terminals and saves the selected Ant Design option", async () => {

@@ -77,7 +77,14 @@ export function useUserSettingsState({
         const normalized = normalizeSettings(next);
         const drafts = Object.fromEntries(normalized.provider_configs.map((provider) => [
           provider.id,
-          { provider_name: provider.provider_name, model: provider.model, api_key: "" },
+          {
+            provider_name: provider.provider_name,
+            model: provider.model,
+            max_tokens: provider.max_tokens,
+            context_size: provider.context_size,
+            temperature: provider.temperature,
+            api_key: "",
+          },
         ]));
         setSettings(normalized);
         setSaved(normalized);
@@ -231,7 +238,17 @@ export function useUserSettingsState({
   function updateProviderDraft(id: string, patch: Partial<ProviderEditDraft>) {
     setProviderDrafts((current) => ({
       ...current,
-      [id]: { ...(current[id] ?? { provider_name: "", model: "", api_key: "" }), ...patch },
+      [id]: {
+        ...(current[id] ?? {
+          provider_name: "",
+          model: "",
+          max_tokens: defaultProvider.max_tokens,
+          context_size: defaultProvider.context_size,
+          temperature: defaultProvider.temperature,
+          api_key: "",
+        }),
+        ...patch,
+      },
     }));
   }
 
@@ -291,13 +308,23 @@ export function useUserSettingsState({
   }
 
   async function saveManagedProvider(provider: ProviderConfig) {
-    const draft = providerDrafts[provider.id] ?? { provider_name: provider.provider_name, model: provider.model, api_key: "" };
+    const draft = providerDrafts[provider.id] ?? {
+      provider_name: provider.provider_name,
+      model: provider.model,
+      max_tokens: provider.max_tokens,
+      context_size: provider.context_size,
+      temperature: provider.temperature,
+      api_key: "",
+    };
     setSaving(true);
     setError("");
     try {
       const updated = await updateProviderConfigById(provider.id, {
         provider_name: draft.provider_name,
         model: draft.model,
+        max_tokens: draft.max_tokens,
+        context_size: draft.context_size,
+        temperature: draft.temperature,
         ...(draft.api_key.trim() ? { api_key: draft.api_key } : {}),
       });
       const providers = (settings?.provider_configs ?? []).map((item) => item.id === updated.id ? updated : item);
@@ -307,7 +334,14 @@ export function useUserSettingsState({
         provider_configs: providers,
         provider_config: updated.is_active ? updated : current.provider_config,
       } : current);
-      const nextDraft = { provider_name: updated.provider_name, model: updated.model, api_key: "" };
+      const nextDraft = {
+        provider_name: updated.provider_name,
+        model: updated.model,
+        max_tokens: updated.max_tokens,
+        context_size: updated.context_size,
+        temperature: updated.temperature,
+        api_key: "",
+      };
       setProviderDrafts((current) => ({ ...current, [updated.id]: nextDraft }));
       setSavedProviderDrafts((current) => ({ ...current, [updated.id]: nextDraft }));
       if (updated.is_active) onProviderConfigUpdate?.(updated);

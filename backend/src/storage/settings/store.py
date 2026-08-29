@@ -165,6 +165,7 @@ class LocalSettingsStore:
             "model": str(record.get("model") or ""),
             "max_tokens": int(record.get("max_tokens") or 8192),
             "context_size": int(record.get("context_size") or 1_024_000),
+            "temperature": float(record.get("temperature", 0.0)),
             "tokenizer_model": str(record.get("tokenizer_model") or ""),
             "api_key_configured": bool(record.get("api_key_ciphertext")),
         }

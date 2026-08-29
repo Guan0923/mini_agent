@@ -1,7 +1,13 @@
-import { AutoComplete, Button, Collapse, Form, Input, Select, Space, Tag, Typography } from "antd";
+import { AutoComplete, Button, Collapse, Form, Input, Select, Slider, Space, Tag, Typography } from "antd";
 import type { UserSettingsState } from "./useUserSettingsState";
 
 type SectionProps = { state: UserSettingsState };
+
+const TEMPERATURE_MARKS = { 0: "0", 1: "1", 2: "2" };
+
+function temperatureLabel(value: number): string {
+  return `Temperature（${value.toFixed(1)}）`;
+}
 
 export function ProviderAddSection({ state }: SectionProps) {
   const draft = state.providerAddDraft;
@@ -16,14 +22,15 @@ export function ProviderAddSection({ state }: SectionProps) {
           />
         </Form.Item>
         <Form.Item label="配置名称" style={{ flex: 1 }}>
-          <Input value={draft.provider_name} onChange={(event) => state.setProviderAddDraft((current) => ({ ...current, provider_name: event.target.value }))} />
+          <Input aria-label="配置名称" value={draft.provider_name} onChange={(event) => state.setProviderAddDraft((current) => ({ ...current, provider_name: event.target.value }))} />
         </Form.Item>
       </Space.Compact>
       <Form.Item label="Base URL">
-        <Input value={draft.base_url} onChange={(event) => state.setProviderAddDraft((current) => ({ ...current, base_url: event.target.value }))} />
+        <Input aria-label="Base URL" value={draft.base_url} onChange={(event) => state.setProviderAddDraft((current) => ({ ...current, base_url: event.target.value }))} />
       </Form.Item>
       <Form.Item label="模型">
         <AutoComplete
+          aria-label="模型"
           options={state.matchingModels("new", draft.model)}
           value={draft.model}
           onChange={(model) => state.setProviderAddDraft((current) => ({ ...current, model }))}
@@ -42,12 +49,24 @@ export function ProviderAddSection({ state }: SectionProps) {
       </Form.Item>
       <Space.Compact block>
         <Form.Item label="最大输出 token" style={{ flex: 1 }}>
-          <Input type="number" value={draft.max_tokens} onChange={(event) => state.setProviderAddDraft((current) => ({ ...current, max_tokens: Number(event.target.value) }))} />
+          <Input aria-label="最大输出 token" type="number" value={draft.max_tokens} onChange={(event) => state.setProviderAddDraft((current) => ({ ...current, max_tokens: Number(event.target.value) }))} />
         </Form.Item>
-        <Form.Item label="上下文大小" style={{ flex: 1 }}>
-          <Input type="number" value={draft.context_size} onChange={(event) => state.setProviderAddDraft((current) => ({ ...current, context_size: Number(event.target.value) }))} />
+        <Form.Item label="上下文窗口" style={{ flex: 1 }}>
+          <Input aria-label="上下文窗口" type="number" value={draft.context_size} onChange={(event) => state.setProviderAddDraft((current) => ({ ...current, context_size: Number(event.target.value) }))} />
         </Form.Item>
       </Space.Compact>
+      <Form.Item label={temperatureLabel(draft.temperature)}>
+        <Slider
+          ariaLabelForHandle="Temperature"
+          min={0}
+          max={2}
+          step={0.1}
+          marks={TEMPERATURE_MARKS}
+          value={draft.temperature}
+          tooltip={{ formatter: (value) => value?.toFixed(1) }}
+          onChange={(temperature) => state.setProviderAddDraft((current) => ({ ...current, temperature }))}
+        />
+      </Form.Item>
       <Form.Item label="API Key">
         <Input.Password placeholder="输入 API Key" value={draft.api_key} onChange={(event) => state.setProviderAddDraft((current) => ({ ...current, api_key: event.target.value }))} />
       </Form.Item>
@@ -91,7 +110,14 @@ export function ProviderManageSection({ state }: SectionProps) {
       <Typography.Title level={4}>Provider 与模型</Typography.Title>
       <Collapse
         items={settings.provider_configs.map((provider) => {
-          const draft = state.providerDrafts[provider.id] ?? { provider_name: provider.provider_name, model: provider.model, api_key: "" };
+          const draft = state.providerDrafts[provider.id] ?? {
+            provider_name: provider.provider_name,
+            model: provider.model,
+            max_tokens: provider.max_tokens,
+            context_size: provider.context_size,
+            temperature: provider.temperature,
+            api_key: "",
+          };
           const modelFeedback = state.managedModelFeedback[provider.id];
           return {
             key: provider.id,
@@ -103,11 +129,12 @@ export function ProviderManageSection({ state }: SectionProps) {
             children: (
               <Form layout="vertical">
                 <Form.Item label="配置名称">
-                  <Input value={draft.provider_name} onChange={(event) => state.updateProviderDraft(provider.id, { provider_name: event.target.value })} />
+                  <Input aria-label={`配置名称 ${provider.provider_name}`} value={draft.provider_name} onChange={(event) => state.updateProviderDraft(provider.id, { provider_name: event.target.value })} />
                 </Form.Item>
                 <Form.Item label="Base URL"><Input value={provider.base_url} disabled /></Form.Item>
                 <Form.Item label="模型">
                   <AutoComplete
+                    aria-label={`模型 ${provider.provider_name}`}
                     options={state.matchingModels(provider.id, state.managedModelQueries[provider.id] ?? "")}
                     value={draft.model}
                     onChange={(model) => state.updateProviderDraft(provider.id, { model })}
@@ -143,6 +170,26 @@ export function ProviderManageSection({ state }: SectionProps) {
                       {modelFeedback.message}
                     </Typography.Text>
                   ) : null}
+                </Form.Item>
+                <Space.Compact block>
+                  <Form.Item label="最大输出 token" style={{ flex: 1 }}>
+                    <Input aria-label={`最大输出 token ${provider.provider_name}`} type="number" value={draft.max_tokens} onChange={(event) => state.updateProviderDraft(provider.id, { max_tokens: Number(event.target.value) })} />
+                  </Form.Item>
+                  <Form.Item label="上下文窗口" style={{ flex: 1 }}>
+                    <Input aria-label={`上下文窗口 ${provider.provider_name}`} type="number" value={draft.context_size} onChange={(event) => state.updateProviderDraft(provider.id, { context_size: Number(event.target.value) })} />
+                  </Form.Item>
+                </Space.Compact>
+                <Form.Item label={temperatureLabel(draft.temperature)}>
+                  <Slider
+                    ariaLabelForHandle={`Temperature ${provider.provider_name}`}
+                    min={0}
+                    max={2}
+                    step={0.1}
+                    marks={TEMPERATURE_MARKS}
+                    value={draft.temperature}
+                    tooltip={{ formatter: (value) => value?.toFixed(1) }}
+                    onChange={(temperature) => state.updateProviderDraft(provider.id, { temperature })}
+                  />
                 </Form.Item>
                 <Form.Item label="API Key">
                   <Input.Password

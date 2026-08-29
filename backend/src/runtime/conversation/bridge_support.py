@@ -160,7 +160,7 @@ class ConversationNodeBridgeMixin:
         model_config.setdefault("output_length", getattr(config, "max_tokens", 8192))
         model_config.setdefault("reasoning_effort", "medium")
         model_config.setdefault("thinking", "enable")
-        model_config.setdefault("temperature", 0.0)
+        model_config.setdefault("temperature", getattr(config, "temperature", 0.0))
         permission_mode = latest.permission_mode if latest is not None else self.runtime.state.permission_mode
         running_mode = latest.running_mode if latest is not None else self.runtime.state.running_mode
         return RuntimeEventNodeBridge(

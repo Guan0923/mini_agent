@@ -199,6 +199,7 @@ class AgentRuntime:
                 config_model = getattr(resolved, "model", None)
                 config_context = getattr(resolved, "context_size", None)
                 config_output = getattr(resolved, "max_tokens", None)
+                config_temperature = getattr(resolved, "temperature", None)
                 if provider_changed:
                     # A named provider is a complete model configuration.  A
                     # switch must not inherit reasoning/thinking/temperature
@@ -214,7 +215,9 @@ class AgentRuntime:
                         if isinstance(config_output, int) and config_output > 0
                         else 8192,
                         "thinking": "enable",
-                        "temperature": 0.0,
+                        "temperature": config_temperature
+                        if isinstance(config_temperature, (int, float)) and not isinstance(config_temperature, bool)
+                        else 0.0,
                     }
                 else:
                     if isinstance(config_model, str) and config_model:
@@ -223,6 +226,8 @@ class AgentRuntime:
                         self.state.model_snapshot["context_length"] = config_context
                     if isinstance(config_output, int) and config_output > 0:
                         self.state.model_snapshot["output_length"] = config_output
+                    if isinstance(config_temperature, (int, float)) and not isinstance(config_temperature, bool):
+                        self.state.model_snapshot["temperature"] = config_temperature
             elif provider_changed:
                 # Without a configured resolver there is no provider
                 # record to load, but stale model fields still must not leak

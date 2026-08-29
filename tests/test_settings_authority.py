@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -8,9 +9,17 @@ from pydantic import ValidationError
 
 from backend.api.routes.settings import SandboxConfigPayload
 from backend.domain import SystemMessage, ToolSpec, UserMessage
-from backend.providers import ChatCompletionsAdapter, LLMClient, MessagesAdapter, ModelConfig, ResponsesAdapter
+from backend.providers import (
+    ChatCompletionsAdapter,
+    LLMClient,
+    MessagesAdapter,
+    ModelConfig,
+    ModelConfigurationError,
+    ResponsesAdapter,
+)
 from backend.runtime.core.context import AgentRuntime
 from backend.storage.settings import LocalSettingsStore, normalize_sandbox_config
+from backend.storage.settings.contract import normalize_provider_config
 
 
 def runtime_for(*messages, stream: bool = False) -> AgentRuntime:
@@ -96,6 +105,35 @@ def test_provider_requests_preserve_tool_parameter_descriptions(protocol: str) -
     assert exposed_schema == schema
 
 
+@pytest.mark.parametrize(
+    ("protocol", "token_field"),
+    [
+        ("chat_completions", "max_tokens"),
+        ("responses", "max_output_tokens"),
+        ("messages", "max_tokens"),
+    ],
+)
+def test_provider_requests_use_configured_model_parameters(protocol: str, token_field: str) -> None:
+    model_config = ModelConfig(
+        "secret",
+        "https://example.test/v1",
+        "configured-model",
+        max_tokens=1536,
+        context_size=65536,
+        temperature=0.7,
+        protocol=protocol,
+    )
+    client = LLMClient(model_config)
+    runtime = runtime_for(UserMessage(content="hello"))
+
+    client.prepare_runtime(runtime)
+    payload = client.llm.prepare_request(runtime)
+
+    assert runtime.state.model_snapshot["context_length"] == 65536
+    assert payload[token_field] == 1536
+    assert payload["temperature"] == 0.7
+
+
 def test_local_settings_encrypts_provider_key_and_reopens_without_identity(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MINI_AGENT_LOCAL_DEK_FALLBACK", "test-local-key-material-that-is-at-least-32-bytes")
     state_db = tmp_path / ".mini_agent" / "runtime" / "state.db"
@@ -121,6 +159,107 @@ def test_local_settings_encrypts_provider_key_and_reopens_without_identity(tmp_p
     assert "v4:" in raw
     reopened = LocalSettingsStore(state_db, config_file)
     assert reopened.model_config().api_key == "secret-key"
+
+
+def test_provider_model_parameters_persist_and_legacy_temperature_defaults(tmp_path: Path) -> None:
+    state_db = tmp_path / ".mini_agent" / "runtime" / "state.db"
+    config_file = tmp_path / ".mini_agent" / "config.toml"
+    store = LocalSettingsStore(state_db, config_file)
+
+    saved = store.update_provider_config(
+        {
+            "provider_name": "local",
+            "base_url": "https://example.test/v1",
+            "model": "demo",
+            "max_tokens": 2048,
+            "context_size": 65536,
+            "temperature": 0.7,
+        }
+    )
+
+    assert saved["max_tokens"] == 2048
+    assert saved["context_size"] == 65536
+    assert saved["temperature"] == 0.7
+    reopened = LocalSettingsStore(state_db, config_file)
+    assert reopened.provider_config()["temperature"] == 0.7
+    assert reopened.model_config().temperature == 0.7
+
+    with sqlite3.connect(state_db) as connection:
+        raw = connection.execute("SELECT provider_configs_json FROM provider_settings WHERE id = 1").fetchone()[0]
+        records = json.loads(raw)
+        records[0].pop("temperature")
+        connection.execute(
+            "UPDATE provider_settings SET provider_configs_json = ? WHERE id = 1",
+            (json.dumps(records),),
+        )
+
+    legacy = LocalSettingsStore(state_db, config_file)
+    assert legacy.provider_config()["temperature"] == 0.0
+    assert legacy.provider_configs()[0]["temperature"] == 0.0
+    assert legacy.model_config().temperature == 0.0
+
+
+def test_model_config_loaders_preserve_temperature_and_default_to_zero(tmp_path: Path) -> None:
+    mapped = ModelConfig.from_mapping(
+        {
+            "api_key": "secret",
+            "base_url": "https://example.test/v1",
+            "model": "mapped",
+            "max_tokens": 2048,
+            "context_size": 65536,
+            "temperature": 0.6,
+        }
+    )
+    default_env = ModelConfig.from_env(
+        tmp_path / ".env",
+        environ={"API_KEY": "secret", "BASE_URL": "https://example.test/v1", "MODEL": "default"},
+    )
+    configured_env = ModelConfig.from_env(
+        tmp_path / ".env",
+        environ={
+            "API_KEY": "secret",
+            "BASE_URL": "https://example.test/v1",
+            "MODEL": "environment",
+            "MAX_TOKENS": "3072",
+            "CONTEXT_SIZE": "131072",
+            "TEMPERATURE": "0.8",
+        },
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """[model]
+api_key = "secret"
+base_url = "https://example.test/v1"
+model = "toml"
+max_tokens = 4096
+context_size = 262144
+temperature = 1.1
+""",
+        encoding="utf-8",
+    )
+    configured_toml = ModelConfig.from_toml(config_path)
+
+    assert mapped.temperature == 0.6
+    assert default_env.temperature == 0.0
+    assert configured_env.temperature == 0.8
+    assert configured_env.max_tokens == 3072
+    assert configured_env.context_size == 131072
+    assert configured_toml.temperature == 1.1
+
+
+@pytest.mark.parametrize("temperature", [-0.1, 2.1, True, float("nan"), float("inf")])
+def test_temperature_validation_rejects_invalid_values(temperature: object) -> None:
+    values = {
+        "provider_name": "local",
+        "base_url": "https://example.test/v1",
+        "model": "demo",
+        "temperature": temperature,
+    }
+
+    with pytest.raises(ValueError, match="temperature"):
+        normalize_provider_config({}, values)
+    with pytest.raises(ModelConfigurationError):
+        ModelConfig.from_mapping({**values, "api_key": "secret"})
 
 
 def test_local_profile_and_agent_preferences_are_stored_in_toml(tmp_path: Path) -> None:

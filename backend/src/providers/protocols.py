@@ -109,10 +109,13 @@ class ResponsesAdapter:
             "model": str(config.get("model") or model_snapshot.get("current_model") or self.config.model),
             "input": items,
             "stream": runtime.exchange.stream,
-            "max_output_tokens": int(parameters.get("max_tokens", self.config.max_tokens)),
+            "max_output_tokens": int(
+                parameters.get("max_tokens", model_snapshot.get("output_length", self.config.max_tokens))
+            ),
         }
-        if parameters.get("temperature") is not None:
-            payload["temperature"] = parameters["temperature"]
+        temperature = parameters.get("temperature", model_snapshot.get("temperature", self.config.temperature))
+        if temperature is not None:
+            payload["temperature"] = temperature
         if parameters.get("reasoning_effort") is not None:
             payload["reasoning"] = {"effort": parameters["reasoning_effort"]}
         if parameters.get("thinking") == {"type": "disabled"}:
@@ -319,11 +322,14 @@ class MessagesAdapter:
         payload: dict[str, Any] = {
             "model": str(config.get("model") or model_snapshot.get("current_model") or self.config.model),
             "messages": messages,
-            "max_tokens": int(parameters.get("max_tokens", self.config.max_tokens)),
+            "max_tokens": int(
+                parameters.get("max_tokens", model_snapshot.get("output_length", self.config.max_tokens))
+            ),
             "stream": runtime.exchange.stream,
         }
-        if parameters.get("temperature") is not None:
-            payload["temperature"] = parameters["temperature"]
+        temperature = parameters.get("temperature", model_snapshot.get("temperature", self.config.temperature))
+        if temperature is not None:
+            payload["temperature"] = temperature
         thinking = parameters.get("thinking")
         if isinstance(thinking, Mapping) and thinking.get("type") == "enabled":
             payload["thinking"] = {"type": "enabled"}
