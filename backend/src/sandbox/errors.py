@@ -31,6 +31,26 @@ class BrokerInstallFailureCode(StrEnum):
     UNKNOWN = "broker_install_failed"
 
 
+class BrokerStatusFailureCode(StrEnum):
+    """Stable failure categories returned by the Broker health endpoint."""
+
+    UNAVAILABLE = "broker_unavailable"
+    NOT_INSTALLED = "broker_not_installed"
+    SERVICE_CONFIGURATION_INVALID = "broker_service_configuration_invalid"
+    READY_MARKER_UNAVAILABLE = "broker_ready_marker_unavailable"
+    READY_MARKER_INVALID = "broker_ready_marker_invalid"
+    PROXY_CONFIGURATION_INVALID = "broker_proxy_configuration_invalid"
+    INSTALLATION_KEY_MISSING = "broker_installation_key_missing"
+    PIPE_UNAVAILABLE = "broker_pipe_unavailable"
+    PROTOCOL_INCOMPATIBLE = "broker_protocol_incompatible"
+    TOKEN_MODEL_INCOMPATIBLE = "broker_token_model_incompatible"
+    GENERATION_MISMATCH = "broker_generation_mismatch"
+    RESPONSE_INVALID = "broker_response_invalid"
+    RESPONSE_AUTHENTICATION_FAILED = "broker_response_authentication_failed"
+    UNHEALTHY = "broker_unhealthy"
+    STATUS_FAILED = "broker_status_failed"
+
+
 class SandboxError(RuntimeError):
     """Base error which never contains command lines or environment values."""
 
@@ -72,6 +92,7 @@ __all__ = [
     "SandboxCleanupPending",
     "BrokerInstallFailureCode",
     "BrokerInstallationError",
+    "BrokerStatusFailureCode",
     "SandboxError",
     "SandboxFailureCode",
     "SandboxInitializationError",

@@ -72,4 +72,9 @@ def _broker_payload(value: object) -> dict[str, object]:
         return dict(value.to_dict())
     if isinstance(value, dict):
         return dict(value)
-    return {"installed": False, "healthy": False, "detail": "Broker returned an invalid status"}
+    return {
+        "installed": False,
+        "healthy": False,
+        "code": "broker_status_failed",
+        "detail": "Broker returned an invalid status",
+    }

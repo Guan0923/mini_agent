@@ -5,6 +5,41 @@ import type { UserSettingsState } from "./useUserSettingsState";
 
 type SectionProps = { state: UserSettingsState };
 
+const brokerErrorTitles: Record<string, string> = {
+  broker_unavailable: "沙箱 Broker 不可用",
+  broker_not_installed: "沙箱 Broker 未安装",
+  broker_service_configuration_invalid: "Broker 服务配置异常",
+  broker_ready_marker_unavailable: "Broker 就绪信息缺失",
+  broker_ready_marker_invalid: "Broker 就绪信息异常",
+  broker_proxy_configuration_invalid: "Broker 代理配置异常",
+  broker_installation_key_missing: "Broker 安装密钥缺失",
+  broker_pipe_unavailable: "Broker 通信失败",
+  broker_protocol_incompatible: "Broker 协议版本不兼容",
+  broker_token_model_incompatible: "Broker 令牌模型不兼容",
+  broker_generation_mismatch: "Broker 配置代际不一致",
+  broker_response_invalid: "Broker 响应异常",
+  broker_response_authentication_failed: "Broker 响应身份验证失败",
+  broker_unhealthy: "Broker 健康检查未通过",
+  broker_status_failed: "Broker 状态检查失败",
+  broker_uac_cancelled: "Broker 修复授权已取消",
+  broker_admin_required: "Broker 修复需要管理员权限",
+  broker_dependency_missing: "Broker 修复依赖缺失",
+  broker_account_failed: "Broker 沙箱账户配置失败",
+  broker_credential_failed: "Broker 沙箱账户凭据失败",
+  broker_privilege_failed: "Broker 权限配置失败",
+  broker_network_failed: "Broker 网络隔离配置失败",
+  broker_acl_failed: "Broker 文件权限配置失败",
+  broker_service_failed: "Broker Windows 服务配置失败",
+  broker_service_stop_failed: "Broker Windows 服务停止失败",
+  broker_service_start_failed: "Broker Windows 服务启动失败",
+  broker_not_ready: "Broker 修复后未就绪",
+  broker_install_failed: "Broker 修复失败",
+};
+
+export function brokerErrorTitle(code: string | null, installed: boolean): string {
+  return (code && brokerErrorTitles[code]) || (installed ? "沙箱 Broker 异常" : "沙箱 Broker 未安装");
+}
+
 const limitFields: Array<{
   key: keyof SandboxLimits;
   label: string;
@@ -59,8 +94,12 @@ export function SandboxSettingsSection({ state }: SectionProps) {
         <Alert
           type="error"
           showIcon
-          title={state.sandboxHealth.installed ? "沙箱 Broker 异常" : "沙箱 Broker 未安装"}
-          description={state.sandboxHealth.detail}
+          title={brokerErrorTitle(state.sandboxHealth.code, state.sandboxHealth.installed)}
+          description={(
+            <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+              {state.sandboxHealth.detail}
+            </div>
+          )}
           style={{ marginBottom: 16 }}
         />
       ) : null}

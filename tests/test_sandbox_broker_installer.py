@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -11,7 +13,8 @@ from fastapi import Request
 
 from backend.api.routes.sandbox import install as install_broker
 from backend.api.routes.sandbox import repair as repair_broker
-from backend.sandbox import WindowsBrokerClient
+from backend.api.routes.sandbox import status as status_broker
+from backend.sandbox import BrokerStatusFailureCode, SandboxInitializationError, WindowsBrokerClient
 from backend.sandbox.broker_service import (
     BrokerCredentialPackage,
     WindowsServiceInstaller,
@@ -38,12 +41,292 @@ class _Result:
         self.returncode = returncode
 
 
-def test_broker_status_preserves_safe_initialization_detail() -> None:
-    status = WindowsBrokerClient(is_windows=True).status()
+class _StatusInstaller:
+    def __init__(self, *, installed: bool = True, configuration_healthy: bool = True) -> None:
+        self.installed = installed
+        self.healthy = configuration_healthy
+
+    def service_installed(self) -> bool:
+        return self.installed
+
+    def configuration_healthy(self) -> bool:
+        return self.healthy
+
+
+def _status_transport(key: bytes, **overrides: object):
+    def transport(payload: bytes) -> bytes:
+        request = json.loads(payload)
+        response = {
+            "nonce": request["nonce"],
+            "installed": True,
+            "healthy": True,
+            "version": "2",
+            "generation": "generation-1",
+            "proxy_port": 17831,
+            "token_model": "capability_sid_v1",
+            **overrides,
+        }
+        response["hmac"] = hmac.new(
+            key,
+            json.dumps(response, sort_keys=True, separators=(",", ":")).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return json.dumps(response, separators=(",", ":")).encode()
+
+    return transport
+
+
+def test_broker_status_reports_only_confirmed_missing_service_as_not_installed() -> None:
+    status = WindowsBrokerClient(is_windows=True, installer=_StatusInstaller(installed=False)).status()
 
     assert status.installed is False
     assert status.healthy is False
+    assert status.code is BrokerStatusFailureCode.NOT_INSTALLED
+    assert status.detail == "Windows Broker is not installed"
+
+
+def test_broker_status_preserves_safe_initialization_detail_for_installed_service() -> None:
+    status = WindowsBrokerClient(is_windows=True, installer=_StatusInstaller()).status()
+
+    assert status.installed is True
+    assert status.healthy is False
+    assert status.code is BrokerStatusFailureCode.INSTALLATION_KEY_MISSING
     assert status.detail == "Broker installation key is missing"
+
+
+def test_broker_status_distinguishes_invalid_service_configuration() -> None:
+    status = WindowsBrokerClient(
+        is_windows=True,
+        installer=_StatusInstaller(configuration_healthy=False),
+    ).status()
+
+    assert status.installed is True
+    assert status.code is BrokerStatusFailureCode.SERVICE_CONFIGURATION_INVALID
+    assert status.detail == "Broker service configuration requires repair"
+
+
+@pytest.mark.parametrize(
+    ("marker", "expected_code", "expected_detail"),
+    [
+        (None, BrokerStatusFailureCode.READY_MARKER_UNAVAILABLE, "Broker ready marker is unavailable"),
+        ({"invalid": True}, BrokerStatusFailureCode.READY_MARKER_INVALID, "Broker ready marker is invalid"),
+    ],
+)
+def test_broker_status_distinguishes_ready_marker_failures(
+    tmp_path: Path,
+    marker: dict[str, object] | None,
+    expected_code: BrokerStatusFailureCode,
+    expected_detail: str,
+) -> None:
+    ready_path = tmp_path / "ready.json"
+    if marker is not None:
+        ready_path.write_text(json.dumps(marker), encoding="utf-8")
+    status = WindowsBrokerClient(
+        installation_key=b"k" * 32,
+        transport=_status_transport(b"k" * 32),
+        is_windows=True,
+        installer=_StatusInstaller(),
+        ready_path=ready_path,
+    ).status()
+
+    assert status.installed is True
+    assert status.code is expected_code
+    assert status.detail == expected_detail
+
+
+@pytest.mark.parametrize(
+    ("proxy_port", "generation", "expected_code", "expected_detail"),
+    [
+        (
+            17832,
+            "generation-1",
+            BrokerStatusFailureCode.PROXY_CONFIGURATION_INVALID,
+            "Broker proxy port requires repair",
+        ),
+        (
+            17831,
+            "generation-2",
+            BrokerStatusFailureCode.GENERATION_MISMATCH,
+            "Broker generation requires repair",
+        ),
+    ],
+)
+def test_broker_status_distinguishes_marker_configuration_mismatches(
+    tmp_path: Path,
+    proxy_port: int,
+    generation: str,
+    expected_code: BrokerStatusFailureCode,
+    expected_detail: str,
+) -> None:
+    key = b"k" * 32
+    package = BrokerCredentialPackage(
+        "generation-1",
+        "SandboxOffline",
+        "S-1-5-21-1-2-3-1001",
+        "offline-password",
+        "SandboxOnline",
+        "S-1-5-21-1-2-3-1002",
+        "online-password",
+    )
+    ready_path = tmp_path / "ready.json"
+    ready_path.write_text(json.dumps(build_ready_marker(package, proxy_port)), encoding="utf-8")
+    status = WindowsBrokerClient(
+        installation_key=key,
+        transport=_status_transport(key, generation=generation),
+        is_windows=True,
+        installer=_StatusInstaller(),
+        ready_path=ready_path,
+    ).status()
+
+    assert status.installed is True
+    assert status.code is expected_code
+    assert status.detail == expected_detail
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_code", "expected_detail"),
+    [
+        (
+            {"version": "1"},
+            BrokerStatusFailureCode.PROTOCOL_INCOMPATIBLE,
+            "Broker protocol version requires repair",
+        ),
+        (
+            {"token_model": "legacy"},
+            BrokerStatusFailureCode.TOKEN_MODEL_INCOMPATIBLE,
+            "Broker token model requires repair",
+        ),
+        (
+            {"healthy": False, "detail": "Broker service stopped"},
+            BrokerStatusFailureCode.UNHEALTHY,
+            "Broker service stopped",
+        ),
+    ],
+)
+def test_broker_status_classifies_protocol_and_health_failures(
+    overrides: dict[str, object],
+    expected_code: BrokerStatusFailureCode,
+    expected_detail: str,
+) -> None:
+    key = b"k" * 32
+    status = WindowsBrokerClient(
+        installation_key=key,
+        transport=_status_transport(key, **overrides),
+        is_windows=True,
+        installer=_StatusInstaller(),
+    ).status()
+
+    assert status.installed is True
+    assert status.code is expected_code
+    assert status.detail == expected_detail
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        (SandboxInitializationError("Windows Broker pipe is unavailable"), BrokerStatusFailureCode.PIPE_UNAVAILABLE),
+        (RuntimeError("  exact raw status failure\n"), BrokerStatusFailureCode.STATUS_FAILED),
+    ],
+)
+def test_broker_status_preserves_complete_transport_failure(
+    failure: Exception,
+    expected_code: BrokerStatusFailureCode,
+) -> None:
+    def transport(payload: bytes) -> bytes:
+        del payload
+        raise failure
+
+    status = WindowsBrokerClient(
+        installation_key=b"k" * 32,
+        transport=transport,
+        is_windows=True,
+        installer=_StatusInstaller(),
+    ).status()
+
+    assert status.installed is True
+    assert status.code is expected_code
+    assert status.detail == str(failure)
+
+
+def test_broker_status_api_exposes_code_and_complete_detail() -> None:
+    detail = "  line one\nline two: exact diagnostic\n"
+
+    class Broker:
+        def status(self):
+            return {
+                "installed": True,
+                "healthy": False,
+                "code": BrokerStatusFailureCode.STATUS_FAILED.value,
+                "detail": detail,
+            }
+
+    app = types.SimpleNamespace(state=types.SimpleNamespace(web=types.SimpleNamespace(sandbox_broker=Broker())))
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/sandbox/status",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+            "app": app,
+        }
+    )
+
+    assert status_broker(request) == {
+        "installed": True,
+        "healthy": False,
+        "code": "broker_status_failed",
+        "detail": detail,
+    }
+
+
+@pytest.mark.parametrize(("winerror", "expected"), [(1060, False), (None, True)])
+def test_service_installed_only_returns_false_for_missing_service(
+    monkeypatch: pytest.MonkeyPatch,
+    winerror: int | None,
+    expected: bool,
+) -> None:
+    class ServiceError(Exception):
+        def __init__(self, code: int) -> None:
+            super().__init__(code, "service error")
+            self.winerror = code
+
+    service_handle = object()
+    fake_win32service = types.SimpleNamespace(
+        SC_MANAGER_CONNECT=1,
+        SERVICE_QUERY_STATUS=4,
+        OpenSCManager=lambda *args: object(),
+        OpenService=(
+            (lambda *args: service_handle)
+            if winerror is None
+            else (lambda *args: (_ for _ in ()).throw(ServiceError(winerror)))
+        ),
+        CloseServiceHandle=lambda handle: None,
+    )
+    monkeypatch.setitem(sys.modules, "win32service", fake_win32service)
+    installer = WindowsServiceInstaller(("pythonservice.exe",), is_windows=True)
+
+    assert installer.service_installed() is expected
+
+
+def test_service_installed_preserves_non_missing_query_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class AccessDenied(Exception):
+        winerror = 5
+
+    fake_win32service = types.SimpleNamespace(
+        SC_MANAGER_CONNECT=1,
+        SERVICE_QUERY_STATUS=4,
+        OpenSCManager=lambda *args: object(),
+        OpenService=lambda *args: (_ for _ in ()).throw(AccessDenied("denied")),
+        CloseServiceHandle=lambda handle: None,
+    )
+    monkeypatch.setitem(sys.modules, "win32service", fake_win32service)
+    installer = WindowsServiceInstaller(("pythonservice.exe",), is_windows=True)
+
+    with pytest.raises(AccessDenied, match="denied"):
+        installer.service_installed()
 
 
 def test_injected_runner_executes_one_local_transaction() -> None:
@@ -364,6 +647,46 @@ def test_repair_route_returns_safe_stop_category_and_code() -> None:
         "detail": message,
         "code": "broker_service_stop_failed",
     }
+
+
+@pytest.mark.parametrize("failure_code", list(BrokerInstallFailureCode))
+def test_repair_route_preserves_every_failure_code_and_complete_detail(
+    failure_code: BrokerInstallFailureCode,
+) -> None:
+    message = f"  raw repair detail for {failure_code.value}\nsecond line\n"
+
+    class Broker:
+        def status(self):
+            return {"installed": True, "healthy": False}
+
+        def repair(self):
+            raise BrokerInstallationError(failure_code, message)
+
+    app = types.SimpleNamespace(
+        state=types.SimpleNamespace(
+            web=types.SimpleNamespace(
+                sandbox_broker=Broker(),
+                auth_service=types.SimpleNamespace(origin_allowed=lambda request: True),
+            )
+        )
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/sandbox/repair",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+            "app": app,
+        }
+    )
+
+    response = repair_broker(request)
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {"detail": message, "code": failure_code.value}
 
 
 def test_repair_route_installs_when_broker_is_missing() -> None:

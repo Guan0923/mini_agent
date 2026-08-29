@@ -20,6 +20,7 @@ from typing import Any
 from ..errors import (
     BrokerInstallationError,
     BrokerInstallFailureCode,
+    BrokerStatusFailureCode,
     SandboxCleanupPending,
     SandboxError,
     SandboxFailureCode,
@@ -31,10 +32,41 @@ from ..errors import (
 _PROCESS_BACKEND_INSTANCE_ID = f"backend-{uuid.uuid4().hex}"
 
 
+def _broker_status_failure_code(detail: str) -> BrokerStatusFailureCode:
+    exact_codes = {
+        "Windows Broker is unavailable": BrokerStatusFailureCode.UNAVAILABLE,
+        "Windows Broker is not installed": BrokerStatusFailureCode.NOT_INSTALLED,
+        "Broker service configuration requires repair": BrokerStatusFailureCode.SERVICE_CONFIGURATION_INVALID,
+        "Broker ready marker is unavailable": BrokerStatusFailureCode.READY_MARKER_UNAVAILABLE,
+        "Broker proxy port requires repair": BrokerStatusFailureCode.PROXY_CONFIGURATION_INVALID,
+        "Broker installation key is missing": BrokerStatusFailureCode.INSTALLATION_KEY_MISSING,
+        "Broker installation key is unavailable": BrokerStatusFailureCode.INSTALLATION_KEY_MISSING,
+        "Windows Broker pipe is unavailable": BrokerStatusFailureCode.PIPE_UNAVAILABLE,
+        "Broker protocol version requires repair": BrokerStatusFailureCode.PROTOCOL_INCOMPATIBLE,
+        "Broker token model requires repair": BrokerStatusFailureCode.TOKEN_MODEL_INCOMPATIBLE,
+        "Broker generation requires repair": BrokerStatusFailureCode.GENERATION_MISMATCH,
+    }
+    if code := exact_codes.get(detail):
+        return code
+    if detail.startswith("Broker ready marker ") or detail == "Broker credential generation is invalid":
+        return BrokerStatusFailureCode.READY_MARKER_INVALID
+    if detail in {
+        "Windows Broker returned invalid data",
+        "Windows Broker response replay detected",
+        "Windows Broker returned an invalid error",
+        "Windows Broker returned an unknown error",
+    }:
+        return BrokerStatusFailureCode.RESPONSE_INVALID
+    if detail == "Windows Broker response authentication failed":
+        return BrokerStatusFailureCode.RESPONSE_AUTHENTICATION_FAILED
+    return BrokerStatusFailureCode.STATUS_FAILED
+
+
 @dataclass(frozen=True, slots=True)
 class BrokerStatus:
     installed: bool
     healthy: bool
+    code: BrokerStatusFailureCode | None = None
     version: str | None = None
     installation_id: str | None = None
     detail: str | None = None
@@ -46,6 +78,7 @@ class BrokerStatus:
         return {
             "installed": self.installed,
             "healthy": self.healthy,
+            "code": self.code.value if self.code is not None else None,
             "version": self.version,
             "installation_id": self.installation_id,
             "detail": self.detail,
@@ -142,8 +175,27 @@ class WindowsBrokerClient:
 
     def status(self) -> BrokerStatus:
         if not self.available:
-            return BrokerStatus(False, False, detail="Windows Broker is unavailable")
+            return BrokerStatus(
+                False,
+                False,
+                code=BrokerStatusFailureCode.UNAVAILABLE,
+                detail="Windows Broker is unavailable",
+            )
+        installed = True
         try:
+            service_installed = getattr(self._installer, "service_installed", None)
+            if callable(service_installed):
+                installed = bool(service_installed())
+                if not installed:
+                    return BrokerStatus(
+                        False,
+                        False,
+                        code=BrokerStatusFailureCode.NOT_INSTALLED,
+                        detail="Windows Broker is not installed",
+                    )
+            configuration_healthy = getattr(self._installer, "configuration_healthy", None)
+            if callable(configuration_healthy) and not configuration_healthy():
+                raise SandboxInitializationError("Broker service configuration requires repair")
             if self._ready_path is not None:
                 from ..broker_service import read_ready_marker
 
@@ -157,22 +209,29 @@ class WindowsBrokerClient:
                 raise SandboxInitializationError("Broker token model requires repair")
             if marker and payload.get("generation") != marker.get("generation"):
                 raise SandboxInitializationError("Broker generation requires repair")
-            configuration_healthy = getattr(self._installer, "configuration_healthy", None)
-            if callable(configuration_healthy) and not configuration_healthy():
-                raise SandboxInitializationError("Broker service configuration requires repair")
+            healthy = bool(payload.get("healthy"))
+            payload_installed = bool(payload.get("installed"))
+            resolved_installed = installed if self._installer is not None else payload_installed
+            detail = str(payload.get("detail")) if payload.get("detail") else None
             return BrokerStatus(
-                bool(payload.get("installed")),
-                bool(payload.get("healthy")),
-                str(payload.get("version")) if payload.get("version") else None,
-                str(payload.get("installation_id")) if payload.get("installation_id") else None,
-                str(payload.get("detail")) if payload.get("detail") else None,
-                str(payload.get("generation")) if payload.get("generation") else None,
-                int(payload["proxy_port"]) if isinstance(payload.get("proxy_port"), int) else None,
-                str(payload.get("token_model")) if payload.get("token_model") else None,
+                resolved_installed,
+                healthy,
+                code=None if healthy else BrokerStatusFailureCode.UNHEALTHY,
+                version=str(payload.get("version")) if payload.get("version") else None,
+                installation_id=(str(payload.get("installation_id")) if payload.get("installation_id") else None),
+                detail=None if healthy else detail or "Broker reported unhealthy status",
+                generation=str(payload.get("generation")) if payload.get("generation") else None,
+                proxy_port=int(payload["proxy_port"]) if isinstance(payload.get("proxy_port"), int) else None,
+                token_model=str(payload.get("token_model")) if payload.get("token_model") else None,
             )
         except Exception as exc:
-            detail = str(exc).strip() or type(exc).__name__
-            return BrokerStatus(False, False, detail=detail)
+            detail = str(exc) or type(exc).__name__
+            return BrokerStatus(
+                installed,
+                False,
+                code=_broker_status_failure_code(detail),
+                detail=detail,
+            )
 
     def install(self) -> BrokerStatus:
         current = self.status()
@@ -219,7 +278,17 @@ class WindowsBrokerClient:
                         ) from last_error
                     time.sleep(0.1)
         payload = self.request(operation, {})
-        return BrokerStatus(bool(payload.get("installed", True)), bool(payload.get("healthy", True)))
+        healthy = bool(payload.get("healthy", True))
+        return BrokerStatus(
+            bool(payload.get("installed", True)),
+            healthy,
+            code=None if healthy else BrokerStatusFailureCode.UNHEALTHY,
+            detail=(
+                str(payload.get("detail"))
+                if not healthy and payload.get("detail")
+                else ("Broker reported unhealthy status" if not healthy else None)
+            ),
+        )
 
     def launch(
         self,
