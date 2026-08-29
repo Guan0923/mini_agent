@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { App, Button, Dropdown, Empty, Input, Space, Tabs, Tooltip, Typography } from "antd";
+import { App, Button, Dropdown, Empty, Input, Space, Tabs, Tooltip, Typography, type TabsProps } from "antd";
 import { CloseOutlined, CommentOutlined, PlusOutlined, ProductOutlined } from "@ant-design/icons";
 import {
   closeRightPanelWindow,
@@ -11,6 +11,11 @@ import {
 } from "../../api";
 import type { RightPanelPayload, RightPanelWindow } from "../../types";
 import TerminalPane from "./TerminalPane";
+
+const RIGHT_PANEL_TAB_STYLES: TabsProps["styles"] = {
+  body: { height: "100%", minHeight: 0 },
+  content: { height: "100%", minHeight: 0 },
+};
 
 export interface RightPanelController {
   payload: RightPanelPayload | null;
@@ -225,6 +230,7 @@ export default function RightPanel({
       type="editable-card"
       hideAdd
       destroyOnHidden={false}
+      styles={RIGHT_PANEL_TAB_STYLES}
       activeKey={payload?.state.active_window_id ?? tabs[0]?.key}
       items={tabs}
       tabBarExtraContent={extra}
