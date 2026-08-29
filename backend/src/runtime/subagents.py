@@ -18,6 +18,7 @@ from backend.domain import (
     SystemMessage,
     ThreadContext,
     ThreadNode,
+    TurnTrace,
 )
 from backend.domain.runtime_state import RuntimeState, new_node_id, new_thread_id, runtime_node_from_dict, utc_iso
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
@@ -71,6 +72,12 @@ class _CanonicalRuntimeStore:
 
     def has_turn_delivery(self, _session_id: str, delivery_id: str) -> bool:
         return bool(getattr(self.store, "has_canonical_delivery")(self.session_id, delivery_id))
+
+    def get_node(self, _session_id: str, turn_id: str) -> object | None:
+        return getattr(self.store, "get_node")(self.session_id, turn_id)
+
+    def initialize_turn_trace(self, _session_id: str, trace: TurnTrace) -> TurnTrace:
+        return getattr(self.store, "initialize_turn_trace")(self.session_id, trace)
 
 
 class SubagentCoordinator:
