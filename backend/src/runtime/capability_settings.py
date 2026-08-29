@@ -27,6 +27,7 @@ class SubagentSettings:
     max_workers: int = 4
     task_timeout_seconds: float = 300.0
     batch_timeout_seconds: float = 600.0
+    max_depth: int = 2
 
     @classmethod
     def from_config(cls, values: Mapping[str, object]) -> SubagentSettings:
@@ -36,10 +37,11 @@ class SubagentSettings:
         if max_workers > max_tasks:
             raise ConfigurationError("subagents.max_workers must not exceed max_tasks_per_batch.")
         return cls(
-            max_tasks,
-            max_workers,
-            _positive_number(configured, "task_timeout_seconds", 300.0),
-            _positive_number(configured, "batch_timeout_seconds", 600.0),
+            max_tasks_per_batch=max_tasks,
+            max_workers=max_workers,
+            task_timeout_seconds=_positive_number(configured, "task_timeout_seconds", 300.0),
+            batch_timeout_seconds=_positive_number(configured, "batch_timeout_seconds", 600.0),
+            max_depth=_positive_int(configured, "max_depth", 2),
         )
 
 

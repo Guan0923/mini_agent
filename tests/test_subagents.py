@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
 from time import sleep
-from types import SimpleNamespace
 
-import pytest
-
-from backend.domain import RunState
-from backend.runtime.core.context import AgentRuntime
-from backend.runtime.subagents import LockedToolExecutor, SubagentCoordinator, WorkspaceWriteLock
-from backend.tools import ToolError, build_tool_registry
+from backend.runtime.subagents import LockedToolExecutor, WorkspaceWriteLock
+from backend.tools import ToolError, build_tool_registry, delegation_tools
 
 
 class _IdleTools:
@@ -34,6 +28,9 @@ class _IdleTools:
     def requires_confirmation(self, _name: str) -> bool:
         return False
 
+    def is_workspace_confined(self, _name: str) -> bool:
+        return False
+
     def is_retryable(self, _name: str) -> bool:
         return False
 
@@ -44,73 +41,22 @@ class _IdleTools:
         return "ok"
 
 
-class _ChildRunner:
-    def __init__(self) -> None:
-        self.tools = _IdleTools()
-        self.task = ""
-
-    def new_runtime(self, *, task: str, session_id: str | None = None, **_kwargs: object) -> AgentRuntime:
-        self.task = task
-        return AgentRuntime.ephemeral(session_id=session_id or "child", planner=object(), tools=self.tools)
-
-    def run(self, _runtime: AgentRuntime) -> object:
-        return SimpleNamespace(status="completed", final_answer=f"completed {self.task}")
-
-
-def _parent_runtime() -> AgentRuntime:
-    runtime = AgentRuntime.ephemeral(session_id="parent", planner=object(), tools=_IdleTools())
-    runtime.state.current_run = RunState(task="parent task", mode="agent")
-    return runtime
-
-
-def test_subagent_coordinator_runs_tasks_and_pages_results() -> None:
-    coordinator = SubagentCoordinator(_ChildRunner)
-    runtime = _parent_runtime()
-
-    summary = json.loads(
-        coordinator.invoke(
-            runtime,
-            "delegate_tasks",
-            {"tasks": [{"id": "one", "task": "first"}, {"id": "two", "task": "second"}]},
-        )
-    )
-
-    assert summary["total"] == 2
-    assert [item["answer"] for item in summary["results"]] == ["completed first", "completed second"]
-    assert runtime.run.subagent_batches[summary["batch_id"]]["status"] == "completed"
-    page = json.loads(
-        coordinator.invoke(runtime, "get_subagent_results", {"batch_id": summary["batch_id"], "limit": 1})
-    )
-    assert page["results"][0]["id"] == "one"
-    assert page["next_cursor"] == 1
-
-
-def test_subagent_inherits_parent_permission_snapshot() -> None:
-    observed: list[str] = []
-
-    class PermissionChild(_ChildRunner):
-        def run(self, runtime: AgentRuntime) -> object:
-            observed.append(runtime.state.permission_mode)
-            return super().run(runtime)
-
-    runtime = _parent_runtime()
-    runtime.state.permission_mode = "workspace_write"
-    SubagentCoordinator(PermissionChild).invoke(
-        runtime,
+def test_persistent_subagent_tool_contract_exposes_only_the_read_query_in_plan_mode() -> None:
+    tools = delegation_tools(3)
+    assert [tool.name for tool in tools] == [
         "delegate_tasks",
-        {"tasks": [{"id": "one", "task": "inherit"}]},
-    )
-    assert observed == ["workspace_write"]
-
-
-def test_subagent_coordinator_rejects_duplicate_task_ids() -> None:
-    coordinator = SubagentCoordinator(_ChildRunner)
-    with pytest.raises(ToolError, match="unique"):
-        coordinator.invoke(
-            _parent_runtime(),
-            "delegate_tasks",
-            {"tasks": [{"id": "same", "task": "one"}, {"id": "same", "task": "two"}]},
-        )
+        "send_agent_message",
+        "set_thread_node_status",
+        "list_current_node_sub_thread",
+    ]
+    assert [tool.name for tool in tools if tool.read_only] == ["list_current_node_sub_thread"]
+    delegate = tools[0].spec.parameters
+    assert delegate["properties"]["context_transfer_strategy"]["items"]["enum"] == [
+        "share",
+        "compaction_share",
+        "independent",
+    ]
+    assert delegate["properties"]["subagent_count"]["maximum"] == 3
 
 
 def test_locked_executor_serializes_same_path_writes() -> None:
@@ -181,29 +127,11 @@ def test_explicit_create_directory_excludes_other_workspace_writes() -> None:
     assert maximum == 1
 
 
-def test_run_state_persists_subagent_batches() -> None:
-    state = RunState(task="persist", mode="agent", subagent_batches={"batch": {"status": "completed", "tasks": []}})
-    restored = RunState.from_dict(state.to_dict())
-    assert restored.subagent_batches == state.subagent_batches
-
-
-def test_recovery_marks_running_subagent_batch_indeterminate() -> None:
-    from backend.runtime.conversation.recovery import reconstruct_attempt
-    from backend.runtime.core.context import RuntimeState
-
-    state = RuntimeState(
-        session_id="resume",
-        status="running",
-        current_run=RunState(
-            task="resume",
-            mode="agent",
-            subagent_batches={"batch": {"status": "running", "tasks": [{"status": "running"}]}},
-        ),
-    )
-
-    source, resumed = reconstruct_attempt(state)
-
-    assert source.current_run is not None
-    assert source.current_run.subagent_batches["batch"]["status"] == "indeterminate"
-    assert resumed.current_run is not None
-    assert resumed.current_run.subagent_batches["batch"]["tasks"][0]["status"] == "indeterminate"
+def test_locked_executor_rejects_missing_workspace_path() -> None:
+    executor = LockedToolExecutor(_IdleTools(), WorkspaceWriteLock())
+    try:
+        executor.invoke("write_file", {}, True)
+    except ToolError as exc:
+        assert "requires a path" in str(exc)
+    else:
+        raise AssertionError("missing path was accepted")

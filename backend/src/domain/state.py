@@ -97,7 +97,6 @@ class RunState:
     active_skills: list[SkillSnapshot] = field(default_factory=list)
     provenance: RunProvenance = field(default_factory=RunProvenance)
     checkpoint: RecoveryCheckpoint | None = None
-    subagent_batches: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         from .state_codec import run_state_to_dict

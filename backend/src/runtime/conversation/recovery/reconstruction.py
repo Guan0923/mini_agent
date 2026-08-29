@@ -153,13 +153,6 @@ def reconstruct_attempt(
                 archived.retryable = action.retryable
 
     if process_interrupted:
-        for run in (source_run, old_run):
-            for batch in run.subagent_batches.values():
-                if batch.get("status") == "running":
-                    batch["status"] = "indeterminate"
-                for task in batch.get("tasks", []):
-                    if isinstance(task, dict) and task.get("status") in {"queued", "running"}:
-                        task["status"] = "indeterminate"
         message = "Previous process stopped before the workflow reached a terminal state."
         source_run.final_answer = source_run.final_answer or message
 

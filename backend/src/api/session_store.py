@@ -10,7 +10,7 @@ from .state import WebAppState
 def session_store(state: WebAppState):
     from backend.storage.sqlite import SQLiteSessionStore
 
-    return SQLiteSessionStore(state.paths)
+    return SQLiteSessionStore(state.paths, getattr(state, "agent_thread_index", None))
 
 
 def require_session(store, session_id: str):

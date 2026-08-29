@@ -1,5 +1,6 @@
 """Stable domain types with no dependency on the UI, tools, or providers."""
 
+from .agent_threads import ContextStrategy, RuntimeThread, ThreadContext, ThreadNode, ThreadOrigin, ThreadStatus
 from .errors import ModelOutputError, PlanningError, TracePersistenceError
 from .message_queue import (
     ClaimedEnvelope,
@@ -106,6 +107,7 @@ from .turn_trace import TurnTrace, TurnTraceContext, TurnTraceItem
 
 __all__ = [
     "AgentAction",
+    "ContextStrategy",
     "AssistantMessage",
     "CHECKPOINT_PREAMBLE",
     "APP_VERSION",
@@ -156,6 +158,7 @@ __all__ = [
     "RuntimeStateNode",
     "RuntimeStateTree",
     "RuntimeStateValidationError",
+    "RuntimeThread",
     "runtime_node_from_dict",
     "TerminalErrorCategory",
     "RunHandoff",
@@ -174,6 +177,10 @@ __all__ = [
     "ToolStatus",
     "TIME_ZONE_OPTIONS",
     "TimeZoneOption",
+    "ThreadContext",
+    "ThreadNode",
+    "ThreadOrigin",
+    "ThreadStatus",
     "TracePersistenceError",
     "TurnTrace",
     "TurnTraceContext",

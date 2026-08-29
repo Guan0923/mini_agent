@@ -75,6 +75,7 @@ class RuntimeServices:
     # rather than a persisted field: the bridge owns the dynamic sidecar and
     # can replace a failed placeholder immediately before every model request.
     runtime_node_context: Callable[[], Sequence[RuntimeTreeNode]] | None = None
+    context_prefix_messages: list[ChatMessage] = field(default_factory=list)
     # In-process JobScope.  It is intentionally non-serializable and is
     # supplied by AgentRunner when a run is opened.
     job_scope: object | None = None
@@ -145,7 +146,7 @@ class AgentRuntime:
         if not nodes:
             messages = list(self.state.messages)
         else:
-            messages = _chat_messages_from_nodes(nodes)
+            messages = [*self.services.context_prefix_messages, *_chat_messages_from_nodes(nodes)]
         if not current_turn_only or not nodes:
             return messages
         boundary = max((index for index, item in enumerate(messages) if isinstance(item, UserMessage)), default=0)

@@ -38,7 +38,6 @@ def run_state_to_dict(state: RunState) -> dict[str, Any]:
         "active_skills": [skill.to_dict() for skill in state.active_skills],
         "provenance": asdict(state.provenance),
         "checkpoint": asdict(state.checkpoint) if state.checkpoint else None,
-        "subagent_batches": state.subagent_batches,
     }
 
 
@@ -145,9 +144,4 @@ def run_state_from_dict(data: dict[str, Any]) -> RunState:
         handoff=handoff,
         provenance=provenance,
         checkpoint=checkpoint,
-        subagent_batches={
-            str(key): dict(value)
-            for key, value in (data.get("subagent_batches") or {}).items()
-            if isinstance(value, dict)
-        },
     )

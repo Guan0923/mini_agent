@@ -41,6 +41,11 @@ def _fingerprint(thread_id: str, turn_id: str, message_ids: Sequence[str]) -> st
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _envelope_fingerprint(envelope: MessageEnvelope) -> str:
+    canonical = replace(envelope, attempts=0).to_dict()
+    return hashlib.sha256(_json(canonical).encode("utf-8")).hexdigest()
+
+
 def _merge(messages: Sequence[QueuedMessage]) -> tuple[str, tuple[dict[str, str], ...]]:
     references: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -121,12 +126,43 @@ if redis.call('XLEN', stream) == 0 then redis.call('DEL', stream) end
 return {'acknowledged'}
 """
 
+    _direct_dispatch_script = """
+local receipt = KEYS[1]
+local stream = KEYS[2]
+local existing = redis.call('HGET', receipt, 'fingerprint')
+if existing then
+  if existing ~= ARGV[1] then return {'delivery_conflict'} end
+  return {'duplicate', redis.call('HGET', receipt, 'stream_id') or ''}
+end
+local stream_id = redis.call('XADD', stream, '*', 'envelope', ARGV[2])
+redis.call('HSET', receipt, 'fingerprint', ARGV[1], 'status', 'dispatched', 'stream_id', stream_id, 'attempts', 0, 'envelope', ARGV[2])
+redis.call('PERSIST', receipt)
+return {'created', stream_id}
+"""
+
+    _direct_ack_script = """
+local receipt = KEYS[1]
+local stream = KEYS[2]
+local fingerprint = redis.call('HGET', receipt, 'fingerprint')
+if not fingerprint then return {'missing_receipt'} end
+if fingerprint ~= ARGV[1] then return {'delivery_conflict'} end
+if redis.call('HGET', receipt, 'status') == 'acknowledged' then return {'duplicate'} end
+redis.pcall('XACK', stream, ARGV[2], ARGV[3])
+redis.call('XDEL', stream, ARGV[3])
+redis.call('HSET', receipt, 'status', 'acknowledged', 'acknowledged_at', ARGV[4])
+redis.call('EXPIRE', receipt, tonumber(ARGV[5]))
+if redis.call('XLEN', stream) == 0 then redis.call('DEL', stream) end
+return {'acknowledged'}
+"""
+
     def __init__(self, client: Redis, *, key_prefix: str = DEFAULT_KEY_PREFIX) -> None:
         self.client = client
         self.key_prefix = key_prefix.rstrip(":")
         self.consumer_group = CONSUMER_GROUP
         self._dispatch = client.register_script(self._dispatch_script)
         self._ack = client.register_script(self._ack_script)
+        self._direct_dispatch = client.register_script(self._direct_dispatch_script)
+        self._direct_ack = client.register_script(self._direct_ack_script)
 
     @classmethod
     def from_url(cls, url: str | None = None, *, key_prefix: str | None = None) -> RedisMessageQueue:
@@ -140,6 +176,14 @@ return {'acknowledged'}
 
     def _stream_key(self, turn_id: str) -> str:
         return f"{self.key_prefix}:turn:{turn_id}:mailbox"
+
+    def _thread_stream_key(self, thread_id: str) -> str:
+        return f"{self.key_prefix}:thread:{thread_id}:mailbox"
+
+    def _envelope_stream_key(self, envelope: MessageEnvelope) -> str:
+        if envelope.target_kind == "thread":
+            return self._thread_stream_key(envelope.target_id)
+        return self._stream_key(envelope.target_id)
 
     def _receipt_key(self, delivery_id: str) -> str:
         return f"{self.key_prefix}:delivery:{delivery_id}"
@@ -336,6 +380,24 @@ return {'acknowledged'}
             raise QueueItemConflict("queued_message_changed_during_dispatch")
         return envelope
 
+    def dispatch_agent(self, envelope: MessageEnvelope) -> MessageEnvelope:
+        """Atomically append one immutable Agent envelope to a Thread mailbox."""
+
+        if envelope.sender_kind != "agent" or envelope.target_kind != "thread":
+            raise ValueError("Agent dispatch requires sender_kind=agent and target_kind=thread.")
+        fingerprint = _envelope_fingerprint(envelope)
+        receipt = self._receipt_key(envelope.delivery_id)
+        try:
+            result = self._direct_dispatch(
+                keys=[receipt, self._thread_stream_key(envelope.target_id)],
+                args=[fingerprint, _json(replace(envelope, attempts=0).to_dict())],
+            )
+        except RedisError as exc:
+            raise self._unavailable(exc) from exc
+        if str(result[0]) == "delivery_conflict":
+            raise DeliveryConflict("delivery_id_conflict")
+        return envelope
+
     def _ensure_group(self, stream: str) -> None:
         try:
             self.client.xgroup_create(stream, self.consumer_group, id="0-0", mkstream=True)
@@ -343,12 +405,22 @@ return {'acknowledged'}
             if "BUSYGROUP" not in str(exc):
                 raise self._unavailable(exc) from exc
 
-    def claim(self, turn_id: str, consumer: str) -> ClaimedEnvelope | None:
-        stream = self._stream_key(turn_id)
+    def _claim_stream(
+        self,
+        stream: str,
+        consumer: str,
+        *,
+        stale_claim_ms: int = STALE_CLAIM_MS,
+    ) -> ClaimedEnvelope | None:
         self._ensure_group(stream)
         try:
             reclaimed = self.client.xautoclaim(
-                stream, self.consumer_group, consumer, min_idle_time=STALE_CLAIM_MS, start_id="0-0", count=1
+                stream,
+                self.consumer_group,
+                consumer,
+                min_idle_time=stale_claim_ms,
+                start_id="0-0",
+                count=1,
             )
             entries = reclaimed[1] if len(reclaimed) > 1 else []
             if not entries:
@@ -366,8 +438,45 @@ return {'acknowledged'}
         except RedisError as exc:
             raise self._unavailable(exc) from exc
 
+    def claim(self, turn_id: str, consumer: str) -> ClaimedEnvelope | None:
+        return self._claim_stream(self._stream_key(turn_id), consumer)
+
+    def claim_thread(self, thread_id: str, consumer: str) -> ClaimedEnvelope | None:
+        return self._claim_stream(self._thread_stream_key(thread_id), consumer)
+
+    def claim_thread_recovery(self, thread_id: str, consumer: str) -> ClaimedEnvelope | None:
+        return self._claim_stream(self._thread_stream_key(thread_id), consumer, stale_claim_ms=0)
+
+    def peek_thread(self, thread_id: str) -> MessageEnvelope | None:
+        try:
+            entries = self.client.xrange(self._thread_stream_key(thread_id), count=1)
+        except RedisError as exc:
+            raise self._unavailable(exc) from exc
+        if not entries:
+            return None
+        raw = entries[0][1].get("envelope")
+        return MessageEnvelope.from_dict(json.loads(raw)) if raw else None
+
     def ack(self, claimed: ClaimedEnvelope) -> None:
         envelope = claimed.envelope
+        if envelope.target_kind == "thread":
+            arguments: list[object] = [
+                _envelope_fingerprint(envelope),
+                self.consumer_group,
+                claimed.stream_id,
+                queue_utc_now(),
+                DELIVERY_RECEIPT_TTL_SECONDS,
+            ]
+            try:
+                result = self._direct_ack(
+                    keys=[self._receipt_key(envelope.delivery_id), self._thread_stream_key(envelope.target_id)],
+                    args=arguments,
+                )
+            except RedisError as exc:
+                raise self._unavailable(exc) from exc
+            if str(result[0]) == "delivery_conflict":
+                raise DeliveryConflict("delivery_id_conflict")
+            return
         order, messages, _ = self._thread_keys(envelope.thread_id)
         fingerprint = _fingerprint(envelope.thread_id, envelope.target_id, envelope.source_message_ids)
         arguments: list[object] = [
@@ -420,14 +529,18 @@ return {'acknowledged'}
             raise self._unavailable(exc) from exc
 
     def pending_deliveries(self) -> list[ClaimedEnvelope]:
-        pattern = f"{self.key_prefix}:turn:*:mailbox"
         result: list[ClaimedEnvelope] = []
         try:
-            for stream in self.client.scan_iter(pattern):
-                for stream_id, fields in self.client.xrange(stream):
-                    raw = fields.get("envelope")
-                    if raw:
-                        result.append(ClaimedEnvelope(str(stream_id), MessageEnvelope.from_dict(json.loads(raw))))
+            patterns = (
+                f"{self.key_prefix}:turn:*:mailbox",
+                f"{self.key_prefix}:thread:*:mailbox",
+            )
+            for pattern in patterns:
+                for stream in self.client.scan_iter(pattern):
+                    for stream_id, fields in self.client.xrange(stream):
+                        raw = fields.get("envelope")
+                        if raw:
+                            result.append(ClaimedEnvelope(str(stream_id), MessageEnvelope.from_dict(json.loads(raw))))
         except RedisError as exc:
             raise self._unavailable(exc) from exc
         return result
@@ -439,6 +552,7 @@ class MemoryMessageQueue:
     def __init__(self) -> None:
         self._queues: dict[str, list[QueuedMessage]] = {}
         self._streams: dict[str, list[tuple[str, MessageEnvelope, float, str | None]]] = {}
+        self._thread_streams: dict[str, list[tuple[str, MessageEnvelope, float, str | None]]] = {}
         self._receipts: dict[str, tuple[str, str, MessageEnvelope]] = {}
         self._counter = 0
         self._lock = RLock()
@@ -543,6 +657,22 @@ class MemoryMessageQueue:
             self._receipts[delivery_id] = (fingerprint, "dispatched", envelope)
             return envelope
 
+    def dispatch_agent(self, envelope: MessageEnvelope) -> MessageEnvelope:
+        if envelope.sender_kind != "agent" or envelope.target_kind != "thread":
+            raise ValueError("Agent dispatch requires sender_kind=agent and target_kind=thread.")
+        with self._lock:
+            fingerprint = _envelope_fingerprint(envelope)
+            receipt = self._receipts.get(envelope.delivery_id)
+            if receipt is not None:
+                if receipt[0] != fingerprint:
+                    raise DeliveryConflict("delivery_id_conflict")
+                return receipt[2]
+            canonical = replace(envelope, attempts=0)
+            self._counter += 1
+            self._thread_streams.setdefault(envelope.target_id, []).append((f"{self._counter}-0", canonical, 0.0, None))
+            self._receipts[envelope.delivery_id] = (fingerprint, "dispatched", canonical)
+            return canonical
+
     def claim(self, turn_id: str, consumer: str) -> ClaimedEnvelope | None:
         with self._lock:
             entries = self._streams.get(turn_id, [])
@@ -553,9 +683,40 @@ class MemoryMessageQueue:
                     return ClaimedEnvelope(stream_id, claimed)
             return None
 
+    def claim_thread(self, thread_id: str, consumer: str) -> ClaimedEnvelope | None:
+        with self._lock:
+            entries = self._thread_streams.get(thread_id, [])
+            for index, (stream_id, envelope, claimed_at, owner) in enumerate(entries):
+                if owner is None:
+                    claimed = replace(envelope, attempts=envelope.attempts + 1)
+                    entries[index] = (stream_id, claimed, claimed_at + 1, consumer)
+                    return ClaimedEnvelope(stream_id, claimed)
+            return None
+
+    def claim_thread_recovery(self, thread_id: str, consumer: str) -> ClaimedEnvelope | None:
+        with self._lock:
+            entries = self._thread_streams.get(thread_id, [])
+            for index, (stream_id, envelope, claimed_at, _owner) in enumerate(entries):
+                claimed = replace(envelope, attempts=envelope.attempts + 1)
+                entries[index] = (stream_id, claimed, claimed_at + 1, consumer)
+                return ClaimedEnvelope(stream_id, claimed)
+            return None
+
+    def peek_thread(self, thread_id: str) -> MessageEnvelope | None:
+        with self._lock:
+            entries = self._thread_streams.get(thread_id, [])
+            return entries[0][1] if entries else None
+
     def ack(self, claimed: ClaimedEnvelope) -> None:
         with self._lock:
             envelope = claimed.envelope
+            if envelope.target_kind == "thread":
+                self._thread_streams[envelope.target_id] = [
+                    item for item in self._thread_streams.get(envelope.target_id, []) if item[0] != claimed.stream_id
+                ]
+                fingerprint, _, stored = self._receipts[envelope.delivery_id]
+                self._receipts[envelope.delivery_id] = (fingerprint, "acknowledged", stored)
+                return
             self._streams[envelope.target_id] = [
                 item for item in self._streams.get(envelope.target_id, []) if item[0] != claimed.stream_id
             ]
@@ -582,7 +743,7 @@ class MemoryMessageQueue:
         with self._lock:
             return [
                 ClaimedEnvelope(stream_id, envelope)
-                for entries in self._streams.values()
+                for entries in (*self._streams.values(), *self._thread_streams.values())
                 for stream_id, envelope, _, _ in entries
             ]
 
@@ -616,10 +777,42 @@ class RedisTurnMailbox:
         self.closed = True
 
 
+class RedisAgentMailbox(RedisTurnMailbox):
+    """Safe-boundary adapter combining one Turn stream and its Thread mailbox."""
+
+    def __init__(
+        self,
+        queue: RedisMessageQueue | MemoryMessageQueue,
+        turn_id: str,
+        thread_id: str,
+        consumer: str,
+    ) -> None:
+        super().__init__(queue, turn_id, consumer)
+        self.thread_id = thread_id
+
+    def take(self) -> list[dict[str, Any]]:
+        turn_items = super().take()
+        if turn_items or self.closed:
+            return turn_items
+        claimed = self.queue.claim_thread(self.thread_id, self.consumer)
+        if claimed is None:
+            return []
+        envelope = claimed.envelope
+        return [
+            {
+                "delivery_id": envelope.delivery_id,
+                "content": envelope.content,
+                "references": list(envelope.references),
+                "_ack": lambda: self.queue.ack(claimed),
+            }
+        ]
+
+
 __all__ = [
     "DEFAULT_KEY_PREFIX",
     "DEFAULT_REDIS_URL",
     "MemoryMessageQueue",
+    "RedisAgentMailbox",
     "RedisMessageQueue",
     "RedisTurnMailbox",
 ]

@@ -6,6 +6,7 @@ from importlib import import_module
 from typing import Any
 
 _EXPORTS = {
+    "AgentThreadIndex": ("agent_thread_index", "AgentThreadIndex"),
     "AgentApplication": ("application.services", "AgentApplication"),
     "AgentRunner": ("execution.runner", "AgentRunner"),
     "AgentRuntime": ("core.context", "AgentRuntime"),
