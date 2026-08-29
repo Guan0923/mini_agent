@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from time import monotonic, sleep
 from uuid import uuid4
 
@@ -75,6 +78,93 @@ class _DelegatingRootPlanner:
             return AssistantMessage(content="root received both Agent results")
         sleep(0.1)
         return AssistantMessage(content="waiting for Agent results")
+
+
+@pytest.fixture
+def local_subagent_model() -> Generator[tuple[ModelConfig, list[str]], None, None]:
+    model_calls: list[str] = []
+
+    class LocalModelHandler(BaseHTTPRequestHandler):
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            if self.path != "/v1/chat/completions":
+                self.send_error(404)
+                return
+            model_calls.append(str(payload.get("model") or ""))
+            if payload.get("stream"):
+                events = [
+                    {
+                        "id": "subagent-trace-test",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "subagent-trace-test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "role": "assistant",
+                                    "content": "child answered through local HTTP",
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": None,
+                    },
+                    {"choices": [], "usage": {"input_tokens": 4, "output_tokens": 3, "total_tokens": 7}},
+                ]
+                body = ("".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n").encode()
+                content_type = "text/event-stream"
+            else:
+                body = json.dumps(
+                    {
+                        "id": "subagent-trace-test",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "subagent-trace-test",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "child answered through local HTTP",
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {"input_tokens": 4, "output_tokens": 3, "total_tokens": 7},
+                    }
+                ).encode()
+                content_type = "application/json"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LocalModelHandler)
+    thread = Thread(target=server.serve_forever, name="subagent-trace-model", daemon=True)
+    thread.start()
+    try:
+        port = int(server.server_address[1])
+        yield (
+            ModelConfig(
+                "local-test-key",
+                f"http://127.0.0.1:{port}/v1",
+                "subagent-trace-test",
+                max_tokens=256,
+                context_size=4_096,
+                provider_name="subagent-trace-local",
+            ),
+            model_calls,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def _finished_source(store: SQLiteSessionStore, session_id: str, *, turn_id: str = "turn_source") -> RuntimeState:
@@ -626,6 +716,96 @@ def test_real_http_sse_redis_subagents_auto_steer_root_and_restart_idle_child(
             assert isinstance(child_turn, RuntimeState) and child_turn.status == "success"
             assert child_turn.user_message.get("delivery_id") == follow_up["delivery_id"]
             source_runner.close()
+    finally:
+        state.close()
+        keys = list(client.scan_iter(f"{prefix}:*"))
+        if keys:
+            client.delete(*keys)
+        client.close()
+
+
+def test_real_http_sse_redis_subagents_persist_model_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    local_sandbox_runtime: None,
+    local_subagent_model: tuple[ModelConfig, list[str]],
+) -> None:
+    model_config, model_calls = local_subagent_model
+    prefix = f"mini-agent:test:agent-trace:{uuid4().hex}"
+    client = Redis.from_url("redis://127.0.0.1:6379/0", decode_responses=True)
+    try:
+        client.ping()
+    except Exception as exc:
+        client.close()
+        pytest.skip(f"real Redis unavailable: {exc}")
+    queue = RedisMessageQueue(client, key_prefix=prefix)
+    state = WebAppState(tmp_path / "web", message_queue=queue)
+    monkeypatch.setattr(state, "model_config", lambda *_args, **_kwargs: model_config)
+    planner = _DelegatingRootPlanner()
+
+    def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
+        application = build_application(
+            workspace or state.session_workspace(session_id),
+            planner_name="llm",
+            paths=state.paths,
+            model_config=model_config,
+            job_registry=state.job_registry,
+            sandbox_session_id=session_id,
+            agent_thread_index=state.agent_thread_index,
+            subagent_coordinator=state.subagent_coordinator,
+        )
+        application.runner.planner = planner
+        return application
+
+    monkeypatch.setattr(chat_routes, "build_local_application", local_application)
+    try:
+        with TestClient(create_app(state)) as http:
+            sidebar = http.post("/api/sidebar-threads", json={}).json()
+            response = http.post(
+                "/api/turns",
+                json={
+                    "id": "turn_agent_trace_root",
+                    "session_id": sidebar["session_id"],
+                    "thread_id": sidebar["thread_id"],
+                    "parent_id": "",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "delegate two traced tasks"}],
+                    },
+                    "permission_mode": "read_only",
+                    "running_mode": "agent",
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert response.text.rstrip().endswith('<SSE id="turn_agent_trace_root" type="success"></SSE>')
+
+            store = SQLiteSessionStore(state.paths, state.agent_thread_index)
+            children = store.list_child_thread_nodes(sidebar["session_id"], sidebar["thread_id"])
+            assert {child.thread_path for child in children} == {"/root/one", "/root/two"}
+            deadline = monotonic() + 10
+            while monotonic() < deadline:
+                runtime_threads = [
+                    store.get_runtime_thread(sidebar["session_id"], child.thread_id) for child in children
+                ]
+                if all(item is not None and item.running_turn_id is None for item in runtime_threads):
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail("local HTTP subagents did not finish")
+
+            for child, runtime_thread in zip(children, runtime_threads, strict=True):
+                assert runtime_thread is not None and runtime_thread.current_turn_id is not None
+                child_turn = store.get_node(sidebar["session_id"], runtime_thread.current_turn_id)
+                assert isinstance(child_turn, RuntimeState) and child_turn.status == "success"
+                trace = store.load_turn_trace(
+                    sidebar["session_id"],
+                    child_turn.id,
+                    child_turn.current_data_idx,
+                )
+                assert trace is not None and trace.thread_id == child.thread_id
+                assert [entry.role for entry in trace.items] == ["user", "assistant"]
+                assert trace.items[-1].item.get("text") == "child answered through local HTTP"
+            assert len(model_calls) == 2
     finally:
         state.close()
         keys = list(client.scan_iter(f"{prefix}:*"))
