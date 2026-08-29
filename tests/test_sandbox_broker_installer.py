@@ -11,12 +11,18 @@ from fastapi import Request
 from backend.api.routes.sandbox import install as install_broker
 from backend.api.routes.sandbox import repair as repair_broker
 from backend.sandbox import WindowsBrokerClient
-from backend.sandbox.broker_service import WindowsServiceInstaller
+from backend.sandbox.broker_service import (
+    BrokerCredentialPackage,
+    WindowsServiceInstaller,
+    build_ready_marker,
+)
+from backend.sandbox.broker_service.installer import _write_python_service_path
 from backend.sandbox.errors import BrokerInstallationError, BrokerInstallFailureCode
 from backend.sandbox.install_helper import (
     EXIT_SERVICE_STOP_FAILED,
     _icacls_sid,
     _persist_sid,
+    _runtime_acl_grants,
     _secure_program_data,
     _service_sid,
     _source_acl_grants,
@@ -55,6 +61,60 @@ def test_injected_runner_executes_one_local_transaction() -> None:
 
     assert [call[:2] for call in calls] == [["sc.exe", "create"], ["sc.exe", "sidtype"], ["sc.exe", "start"]]
     assert calls[0][calls[0].index("obj=") + 1] == r"NT SERVICE\MiniAgentSandboxBroker"
+
+
+def test_pywin32_service_host_is_resolved_before_elevation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    host = tmp_path / "runtime" / "pythonservice.exe"
+    host.parent.mkdir()
+    host.write_bytes(b"host")
+    python_dll = tmp_path / "base" / "python312.dll"
+    python_dll.parent.mkdir()
+    python_dll.write_bytes(b"python-runtime")
+    pywintypes_dll = tmp_path / "packages" / "pywintypes312.dll"
+    pywintypes_dll.parent.mkdir()
+    pywintypes_dll.write_bytes(b"pywin32-runtime")
+    servicemanager_pyd = tmp_path / "packages" / "servicemanager.pyd"
+    servicemanager_pyd.write_bytes(b"service-manager")
+    module = types.SimpleNamespace(LocatePythonServiceExe=lambda: str(host))
+    monkeypatch.setitem(sys.modules, "win32serviceutil", module)
+    monkeypatch.setitem(
+        sys.modules,
+        "win32api",
+        types.SimpleNamespace(GetModuleFileName=lambda _handle: str(python_dll)),
+    )
+    monkeypatch.setitem(sys.modules, "pywintypes", types.SimpleNamespace(__file__=str(pywintypes_dll)))
+    monkeypatch.setitem(sys.modules, "servicemanager", types.SimpleNamespace(__file__=str(servicemanager_pyd)))
+    installer = WindowsServiceInstaller(
+        ("placeholder.exe",),
+        service_class="sandbox_service_bootstrap.MiniAgentSandboxBrokerService",
+        is_windows=True,
+    )
+
+    installer._prepare_service_host()
+
+    assert installer.service_command == (str(host.resolve()),)
+    assert (host.parent / python_dll.name).read_bytes() == b"python-runtime"
+    assert (host.parent / pywintypes_dll.name).read_bytes() == b"pywin32-runtime"
+    assert (host.parent / servicemanager_pyd.name).read_bytes() == b"service-manager"
+
+
+def test_python_service_path_lists_only_explicit_import_roots(tmp_path: Path) -> None:
+    executable = tmp_path / "venv" / "pythonservice.exe"
+    executable.parent.mkdir()
+    base = tmp_path / "base"
+    environment = tmp_path / "venv"
+
+    path_file = _write_python_service_path(executable, base, environment)
+
+    assert path_file.read_text(encoding="utf-8").splitlines() == [
+        ".",
+        str((base / f"python{sys.version_info.major}{sys.version_info.minor}.zip").resolve()),
+        str((base / "Lib").resolve()),
+        str((base / "DLLs").resolve()),
+        str((environment / "Lib" / "site-packages").resolve()),
+        str((environment / "Lib" / "site-packages" / "win32").resolve()),
+        str((environment / "Lib" / "site-packages" / "win32" / "lib").resolve()),
+    ]
 
 
 def test_injected_runner_uses_prefixed_sid_for_acl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,7 +157,17 @@ def test_injected_runner_uses_prefixed_sid_for_acl(monkeypatch: pytest.MonkeyPat
     assert "*S-1-5-21-1-2-3-500:(R)" in key_acl_call
     assert f"*{service_sid}:(M)" in key_acl_call
     assert source_call[2:] == [service_sid, "RX", "inherit"]
-    assert [call for call in calls if call[0] == "win32-acl"] == [source_call]
+    assert [call for call in calls if call[0] == "win32-acl"] == [
+        ["win32-acl", str(installer.service_code_boundary_path), service_sid, "X", "direct"],
+        [
+            "win32-acl",
+            str(installer.service_code_boundary_path / "backend"),
+            service_sid,
+            "X",
+            "direct",
+        ],
+        source_call,
+    ]
 
 
 def test_injected_repair_installs_when_service_is_missing() -> None:
@@ -382,6 +452,7 @@ def test_repair_state_query_failure_aborts_before_config(monkeypatch: pytest.Mon
                 "operation": "repair",
                 "service_name": "MiniAgentSandboxBroker",
                 "service_command": ["python.exe", "-m", "backend.sandbox.service_main", "run"],
+                "service_class": "sandbox_service_bootstrap.MiniAgentSandboxBrokerService",
                 "backend_sid": None,
                 "backend_sid_path": None,
                 "program_data_path": None,
@@ -450,11 +521,25 @@ def test_source_acl_is_confined_to_rx_on_source_tree() -> None:
     grants = _source_acl_grants(source, boundary, "MiniAgentSandboxBroker")
     service_sid = _service_sid("MiniAgentSandboxBroker")
 
-    assert grants[-1].path == source
+    assert [grant.path for grant in grants] == [boundary, boundary / "backend", source]
+    assert [grant.rights for grant in grants] == ["X", "X", "RX"]
+    assert [grant.inherit for grant in grants] == [False, False, True]
     assert grants[-1].sid == service_sid
     assert grants[-1].rights == "RX"
     assert grants[-1].inherit is True
-    assert len(grants) == 1
+
+
+def test_runtime_acl_requires_the_service_executable_and_grants_rx() -> None:
+    runtime = Path("C:/workspace/mini_agent/.venv")
+    base_runtime = Path("C:/python/cpython-3.12")
+    executable = runtime / "Scripts" / "python.exe"
+
+    grants = _runtime_acl_grants((runtime, base_runtime, runtime), executable, "MiniAgentSandboxBroker")
+
+    assert [grant.path for grant in grants] == [runtime, base_runtime]
+    assert all(grant.rights == "RX" and grant.inherit for grant in grants)
+    with pytest.raises(ValueError):
+        _runtime_acl_grants((base_runtime,), executable, "MiniAgentSandboxBroker")
 
 
 def test_helper_transaction_orders_sid_service_acl_source_and_start(
@@ -478,6 +563,19 @@ def test_helper_transaction_orders_sid_service_acl_source_and_start(
         "backend.sandbox.install_helper._wait_for_service_stopped",
         lambda service_name, **kwargs: True,
     )
+    package = BrokerCredentialPackage(
+        "generation-test",
+        "CodexSandboxOffline",
+        "S-1-5-21-1-2-3-1001",
+        "offline-password",
+        "CodexSandboxOnline",
+        "S-1-5-21-1-2-3-1002",
+        "online-password",
+    )
+    monkeypatch.setattr(
+        "backend.sandbox.install_helper._provision_fixed_accounts",
+        lambda *_args: (package, build_ready_marker(package, 17831)),
+    )
 
     assert (
         run_transaction(
@@ -485,6 +583,7 @@ def test_helper_transaction_orders_sid_service_acl_source_and_start(
                 "operation": "repair",
                 "service_name": "MiniAgentSandboxBroker",
                 "service_command": ["python.exe", "-m", "backend.sandbox.service_main", "run"],
+                "service_class": rf"{source}\sandbox_service_bootstrap.MiniAgentSandboxBrokerService",
                 "backend_sid": "S-1-5-21-1-2-3-500",
                 "backend_sid_path": str(sid_path),
                 "program_data_path": str(program_data),
@@ -500,9 +599,23 @@ def test_helper_transaction_orders_sid_service_acl_source_and_start(
     assert f"{service_sid}:(R)" not in calls[0]
     assert calls[1] == ["sc.exe", "stop", "MiniAgentSandboxBroker"]
     assert calls[2][:2] == ["sc.exe", "config"]
-    assert calls[3] == ["sc.exe", "sidtype", "MiniAgentSandboxBroker", "unrestricted"]
-    assert calls[4][:2] == ["icacls.exe", str(program_data)]
-    assert calls[5][:2] == ["icacls.exe", str(sid_path)]
-    assert f"{service_sid}:(R)" in calls[5]
-    assert calls[-2] == ["win32-acl-batch", str(source), str(tmp_path / "repo"), "MiniAgentSandboxBroker"]
+    assert calls[3] == [
+        "reg.exe",
+        "add",
+        r"HKLM\SYSTEM\CurrentControlSet\Services\MiniAgentSandboxBroker\PythonClass",
+        "/ve",
+        "/t",
+        "REG_SZ",
+        "/d",
+        rf"{source}\sandbox_service_bootstrap.MiniAgentSandboxBrokerService",
+        "/f",
+    ]
+    assert calls[4] == ["sc.exe", "sidtype", "MiniAgentSandboxBroker", "unrestricted"]
+    assert calls[5][:2] == ["icacls.exe", str(program_data)]
+    assert calls[6][:2] == ["icacls.exe", str(sid_path)]
+    assert f"{service_sid}:(R)" in calls[6]
+    assert calls[-4] == ["win32-acl-batch", str(source), str(tmp_path / "repo"), "MiniAgentSandboxBroker"]
+    assert calls[-3] == ["takeown.exe", "/F", str(program_data / "ready.json"), "/A"]
+    assert calls[-2][:2] == ["icacls.exe", str(program_data / "ready.json")]
+    assert "*S-1-5-21-1-2-3-500:(R)" in calls[-2]
     assert calls[-1] == ["sc.exe", "start", "MiniAgentSandboxBroker"]

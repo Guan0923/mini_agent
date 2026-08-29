@@ -9,7 +9,7 @@ from backend.runtime.core.contracts import InterruptDecision, InterruptRequest
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.core.hook_contracts import HookOperationResult, ToolHookContext
 
-from ..policy import SandboxLimits
+from ..policy import NetworkMode, NetworkRule, PermissionMode, SandboxLimits
 from ..runtime.launcher import SandboxLauncher
 from .decision import SandboxExecutionDecision
 
@@ -61,7 +61,7 @@ def sandbox_operation(context: ToolHookContext) -> HookOperationResult:
 
 def _approval_request(context: ToolHookContext) -> InterruptRequest:
     command = context.arguments.get("command")
-    permission_target = "full_access" if context.name == "run_command" else context.permission_mode
+    permission_target = context.permission_mode
     return InterruptRequest(
         "tool",
         f"Call tool {context.name}?",
@@ -74,6 +74,12 @@ def _approval_request(context: ToolHookContext) -> InterruptRequest:
             "command": command if isinstance(command, str) else context.name,
             "cwd": context.workspace_root,
             "permission_target": permission_target,
+            "network_target": {
+                "mode": str(context.sandbox_config.get("network_mode") or "no_network"),
+                "allowlist": list(context.sandbox_config.get("network_allowlist") or []),
+            }
+            if context.name == "run_command"
+            else None,
         },
     )
 
@@ -82,11 +88,31 @@ def _command_decision(context: ToolHookContext) -> SandboxExecutionDecision:
     assert isinstance(context.sandbox_launcher, SandboxLauncher)
     raw_limits = context.sandbox_config.get("limits")
     limits = SandboxLimits.from_mapping(raw_limits if isinstance(raw_limits, Mapping) else None)
+    try:
+        file_mode = PermissionMode(context.permission_mode)
+        network_mode = NetworkMode(str(context.sandbox_config.get("network_mode") or NetworkMode.NO_NETWORK.value))
+        proxy_port = int(context.sandbox_config.get("proxy_port", 17831))
+        raw_rules = context.sandbox_config.get("network_allowlist")
+        network_allowlist = (
+            tuple(
+                NetworkRule(str(item.get("host") or ""), item.get("port"))
+                for item in raw_rules
+                if isinstance(item, Mapping)
+            )
+            if isinstance(raw_rules, (list, tuple))
+            else ()
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("run_command sandbox configuration is invalid") from exc
     return SandboxExecutionDecision(
         launcher=context.sandbox_launcher,
         workspace=Path(context.workspace_root).resolve(),
         session_id=context.run.session_id,
         user_id=context.sandbox_user_id or "local",
+        file_mode=file_mode,
+        network_mode=network_mode,
+        network_allowlist=network_allowlist,
+        proxy_port=proxy_port,
         limits=limits,
     )
 

@@ -9,7 +9,7 @@ from backend.api.routes.settings import SandboxConfigPayload
 from backend.domain import SystemMessage, ToolSpec, UserMessage
 from backend.providers import ChatCompletionsAdapter, LLMClient, MessagesAdapter, ModelConfig, ResponsesAdapter
 from backend.runtime.core.context import AgentRuntime
-from backend.storage.settings import LocalSettingsStore
+from backend.storage.settings import LocalSettingsStore, normalize_sandbox_config
 
 
 def runtime_for(*messages, stream: bool = False) -> AgentRuntime:
@@ -119,6 +119,33 @@ def test_sandbox_enabled_parameter_is_removed_from_every_settings_projection(tmp
     assert "enabled" not in store.config_store.read()["sandbox"]
     assert "enabled" not in SandboxConfigPayload.model_fields
     assert "enabled" not in SandboxConfigPayload.model_json_schema()["properties"]
+    assert "file_mode" not in normalized
+    assert "file_mode" not in SandboxConfigPayload.model_fields
+    assert normalized["policy_version"] == 3
+    assert normalized["proxy_port"] == 17831
+
+
+def test_v2_sandbox_config_migrates_only_command_network_and_limits(tmp_path: Path) -> None:
+    del tmp_path
+    normalized = normalize_sandbox_config(
+        {
+            "policy_version": 2,
+            "file_mode": "full_access",
+            "full_access_acknowledged": True,
+            "network_mode": "restricted_network",
+            "network_allowlist": [{"host": "127.0.0.1"}, {"host": "example.test", "port": 443}],
+            "limits": {"wall_seconds": 60},
+        }
+    )
+
+    assert normalized["policy_version"] == 3
+    assert normalized["network_allowlist"] == [
+        {"host": "127.0.0.1"},
+        {"host": "example.test", "port": 443},
+    ]
+    assert normalized["limits"]["wall_seconds"] == 60
+    assert "file_mode" not in normalized
+    assert "full_access_acknowledged" not in normalized
 
 
 def test_provider_names_are_case_insensitive_unique_and_renamable(tmp_path: Path) -> None:

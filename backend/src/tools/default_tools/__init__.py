@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 
 from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, TerminalType
@@ -26,40 +25,20 @@ def build_default_tools(
     fetcher: SafeWebFetcher | None = None,
     upload_files: WorkspaceFiles | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
-    sandbox_config: Mapping[str, object] | None = None,
+    sandbox_config: object | None = None,
     network_mode: str | None = None,
 ) -> tuple[Tool, ...]:
     """Build tools in the stable order exposed to planners."""
 
     workspace_files = files or WorkspaceFiles(workspace)
-    configured_network_mode = network_mode
-    configured_allowlist: tuple[tuple[str, int], ...] = ()
-    if configured_network_mode is None and isinstance(sandbox_config, Mapping):
-        raw_mode = sandbox_config.get("network_mode")
-        configured_network_mode = str(raw_mode) if raw_mode is not None else None
-        raw_rules = sandbox_config.get("network_allowlist")
-        if isinstance(raw_rules, (list, tuple)):
-            configured_allowlist = tuple(
-                (str(item.get("host")), int(item.get("port")))
-                for item in raw_rules
-                if isinstance(item, Mapping) and item.get("host") and item.get("port")
-            )
+    del sandbox_config
     tools = [
         *time_tools(),
         *todo_tools(),
         *filesystem_read_tools(workspace_files),
         *web_tools(
-            search
-            or DdgrWebSearch(
-                network_mode=configured_network_mode,
-                network_allowlist=configured_allowlist,
-            ),
-            fetcher
-            or SafeWebFetcher(
-                allow_private_network=configured_network_mode == "full_network",
-                network_mode=configured_network_mode,
-                network_allowlist=configured_allowlist,
-            ),
+            search or DdgrWebSearch(network_mode=network_mode),
+            fetcher or SafeWebFetcher(network_mode=network_mode),
         ),
         *filesystem_mutation_tools(workspace_files),
         command_tool(

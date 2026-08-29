@@ -28,6 +28,8 @@ from ..errors import (
     SandboxResourceExceeded,
 )
 
+_PROCESS_BACKEND_INSTANCE_ID = f"backend-{uuid.uuid4().hex}"
+
 
 @dataclass(frozen=True, slots=True)
 class BrokerStatus:
@@ -36,6 +38,9 @@ class BrokerStatus:
     version: str | None = None
     installation_id: str | None = None
     detail: str | None = None
+    generation: str | None = None
+    proxy_port: int | None = None
+    token_model: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -44,6 +49,9 @@ class BrokerStatus:
             "version": self.version,
             "installation_id": self.installation_id,
             "detail": self.detail,
+            "generation": self.generation,
+            "proxy_port": self.proxy_port,
+            "token_model": self.token_model,
         }
 
 
@@ -62,12 +70,14 @@ class WindowsBrokerClient:
         installer: Any | None = None,
         clock: Callable[[], float] | None = None,
         request_ttl_seconds: int = 30,
+        ready_path: Path | None = None,
+        expected_proxy_port: int = 17831,
     ) -> None:
         self.pipe_name = pipe_name
         self._key = installation_key
         self._transport = transport
         self._is_windows = os.name == "nt" if is_windows is None else is_windows
-        self.backend_instance_id = backend_instance_id or f"backend-{uuid.uuid4().hex}"
+        self.backend_instance_id = backend_instance_id or _PROCESS_BACKEND_INSTANCE_ID
         self._key_store = key_store
         self._installer = installer
         self._clock = clock or time.time
@@ -75,9 +85,16 @@ class WindowsBrokerClient:
             raise ValueError("request_ttl_seconds must be between 1 and 60")
         self._request_ttl_seconds = request_ttl_seconds
         self._seen_nonces: set[str] = set()
+        self._ready_path = Path(ready_path) if ready_path is not None else None
+        self._expected_proxy_port = expected_proxy_port
 
     @classmethod
-    def from_system(cls, *, is_windows: bool | None = None) -> WindowsBrokerClient:
+    def from_system(
+        cls,
+        *,
+        is_windows: bool | None = None,
+        expected_proxy_port: int = 17831,
+    ) -> WindowsBrokerClient:
         """Load the locally installed DPAPI key without creating one.
 
         Installation is an explicit control-plane action.  A missing key is
@@ -94,12 +111,16 @@ class WindowsBrokerClient:
             return cls(is_windows=True)
         configuration = BrokerConfiguration.create()
         key_store = DpapiKeyStore(configuration.installation_key_path)
+        source_root = Path(__file__).resolve().parents[2]
         installer = WindowsServiceInstaller(
-            (sys.executable, "-m", "backend.sandbox.service_main", "run"),
+            (str(Path(sys.prefix) / "pythonservice.exe"),),
+            service_class=(rf"{source_root}\sandbox_service_bootstrap.MiniAgentSandboxBrokerService"),
             backend_sid_path=configuration.backend_sid_path,
             program_data_path=configuration.program_data,
-            service_code_path=Path(__file__).resolve().parents[1],
-            service_code_boundary_path=Path(__file__).resolve().parents[3],
+            service_code_path=source_root,
+            service_code_boundary_path=Path(__file__).resolve().parents[4],
+            service_runtime_paths=(Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()),
+            proxy_port=expected_proxy_port,
         )
         try:
             key = key_store.load()
@@ -111,6 +132,8 @@ class WindowsBrokerClient:
             is_windows=True,
             key_store=key_store,
             installer=installer,
+            ready_path=configuration.ready_path,
+            expected_proxy_port=expected_proxy_port,
         )
 
     @property
@@ -121,24 +144,48 @@ class WindowsBrokerClient:
         if not self.available:
             return BrokerStatus(False, False, detail="Windows Broker is unavailable")
         try:
+            if self._ready_path is not None:
+                from ..broker_service import read_ready_marker
+
+                marker = read_ready_marker(self._ready_path, expected_proxy_port=self._expected_proxy_port)
+            else:
+                marker = {}
             payload = self.request("status", {})
+            if payload.get("version") != "2":
+                raise SandboxInitializationError("Broker protocol version requires repair")
+            if payload.get("token_model") != "capability_sid_v1":
+                raise SandboxInitializationError("Broker token model requires repair")
+            if marker and payload.get("generation") != marker.get("generation"):
+                raise SandboxInitializationError("Broker generation requires repair")
+            configuration_healthy = getattr(self._installer, "configuration_healthy", None)
+            if callable(configuration_healthy) and not configuration_healthy():
+                raise SandboxInitializationError("Broker service configuration requires repair")
             return BrokerStatus(
                 bool(payload.get("installed")),
                 bool(payload.get("healthy")),
                 str(payload.get("version")) if payload.get("version") else None,
                 str(payload.get("installation_id")) if payload.get("installation_id") else None,
                 str(payload.get("detail")) if payload.get("detail") else None,
+                str(payload.get("generation")) if payload.get("generation") else None,
+                int(payload["proxy_port"]) if isinstance(payload.get("proxy_port"), int) else None,
+                str(payload.get("token_model")) if payload.get("token_model") else None,
             )
         except Exception as exc:
             detail = str(exc).strip() or type(exc).__name__
             return BrokerStatus(False, False, detail=detail)
 
     def install(self) -> BrokerStatus:
+        current = self.status()
+        if current.healthy:
+            return current
         if self._installer is None:
             self._ensure_installation_key()
-        return self._status_command("install")
+        return self._status_command("repair" if self._installer is not None else "install")
 
     def repair(self) -> BrokerStatus:
+        current = self.status()
+        if current.healthy:
+            return current
         if self._installer is None:
             self._ensure_installation_key()
         return self._status_command("repair")
@@ -159,8 +206,10 @@ class WindowsBrokerClient:
                 try:
                     if self._key is None and self._key_store is not None:
                         self._key = self._key_store.load()
-                    payload = self.request("status", {})
-                    break
+                    status = self.status()
+                    if status.healthy:
+                        return status
+                    raise SandboxInitializationError(status.detail or "Broker is not healthy")
                 except Exception as exc:
                     last_error = exc
                     if time.monotonic() >= deadline:
@@ -169,8 +218,7 @@ class WindowsBrokerClient:
                             "Broker 服务已安装但未能在限定时间内就绪。",
                         ) from last_error
                     time.sleep(0.1)
-        else:
-            payload = self.request(operation, {})
+        payload = self.request(operation, {})
         return BrokerStatus(bool(payload.get("installed", True)), bool(payload.get("healthy", True)))
 
     def launch(
@@ -179,9 +227,10 @@ class WindowsBrokerClient:
         argv: list[str],
         cwd: str,
         environment: Mapping[str, str],
-        policy: Mapping[str, Any],
+        reservation_id: str,
+        policy_hash: str,
+        capability_digest: str,
         user_id: str,
-        job_kind: str = "command",
     ) -> Any:
         response = self.request(
             "launch",
@@ -189,10 +238,11 @@ class WindowsBrokerClient:
                 "argv": list(argv),
                 "cwd": cwd,
                 "environment": dict(environment),
-                "policy": dict(policy),
+                "reservation_id": reservation_id,
+                "policy_hash": policy_hash,
+                "capability_digest": capability_digest,
                 "backend_instance_id": self.backend_instance_id,
                 "user_id": user_id,
-                "job_kind": job_kind,
             },
         )
         if not response.get("accepted", False):
@@ -214,6 +264,40 @@ class WindowsBrokerClient:
             stdout_enabled=response.get("stdout") == "pipe",
             stderr_enabled=response.get("stderr") == "pipe",
         )
+
+    def reserve(self, *, policy: Mapping[str, Any], policy_hash: str, user_id: str) -> dict[str, Any]:
+        response = self.request(
+            "reserve",
+            {
+                "policy": dict(policy),
+                "policy_hash": policy_hash,
+                "backend_instance_id": self.backend_instance_id,
+                "user_id": user_id,
+            },
+        )
+        reservation_id = response.get("reservation_id")
+        logon_sid = response.get("logon_sid")
+        capability_sids = response.get("capability_sids")
+        capability_digest = response.get("capability_digest")
+        if (
+            not response.get("reserved")
+            or not isinstance(reservation_id, str)
+            or not isinstance(logon_sid, str)
+            or not isinstance(capability_sids, Mapping)
+            or not isinstance(capability_sids.get("workspace"), str)
+            or not isinstance(capability_sids.get("temp"), str)
+            or not isinstance(capability_digest, str)
+            or not capability_digest
+        ):
+            raise SandboxInitializationError("Windows Broker did not return a reservation")
+        return response
+
+    def reclaim_stale(self) -> tuple[str, ...]:
+        response = self.request("reclaim", {"backend_instance_id": self.backend_instance_id})
+        raw = response.get("reclaimed")
+        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+            raise SandboxInitializationError("Windows Broker returned invalid reclaim data")
+        return tuple(raw)
 
     def release(self, job_id: str, *, user_id: str) -> None:
         """Drop the Broker-side resource lease for one completed Job."""
@@ -357,7 +441,14 @@ class BrokerManagedProcess:
         self.stderr = _BrokerReadStream(self, "stderr") if stderr_enabled else None
 
     def _control(self, operation: str, values: Mapping[str, Any]) -> dict[str, Any]:
-        return self._client.request(operation, {"process_id": self._process_id, **dict(values)})
+        return self._client.request(
+            operation,
+            {
+                "process_id": self._process_id,
+                "backend_instance_id": self._client.backend_instance_id,
+                **dict(values),
+            },
+        )
 
     def poll(self) -> int | None:
         response = self._control("process_poll", {})

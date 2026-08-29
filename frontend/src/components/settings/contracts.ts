@@ -68,9 +68,9 @@ export const defaultProviderDraft: ProviderDraft = {
 };
 
 export const defaultSandboxConfig: SandboxConfig = {
-  file_mode: "read_only",
   network_mode: "no_network",
   network_allowlist: [],
+  proxy_port: 17831,
   limits: {
     wall_seconds: 300,
     cpu_seconds: 300,

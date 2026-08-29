@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..errors import SandboxInitializationError
+from ..policy import FileAccessMode
 from .api import _modules
 
 
@@ -17,74 +18,136 @@ class WindowsSandboxAccount:
     password: str
 
 
-class WindowsAccountManager:
-    """Provision non-admin local accounts for bounded per-user pools."""
-
-    def create(self, name: str) -> WindowsSandboxAccount:
-        if (
-            not name
-            or len(name) > 20
-            or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for character in name.lower())
-        ):
-            raise SandboxInitializationError("sandbox account name is invalid")
-        modules = _modules()
-        password = secrets.token_urlsafe(32)
-        try:
-            try:
-                modules["net"].NetUserAdd(
-                    None,
-                    1,
-                    {
-                        "name": name,
-                        "password": password,
-                        "priv": modules["netcon"].USER_PRIV_USER,
-                        "flags": (
-                            modules["netcon"].UF_SCRIPT
-                            | modules["netcon"].UF_DONT_EXPIRE_PASSWD
-                            | modules["netcon"].UF_PASSWD_CANT_CHANGE
-                        ),
-                    },
-                )
-            except Exception as exc:
-                if getattr(exc, "winerror", None) != 2224:
-                    raise
-                modules["net"].NetUserSetInfo(None, name, 1003, {"password": password})
-            sid, _, _ = modules["security"].LookupAccountName(None, name)
-        except Exception as exc:  # pragma: no cover - requires UAC
-            raise SandboxInitializationError("sandbox account could not be created") from exc
-        return WindowsSandboxAccount(name, modules["security"].ConvertSidToStringSid(sid), password)
-
-    def delete(self, name: str) -> bool:
-        modules = _modules()
-        try:
-            modules["net"].NetUserDel(None, name)
-            return True
-        except Exception as exc:  # pragma: no cover - requires UAC
-            winerror = getattr(exc, "winerror", None)
-            if winerror == getattr(modules["netcon"], "NERR_UserNotFound", 2221):
-                return True
-            return False
+@dataclass(frozen=True, slots=True)
+class WindowsReservedToken:
+    token: Any
+    logon_sid: str
+    account_sid: str
+    workspace_cap_sid: str
+    temp_cap_sid: str
 
 
 class WindowsRestrictedTokenFactory:
-    """Log on a pool account and remove every removable privilege."""
+    """Create a per-logon restricted token from one fixed sandbox account."""
 
-    def create(self, account: WindowsSandboxAccount) -> Any:
+    def __init__(self, service_sid: str | None = None, *, sid_factory=None) -> None:
+        self.service_sid = service_sid
+        self._sid_factory = sid_factory or random_capability_sid
+
+    def reserve(self, account: WindowsSandboxAccount, file_mode: FileAccessMode) -> WindowsReservedToken:
         modules = _modules()
+        source = None
+        workspace_cap_sid = self._sid_factory()
+        temp_cap_sid = self._sid_factory()
+        if workspace_cap_sid == temp_cap_sid:
+            raise SandboxInitializationError("sandbox capability SID collision")
         try:
-            token = modules["security"].LogonUser(
-                account.name,
-                ".",
-                account.password,
-                modules["con"].LOGON32_LOGON_BATCH,
-                modules["con"].LOGON32_PROVIDER_DEFAULT,
+            security = modules["security"]
+            try:
+                source = security.LogonUser(
+                    account.name,
+                    ".",
+                    account.password,
+                    modules["con"].LOGON32_LOGON_BATCH,
+                    modules["con"].LOGON32_PROVIDER_DEFAULT,
+                )
+            except Exception as exc:  # pragma: no cover - requires Windows account
+                raise SandboxInitializationError("sandbox account batch logon failed") from exc
+            try:
+                logon_sid = self._logon_sid(source)
+                logon_sid_value = security.ConvertStringSidToSid(logon_sid)
+            except Exception as exc:  # pragma: no cover - requires Windows token
+                raise SandboxInitializationError("sandbox logon SID extraction failed") from exc
+            capability_values = (
+                security.ConvertStringSidToSid(workspace_cap_sid),
+                security.ConvertStringSidToSid(temp_cap_sid),
             )
-            return modules["security"].CreateRestrictedToken(
+            flags = security.DISABLE_MAX_PRIVILEGE | 0x4  # LUA_TOKEN
+            restricting_sids: list[tuple[Any, int]] = []
+            if file_mode is not FileAccessMode.FULL_ACCESS:
+                account_sid_value = security.ConvertStringSidToSid(account.sid)
+                everyone_sid = security.CreateWellKnownSid(security.WinWorldSid, None)
+                # WRITE_RESTRICTED causes write access to require both the
+                # ordinary token and one of these per-job restricting SIDs.
+                flags |= 0x8
+                restricting_sids.extend(
+                    (
+                        (capability_values[0], 0),
+                        (capability_values[1], 0),
+                        (account_sid_value, 0),
+                        (logon_sid_value, 0),
+                        (everyone_sid, 0),
+                    )
+                )
+            try:
+                token = security.CreateRestrictedToken(source, flags, [], [], restricting_sids)
+            except Exception as exc:  # pragma: no cover - requires Windows token
+                raise SandboxInitializationError("sandbox restricted token creation failed") from exc
+            try:
+                self._set_default_dacl(token, logon_sid_value, capability_values, self.service_sid)
+                self._restore_change_notify(token)
+            except Exception as exc:  # pragma: no cover - requires Windows token
+                try:
+                    token.Close()
+                except Exception:
+                    pass
+                raise SandboxInitializationError("sandbox token default DACL configuration failed") from exc
+            return WindowsReservedToken(
                 token,
-                modules["security"].DISABLE_MAX_PRIVILEGE,
-                [],
-                [],
-                [],
+                logon_sid,
+                account.sid,
+                workspace_cap_sid,
+                temp_cap_sid,
             )
-        except Exception as exc:  # pragma: no cover - requires UAC
-            raise SandboxInitializationError("sandbox restricted token could not be created") from exc
+        finally:
+            if source is not None:
+                try:
+                    source.Close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _logon_sid(token: Any) -> str:
+        modules = _modules()
+        security = modules["security"]
+        for sid, attributes in security.GetTokenInformation(token, security.TokenGroups):
+            if int(attributes) & 0xC0000000 == 0xC0000000:
+                value = str(security.ConvertSidToStringSid(sid))
+                if value.startswith("S-1-5-5-"):
+                    return value
+        raise SandboxInitializationError("sandbox logon SID is unavailable")
+
+    @staticmethod
+    def _set_default_dacl(
+        token: Any,
+        logon_sid: Any,
+        capability_sids: tuple[Any, Any],
+        service_sid: str | None,
+    ) -> None:
+        modules = _modules()
+        security = modules["security"]
+        acl = security.ACL()
+        full = modules["con"].GENERIC_ALL
+        acl.AddAccessAllowedAce(security.ACL_REVISION, full, logon_sid)
+        for capability_sid in capability_sids:
+            acl.AddAccessAllowedAce(security.ACL_REVISION, full, capability_sid)
+        acl.AddAccessAllowedAce(
+            security.ACL_REVISION, full, security.CreateWellKnownSid(security.WinLocalSystemSid, None)
+        )
+        if service_sid:
+            acl.AddAccessAllowedAce(security.ACL_REVISION, full, security.ConvertStringSidToSid(service_sid))
+        security.SetTokenInformation(token, security.TokenDefaultDacl, acl)
+
+    @staticmethod
+    def _restore_change_notify(token: Any) -> None:
+        modules = _modules()
+        security = modules["security"]
+        luid = security.LookupPrivilegeValue(None, "SeChangeNotifyPrivilege")
+        security.AdjustTokenPrivileges(token, False, [(luid, security.SE_PRIVILEGE_ENABLED)])
+
+
+def random_capability_sid() -> str:
+    """Create a private ordinary SID without registering an account or group."""
+
+    parts = tuple(secrets.randbits(32) or 1 for _ in range(4))
+    return "S-1-5-21-" + "-".join(str(value) for value in parts)

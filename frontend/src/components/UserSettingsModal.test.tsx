@@ -26,9 +26,9 @@ const settings = {
   agent_config: { tone: "balanced", verbosity: "balanced", initiative: "balanced", custom_instructions: "" },
   runtime_config: { max_tool_calls: 32, terminal_type: "cmd" as const },
   sandbox_config: {
-    file_mode: "read_only" as const,
     network_mode: "no_network" as const,
     network_allowlist: [],
+    proxy_port: 17831,
     limits: {
       wall_seconds: 300,
       cpu_seconds: 300,
@@ -191,7 +191,7 @@ describe("UserSettingsModal", () => {
     await screen.findByDisplayValue("旧名字");
     await userEvent.click(screen.getByRole("menuitem", { name: "沙箱" }));
 
-    expect(screen.getByRole("combobox", { name: "沙箱文件权限" })).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "沙箱文件权限" })).not.toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "沙箱网络权限" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "网络白名单" })).toBeInTheDocument();
     expect(screen.getByText("暂无白名单规则")).toBeInTheDocument();
@@ -201,27 +201,24 @@ describe("UserSettingsModal", () => {
     expect(screen.queryByText(/健康/)).not.toBeInTheDocument();
   });
 
-  it("forces Full access to full network, confirms risk, and saves without enabled", async () => {
+  it("saves command network policy independently from Turn file permission", async () => {
     renderModal();
     await screen.findByDisplayValue("旧名字");
     await userEvent.click(screen.getByRole("menuitem", { name: "沙箱" }));
 
-    fireEvent.mouseDown(screen.getByRole("combobox", { name: "沙箱文件权限" }));
-    fireEvent.click(await screen.findByText("Full access", { selector: ".ant-select-item-option-content" }));
-    expect(screen.getByRole("combobox", { name: "沙箱网络权限" })).toBeDisabled();
-    expect(screen.getByRole("combobox", { name: "沙箱网络权限" }).closest(".ant-select")).toHaveTextContent("完整网络");
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "沙箱网络权限" }));
+    fireEvent.click(await screen.findByText("完整网络", { selector: ".ant-select-item-option-content" }));
 
     await userEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect((await screen.findAllByText("启用 Full access？")).length).toBeGreaterThan(0);
-    await userEvent.click(screen.getByRole("button", { name: "确认并保存" }));
 
     await waitFor(() => expect(api.updateSandboxConfig).toHaveBeenCalledTimes(1));
     const payload = api.updateSandboxConfig.mock.calls[0][0];
     expect(payload).toMatchObject({
-      file_mode: "full_access",
       network_mode: "full_network",
-      full_access_acknowledged: true,
+      proxy_port: 17831,
     });
+    expect(payload).not.toHaveProperty("file_mode");
+    expect(payload).not.toHaveProperty("full_access_acknowledged");
     expect(payload).not.toHaveProperty("enabled");
   });
 

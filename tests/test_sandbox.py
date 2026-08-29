@@ -40,6 +40,8 @@ from backend.sandbox import (
     normalize_permission_mode,
     resolve_network_rules,
 )
+from backend.sandbox.broker_service import BrokerCredentialPackage, build_ready_marker
+from backend.sandbox.runtime.leases import CommandLease
 
 
 def test_permission_modes_use_only_the_three_level_contract(tmp_path: Path) -> None:
@@ -57,25 +59,16 @@ def test_limits_validate_hard_bounds() -> None:
     assert SandboxLimits.from_mapping({"memory_mb": 128}).memory_mib == 128
 
 
-def test_policy_requires_workspace_and_full_access_pair(tmp_path: Path) -> None:
-    workspace = tmp_path
-    with pytest.raises(Exception):
-        SandboxPolicy(
-            workspace,
-            "session",
-            "job",
-            file_mode=PermissionMode.FULL_ACCESS,
-            enforced=False,
-            full_access_acknowledged=True,
-        )
+@pytest.mark.parametrize("network_mode", list(NetworkMode))
+def test_full_access_file_mode_is_independent_from_network_mode(tmp_path: Path, network_mode: NetworkMode) -> None:
+    allowlist = (NetworkRule("example.test"),) if network_mode is NetworkMode.RESTRICTED_NETWORK else ()
     policy = SandboxPolicy(
-        workspace,
+        tmp_path,
         "session",
         "job",
-        network_mode=NetworkMode.FULL_NETWORK,
+        network_mode=network_mode,
+        network_allowlist=allowlist,
         file_mode=PermissionMode.FULL_ACCESS,
-        enforced=False,
-        full_access_acknowledged=True,
     )
     assert len(policy.policy_hash()) == hashlib.sha256().digest_size * 2
 
@@ -143,7 +136,15 @@ def test_broker_request_authenticates_nonce() -> None:
 
     def transport(payload: bytes) -> bytes:
         request = json.loads(payload)
-        response = {"nonce": request["nonce"], "installed": True, "healthy": True}
+        response = {
+            "nonce": request["nonce"],
+            "installed": True,
+            "healthy": True,
+            "version": "2",
+            "generation": "test-generation",
+            "proxy_port": 17831,
+            "token_model": "capability_sid_v1",
+        }
         response["hmac"] = hmac.new(
             key,
             json.dumps(response, sort_keys=True, separators=(",", ":")).encode(),
@@ -187,7 +188,9 @@ def test_broker_managed_process_proxies_communicate() -> None:
         argv=["cmd.exe", "/c", "echo ok"],
         cwd="C:\\workspace",
         environment={},
-        policy={"job_id": "job-1"},
+        reservation_id="reservation-1",
+        policy_hash="policy-hash",
+        capability_digest="capability-digest",
         user_id="user-1",
     )
     assert isinstance(process, BrokerManagedProcess)
@@ -281,14 +284,25 @@ def test_broker_service_verifies_requests_and_recovers_owned_orphans(tmp_path: P
             return value.removeprefix(b"protected:")
 
     class Adapter:
-        def install(self) -> None:
-            return None
-
-        def repair(self) -> None:
-            return None
-
         def launch(self, request: dict[str, object]) -> dict[str, object]:
-            return {"accepted": True, "resources": {"pid": 321}}
+            return {
+                "accepted": True,
+                "backend_instance_id": "backend-1",
+                "user_id": "user-1",
+                "job_id": "job-1",
+                "resources": {"pid": 321},
+            }
+
+    package = BrokerCredentialPackage(
+        "generation-1",
+        "CodexSandboxOffline",
+        "S-1-5-21-1-2-3-1001",
+        "offline-password",
+        "CodexSandboxOnline",
+        "S-1-5-21-1-2-3-1002",
+        "online-password",
+    )
+    credential_store = types.SimpleNamespace(load=lambda: package)
 
     configuration = BrokerConfiguration.create(
         program_data=tmp_path,
@@ -296,12 +310,15 @@ def test_broker_service_verifies_requests_and_recovers_owned_orphans(tmp_path: P
         backend_instance_id="backend-1",
     )
     store = DpapiKeyStore(configuration.installation_key_path, provider=FakeDpapi())
+    store.ensure()
     service = WindowsBrokerService(
         configuration,
         key_store=store,
         adapter=Adapter(),
         is_windows=True,
         clock=lambda: 1_000,
+        credential_store=credential_store,
+        ready_reader=lambda _path: build_ready_marker(package, 17831),
     )
     service.initialize()
     client = WindowsBrokerClient(
@@ -366,7 +383,24 @@ def test_broker_service_rejects_expired_signed_request(tmp_path: Path) -> None:
             return key
 
     configuration = BrokerConfiguration.create(program_data=tmp_path)
-    service = WindowsBrokerService(configuration, key_store=KeyStore(), is_windows=True, clock=lambda: 100)
+    package = BrokerCredentialPackage(
+        "generation-1",
+        "CodexSandboxOffline",
+        "S-1-5-21-1-2-3-1001",
+        "offline-password",
+        "CodexSandboxOnline",
+        "S-1-5-21-1-2-3-1002",
+        "online-password",
+    )
+    service = WindowsBrokerService(
+        configuration,
+        key_store=KeyStore(),
+        adapter=types.SimpleNamespace(),
+        is_windows=True,
+        clock=lambda: 100,
+        credential_store=types.SimpleNamespace(load=lambda: package),
+        ready_reader=lambda _path: build_ready_marker(package, 17831),
+    )
     service.initialize()
     unsigned = {
         "operation": "status",
@@ -447,6 +481,8 @@ def test_windows_launcher_fails_closed_without_broker(tmp_path: Path) -> None:
 
 
 def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> None:
+    calls: list[str] = []
+
     class Broker:
         def __init__(self) -> None:
             self.temp_dir: Path | None = None
@@ -454,39 +490,60 @@ def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> No
         def release(self, _job_id: str, *, user_id: str) -> None:
             del user_id
             assert self.temp_dir is not None and self.temp_dir.exists()
-            self.temp_dir.rmdir()
+            calls.append("broker")
+
+    class Acl:
+        def revoke_lease(self, _path: Path, _sid: str) -> bool:
+            calls.append("acl")
+            return True
 
     broker = Broker()
     policy = SandboxPolicy(tmp_path, "session", "job")
     temp_dir = tmp_path / "scratch" / "job"
     temp_dir.mkdir(parents=True)
     broker.temp_dir = temp_dir
-    launcher = SandboxLauncher(broker=broker, is_windows=True, allow_local_backend=True)
+    launcher = SandboxLauncher(
+        broker=broker,
+        is_windows=True,
+        allow_local_backend=True,
+        acl_manager=Acl(),
+        lease_store_path=tmp_path / "leases.json",
+    )
     launcher._temp_dirs[1234] = temp_dir
     launcher._job_contexts[1234] = SandboxJobContext("user-1", policy)
+    lease = CommandLease(
+        "job",
+        "reservation",
+        "S-1-5-5-1-2",
+        "S-1-5-21-1-2-3-1001",
+        "S-1-5-80-1-2-3-4-5",
+        str(tmp_path),
+        str(temp_dir),
+        "read_only",
+        "S-1-5-21-10-20-30-40",
+        "S-1-5-21-50-60-70-80",
+        "capability-digest",
+        (),
+        {},
+    )
+    launcher.lease_store.add(lease)
+    launcher._leases[1234] = lease
 
     assert launcher.cleanup(1234)
     assert not temp_dir.exists()
+    assert calls[0] == "broker"
 
 
-def test_launcher_terminates_full_access_job_object() -> None:
-    class JobObject:
-        def __init__(self) -> None:
-            self.terminated = False
+def test_launcher_terminates_through_broker_managed_process() -> None:
+    class Process:
+        terminated = False
 
         def terminate(self) -> None:
             self.terminated = True
 
-    class Process:
-        pid = 4321
-
-        def terminate(self) -> None:
-            raise AssertionError("root process termination bypassed the Job Object")
-
     launcher = SandboxLauncher(is_windows=True, allow_local_backend=True)
-    job = JobObject()
-    launcher._local_job_objects[Process.pid] = job
+    process = Process()
 
-    launcher.terminate_tree(Process())
+    launcher.terminate_tree(process)
 
-    assert job.terminated
+    assert process.terminated

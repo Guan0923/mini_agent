@@ -18,7 +18,7 @@ from backend.runtime.capability_settings import SubagentSettings
 from backend.runtime.core.context import AgentRuntime
 from backend.runtime.subagent_bridge import ParentRuntimeBridge
 from backend.runtime.subagents import SubagentCoordinator
-from backend.sandbox import BrokerStatus, SandboxInitializationError, SandboxLauncher
+from backend.sandbox import BrokerStatus, SandboxLauncher
 from backend.tools import ToolError, ToolRegistry
 from backend.tools.filesystem import normalized_workspace_path
 
@@ -77,38 +77,33 @@ def test_user_mcp_servers_are_started_and_project_file_is_ignored(tmp_path: Path
     monkeypatch.setattr(app_factory, "start_external_tools", start)
     _write_mcp(workspace / ".mini_agent" / "mcp.toml")
 
-    app_factory._external_resources(workspace, paths, {})
+    app_factory._external_resources(paths, {})
     assert started == [()]
 
     _write_mcp(paths.mcp_file, plaintext=False)
     app_factory._external_resources(
-        workspace,
         paths,
         {},
-        sandbox_launcher=SandboxLauncher(is_windows=False, allow_local_backend=True),
-        sandbox_config={},
     )
     assert len(started) == 2
     assert len(started[1]) == 1
     assert started[1][0].name == "demo"
 
 
-def test_external_mcp_server_cannot_start_without_sandbox(tmp_path: Path, monkeypatch) -> None:
+def test_external_mcp_server_starts_without_command_sandbox(tmp_path: Path, monkeypatch) -> None:
     paths = ClientPaths(tmp_path / "home")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _write_mcp(paths.mcp_file, plaintext=False)
-    monkeypatch.setattr(
-        app_factory,
-        "start_external_tools",
-        lambda *_args, **_kwargs: pytest.fail("MCP process must not start"),
-    )
+    started = []
+    monkeypatch.setattr(app_factory, "start_external_tools", lambda configs, *_args, **_kwargs: started.extend(configs))
 
-    with pytest.raises(SandboxInitializationError, match="require a healthy Sandbox"):
-        app_factory._external_resources(workspace, paths, {})
+    app_factory._external_resources(paths, {})
+
+    assert [server.name for server in started] == ["demo"]
 
 
-def test_sandbox_runtime_requires_healthy_broker_and_drops_obsolete_enabled_config(monkeypatch) -> None:
+def test_sandbox_runtime_only_disables_run_command_when_broker_is_unhealthy(monkeypatch) -> None:
     class Broker:
         def __init__(self, status: BrokerStatus) -> None:
             self._status = status
@@ -117,21 +112,23 @@ def test_sandbox_runtime_requires_healthy_broker_and_drops_obsolete_enabled_conf
             return self._status
 
     unavailable = Broker(BrokerStatus(installed=False, healthy=False))
-    monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda: unavailable)
-    with pytest.raises(SandboxInitializationError, match="未安装或当前不可用"):
-        app_factory._sandbox_runtime({})
+    monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda **_kwargs: unavailable)
+    launcher, _ = app_factory._sandbox_runtime({})
+    assert launcher is None
 
     unhealthy = Broker(BrokerStatus(installed=True, healthy=False))
-    monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda: unhealthy)
-    with pytest.raises(SandboxInitializationError, match="健康检查未通过"):
-        app_factory._sandbox_runtime({})
+    monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda **_kwargs: unhealthy)
+    launcher, _ = app_factory._sandbox_runtime({})
+    assert launcher is None
 
     healthy = Broker(BrokerStatus(installed=True, healthy=True))
-    monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda: healthy)
+    monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda **_kwargs: healthy)
     launcher, config = app_factory._sandbox_runtime({"sandbox_config": {"policy_version": 2, "enabled": False}})
 
     assert isinstance(launcher, SandboxLauncher)
     assert "enabled" not in config
+    assert "file_mode" not in config
+    assert config["policy_version"] == 3
 
 
 def test_mcp_trust_store_is_compat_noop(tmp_path: Path) -> None:

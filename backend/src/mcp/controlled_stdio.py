@@ -15,7 +15,7 @@ import signal
 import subprocess
 import sys
 from contextlib import asynccontextmanager
-from typing import Any, TextIO
+from typing import TextIO
 
 import anyio
 import mcp.types as types
@@ -30,10 +30,6 @@ logger = logging.getLogger(__name__)
 async def controlled_stdio_client(
     server: StdioServerParameters,
     errlog: TextIO = sys.stderr,
-    *,
-    sandbox_launcher: Any | None = None,
-    sandbox_policy: Any | None = None,
-    sandbox_user_id: str | None = None,
 ):
     """Yield MCP memory streams backed by one explicitly configured process."""
     read_writer, read_stream = anyio.create_memory_object_stream(0)
@@ -48,9 +44,6 @@ async def controlled_stdio_client(
             env,
             server.cwd,
             errlog,
-            sandbox_launcher=sandbox_launcher,
-            sandbox_policy=sandbox_policy,
-            sandbox_user_id=sandbox_user_id,
         )
 
         async def stdout_reader() -> None:
@@ -117,28 +110,7 @@ async def _open_process(
     env: dict[str, str],
     cwd,
     errlog: TextIO,
-    *,
-    sandbox_launcher: Any | None = None,
-    sandbox_policy: Any | None = None,
-    sandbox_user_id: str | None = None,
 ):
-    if sandbox_launcher is not None:
-        if sandbox_policy is None:
-            raise RuntimeError("MCP sandbox policy is required when a SandboxLauncher is configured")
-        popen = await anyio.to_thread.run_sync(
-            lambda: sandbox_launcher.launch(
-                [command, *args],
-                sandbox_policy,
-                cwd=cwd,
-                environment=env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                user_id=sandbox_user_id or "local",
-                job_kind="mcp",
-            )
-        )
-        return _PopenProcess(popen, sandbox_launcher=sandbox_launcher)
     if os.name == "nt":
         from mcp.os.win32.utilities import create_windows_process
 
@@ -152,62 +124,6 @@ async def _open_process(
         stderr=errlog,
         start_new_session=True,
     )
-
-
-class _PopenProcess:
-    """Adapt a synchronous SandboxLauncher process to the MCP stream port."""
-
-    def __init__(self, process, *, sandbox_launcher=None) -> None:
-        self._process = process
-        self._sandbox_launcher = sandbox_launcher
-        self.pid = process.pid
-        self.stdin = _PopenSend(process.stdin) if process.stdin is not None else None
-        self.stdout = _PopenReceive(process.stdout) if process.stdout is not None else None
-        self.stderr = _PopenReceive(process.stderr) if process.stderr is not None else None
-
-    async def wait(self) -> int:
-        return await anyio.to_thread.run_sync(self._process.wait)
-
-    def kill(self) -> None:
-        self._process.kill()
-
-    def terminate(self) -> None:
-        """Stop through the owning process manager when one is present."""
-
-        self._process.terminate()
-
-    async def cleanup(self) -> None:
-        if self._sandbox_launcher is not None:
-            await anyio.to_thread.run_sync(self._sandbox_launcher.cleanup, self._process)
-
-
-class _PopenSend:
-    def __init__(self, stream) -> None:
-        self._stream = stream
-
-    async def send(self, value: bytes) -> None:
-        await anyio.to_thread.run_sync(self._write, value)
-
-    def _write(self, value: bytes) -> None:
-        self._stream.write(value)
-        self._stream.flush()
-
-    async def aclose(self) -> None:
-        await anyio.to_thread.run_sync(self._stream.close)
-
-
-class _PopenReceive:
-    def __init__(self, stream) -> None:
-        self._stream = stream
-
-    async def receive(self, max_bytes: int = 65536) -> bytes:
-        value = await anyio.to_thread.run_sync(self._stream.read, max_bytes)
-        if not value:
-            raise anyio.EndOfStream
-        return value
-
-    async def aclose(self) -> None:
-        await anyio.to_thread.run_sync(self._stream.close)
 
 
 async def _close_process(process, server: StdioServerParameters) -> None:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 from typing import Protocol
@@ -110,3 +113,83 @@ class DpapiKeyStore:
         if self.provider is not None:
             return self.provider
         return WindowsDpapiProvider()
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerCredentialPackage:
+    generation: str
+    offline_name: str
+    offline_sid: str
+    offline_password: str
+    online_name: str
+    online_sid: str
+    online_password: str
+
+    def to_dict(self) -> dict[str, str | int]:
+        return {"schema": 1, **{name: str(getattr(self, name)) for name in self.__dataclass_fields__}}
+
+    @classmethod
+    def from_dict(cls, raw: object) -> BrokerCredentialPackage:
+        if not isinstance(raw, dict) or raw.get("schema") != 1:
+            raise SandboxInitializationError("Broker credential package schema is invalid")
+        try:
+            package = cls(**{name: raw[name] for name in cls.__dataclass_fields__})
+        except (KeyError, TypeError) as exc:
+            raise SandboxInitializationError("Broker credential package is invalid") from exc
+        if any(
+            not isinstance(getattr(package, name), str) or not getattr(package, name)
+            for name in cls.__dataclass_fields__
+        ):
+            raise SandboxInitializationError("Broker credential package is invalid")
+        return package
+
+
+class DpapiCredentialStore:
+    """Atomically store fixed sandbox-account credentials with LocalMachine DPAPI."""
+
+    def __init__(self, path: Path, *, provider: DpapiProvider | None = None) -> None:
+        self.path = Path(path)
+        self.provider = provider
+        self._lock = RLock()
+
+    def load(self) -> BrokerCredentialPackage:
+        with self._lock:
+            try:
+                protected = self.path.read_bytes()
+            except OSError as exc:
+                raise SandboxInitializationError("Broker credential package is unavailable") from exc
+            try:
+                raw = json.loads(self._provider().unprotect(protected).decode("utf-8"))
+            except (UnicodeError, ValueError) as exc:
+                raise SandboxInitializationError("Broker credential package is invalid") from exc
+        return BrokerCredentialPackage.from_dict(raw)
+
+    def save(self, package: BrokerCredentialPackage) -> None:
+        payload = json.dumps(package.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        protected = self._provider().protect(payload)
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}")
+            try:
+                with temporary.open("wb") as stream:
+                    stream.write(protected)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, self.path)
+            finally:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _provider(self) -> DpapiProvider:
+        return self.provider or WindowsDpapiProvider()
+
+
+__all__ = [
+    "BrokerCredentialPackage",
+    "DpapiCredentialStore",
+    "DpapiKeyStore",
+    "DpapiProvider",
+    "WindowsDpapiProvider",
+]

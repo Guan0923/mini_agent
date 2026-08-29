@@ -22,9 +22,10 @@ from ..errors import (
 from ..runtime.manifest import ResourceManifest, ResourceRecord
 from ..runtime.reclaimer import SandboxResourceReclaimer
 from .configuration import BrokerConfiguration
-from .credentials import DpapiKeyStore
+from .credentials import DpapiCredentialStore, DpapiKeyStore
 from .installer import BrokerProcessAdapter
 from .protocol import BROKER_VERSION, MAX_CLOCK_SKEW_SECONDS, MAX_REQUEST_TTL_SECONDS, _canonical
+from .readiness import read_ready_marker, validate_ready_marker
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class WindowsBrokerService:
         installed: bool = True,
         is_windows: bool | None = None,
         clock: Callable[[], float] | None = None,
+        credential_store: DpapiCredentialStore | None = None,
+        ready_reader: Callable[[object], dict[str, object]] | None = None,
     ) -> None:
         self.configuration = configuration
         self.key_store = key_store or DpapiKeyStore(configuration.installation_key_path)
@@ -48,12 +51,15 @@ class WindowsBrokerService:
         self.installed = installed
         self.is_windows = os.name == "nt" if is_windows is None else is_windows
         self._clock = clock or time.time
+        self.credential_store = credential_store or DpapiCredentialStore(configuration.credential_path)
+        self.ready_reader = ready_reader or read_ready_marker
         self.manifest = ResourceManifest(
             configuration.manifest_path,
             installation_id=configuration.installation_id,
             backend_instance_id=configuration.backend_instance_id,
         )
         self._key: bytes | None = None
+        self._ready: dict[str, object] | None = None
         self._nonces: dict[str, int] = {}
         self._pending_releases: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._lock = RLock()
@@ -63,18 +69,25 @@ class WindowsBrokerService:
         if not self.is_windows:
             raise SandboxInitializationError("Windows Broker is unavailable on this platform")
         self.configuration.persist_installation_id()
-        self._key = self.key_store.ensure()
+        self._key = self.key_store.load()
+        credentials = self.credential_store.load()
+        self._ready = self.ready_reader(self.configuration.ready_path)
+        validate_ready_marker(self._ready, package=credentials)
         if self.adapter is None:
             from ..native_broker_adapter.adapter import WindowsNativeBrokerAdapter
-            from ..native_windows import WindowsPowerShellWfpController
+            from ..native_windows import windows_service_sid
 
-            self.adapter = WindowsNativeBrokerAdapter(wfp=WindowsPowerShellWfpController())
+            service_sid = windows_service_sid("MiniAgentSandboxBroker")
+            self.adapter = WindowsNativeBrokerAdapter(credentials=credentials, service_sid=service_sid)
         if self.manifest.records():
             self.recover_orphans(set())
         self._reclaimer.start()
 
     def close(self) -> None:
         self._reclaimer.close()
+        close = getattr(self.adapter, "close", None)
+        if callable(close):
+            close()
 
     def handle(self, payload: bytes) -> bytes:
         """Verify one request and return one authenticated response."""
@@ -128,7 +141,7 @@ class WindowsBrokerService:
         try:
             result = self._dispatch(operation, dict(body))
         except Exception as exc:
-            self._audit(operation, "failed", body)
+            self._audit(operation, "failed", body, error=exc)
             code = exc.code if isinstance(exc, SandboxError) else SandboxFailureCode.INIT_FAILED
             result = {"error": {"code": str(code)}}
         else:
@@ -139,7 +152,14 @@ class WindowsBrokerService:
         ).hexdigest()
         return _canonical(response)
 
-    def _audit(self, operation: str, status: str, body: Mapping[str, Any]) -> None:
+    def _audit(
+        self,
+        operation: str,
+        status: str,
+        body: Mapping[str, Any],
+        *,
+        error: Exception | None = None,
+    ) -> None:
         policy = body.get("policy")
         job_id = policy.get("job_id") if isinstance(policy, Mapping) else body.get("job_id")
         record = {
@@ -151,6 +171,13 @@ class WindowsBrokerService:
             "user_id": str(body.get("user_id") or ""),
             "job_id": str(job_id or ""),
         }
+        if error is not None:
+            cause = error.__cause__
+            winerror = getattr(cause, "winerror", None)
+            record["failure"] = str(error) if isinstance(error, SandboxError) else "unexpected broker failure"
+            record["failure_type"] = type(cause or error).__name__
+            if isinstance(winerror, int):
+                record["winerror"] = winerror
         encoded = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         try:
             with self._lock:
@@ -164,28 +191,29 @@ class WindowsBrokerService:
 
     def _dispatch(self, operation: str, body: dict[str, Any]) -> dict[str, Any]:
         if operation == "status":
+            ready = self._ready or {}
             return {
                 "installed": bool(self.installed),
-                "healthy": bool(self.installed and self._key is not None),
+                "healthy": bool(self.installed and self._key is not None and self._ready is not None),
                 "version": BROKER_VERSION,
                 "installation_id": self.configuration.installation_id,
+                "generation": ready.get("generation"),
+                "proxy_port": ready.get("proxy_port"),
+                "token_model": ready.get("token_model"),
             }
-        if operation in {"install", "repair"}:
-            if self.adapter is None:
-                raise SandboxInitializationError("Broker installation adapter is unavailable")
-            getattr(self.adapter, operation)()
-            self.installed = True
-            return self._dispatch("status", {})
+        if operation == "reserve":
+            if not self.installed or self.adapter is None:
+                raise SandboxInitializationError("Broker is not ready to reserve jobs")
+            return dict(self.adapter.reserve(body))
         if operation == "launch":
             if not self.installed or self.adapter is None:
                 raise SandboxInitializationError("Broker is not ready to launch jobs")
             result = dict(self.adapter.launch(body))
             accepted = bool(result.get("accepted", False))
             if accepted:
-                policy = body.get("policy")
-                job_id = policy.get("job_id") if isinstance(policy, Mapping) else None
-                backend_instance_id = body.get("backend_instance_id")
-                user_id = body.get("user_id")
+                job_id = result.get("job_id")
+                backend_instance_id = result.get("backend_instance_id")
+                user_id = result.get("user_id")
                 if (
                     isinstance(job_id, str)
                     and job_id
@@ -211,6 +239,21 @@ class WindowsBrokerService:
                 else:
                     raise SandboxInitializationError("Broker launch resource identity is invalid")
             return result
+        if operation == "reclaim":
+            if self.adapter is None:
+                raise SandboxInitializationError("Broker process adapter is unavailable")
+            current_backend = body.get("backend_instance_id")
+            if not isinstance(current_backend, str) or not current_backend:
+                raise SandboxInitializationError("Broker reclaim owner is invalid")
+            reclaimed = tuple(self.adapter.reclaim(body))
+            for record in self.manifest.records():
+                if record.backend_instance_id != current_backend:
+                    self.manifest.remove(
+                        record.user_id,
+                        record.job_id,
+                        backend_instance_id=record.backend_instance_id,
+                    )
+            return {"reclaimed": list(reclaimed)}
         if operation == "release":
             backend_instance_id = body.get("backend_instance_id")
             user_id = body.get("user_id")

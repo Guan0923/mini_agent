@@ -9,9 +9,7 @@ from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, normalize_terminal_ty
 from backend.sandbox import (
     NetworkMode,
     NetworkRule,
-    PermissionMode,
     SandboxLimits,
-    normalize_permission_mode,
 )
 
 DEFAULT_PROFILE: dict[str, str] = {"display_name": "", "agent_preferences": ""}
@@ -41,10 +39,10 @@ DEFAULT_PROVIDER_CONFIG: dict[str, object] = {
 DEFAULT_CAPABILITY_CONFIG: dict[str, object] = {}
 DEFAULT_RUNTIME_CONFIG: dict[str, object] = {"max_tool_calls": 32, "terminal_type": DEFAULT_TERMINAL_TYPE}
 DEFAULT_SANDBOX_CONFIG: dict[str, object] = {
-    "policy_version": 2,
-    "file_mode": PermissionMode.READ_ONLY.value,
+    "policy_version": 3,
     "network_mode": NetworkMode.NO_NETWORK.value,
     "network_allowlist": [],
+    "proxy_port": 17831,
     "limits": SandboxLimits().to_dict(),
 }
 
@@ -71,12 +69,17 @@ def normalize_sandbox_config(
     result = dict(DEFAULT_SANDBOX_CONFIG)
     if isinstance(current, Mapping):
         current_values = dict(current)
-        if current_values.get("policy_version") != 2:
+        if current_values.get("policy_version") not in {2, 3}:
             raise ValueError("Unsupported sandbox policy version.")
+        if current_values.get("policy_version") == 2:
+            current_values = {
+                name: value
+                for name, value in current_values.items()
+                if name in {"network_mode", "network_allowlist", "limits", "proxy_port"}
+            }
         result.update(current_values)
     if isinstance(values, Mapping):
         result.update(values)
-    file_mode = normalize_permission_mode(result.get("file_mode"))
     network_mode = str(result.get("network_mode") or NetworkMode.NO_NETWORK.value)
     try:
         network = NetworkMode(network_mode)
@@ -93,30 +96,21 @@ def normalize_sandbox_config(
             raise ValueError("network_allowlist entries must be objects")
         try:
             raw_port = item.get("port")
-            if isinstance(raw_port, bool) or not isinstance(raw_port, int):
-                raise ValueError("network port must be an integer")
             rule = NetworkRule(str(item.get("host") or ""), raw_port)
         except (TypeError, ValueError) as exc:
             raise ValueError("network_allowlist entry is invalid") from exc
-        allowlist.append({"host": rule.host, "port": rule.port})
+        allowlist.append({"host": rule.host, **({"port": rule.port} if rule.port is not None else {})})
     if network is NetworkMode.RESTRICTED_NETWORK and not allowlist:
         raise ValueError("restricted_network requires at least one network rule")
-    if file_mode is PermissionMode.FULL_ACCESS and network is not NetworkMode.FULL_NETWORK:
-        raise ValueError("full_access requires full_network")
-    if (
-        file_mode is PermissionMode.FULL_ACCESS
-        and isinstance(values, Mapping)
-        and values.get("file_mode") == PermissionMode.FULL_ACCESS.value
-        and not bool(values.get("full_access_acknowledged", False))
-        and not (isinstance(current, Mapping) and current.get("file_mode") == PermissionMode.FULL_ACCESS.value)
-    ):
-        raise ValueError("full_access requires explicit joint file and network confirmation")
+    raw_proxy_port = result.get("proxy_port", 17831)
+    if isinstance(raw_proxy_port, bool) or not isinstance(raw_proxy_port, int) or not 1 <= raw_proxy_port <= 65535:
+        raise ValueError("proxy_port must be between 1 and 65535")
     limits = SandboxLimits.from_mapping(result.get("limits") if isinstance(result.get("limits"), Mapping) else None)
     return {
-        "policy_version": 2,
-        "file_mode": file_mode.value,
+        "policy_version": 3,
         "network_mode": network.value,
         "network_allowlist": allowlist,
+        "proxy_port": raw_proxy_port,
         "limits": limits.to_dict(),
     }
 

@@ -52,15 +52,13 @@ class SandboxLimitsPayload(BaseModel):
 
 class SandboxNetworkRulePayload(BaseModel):
     host: str = Field(min_length=1, max_length=253)
-    port: StrictInt = Field(ge=1, le=65535)
+    port: StrictInt | None = Field(default=None, ge=1, le=65535)
 
 
 class SandboxConfigPayload(BaseModel):
-    file_mode: Literal["read_only", "workspace_write", "full_access"] = "read_only"
     network_mode: Literal["no_network", "restricted_network", "full_network"] = "no_network"
     network_allowlist: list[SandboxNetworkRulePayload] = Field(default_factory=list, max_length=128)
     limits: SandboxLimitsPayload = Field(default_factory=SandboxLimitsPayload)
-    full_access_acknowledged: StrictBool = False
 
 
 class ProviderConfigPayload(BaseModel):

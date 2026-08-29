@@ -58,14 +58,16 @@ def normalize_permission_mode(value: object, *, default: FileAccessMode = FileAc
 @dataclass(frozen=True, slots=True)
 class NetworkRule:
     host: str
-    port: int
+    port: int | None = None
 
     def __post_init__(self) -> None:
         host = self.host.strip().lower()
         if not host or len(host) > 253 or any(ch.isspace() for ch in host):
             raise SandboxPolicyError("network host is invalid")
-        if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535:
-            raise SandboxPolicyError("network port must be between 1 and 65535")
+        if self.port is not None and (
+            isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535
+        ):
+            raise SandboxPolicyError("network port must be omitted or between 1 and 65535")
         object.__setattr__(self, "host", host)
 
 
@@ -159,8 +161,7 @@ class SandboxPolicy:
     network_allowlist: tuple[NetworkRule, ...] = ()
     limits: ResourceLimits = field(default_factory=ResourceLimits)
     terminal: TerminalKind = TerminalKind.CMD
-    enforced: bool = True
-    full_access_acknowledged: bool = False
+    proxy_port: int = 17831
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "workspace", Path(self.workspace))
@@ -189,15 +190,16 @@ class SandboxPolicy:
             raise SandboxPolicyError("session_id and job_id are required")
         if self.terminal.value not in SUPPORTED_TERMINALS:
             raise SandboxPolicyError("unsupported terminal")
-        if self.file_mode is FileAccessMode.FULL_ACCESS:
-            if self.network_mode is not NetworkMode.FULL_NETWORK or not self.full_access_acknowledged:
-                raise SandboxPolicyError("full_access requires full_network acknowledgement")
-            if self.enforced:
-                raise SandboxPolicyError("full_access must be explicitly marked non-sandbox")
         if self.network_mode is NetworkMode.RESTRICTED_NETWORK and not self.network_allowlist:
             raise SandboxPolicyError("restricted_network requires an allowlist")
         if len(self.network_allowlist) > 64:
             raise SandboxPolicyError("network allowlist may contain at most 64 rules")
+        if (
+            isinstance(self.proxy_port, bool)
+            or not isinstance(self.proxy_port, int)
+            or not 1 <= self.proxy_port <= 65535
+        ):
+            raise SandboxPolicyError("proxy_port must be between 1 and 65535")
         self.limits.validate()
         workspace = _safe_directory(self.workspace)
         if workspace != self.workspace.resolve():
@@ -210,11 +212,13 @@ class SandboxPolicy:
             "job_id": self.job_id,
             "file_mode": self.file_mode.value,
             "network_mode": self.network_mode.value,
-            "network_allowlist": [{"host": rule.host, "port": rule.port} for rule in self.network_allowlist],
+            "network_allowlist": [
+                {"host": rule.host, **({"port": rule.port} if rule.port is not None else {})}
+                for rule in self.network_allowlist
+            ],
             "limits": self.limits.to_dict(),
             "terminal": self.terminal.value,
-            "enforced": self.enforced,
-            "full_access_acknowledged": self.full_access_acknowledged,
+            "proxy_port": self.proxy_port,
         }
 
     def policy_hash(self) -> str:
@@ -257,9 +261,11 @@ class SandboxPolicy:
         # an alternate write channel into the checked-out project.
         session_component = hashlib.sha256(self.session_id.encode("utf-8", errors="replace")).hexdigest()[:24]
         job_component = hashlib.sha256(self.job_id.encode("utf-8", errors="replace")).hexdigest()[:16]
-        base = (
-            Path(root) if root is not None else Path(tempfile.gettempdir()) / "mini-agent-sandbox" / session_component
-        )
+        if root is not None:
+            base = Path(root).resolve(strict=True)
+        else:
+            temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+            base = temp_root / "mini-agent-sandbox" / session_component
         if _has_reparse_ancestor(base):
             raise SandboxPolicyError("job temp root cannot be a reparse point")
         base.mkdir(parents=True, exist_ok=True)
@@ -397,6 +403,8 @@ def resolve_network_rules(
     resolve = resolver or socket.getaddrinfo
     result: set[tuple[str, int]] = set()
     for rule in rules:
+        if rule.port is None:
+            raise SandboxPolicyError("network rule port is required for direct resolution")
         try:
             answers = resolve(rule.host, rule.port, type=socket.SOCK_STREAM)
         except OSError as exc:

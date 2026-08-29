@@ -10,6 +10,7 @@ keywords = ["agent", "mcp", "skills", "subagents"]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<1",
+    "h11>=0.16,<1",
     "huggingface-hub>=0.30,<2",
     "jsonschema>=4.23,<5",
     "mcp>=1.28,<2",

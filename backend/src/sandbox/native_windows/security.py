@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +14,110 @@ from .api import _modules
 
 
 class WindowsAclManager:
-    """Protect a workspace DACL and return an SDDL snapshot for cleanup."""
+    """Manage per-logon-SID ACE leases without replacing an existing DACL."""
 
-    def protect(self, path: Path, account_sid: str, mode: FileAccessMode) -> str:
-        if mode is FileAccessMode.FULL_ACCESS:
-            raise SandboxInitializationError("full_access does not use sandbox ACLs")
+    def grant_lease(self, path: Path, logon_sid: str, mode: FileAccessMode) -> None:
+        rights = _modules()["ntsecuritycon"].FILE_GENERIC_READ | _modules()["ntsecuritycon"].FILE_GENERIC_EXECUTE
+        if mode is not FileAccessMode.READ_ONLY:
+            rights |= _modules()["ntsecuritycon"].FILE_GENERIC_WRITE | _modules()["ntsecuritycon"].DELETE
+        self._grant(path, logon_sid, rights)
+
+    def grant_execute_lease(self, path: Path, sid_value: str) -> None:
+        """Grant the temporary image/cwd access CreateProcessAsUser needs."""
+
+        nt = _modules()["ntsecuritycon"]
+        self._grant(path, sid_value, nt.FILE_GENERIC_READ | nt.FILE_GENERIC_EXECUTE)
+
+    def grant_capability_write(self, path: Path, sid_value: str) -> None:
+        modules = _modules()
+        rights = modules["ntsecuritycon"].FILE_GENERIC_READ | modules["ntsecuritycon"].FILE_GENERIC_EXECUTE
+        rights |= modules["ntsecuritycon"].FILE_GENERIC_WRITE | modules["ntsecuritycon"].DELETE
+        self._grant(path, sid_value, rights)
+
+    def deny_capability_write(self, path: Path, sid_value: str) -> None:
+        modules = _modules()
+        nt = modules["ntsecuritycon"]
+        mask = nt.FILE_GENERIC_WRITE | nt.DELETE | nt.FILE_DELETE_CHILD
+        try:
+            _add_native_deny_ace(Path(path), sid_value, mask)
+        except Exception as exc:  # pragma: no cover - requires Windows ACL support
+            raise SandboxInitializationError("sandbox capability deny ACL could not be applied") from exc
+
+    def path_allows_write(self, path: Path, *sid_values: str) -> bool:
+        """Conservatively detect effective write allows for the named SIDs."""
+
+        modules = _modules()
+        security = modules["security"]
+        nt = modules["ntsecuritycon"]
+        target = Path(path)
+        try:
+            descriptor = security.GetNamedSecurityInfo(
+                str(target),
+                security.SE_FILE_OBJECT,
+                security.DACL_SECURITY_INFORMATION,
+            )
+            dacl = descriptor.GetSecurityDescriptorDacl()
+            if dacl is None:
+                return True
+            sids = tuple(security.ConvertStringSidToSid(value) for value in sid_values)
+            write_mask = (
+                nt.FILE_GENERIC_WRITE
+                | nt.DELETE
+                | nt.FILE_DELETE_CHILD
+                | modules["con"].GENERIC_WRITE
+                | modules["con"].GENERIC_ALL
+                | modules["con"].WRITE_DAC
+                | modules["con"].WRITE_OWNER
+            )
+            denied = 0
+            allowed = 0
+            for index in range(dacl.GetAceCount()):
+                ace = dacl.GetAce(index)
+                ace_type = ace[0][0]
+                if len(ace) < 3 or ace[2] not in sids:
+                    continue
+                mask = int(ace[1]) & write_mask
+                if ace_type == security.ACCESS_DENIED_ACE_TYPE:
+                    denied |= mask
+                elif ace_type == security.ACCESS_ALLOWED_ACE_TYPE:
+                    allowed |= mask & ~denied
+                else:
+                    raise SandboxInitializationError("sandbox ACL contains an unsupported matching ACE")
+            return bool(allowed)
+        except SandboxInitializationError:
+            raise
+        except Exception as exc:  # pragma: no cover - requires Windows ACL support
+            raise SandboxInitializationError("sandbox path ACL could not be inspected") from exc
+
+    def capability_write_denied(self, path: Path, sid_value: str) -> bool:
+        modules = _modules()
+        security = modules["security"]
+        nt = modules["ntsecuritycon"]
+        mask = nt.FILE_GENERIC_WRITE | nt.DELETE | nt.FILE_DELETE_CHILD
+        try:
+            descriptor = security.GetNamedSecurityInfo(
+                str(path),
+                security.SE_FILE_OBJECT,
+                security.DACL_SECURITY_INFORMATION,
+            )
+            dacl = descriptor.GetSecurityDescriptorDacl()
+            if dacl is None:
+                return False
+            sid = security.ConvertStringSidToSid(sid_value)
+            return any(
+                (ace := dacl.GetAce(index))[0][0] == security.ACCESS_DENIED_ACE_TYPE
+                and ace[2] == sid
+                and int(ace[1]) & mask == mask
+                for index in range(dacl.GetAceCount())
+            )
+        except Exception as exc:  # pragma: no cover - requires Windows ACL support
+            raise SandboxInitializationError("sandbox capability deny ACL could not be verified") from exc
+
+    def path_identity(self, path: Path) -> PathIdentity:
+        return _path_identity(Path(path))
+
+    @staticmethod
+    def _grant(path: Path, sid_value: str, rights: int) -> None:
         modules = _modules()
         security = modules["security"]
         target = Path(path).resolve(strict=True)
@@ -25,56 +127,198 @@ class WindowsAclManager:
             descriptor = security.GetNamedSecurityInfo(
                 str(target),
                 security.SE_FILE_OBJECT,
-                security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION,
+                security.DACL_SECURITY_INFORMATION,
             )
-            snapshot = security.ConvertSecurityDescriptorToStringSecurityDescriptor(
-                descriptor,
-                security.SDDL_REVISION_1,
-                security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION,
-            )
-            owner = descriptor.GetSecurityDescriptorOwner()
-            sandbox_sid = security.ConvertStringSidToSid(account_sid)
-            system_sid = security.CreateWellKnownSid(security.WinLocalSystemSid, None)
-            admins_sid = security.CreateWellKnownSid(security.WinBuiltinAdministratorsSid, None)
-            acl = security.ACL()
+            dacl = descriptor.GetSecurityDescriptorDacl() or security.ACL()
+            sid = security.ConvertStringSidToSid(sid_value)
             inheritance = modules["con"].OBJECT_INHERIT_ACE | modules["con"].CONTAINER_INHERIT_ACE
-            full = modules["ntsecuritycon"].FILE_ALL_ACCESS
-            read = modules["ntsecuritycon"].FILE_GENERIC_READ | modules["ntsecuritycon"].FILE_GENERIC_EXECUTE
-            sandbox_rights = read
-            if mode is FileAccessMode.WORKSPACE_WRITE:
-                sandbox_rights |= modules["ntsecuritycon"].FILE_GENERIC_WRITE | modules["ntsecuritycon"].DELETE
-            for sid in (system_sid, admins_sid, owner):
-                acl.AddAccessAllowedAceEx(security.ACL_REVISION_DS, inheritance, full, sid)
-            acl.AddAccessAllowedAceEx(security.ACL_REVISION_DS, inheritance, sandbox_rights, sandbox_sid)
+            for index in range(dacl.GetAceCount()):
+                ace = dacl.GetAce(index)
+                if ace[0][0] == security.ACCESS_ALLOWED_ACE_TYPE and ace[2] == sid and ace[1] & rights == rights:
+                    return
+            dacl.AddAccessAllowedAceEx(security.ACL_REVISION_DS, inheritance, rights, sid)
             security.SetNamedSecurityInfo(
                 str(target),
                 security.SE_FILE_OBJECT,
-                security.DACL_SECURITY_INFORMATION | security.PROTECTED_DACL_SECURITY_INFORMATION,
+                security.DACL_SECURITY_INFORMATION,
                 None,
                 None,
-                acl,
+                dacl,
                 None,
             )
-            return str(snapshot)
-        except Exception as exc:  # pragma: no cover - requires UAC
-            raise SandboxInitializationError("sandbox workspace ACL could not be applied") from exc
+        except Exception as exc:  # pragma: no cover - requires Windows ACL support
+            raise SandboxInitializationError("sandbox ACL lease could not be applied") from exc
 
-    def restore(self, path: Path, sddl: str) -> bool:
+    def revoke_lease(self, path: Path, logon_sid: str) -> bool:
         modules = _modules()
         security = modules["security"]
         try:
-            descriptor = security.ConvertStringSecurityDescriptorToSecurityDescriptor(
-                sddl,
-                security.SDDL_REVISION_1,
+            target = Path(path).resolve(strict=True)
+            descriptor = security.GetNamedSecurityInfo(
+                str(target),
+                security.SE_FILE_OBJECT,
+                security.DACL_SECURITY_INFORMATION,
             )
-            security.SetFileSecurity(
-                str(path),
-                security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION,
-                descriptor,
-            )
+            dacl = descriptor.GetSecurityDescriptorDacl()
+            if dacl is None:
+                return True
+            sid = security.ConvertStringSidToSid(logon_sid)
+            matches = [
+                index
+                for index in range(dacl.GetAceCount())
+                if (ace := dacl.GetAce(index))[0][0]
+                in {security.ACCESS_ALLOWED_ACE_TYPE, security.ACCESS_DENIED_ACE_TYPE}
+                and ace[2] == sid
+            ]
+            for index in reversed(matches):
+                dacl.DeleteAce(index)
+            if matches:
+                security.SetNamedSecurityInfo(
+                    str(target),
+                    security.SE_FILE_OBJECT,
+                    security.DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    dacl,
+                    None,
+                )
             return True
-        except Exception:  # pragma: no cover - requires UAC
+        except Exception:  # pragma: no cover - requires Windows ACL support
             return False
+
+
+@dataclass(frozen=True, slots=True)
+class PathIdentity:
+    path: Path
+    object_id: str
+
+
+def _path_identity(path: Path, _seen: set[str] | None = None) -> PathIdentity:
+    modules = _modules()
+    con = modules["con"]
+    handle = None
+    seen = set() if _seen is None else _seen
+    lexical = os.path.normcase(os.path.abspath(str(path)))
+    if lexical in seen:
+        raise SandboxInitializationError("sandbox reparse path contains a loop")
+    seen.add(lexical)
+    try:
+        if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+            raw_target = os.readlink(path)
+            normalized_target = raw_target.removeprefix("\\\\?\\")
+            return _path_identity(Path(normalized_target), seen)
+        handle = modules["file"].CreateFile(
+            str(path),
+            0,
+            con.FILE_SHARE_READ | con.FILE_SHARE_WRITE | con.FILE_SHARE_DELETE,
+            None,
+            con.OPEN_EXISTING,
+            con.FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        final = modules["file"].GetFinalPathNameByHandle(handle, 0)
+        info = modules["file"].GetFileInformationByHandle(handle)
+        if not isinstance(final, str) or len(info) < 10:
+            raise OSError("invalid file identity")
+        normalized = final.removeprefix("\\\\?\\")
+        object_id = f"{int(info[4]):08x}:{int(info[8]):08x}:{int(info[9]):08x}"
+        return PathIdentity(Path(os.path.normcase(normalized)), object_id)
+    except SandboxInitializationError:
+        raise
+    except Exception as exc:  # pragma: no cover - requires Windows handle APIs
+        raise SandboxInitializationError("sandbox path identity could not be resolved") from exc
+    finally:
+        if handle is not None:
+            try:
+                handle.Close()
+            except Exception:
+                pass
+
+
+class _TrusteeW(ctypes.Structure):
+    _fields_ = [
+        ("pMultipleTrustee", ctypes.c_void_p),
+        ("MultipleTrusteeOperation", ctypes.c_int),
+        ("TrusteeForm", ctypes.c_int),
+        ("TrusteeType", ctypes.c_int),
+        ("ptstrName", ctypes.c_void_p),
+    ]
+
+
+class _ExplicitAccessW(ctypes.Structure):
+    _fields_ = [
+        ("grfAccessPermissions", ctypes.c_uint32),
+        ("grfAccessMode", ctypes.c_int),
+        ("grfInheritance", ctypes.c_uint32),
+        ("Trustee", _TrusteeW),
+    ]
+
+
+def _add_native_deny_ace(path: Path, sid_value: str, mask: int) -> None:
+    """Use SetEntriesInAcl so the new deny ACE is placed before allow ACEs."""
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    sid = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    old_dacl = ctypes.c_void_p()
+    new_dacl = ctypes.c_void_p()
+    convert = advapi.ConvertStringSidToSidW
+    convert.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_void_p)]
+    convert.restype = ctypes.c_int
+    if not convert(sid_value, ctypes.byref(sid)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        get_info = advapi.GetNamedSecurityInfoW
+        get_info.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        get_info.restype = ctypes.c_uint32
+        code = get_info(str(path), 1, 0x4, None, None, ctypes.byref(old_dacl), None, ctypes.byref(descriptor))
+        if code:
+            raise OSError(code, "GetNamedSecurityInfoW failed")
+        entry = _ExplicitAccessW(
+            int(mask),
+            3,  # DENY_ACCESS
+            0x1 | 0x2,  # OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+            _TrusteeW(None, 0, 0, 0, sid),
+        )
+        set_entries = advapi.SetEntriesInAclW
+        set_entries.argtypes = [
+            ctypes.c_ulong,
+            ctypes.POINTER(_ExplicitAccessW),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        set_entries.restype = ctypes.c_uint32
+        code = set_entries(1, ctypes.byref(entry), old_dacl, ctypes.byref(new_dacl))
+        if code:
+            raise OSError(code, "SetEntriesInAclW failed")
+        set_info = advapi.SetNamedSecurityInfoW
+        set_info.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        set_info.restype = ctypes.c_uint32
+        code = set_info(str(path), 1, 0x4, None, None, new_dacl, None)
+        if code:
+            raise OSError(code, "SetNamedSecurityInfoW failed")
+    finally:
+        for value in (new_dacl, descriptor, sid):
+            if value.value:
+                kernel.LocalFree(value)
 
 
 def windows_pipe_security_attributes(*allowed_sid_strings: str) -> Any:
