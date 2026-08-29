@@ -71,7 +71,7 @@ export function ChatMessageList({
               <p className="welcome-sub">向你的智能体提问，它会调用文件、Shell、Web 等工具完成任务</p>
             </div>
           ) : messages.map((message) => message.role === "user" ? (
-            <div className="message user" id={conversationTurnId(message.id)} data-chat-anchor-key={message.id} key={message.id}>
+            <div className={`message user${message.pending ? " is-pending" : ""}`} id={conversationTurnId(message.id)} data-chat-anchor-key={message.id} key={message.id}>
               <div className={editingMessageId === message.id ? "message-content is-editing" : "message-content"}>
                 {editingMessageId === message.id ? (
                   <div className="message-edit" aria-label="编辑用户消息">
@@ -117,6 +117,7 @@ export function ChatMessageList({
                         ))}
                       </div>
                     ) : null}
+                    {message.pending ? <span className="agent-message-pending" role="status">正在交给主 Agent 转发…</span> : null}
                   </div>
                 )}
                 {editingMessageId !== message.id ? (

@@ -16,6 +16,7 @@ import type { SandboxHealthState } from "../../app/useSandboxHealth";
 
 export interface ChatPageProps {
   conversation: Conversation | null;
+  agentThreadNavigation?: boolean;
   displayMode?: DisplayMode;
   providerConfig?: ProviderConfig | null;
   mode?: ChatMode;

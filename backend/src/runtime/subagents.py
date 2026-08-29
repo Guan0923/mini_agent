@@ -20,7 +20,15 @@ from backend.domain import (
     ThreadNode,
     TurnTrace,
 )
-from backend.domain.runtime_state import RuntimeState, new_node_id, new_thread_id, runtime_node_from_dict, utc_iso
+from backend.domain.runtime_state import (
+    NodeFrame,
+    RuntimeState,
+    new_node_id,
+    new_thread_id,
+    runtime_node_from_dict,
+    terminal_error_payload,
+    utc_iso,
+)
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
 from backend.tools import ToolError
 
@@ -41,6 +49,14 @@ class ChildRunner(Protocol):
     def new_runtime(self, *, task: str, session_id: str | None = None, **kwargs: object) -> AgentRuntime: ...
 
     def run(self, runtime: AgentRuntime) -> object: ...
+
+
+class AgentThreadEvents(Protocol):
+    def start_turn(self, turn: RuntimeState) -> None: ...
+
+    def publish_frame(self, thread_id: str, frame: NodeFrame, current: RuntimeState) -> None: ...
+
+    def finish_turn(self, thread_id: str, turn: RuntimeState) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,14 +116,17 @@ class SubagentCoordinator:
         message_queue: object | None = None,
         index: object | None = None,
         job_registry: object | None = None,
+        thread_events: AgentThreadEvents | None = None,
     ) -> None:
         self._settings = settings or SubagentSettings()
         self._store = store
         self._queue = message_queue
         self._index = index
         self._job_registry = job_registry
+        self._thread_events = thread_events
         self._bindings: dict[str, _SessionBinding] = {}
         self._jobs: dict[str, ThreadJob] = {}
+        self._active_bridges: dict[str, RuntimeEventNodeBridge] = {}
         self._approval_channels: dict[str, Callable[[InterruptRequest], object]] = {}
         self._locks = WorkspaceWriteLock()
         self._state_lock = RLock()
@@ -348,6 +367,7 @@ class SubagentCoordinator:
             raise ToolError("target_thread_id must be a non-empty string.")
         if not isinstance(content, str) or not content.strip():
             raise ToolError("subagent_tasks must contain text.")
+        references = self._parse_references(arguments.get("references", []))
         if source_id == target_id:
             raise ToolError("An Agent Thread cannot send a message to itself.")
         session_id = runtime.state.session_id
@@ -357,7 +377,25 @@ class SubagentCoordinator:
             raise ToolError("Both source and target must be nodes in the same Agent tree.")
         if target.thread_status != "opening":
             raise ToolError("Target Agent Thread is closed.")
-        return json.dumps(self._dispatch_message(session_id, source_id, target_id, content), ensure_ascii=False)
+        return json.dumps(
+            self._dispatch_message(session_id, source_id, target_id, content, references=references),
+            ensure_ascii=False,
+        )
+
+    @staticmethod
+    def _parse_references(value: object) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            raise ToolError("references must be an array.")
+        references: list[dict[str, str]] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                raise ToolError("Every reference must be an object.")
+            source = item.get("source")
+            path = item.get("path")
+            if source not in {"project", "upload"} or not isinstance(path, str) or not path:
+                raise ToolError("Every reference requires a valid source and path.")
+            references.append({"source": str(source), "path": path})
+        return references
 
     def _dispatch_message(
         self,
@@ -367,6 +405,8 @@ class SubagentCoordinator:
         content: str,
         *,
         correlation_id: str | None = None,
+        references: list[dict[str, str]] | None = None,
+        runtime_config: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         delivery_id = f"agent_delivery_{uuid4().hex}"
         envelope = MessageEnvelope(
@@ -377,7 +417,11 @@ class SubagentCoordinator:
             target_id=target_thread_id,
             session_id=session_id,
             thread_id=target_thread_id,
-            payload={"content": content, "references": []},
+            payload={
+                "content": content,
+                "references": [dict(item) for item in references or []],
+                **({"runtime_config": dict(runtime_config)} if runtime_config else {}),
+            },
             source_message_ids=(delivery_id,),
             correlation_id=correlation_id,
         )
@@ -404,22 +448,70 @@ class SubagentCoordinator:
 
     def _list_children(self, runtime: AgentRuntime, arguments: dict[str, Any]) -> str:
         source_id = self._actual_source(runtime, arguments.get("source_thread_id"), optional=True)
-        source = getattr(self._store, "get_thread_node")(runtime.state.session_id, source_id)
-        if source is None:
-            raise ToolError("The calling Thread is not an Agent-tree node.")
-        children = getattr(self._store, "list_child_thread_nodes")(runtime.state.session_id, source_id)
-        return json.dumps(
-            [
-                {
-                    "thread_id": node.thread_id,
-                    "thread_path": node.thread_path,
-                    "thread_task": node.thread_task,
-                    "thread_status": node.thread_status,
-                }
-                for node in children
-            ],
-            ensure_ascii=False,
+        return json.dumps(self.list_children(runtime.state.session_id, source_id), ensure_ascii=False)
+
+    def list_children(self, session_id: str, source_thread_id: str) -> list[dict[str, str]]:
+        self._require_services()
+        source = getattr(self._store, "get_thread_node")(session_id, source_thread_id)
+        if source is None or source.session_id != session_id:
+            raise ToolError("The source Thread is not an Agent-tree node in this Session.")
+        children = getattr(self._store, "list_child_thread_nodes")(session_id, source_thread_id)
+        return [
+            {
+                "thread_id": node.thread_id,
+                "thread_path": node.thread_path,
+                "thread_task": node.thread_task,
+                "thread_status": node.thread_status,
+            }
+            for node in children
+        ]
+
+    def send_from_root(
+        self,
+        session_id: str,
+        target_thread_id: str,
+        content: str,
+        *,
+        references: list[dict[str, str]] | None = None,
+        runtime_config: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        self._require_services()
+        source = getattr(self._store, "get_thread_node")(session_id, session_id)
+        target = getattr(self._store, "get_thread_node")(session_id, target_thread_id)
+        if (
+            source is None
+            or source.depth != 0
+            or target is None
+            or target.session_id != session_id
+            or target.depth <= 0
+        ):
+            raise ToolError("The target must be a Subagent Thread in this Session tree.")
+        if target.thread_status != "opening":
+            raise ToolError("Target Agent Thread is closed.")
+        parsed_references = self._parse_references(references or [])
+        if not content.strip() and not parsed_references:
+            raise ToolError("Agent message requires text or references.")
+        return self._dispatch_message(
+            session_id,
+            session_id,
+            target_thread_id,
+            content,
+            references=parsed_references,
+            runtime_config=runtime_config,
         )
+
+    def apply_runtime_config(
+        self,
+        session_id: str,
+        thread_id: str,
+        changes: Mapping[str, object],
+    ) -> RuntimeState | None:
+        target = getattr(self._store, "get_thread_node")(session_id, thread_id) if self._store is not None else None
+        if target is None or target.depth <= 0:
+            return None
+        with self._state_lock:
+            bridge = self._active_bridges.get(thread_id)
+        return bridge.apply_runtime_config(changes) if bridge is not None else None
 
     def _wake_thread(self, session_id: str, thread_id: str) -> dict[str, object]:
         target = getattr(self._store, "get_thread_node")(session_id, thread_id)
@@ -437,16 +529,22 @@ class SubagentCoordinator:
             return {"target_state": "idle", "background_admission": "missing_parent"}
         turn_id = new_node_id()
         item = {"type": "text", "text": envelope.content, "status": "success"}
+        if envelope.references:
+            item["references"] = [dict(reference) for reference in envelope.references]
+        requested_config = envelope.payload.get("runtime_config")
+        runtime_config = dict(requested_config) if isinstance(requested_config, Mapping) else {}
+        requested_model = runtime_config.get("model")
+        model = {**parent.model, **dict(requested_model)} if isinstance(requested_model, Mapping) else parent.model
         node = RuntimeState.create(
             session_id=session_id,
             thread_id=thread_id,
             id=turn_id,
             parent=parent,
             user_content=[item],
-            provider_name=parent.provider_name,
-            model=parent.model,
-            permission_mode=parent.permission_mode,
-            running_mode="agent",
+            provider_name=str(runtime_config.get("provider_name") or parent.provider_name),
+            model=model,
+            permission_mode=str(runtime_config.get("permission_mode") or parent.permission_mode),
+            running_mode=str(runtime_config.get("running_mode") or parent.running_mode),
             cwd=parent.cwd,
             project_cwd=parent.project_cwd,
         )
@@ -479,6 +577,8 @@ class SubagentCoordinator:
         initial_delivery_id: str | None = None,
         recover_delivery: bool = False,
     ) -> str:
+        if self._thread_events is not None:
+            self._thread_events.start_turn(turn)
         binding = self._binding(node.session_id)
         if binding is None:
             self._fail_preallocated(turn, "No Agent runner is bound for this Session.")
@@ -540,6 +640,9 @@ class SubagentCoordinator:
         initial_delivery_id: str | None,
         recover_delivery: bool,
     ) -> None:
+        stored_turn = getattr(self._store, "get_node")(node.session_id, turn.id)
+        if isinstance(stored_turn, RuntimeState):
+            turn = stored_turn
         runner = binding.runner_factory()
         runner.subagents = self
         runner.tools = LockedToolExecutor(
@@ -549,6 +652,16 @@ class SubagentCoordinator:
             binding.project_workspace,
         )
         mailbox = None
+
+        def emit(frame: NodeFrame) -> None:
+            if self._thread_events is None:
+                return
+            self._thread_events.publish_frame(
+                node.thread_id,
+                frame,
+                bridge.writer.current(frame.session_id, frame.turn_id),
+            )
+
         bridge = RuntimeEventNodeBridge(
             self._store,
             session_id=node.session_id,
@@ -557,19 +670,21 @@ class SubagentCoordinator:
             adopt_existing=True,
             prompt="",
             permission_mode=turn.permission_mode,
-            running_mode="agent",
+            running_mode=turn.running_mode,
             cwd=turn.cwd,
             project_cwd=turn.project_cwd,
             isolated_thread_context=True,
-            emit=lambda _frame: None,
+            emit=emit,
         )
         try:
             runtime = runner.new_runtime(task=self._turn_prompt(turn), session_id=node.session_id)
             runtime.state.permission_mode = turn.permission_mode
-            runtime.state.running_mode = "agent"
+            runtime.state.running_mode = turn.running_mode
             runtime.services.runtime_store = _CanonicalRuntimeStore(self._store, node.session_id)
             bridge.bind_runtime(runtime)
             current = bridge.start()
+            with self._state_lock:
+                self._active_bridges[node.thread_id] = bridge
             runtime.run.thread_id = current.thread_id
             runtime.run.turn_id = current.id
             runtime.run.data_idx = current.current_data_idx
@@ -613,6 +728,16 @@ class SubagentCoordinator:
             if auto_reply and final is not None:
                 self._send_initial_result(node, final, creator_thread_id, None, error=self._safe_error(exc))
         finally:
+            current_turn = getattr(self._store, "get_node")(node.session_id, turn.id)
+            if (
+                self._thread_events is not None
+                and isinstance(current_turn, RuntimeState)
+                and current_turn.status != "running"
+            ):
+                self._thread_events.finish_turn(node.thread_id, current_turn)
+            with self._state_lock:
+                if self._active_bridges.get(node.thread_id) is bridge:
+                    self._active_bridges.pop(node.thread_id, None)
             if mailbox is not None:
                 mailbox.close()
             close = getattr(runner, "close", None)
@@ -703,11 +828,15 @@ class SubagentCoordinator:
         if not isinstance(current, RuntimeState) or current.status != "running":
             return
         current.data[current.current_data_idx][-1]["content"].append(
-            {"type": "error", "message": message, "status": "failed", "retryable": False}
+            terminal_error_payload("agent", message, retryable=False)
         )
         current.status = "failed"
         current.timestamp = utc_iso()
-        getattr(self._store, "finalize_node")(RuntimeState.from_dict(current.to_dict()))
+        final = RuntimeState.from_dict(current.to_dict())
+        getattr(self._store, "finalize_node")(final)
+        if self._thread_events is not None:
+            self._thread_events.publish_frame(turn.thread_id, NodeFrame.snapshot(final), final)
+            self._thread_events.finish_turn(turn.thread_id, final)
 
     def _is_closed(self, session_id: str, thread_id: str) -> bool:
         node = getattr(self._store, "get_thread_node")(session_id, thread_id)

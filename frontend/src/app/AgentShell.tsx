@@ -187,6 +187,7 @@ export default function AgentShell(props: AgentShellProps) {
       {props.page === "chat" ? (
         <ChatPage
           conversation={props.current}
+          agentThreadNavigation
           mode={props.current ? props.modeBySession[props.current.threadId ?? props.current.sessionId ?? props.current.id] ?? "agent" : props.draftMode}
           displayMode={props.displayMode}
           providerConfig={props.providerConfig}

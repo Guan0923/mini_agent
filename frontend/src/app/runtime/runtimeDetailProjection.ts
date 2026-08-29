@@ -206,6 +206,7 @@ export function projectTurnPath(nodes: Map<string, RuntimeTreeNode>, activeTurnI
           sourceNodeId: turn.parent_id || undefined,
           references: userItem ? references(userItem) : undefined,
           timelineSource: typeof message.delivery_id === "string" ? "steering" : "user",
+          deliveryId: typeof message.delivery_id === "string" ? message.delivery_id : undefined,
         });
         continue;
       }

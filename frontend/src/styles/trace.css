@@ -52,6 +52,13 @@
   white-space: nowrap;
 }
 
+.ant-popover .ant-tree[aria-label="Agent Thread 树"] {
+  min-width: 260px;
+  max-width: min(420px, 80vw);
+  max-height: 360px;
+  overflow: auto;
+}
+
 .trace-page {
   flex: 1;
   min-height: 0;

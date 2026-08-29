@@ -26,6 +26,8 @@ from backend.storage.projects import ProjectStore
 from backend.storage.settings import LocalSettingsStore
 from backend.tools.terminal import available_terminal_executables, effective_terminal_type
 
+from .agent_thread_stream import AgentThreadEventHub
+
 DEFAULT_DATA_ROOT = Path.home() / ".mini_agent"
 INTERRUPTED_TURN_MESSAGE = "Turn interrupted because its backend process stopped."
 
@@ -72,6 +74,7 @@ class WebAppState:
         self.active_turn_streams: dict[str, object] = {}
         self.active_turn_streams_lock = RLock()
         self.active_runtime_config_locks: dict[str, RLock] = {}
+        self.agent_thread_events = AgentThreadEventHub()
         self._reconcile_message_queue()
         from backend.storage.sqlite import SQLiteSessionStore
 
@@ -83,6 +86,7 @@ class WebAppState:
             message_queue=self.message_queue,
             index=self.agent_thread_index,
             job_registry=self.job_registry,
+            thread_events=self.agent_thread_events,
         )
 
     @staticmethod
@@ -308,6 +312,7 @@ class WebAppState:
 
     def close(self) -> None:
         self.job_registry.close_all(reason="web application closed", timeout=5.0)
+        self.agent_thread_events.close()
         self.terminal_manager.close_all()
         closed: set[int] = set()
         for resource in (self.settings, self.projects, self.message_queue):
