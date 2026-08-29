@@ -178,6 +178,7 @@ class ConversationNodeBridgeMixin:
             permission_mode=permission_mode,
             running_mode=running_mode,
             cwd=str(getattr(self.runtime.state, "workspace_root", "") or ""),
+            project_cwd=str(getattr(self.runtime.state, "project_cwd", "") or ""),
             references=references,
             emit=lambda _frame: None,
         )

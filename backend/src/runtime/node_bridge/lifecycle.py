@@ -42,6 +42,7 @@ class _LifecycleMixin:
             permission_mode=parent.permission_mode,
             running_mode=running_mode,
             cwd=parent.cwd or self.cwd,
+            project_cwd=parent.project_cwd or self.project_cwd,
         )
         child = self.writer.create(child)
         self.assistant = child

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import HTTPException
@@ -227,10 +228,12 @@ def _stream(
         try:
             outer_job = job_holder["job"]
             job_parent_id = outer_job.info().id if outer_job is not None else None
-            workspace = state.session_workspace(session_id)
+            state.paths.ensure_session(session_id)
+            workspace = state.paths.session_workspace(session_id)
             bound_project = state.projects.session_project(session_id, include_removed=False)
             if bound_project is not None and not bound_project.available:
                 raise RuntimeError("项目 cwd 不可访问，请恢复文件夹后重试。")
+            project_cwd = Path(bound_project.cwd).resolve() if bound_project is not None else None
             selected_model_config = model_config
             if provider_name:
                 try:
@@ -245,6 +248,7 @@ def _stream(
                 load_model_config=False,
                 workspace=workspace,
                 project_id=bound_project.project_id if bound_project is not None else None,
+                project_cwd=project_cwd,
                 job_registry=job_registry,
                 job_parent_id=job_parent_id,
             )
@@ -301,6 +305,7 @@ def _stream(
                         permission_mode=permission_mode or "read_only",
                         running_mode=mode,
                         cwd=str(workspace),
+                        project_cwd=str(project_cwd) if project_cwd is not None else "",
                         references=references,
                         delivery_id=initial_delivery.envelope.delivery_id if initial_delivery is not None else None,
                         emit=publish_frame,

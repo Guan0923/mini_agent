@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -147,7 +148,14 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                 for item in blocks:
                     for reference in item.get("references", []) if isinstance(item.get("references"), list) else []:
                         if isinstance(reference, Mapping) and reference.get("path"):
-                            references.append(f"- @{reference['path']} ({reference.get('source', 'project')})")
+                            source = str(reference.get("source") or "project")
+                            relative = str(reference["path"])
+                            root = (
+                                Path(node.cwd) / "uploads" if source == "upload" else Path(node.project_cwd or node.cwd)
+                            )
+                            candidate = (root / relative).resolve()
+                            path = candidate.as_posix() if candidate.is_relative_to(root.resolve()) else relative
+                            references.append(f"- @{path} ({source})")
                 if references:
                     user_text = f"{user_text}\n\nFile references:\n" + "\n".join(references)
                 if user_text:

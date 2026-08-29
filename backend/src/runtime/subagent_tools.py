@@ -50,10 +50,21 @@ class WorkspaceWriteLock:
 class LockedToolExecutor:
     """Delegate the tool port while locking only workspace mutation operations."""
 
-    def __init__(self, tools: object, locks: WorkspaceWriteLock, workspace: Path | None = None) -> None:
+    def __init__(
+        self,
+        tools: object,
+        locks: WorkspaceWriteLock,
+        workspace: Path | None = None,
+        project_workspace: Path | None = None,
+    ) -> None:
         self._tools = tools
         self._locks = locks
         self._workspace = (workspace or Path(".")).resolve()
+        self._workspaces = (
+            (self._workspace, project_workspace.resolve())
+            if project_workspace is not None and project_workspace.resolve() != self._workspace
+            else (self._workspace,)
+        )
 
     def names(self) -> list[str]:
         return self._tools.names()
@@ -111,7 +122,7 @@ class LockedToolExecutor:
             path = arguments.get("path")
             if not isinstance(path, str):
                 raise ToolError("Workspace mutation requires a path.")
-            with self._locks.file(normalized_workspace_path(self._workspace, path)):
+            with self._locks.file(normalized_workspace_path(self._workspaces, path)):
                 return call()
         if name in {"create_directory", "run_command"}:
             with self._locks.command():

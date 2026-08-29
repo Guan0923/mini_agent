@@ -187,6 +187,7 @@ class RuntimeStateTree:
             permission_mode=source.permission_mode,
             running_mode=source.running_mode,
             cwd=source.cwd,
+            project_cwd=source.project_cwd,
             first_kept_item_size=source.first_kept_item_size,
             data=data,
         )

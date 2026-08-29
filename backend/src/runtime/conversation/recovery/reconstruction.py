@@ -180,6 +180,7 @@ def reconstruct_attempt(
             "attempt": old_run.provenance.attempt + 1,
             "trigger": "resume",
             "workspace_root": old_run.provenance.workspace_root or resumed.workspace_root,
+            "project_cwd": old_run.provenance.project_cwd or resumed.project_cwd,
             "source_session_id": resumed.session_id,
             "source_run_id": old_run.run_id,
         },

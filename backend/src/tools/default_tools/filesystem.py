@@ -11,7 +11,10 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
     return (
         Tool(
             "read_file",
-            "Reads a bounded range from a UTF-8 text file, returning normalized LF text and line-range metadata.",
+            (
+                "Reads a bounded range from an absolute UTF-8 text-file path inside an approved workspace or "
+                "read-only Skill root, returning numbered normalized-LF lines and range metadata."
+            ),
             files.read_file,
             object_schema(
                 {
@@ -19,7 +22,8 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                         "type": "string",
                         "minLength": 1,
                         "description": (
-                            "The path to the UTF-8 text file. Use a workspace-relative path, or an absolute."
+                            "The absolute path to the UTF-8 text file inside cwd, project_cwd, or an approved "
+                            "read-only Skill root."
                         ),
                     },
                     "start_line": {
@@ -69,8 +73,10 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "default": ".",
-                        "description": "The directory to search. Defaults to the workspace root.",
+                        "description": (
+                            "The absolute directory to search inside cwd or project_cwd. When omitted, both "
+                            "available workspaces are searched."
+                        ),
                     },
                     "max_results": {
                         "type": "integer",
@@ -102,8 +108,10 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "default": ".",
-                        "description": "The file or directory to search. Defaults to the workspace root.",
+                        "description": (
+                            "The absolute file or directory to search inside cwd or project_cwd. When omitted, "
+                            "both available workspaces are searched."
+                        ),
                     },
                     "glob": {
                         "type": "string",
@@ -154,7 +162,7 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "The directory path to create.",
+                        "description": "The absolute directory path to create inside cwd or project_cwd.",
                     },
                 },
                 ["path"],
@@ -175,7 +183,7 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "The file path to write.",
+                        "description": "The absolute file path to write inside cwd or project_cwd.",
                     },
                     "content": {
                         "type": "string",
@@ -198,72 +206,50 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
         ),
         Tool(
             "edit_file",
-            "Edits an existing UTF-8 text file by replacing one uniquely matching text block with new text.",
+            (
+                "Replaces an inclusive line range in an existing UTF-8 text file after verifying the current "
+                "line contents."
+            ),
             files.edit_file,
             object_schema(
                 {
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "The path to the existing UTF-8 text file.",
+                        "description": "The absolute path to the existing UTF-8 text file inside cwd or project_cwd.",
                     },
-                    "old_text": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "The exact text to replace. It must occur exactly once in the file.",
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The one-based first line of the inclusive range to replace.",
                     },
-                    "new_text": {
-                        "type": "string",
-                        "description": "The replacement text. Use an empty string to delete old_text.",
+                    "end_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The one-based last line of the inclusive range to replace.",
+                    },
+                    "expected_lines": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string"},
+                        "description": (
+                            "The current unnumbered contents of every selected line, in order. The edit is "
+                            "rejected if they no longer match."
+                        ),
+                    },
+                    "replacement_lines": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "The replacement lines without line-break characters. Use an empty array to delete "
+                            "the selected range or an array containing an empty string for one blank line."
+                        ),
                     },
                 },
-                ["path", "old_text", "new_text"],
+                ["path", "start_line", "end_line", "expected_lines", "replacement_lines"],
             ),
             requires_confirmation=True,
             read_only=False,
             workspace_confined=True,
-        ),
-    )
-
-
-def upload_file_read_tool(files: WorkspaceFiles) -> Tool:
-    """Read-only access to one session's uploaded files.
-
-    Uploads live below the session workspace and must stay readable even when
-    the agent's cwd is an external project folder, so they get their own
-    confined, read-only tool instead of reusing the cwd-scoped ``read_file``.
-    """
-
-    return Tool(
-        "read_upload_file",
-        (
-            "Reads a bounded range from a UTF-8 text file uploaded to the current session, returning normalized LF "
-            "text and line-range metadata."
-        ),
-        files.read_file,
-        object_schema(
-            {
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "The path to the UTF-8 text file relative to the current session's upload directory."
-                    ),
-                },
-                "start_line": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "default": 1,
-                    "description": "The one-based line number at which reading starts. Defaults to 1.",
-                },
-                "max_lines": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1_000,
-                    "default": 200,
-                    "description": ("The maximum number of lines to return, from 1 to 1000. Defaults to 200."),
-                },
-            },
-            ["path"],
         ),
     )

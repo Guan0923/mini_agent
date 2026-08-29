@@ -104,9 +104,14 @@ def _command_decision(context: ToolHookContext) -> SandboxExecutionDecision:
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("run_command sandbox configuration is invalid") from exc
+    workspaces = [Path(context.workspace_root).resolve()]
+    if context.project_cwd:
+        project_workspace = Path(context.project_cwd).resolve()
+        if project_workspace not in workspaces:
+            workspaces.append(project_workspace)
     return SandboxExecutionDecision(
         launcher=context.sandbox_launcher,
-        workspace=Path(context.workspace_root).resolve(),
+        workspaces=tuple(workspaces),
         session_id=context.run.session_id,
         user_id=context.sandbox_user_id or "local",
         file_mode=file_mode,

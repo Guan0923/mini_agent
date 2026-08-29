@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import regex as regex_engine
 
 from ..base import ToolError
@@ -40,8 +42,10 @@ class FileReadMixin:
         ends_with_newline = False
         start_line_length = 0
         body_chars: list[str] = []
+        body_char_count = 0
         last_returned_line: int | None = None
         continuation: tuple[int, int] | None = None
+        prefixed_line: int | None = None
 
         for chunk in self._iter_text_chunks(file_path, path):
             for character in chunk:
@@ -52,8 +56,12 @@ class FileReadMixin:
                 selected_line = start_line <= line_number <= last_selected_line
                 selected_column = line_number != start_line or column >= start_column
                 if selected_line and selected_column:
-                    if len(body_chars) < self._MAX_OUTPUT_CHARS:
-                        body_chars.append(character)
+                    prefix = f"{line_number} | " if prefixed_line != line_number else ""
+                    rendered = prefix + character
+                    if body_char_count + len(rendered) <= self._MAX_OUTPUT_CHARS:
+                        body_chars.append(rendered)
+                        body_char_count += len(rendered)
+                        prefixed_line = line_number
                         last_returned_line = line_number
                     elif continuation is None:
                         continuation = (line_number, column)
@@ -95,31 +103,22 @@ class FileReadMixin:
             )
         return f"{header}\n{body}"
 
-    def glob(self, pattern: str, path: str = ".", max_results: int = 200) -> str:
-        """List workspace files matching a segment-aware glob pattern."""
+    def glob(self, pattern: str, path: str | None = None, max_results: int = 200) -> str:
+        """List approved-workspace files matching a segment-aware glob pattern."""
 
         pattern_parts = self._pattern_parts(pattern)
         self._validate_integer("max_results", max_results, minimum=1, maximum=self._MAX_RESULTS)
-        root = self._read_path(path, allow_root=True)
-        if not root.is_dir():
-            raise ToolError(f"Not a directory: {path}")
-
-        matches: list[str] = []
-        truncated_by_results = False
-        truncated_by_walk = False
-        examined = 0
-        for file_path in self._iter_files(root):
-            examined += 1
-            if examined > self._MAX_WALKED_FILES:
-                truncated_by_walk = True
-                break
-            relative_to_root = file_path.relative_to(root).parts
-            if not self._glob_matches(relative_to_root, pattern_parts):
-                continue
-            if len(matches) == max_results:
-                truncated_by_results = True
-                break
-            matches.append(self._display_path(file_path))
+        roots = self._search_roots(path)
+        files, truncated_by_walk = self._files_for_roots(roots)
+        matches = sorted(
+            {
+                self._display_path(file_path)
+                for root, file_path in files
+                if self._glob_matches(file_path.relative_to(root).parts, pattern_parts)
+            }
+        )
+        truncated_by_results = len(matches) > max_results
+        matches = matches[:max_results]
 
         if not matches:
             if truncated_by_walk:
@@ -134,7 +133,7 @@ class FileReadMixin:
     def grep(
         self,
         pattern: str,
-        path: str = ".",
+        path: str | None = None,
         glob: str = "**/*",
         regex: bool = False,
         case_sensitive: bool = True,
@@ -156,18 +155,13 @@ class FileReadMixin:
         except regex_engine.error as exc:
             raise ToolError(f"Invalid regular expression: {exc}") from exc
 
-        root = self._read_path(path, allow_root=True)
-        if not root.exists():
-            raise ToolError(f"Path does not exist: {path}")
-        if not root.is_dir() and not root.is_file():
-            raise ToolError(f"Not a file or directory: {path}")
-
+        roots = self._search_roots(path, allow_file=True)
+        files, truncated_by_walk = self._files_for_roots(roots)
         results: list[str] = []
         output_chars = 0
         skipped = 0
         truncated = False
-        files = (root,) if root.is_file() else self._iter_files(root)
-        for file_path in files:
+        for root, file_path in files:
             relative_to_root = (file_path.name,) if root.is_file() else file_path.relative_to(root).parts
             if not self._glob_matches(relative_to_root, pattern_parts):
                 continue
@@ -211,4 +205,34 @@ class FileReadMixin:
             output.append("... search results truncated.")
         if skipped:
             output.append(f"Skipped {skipped} binary, non-UTF-8, or oversized files.")
+        if truncated_by_walk:
+            output.append(f"... directory search truncated at {self._MAX_WALKED_FILES} files.")
         return "\n".join(output)
+
+    def _search_roots(self, path: str | None, *, allow_file: bool = False) -> tuple[Path, ...]:
+        if path is None:
+            return self.workspaces
+        root = self._read_path(path, allow_root=True)
+        if not root.exists():
+            raise ToolError(f"Path does not exist: {path}")
+        if root.is_file() and allow_file:
+            return (root,)
+        if not root.is_dir():
+            raise ToolError(f"Not a directory: {path}")
+        return (root,)
+
+    def _files_for_roots(self, roots: tuple[Path, ...]) -> tuple[list[tuple[Path, Path]], bool]:
+        values: dict[str, tuple[Path, Path]] = {}
+        examined = 0
+        truncated = False
+        for root in roots:
+            candidates = (root,) if root.is_file() else self._iter_files(root)
+            for file_path in candidates:
+                examined += 1
+                if examined > self._MAX_WALKED_FILES:
+                    truncated = True
+                    break
+                values.setdefault(self._display_path(file_path), (root, file_path))
+            if truncated:
+                break
+        return [values[key] for key in sorted(values)], truncated

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -508,10 +509,12 @@ def compact_turn(
 
     app = None
     try:
-        workspace = state.session_workspace(source.session_id)
+        state.paths.ensure_session(source.session_id)
+        workspace = state.paths.session_workspace(source.session_id)
         bound_project = state.projects.session_project(source.session_id, include_removed=False)
         if bound_project is not None and not bound_project.available:
             raise HTTPException(status_code=409, detail="项目 cwd 不可访问，请恢复文件夹后重试。")
+        project_cwd = Path(bound_project.cwd).resolve() if bound_project is not None else None
         model_config = _model_config_snapshot(state, provider_name=source.provider_name)
         app = build_local_application(
             state,
@@ -521,6 +524,7 @@ def compact_turn(
             load_model_config=False,
             workspace=workspace,
             project_id=bound_project.project_id if bound_project is not None else None,
+            project_cwd=project_cwd,
             job_registry=state.job_registry,
         )
         conversation = app.open_conversation(source.session_id)

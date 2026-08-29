@@ -137,17 +137,17 @@ class WindowsNativeBrokerAdapter:
         account = self._account(network_mode)
         reserved = self.token_factory.reserve(account, file_mode)
         reservation_id = f"reservation-{uuid.uuid4().hex}"
-        workspace = _canonical_absolute_path(_required_text(policy_value, "workspace"))
+        workspaces = _required_absolute_paths(policy_value, "workspaces")
         temp_dir = _canonical_absolute_path(_required_text(policy_value, "temp_dir"))
         cwd = _canonical_absolute_path(_required_text(policy_value, "cwd"))
-        if not cwd.is_relative_to(workspace):
+        if not any(cwd.is_relative_to(workspace) for workspace in workspaces):
             _close_handle(reserved.token)
-            raise SandboxInitializationError("Broker reserve cwd is outside the workspace")
+            raise SandboxInitializationError("Broker reserve cwd is outside the workspaces")
         expires_at = self._clock() + self._reservation_ttl_seconds
         capability_digest = _capability_digest(
             reservation_id=reservation_id,
             policy_hash=policy_hash,
-            workspace=workspace,
+            workspaces=workspaces,
             temp_dir=temp_dir,
             account_sid=reserved.account_sid,
             workspace_cap_sid=reserved.workspace_cap_sid,
@@ -227,11 +227,11 @@ class WindowsNativeBrokerAdapter:
             self._close_reservation(reservation)
             raise SandboxInitializationError("Broker launch environment is invalid")
         policy = reservation.policy
-        workspace = _canonical_absolute_path(_required_text(policy, "workspace"))
+        workspaces = _required_absolute_paths(policy, "workspaces")
         cwd = _canonical_absolute_path(_required_text(request, "cwd"))
         expected_cwd = _canonical_absolute_path(_required_text(policy, "cwd"))
         expected_temp = _canonical_absolute_path(_required_text(policy, "temp_dir"))
-        if cwd != expected_cwd or not cwd.is_relative_to(workspace):
+        if cwd != expected_cwd or not any(cwd.is_relative_to(workspace) for workspace in workspaces):
             self._close_reservation(reservation)
             raise SandboxInitializationError("Broker launch cwd does not match the reservation")
         for name in ("TEMP", "TMP"):
@@ -436,6 +436,20 @@ def _required_text(values: Mapping[str, Any], name: str) -> str:
     return value
 
 
+def _required_absolute_paths(values: Mapping[str, Any], name: str) -> tuple[Path, ...]:
+    raw = values.get(name)
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise SandboxInitializationError(f"Broker {name} is invalid")
+    result: list[Path] = []
+    for value in raw:
+        if not isinstance(value, str) or not value:
+            raise SandboxInitializationError(f"Broker {name} is invalid")
+        path = _canonical_absolute_path(value)
+        if path not in result:
+            result.append(path)
+    return tuple(result)
+
+
 def _timeout(value: object) -> float | None:
     if value is None:
         return None
@@ -459,7 +473,7 @@ def _capability_digest(
     *,
     reservation_id: str,
     policy_hash: str,
-    workspace: Path,
+    workspaces: tuple[Path, ...],
     temp_dir: Path,
     account_sid: str,
     workspace_cap_sid: str,
@@ -469,7 +483,7 @@ def _capability_digest(
     value = {
         "reservation_id": reservation_id,
         "policy_hash": policy_hash,
-        "workspace": str(workspace),
+        "workspaces": [str(workspace) for workspace in workspaces],
         "temp_dir": str(temp_dir),
         "account_sid": account_sid,
         "capability_sids": {"workspace": workspace_cap_sid, "temp": temp_cap_sid},

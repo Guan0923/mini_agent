@@ -9,11 +9,12 @@ from backend.tools.filesystem import io as filesystem_io
 
 
 def test_read_file_returns_bounded_lf_line_range(tmp_path: Path) -> None:
-    (tmp_path / "note.txt").write_bytes(b"one\r\ntwo\r\nthree\r\n")
+    path = tmp_path / "note.txt"
+    path.write_bytes(b"one\r\ntwo\r\nthree\r\n")
 
-    result = WorkspaceFiles(tmp_path).read_file("note.txt", start_line=2, max_lines=2)
+    result = WorkspaceFiles(tmp_path).read_file(str(path), start_line=2, max_lines=2)
 
-    assert result == "note.txt: lines 2-3 of 3\ntwo\nthree\n"
+    assert result == f"{path.resolve().as_posix()}: lines 2-3 of 3\n2 | two\n3 | three\n"
 
 
 def test_read_file_validates_ranges_paths_and_utf8(tmp_path: Path) -> None:
@@ -21,13 +22,13 @@ def test_read_file_validates_ranges_paths_and_utf8(tmp_path: Path) -> None:
     (tmp_path / "binary.dat").write_bytes(b"\xff")
 
     with pytest.raises(ToolError, match="start_line"):
-        files.read_file("binary.dat", start_line=0)
+        files.read_file(str(tmp_path / "binary.dat"), start_line=0)
     with pytest.raises(ToolError, match="max_lines"):
-        files.read_file("binary.dat", max_lines=1_001)
-    with pytest.raises(ToolError, match="workspace"):
+        files.read_file(str(tmp_path / "binary.dat"), max_lines=1_001)
+    with pytest.raises(ToolError, match="absolute"):
         files.read_file("../outside.txt")
     with pytest.raises(ToolError, match="valid UTF-8"):
-        files.read_file("binary.dat")
+        files.read_file(str(tmp_path / "binary.dat"))
 
 
 def test_read_file_allows_only_absolute_paths_in_read_only_whitelist(tmp_path: Path) -> None:
@@ -43,19 +44,19 @@ def test_read_file_allows_only_absolute_paths_in_read_only_whitelist(tmp_path: P
 
     result = files.read_file(str(nested))
 
-    assert result.endswith("\nskill guide")
+    assert result.endswith("\n1 | skill guide")
     assert nested.as_posix() in result
-    with pytest.raises(ToolError, match="allowed read root"):
+    with pytest.raises(ToolError, match="approved workspace"):
         files.read_file(str(outside))
-    with pytest.raises(ToolError, match="relative to the workspace"):
+    with pytest.raises(ToolError, match="approved workspace"):
         files.glob("*.md", path=str(skill_root))
-    with pytest.raises(ToolError, match="relative to the workspace"):
+    with pytest.raises(ToolError, match="approved workspace"):
         files.grep("guide", path=str(skill_root))
-    with pytest.raises(ToolError, match="relative to the workspace"):
+    with pytest.raises(ToolError, match="approved workspace"):
         files.write_file(str(nested), "changed")
 
 
-def test_read_file_expands_tilde_only_inside_configured_skill_root(tmp_path: Path, monkeypatch) -> None:
+def test_read_file_rejects_tilde_even_inside_configured_skill_root(tmp_path: Path, monkeypatch) -> None:
     profile = tmp_path / "profile"
     workspace = tmp_path / "workspace"
     skill_root = profile / ".mini_agent" / "skills"
@@ -67,7 +68,8 @@ def test_read_file_expands_tilde_only_inside_configured_skill_root(tmp_path: Pat
     monkeypatch.setenv("HOME", str(profile))
     files = WorkspaceFiles(workspace, read_file_roots=(skill_root,))
 
-    assert files.read_file("~/.mini_agent/skills/demo/SKILL.md").endswith("\ndemo instructions")
+    with pytest.raises(ToolError, match="absolute"):
+        files.read_file("~/.mini_agent/skills/demo/SKILL.md")
 
 
 def test_glob_matches_root_and_nested_files_and_skips_internal_directories(tmp_path: Path) -> None:
@@ -80,7 +82,11 @@ def test_glob_matches_root_and_nested_files_and_skips_internal_directories(tmp_p
 
     result = WorkspaceFiles(tmp_path).glob("**/*.py")
 
-    assert result.splitlines() == ["root.py", "src/direct.py", "src/nested/deep.py"]
+    assert result.splitlines() == [
+        (tmp_path / "root.py").resolve().as_posix(),
+        (tmp_path / "src" / "direct.py").resolve().as_posix(),
+        (tmp_path / "src" / "nested" / "deep.py").resolve().as_posix(),
+    ]
 
 
 def test_glob_is_case_sensitive_and_reports_truncation(tmp_path: Path) -> None:
@@ -90,7 +96,7 @@ def test_glob_is_case_sensitive_and_reports_truncation(tmp_path: Path) -> None:
     files = WorkspaceFiles(tmp_path)
     assert files.glob("*.PY") == "(no matches)"
     assert files.glob("*.py", max_results=1).splitlines() == [
-        "A.py",
+        (tmp_path / "A.py").resolve().as_posix(),
         "... results truncated at 1 files.",
     ]
 
@@ -101,10 +107,12 @@ def test_grep_supports_literal_regex_case_and_glob_filters(tmp_path: Path) -> No
     files = WorkspaceFiles(tmp_path)
 
     assert files.grep("alpha", case_sensitive=False).splitlines() == [
-        "app.py:1:Alpha",
-        "notes.txt:1:alpha",
+        f"{(tmp_path / 'app.py').resolve().as_posix()}:1:Alpha",
+        f"{(tmp_path / 'notes.txt').resolve().as_posix()}:1:alpha",
     ]
-    assert files.grep(r"beta \d+", glob="**/*.py", regex=True) == "app.py:2:beta 42"
+    assert files.grep(r"beta \d+", glob="**/*.py", regex=True) == (
+        f"{(tmp_path / 'app.py').resolve().as_posix()}:2:beta 42"
+    )
     with pytest.raises(ToolError, match="Invalid regular expression"):
         files.grep("[", regex=True)
 
@@ -119,30 +127,70 @@ def test_grep_skips_binary_non_utf8_and_oversized_files(tmp_path: Path, monkeypa
     result = WorkspaceFiles(tmp_path).grep("needle")
 
     assert result.splitlines() == [
-        "match.txt:1:needle",
+        f"{(tmp_path / 'match.txt').resolve().as_posix()}:1:needle",
         "Skipped 3 binary, non-UTF-8, or oversized files.",
     ]
+
+
+def test_omitted_search_path_merges_both_workspaces_with_absolute_paths(tmp_path: Path) -> None:
+    session_workspace = tmp_path / "session"
+    project_workspace = tmp_path / "project"
+    session_workspace.mkdir()
+    project_workspace.mkdir()
+    session_file = session_workspace / "same.txt"
+    project_file = project_workspace / "same.txt"
+    session_file.write_text("needle session", encoding="utf-8")
+    project_file.write_text("needle project", encoding="utf-8")
+    files = WorkspaceFiles(session_workspace, project_workspace=project_workspace)
+
+    expected_paths = sorted((session_file.resolve().as_posix(), project_file.resolve().as_posix()))
+    assert files.glob("*.txt").splitlines() == expected_paths
+    assert files.grep("needle").splitlines() == sorted(
+        (
+            f"{session_file.resolve().as_posix()}:1:needle session",
+            f"{project_file.resolve().as_posix()}:1:needle project",
+        )
+    )
+    assert files.glob("*.txt", path=str(project_workspace)).splitlines() == [project_file.resolve().as_posix()]
+
+
+def test_read_file_numbers_empty_lines_and_supports_column_continuation(tmp_path: Path) -> None:
+    path = tmp_path / "note.txt"
+    path.write_text("alpha\n\nomega", encoding="utf-8", newline="")
+    files = WorkspaceFiles(tmp_path)
+
+    assert files.read_file(str(path), start_line=1, max_lines=3) == (
+        f"{path.resolve().as_posix()}: lines 1-3 of 3\n1 | alpha\n2 | \n3 | omega"
+    )
+    assert files.read_file(str(path), start_line=1, max_lines=1, start_column=3) == (
+        f"{path.resolve().as_posix()}: lines 1-1 of 3, starting at column 3\n1 | pha\n"
+    )
 
 
 def test_write_file_creates_and_requires_explicit_overwrite(tmp_path: Path) -> None:
     files = WorkspaceFiles(tmp_path)
 
-    assert files.write_file("note.txt", "first") == "Created note.txt with 5 characters."
+    path = tmp_path / "note.txt"
+    assert files.write_file(str(path), "first") == f"Created {path.resolve().as_posix()} with 5 characters."
     with pytest.raises(ToolError, match="already exists"):
-        files.write_file("note.txt", "second")
+        files.write_file(str(path), "second")
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "first"
 
-    assert files.write_file("note.txt", "second", overwrite=True) == "Replaced note.txt with 6 characters."
+    assert files.write_file(str(path), "second", overwrite=True) == (
+        f"Replaced {path.resolve().as_posix()} with 6 characters."
+    )
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "second"
-    assert files.write_file("missing/note.txt", "content") == "Created missing/note.txt with 7 characters."
+    nested = tmp_path / "missing" / "note.txt"
+    assert files.write_file(str(nested), "content") == (f"Created {nested.resolve().as_posix()} with 7 characters.")
     assert (tmp_path / "missing" / "note.txt").read_text(encoding="utf-8") == "content"
 
 
 def test_create_directory_is_recursive_idempotent_and_registered_as_approved_write(tmp_path: Path) -> None:
     files = WorkspaceFiles(tmp_path)
 
-    assert files.create_directory("one/two/three") == "Created directory one/two/three."
-    assert files.create_directory("one/two/three") == "Directory already exists: one/two/three."
+    directory = tmp_path / "one" / "two" / "three"
+    assert files.create_directory(str(directory)) == f"Created directory {directory.resolve().as_posix()}."
+    assert files.create_directory(str(directory)) == f"Directory already exists: {directory.resolve().as_posix()}."
     assert (tmp_path / "one" / "two" / "three").is_dir()
 
     registry = build_tool_registry(tmp_path)
@@ -155,7 +203,7 @@ def test_create_directory_is_recursive_idempotent_and_registered_as_approved_wri
         "edit_file",
     }
     with pytest.raises(ConfirmationRequired):
-        registry.invoke("create_directory", {"path": "approved"})
+        registry.invoke("create_directory", {"path": str(tmp_path / "approved")})
     with pytest.raises(ToolError, match="Invalid arguments"):
         registry.invoke("create_directory", {}, confirmed=True)
 
@@ -165,11 +213,11 @@ def test_create_directory_rejects_files_traversal_absolute_paths_and_links(tmp_p
     (tmp_path / "blocked").write_text("file", encoding="utf-8")
 
     with pytest.raises(ToolError, match="Not a directory"):
-        files.create_directory("blocked/child")
-    with pytest.raises(ToolError, match="workspace"):
+        files.create_directory(str(tmp_path / "blocked" / "child"))
+    with pytest.raises(ToolError, match="absolute"):
         files.create_directory("../outside")
-    with pytest.raises(ToolError, match="relative"):
-        files.create_directory(str(tmp_path / "absolute"))
+    with pytest.raises(ToolError, match="approved workspace"):
+        files.create_directory(str(tmp_path.parent / "absolute"))
 
     target = tmp_path / "target"
     target.mkdir()
@@ -179,7 +227,7 @@ def test_create_directory_rejects_files_traversal_absolute_paths_and_links(tmp_p
     except OSError:
         pytest.skip("Creating symbolic links is not permitted on this system.")
     with pytest.raises(ToolError, match="Symbolic links"):
-        files.create_directory("link/child")
+        files.create_directory(str(link / "child"))
 
 
 def test_write_file_keeps_created_parents_when_file_creation_fails(tmp_path: Path, monkeypatch) -> None:
@@ -193,7 +241,7 @@ def test_write_file_keeps_created_parents_when_file_creation_fails(tmp_path: Pat
     with pytest.raises(ToolError, match="simulated file creation failure"):
         registry.invoke(
             "write_file",
-            {"path": "created/before/failure.txt", "content": "content"},
+            {"path": str(tmp_path / "created" / "before" / "failure.txt"), "content": "content"},
             confirmed=True,
         )
 
@@ -205,24 +253,60 @@ def test_edit_file_replaces_one_match_and_preserves_crlf(tmp_path: Path) -> None
     path = tmp_path / "note.txt"
     path.write_bytes(b"one\r\ntwo\r\n")
 
-    result = WorkspaceFiles(tmp_path).edit_file("note.txt", "one\ntwo", "one\nchanged")
+    result = WorkspaceFiles(tmp_path).edit_file(str(path), 1, 2, ["one", "two"], ["one", "changed"])
 
-    assert result == "Edited note.txt: replaced 1 occurrence."
+    assert result == f"Edited {path.resolve().as_posix()}: replaced lines 1-2."
     assert path.read_bytes() == b"one\r\nchanged\r\n"
 
 
-def test_edit_file_rejects_missing_or_ambiguous_matches_without_changes(tmp_path: Path) -> None:
+def test_edit_file_rejects_stale_or_invalid_ranges_without_changes(tmp_path: Path) -> None:
     path = tmp_path / "note.txt"
     path.write_text("same\nsame\n", encoding="utf-8")
     files = WorkspaceFiles(tmp_path)
 
-    with pytest.raises(ToolError, match="not found"):
-        files.edit_file("note.txt", "missing", "new")
-    with pytest.raises(ToolError, match="matched 2 locations"):
-        files.edit_file("note.txt", "same", "new")
-    with pytest.raises(ToolError, match="non-empty"):
-        files.edit_file("note.txt", "", "new")
+    with pytest.raises(ToolError, match="no longer match"):
+        files.edit_file(str(path), 1, 1, ["missing"], ["new"])
+    with pytest.raises(ToolError, match="greater than or equal"):
+        files.edit_file(str(path), 2, 1, [], [])
+    with pytest.raises(ToolError, match="length"):
+        files.edit_file(str(path), 1, 2, ["same"], ["new"])
+    with pytest.raises(ToolError, match="line-break"):
+        files.edit_file(str(path), 1, 1, ["same"], ["new\nline"])
     assert path.read_text(encoding="utf-8") == "same\nsame\n"
+
+
+def test_edit_file_distinguishes_deletion_from_one_blank_line(tmp_path: Path) -> None:
+    delete_path = tmp_path / "delete.txt"
+    blank_path = tmp_path / "blank.txt"
+    delete_path.write_bytes(b"one\r\ntwo\r\nthree")
+    blank_path.write_bytes(b"one\r\ntwo")
+    files = WorkspaceFiles(tmp_path)
+
+    files.edit_file(str(delete_path), 2, 2, ["two"], [])
+    files.edit_file(str(blank_path), 2, 2, ["two"], [""])
+
+    assert delete_path.read_bytes() == b"one\r\nthree"
+    assert blank_path.read_bytes() == b"one\r\n\r\n"
+
+
+def test_edit_file_rejects_a_concurrent_change_before_atomic_replace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "concurrent.txt"
+    path.write_text("before\n", encoding="utf-8")
+    files = WorkspaceFiles(tmp_path)
+    atomic_replace = files._atomic_replace
+
+    def race(file_path: Path, content: str, *, expected_content: str) -> None:
+        file_path.write_text("concurrent\n", encoding="utf-8")
+        atomic_replace(file_path, content, expected_content=expected_content)
+
+    monkeypatch.setattr(files, "_atomic_replace", race)
+
+    with pytest.raises(ToolError, match="changed during"):
+        files.edit_file(str(path), 1, 1, ["before"], ["after"])
+    assert path.read_text(encoding="utf-8") == "concurrent\n"
 
 
 def test_atomic_replace_failure_preserves_original_and_cleans_temporary_file(tmp_path: Path, monkeypatch) -> None:
@@ -234,7 +318,7 @@ def test_atomic_replace_failure_preserves_original_and_cleans_temporary_file(tmp
 
     monkeypatch.setattr(filesystem_io.os, "replace", fail_replace)
     with pytest.raises(ToolError, match="replace failed"):
-        WorkspaceFiles(tmp_path).write_file("note.txt", "updated", overwrite=True)
+        WorkspaceFiles(tmp_path).write_file(str(path), "updated", overwrite=True)
 
     assert path.read_text(encoding="utf-8") == "original"
     assert not list(tmp_path.glob(".note.txt.*.tmp"))
@@ -250,7 +334,7 @@ def test_write_operations_reject_symbolic_links(tmp_path: Path) -> None:
         pytest.skip("Creating symbolic links is not permitted on this system.")
 
     with pytest.raises(ToolError, match="Symbolic links"):
-        WorkspaceFiles(tmp_path).write_file("link.txt", "changed", overwrite=True)
+        WorkspaceFiles(tmp_path).write_file(str(link), "changed", overwrite=True)
     assert target.read_text(encoding="utf-8") == "target"
 
 

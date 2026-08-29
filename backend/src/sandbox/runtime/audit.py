@@ -59,7 +59,7 @@ class WorldWritablePathAuditor:
     def scan(
         self,
         *,
-        workspace: Path,
+        workspaces: tuple[Path, ...],
         temp_dir: Path,
         environment: Mapping[str, str],
         account_sid: str,
@@ -75,7 +75,7 @@ class WorldWritablePathAuditor:
         checked = 0
         allowed_roots = [temp_dir]
         if file_mode is FileAccessMode.WORKSPACE_WRITE:
-            allowed_roots.append(workspace)
+            allowed_roots.extend(workspaces)
         allowed_identities = [self.acl_manager.path_identity(path) for path in allowed_roots]
 
         def audit_one(candidate: Path) -> None:
@@ -108,7 +108,7 @@ class WorldWritablePathAuditor:
                 return
             deny_paths.append(identity.path)
 
-        for root in self._candidate_roots(workspace, temp_dir, environment):
+        for root in self._candidate_roots(workspaces, temp_dir, environment):
             if not root.exists():
                 continue
             audit_one(root)
@@ -140,8 +140,12 @@ class WorldWritablePathAuditor:
             raise SandboxAuditError(SandboxAuditFailure.SCAN_INCOMPLETE)
 
     @staticmethod
-    def _candidate_roots(workspace: Path, temp_dir: Path, environment: Mapping[str, str]) -> tuple[Path, ...]:
-        raw: list[Path] = [workspace, temp_dir]
+    def _candidate_roots(
+        workspaces: tuple[Path, ...],
+        temp_dir: Path,
+        environment: Mapping[str, str],
+    ) -> tuple[Path, ...]:
+        raw: list[Path] = [*workspaces, temp_dir]
         for name in ("TEMP", "TMP", "USERPROFILE", "PUBLIC", "PROGRAMDATA"):
             value = environment.get(name) or os.environ.get(name)
             if value:

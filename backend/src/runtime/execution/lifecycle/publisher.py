@@ -30,6 +30,7 @@ class RunEventPublisher:
             "workflow_attempt": run.provenance.attempt,
             "workflow_trigger": run.provenance.trigger,
             "workspace_root": run.provenance.workspace_root or runtime.state.workspace_root,
+            "project_cwd": run.provenance.project_cwd or runtime.state.project_cwd,
             "source_session_id": run.provenance.source_session_id,
             "source_run_id": run.provenance.source_run_id,
             "task": run.task,

@@ -7,18 +7,14 @@ from ..base import ToolError
 
 class FileWriteMixin:
     def create_directory(self, path: str) -> str:
-        """Recursively create one workspace directory without following links."""
+        """Recursively create one approved-workspace directory."""
 
-        parts = self._relative_parts(path, allow_root=False)
-        directory_path = self.workspace
-        for part in parts:
-            directory_path /= part
-            if directory_path.is_symlink():
-                raise ToolError("Symbolic links are not supported for writes.")
-            if directory_path.exists() and not directory_path.is_dir():
-                raise ToolError(f"Not a directory: {self._display_candidate(directory_path)}")
-
-        directory_path = self._resolve_inside(directory_path, allow_root=False)
+        directory_path = self._write_path(path)
+        current = directory_path
+        while not current.exists() and current not in self.workspaces:
+            current = current.parent
+        if current.exists() and not current.is_dir():
+            raise ToolError(f"Not a directory: {self._display_candidate(current)}")
         if directory_path.is_dir():
             return f"Directory already exists: {self._display_path(directory_path)}."
         try:
@@ -36,8 +32,7 @@ class FileWriteMixin:
             raise ToolError("overwrite must be a boolean.")
         file_path = self._write_path(path)
         if not file_path.parent.is_dir():
-            parent = file_path.parent.relative_to(self.workspace).as_posix()
-            self.create_directory(parent)
+            self.create_directory(str(file_path.parent))
             file_path = self._write_path(path)
         if file_path.exists() and not file_path.is_file():
             raise ToolError(f"Not a file: {path}")
@@ -52,31 +47,61 @@ class FileWriteMixin:
         self._exclusive_create(file_path, content)
         return f"Created {self._display_path(file_path)} with {len(content)} characters."
 
-    def edit_file(self, path: str, old_text: str, new_text: str) -> str:
-        """Replace exactly one text block in an existing UTF-8 file."""
+    def edit_file(
+        self,
+        path: str,
+        start_line: int,
+        end_line: int,
+        expected_lines: list[str],
+        replacement_lines: list[str],
+    ) -> str:
+        """Replace one inclusive line range after checking its current contents."""
 
-        if not isinstance(old_text, str) or not old_text:
-            raise ToolError("old_text must be a non-empty string.")
-        if not isinstance(new_text, str):
-            raise ToolError("new_text must be a string.")
-        if old_text == new_text:
-            raise ToolError("old_text and new_text must be different.")
+        self._validate_integer("start_line", start_line, minimum=1)
+        self._validate_integer("end_line", end_line, minimum=1)
+        if end_line < start_line:
+            raise ToolError("end_line must be greater than or equal to start_line.")
+        for name, lines in (("expected_lines", expected_lines), ("replacement_lines", replacement_lines)):
+            if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
+                raise ToolError(f"{name} must be an array of strings.")
+            if any("\n" in line or "\r" in line for line in lines):
+                raise ToolError(f"{name} entries must not contain line-break characters.")
+        if len(expected_lines) != end_line - start_line + 1:
+            raise ToolError("expected_lines length must match the inclusive line range.")
 
         file_path = self._write_path(path)
         if not file_path.is_file():
             raise ToolError(f"Not a file: {path}")
         original = self._read_raw(file_path, path)
+        records = self._line_records(original)
+        if end_line > len(records):
+            raise ToolError(f"Line range {start_line}-{end_line} exceeds the file's {len(records)} lines.")
+        selected = [content for content, _ending in records[start_line - 1 : end_line]]
+        if selected != expected_lines:
+            raise ToolError("The selected lines no longer match expected_lines; file was not changed.")
         newline = self._dominant_newline(original)
-        old_candidate = self._with_newline(old_text, newline)
-        new_candidate = self._with_newline(new_text, newline)
-        occurrences = original.count(old_candidate)
-        if occurrences == 0:
-            raise ToolError("old_text was not found; file was not changed.")
-        if occurrences > 1:
-            raise ToolError(
-                f"old_text matched {occurrences} locations; include more surrounding context. File was not changed."
-            )
-
-        updated = original.replace(old_candidate, new_candidate, 1)
+        prefix = "".join(content + ending for content, ending in records[: start_line - 1])
+        suffix = "".join(content + ending for content, ending in records[end_line:])
+        selected_ending = records[end_line - 1][1]
+        replacement = ""
+        for index, line in enumerate(replacement_lines):
+            is_last = index == len(replacement_lines) - 1
+            ending = selected_ending if is_last else newline
+            if is_last and not ending and not line:
+                ending = newline
+            replacement += line + ending
+        updated = prefix + replacement + suffix
         self._atomic_replace(file_path, updated, expected_content=original)
-        return f"Edited {self._display_path(file_path)}: replaced 1 occurrence."
+        return f"Edited {self._display_path(file_path)}: replaced lines {start_line}-{end_line}."
+
+    @staticmethod
+    def _line_records(value: str) -> list[tuple[str, str]]:
+        records: list[tuple[str, str]] = []
+        for raw in value.splitlines(keepends=True):
+            if raw.endswith("\r\n"):
+                records.append((raw[:-2], "\r\n"))
+            elif raw.endswith(("\n", "\r")):
+                records.append((raw[:-1], raw[-1]))
+            else:
+                records.append((raw, ""))
+        return records

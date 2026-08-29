@@ -83,6 +83,7 @@ def run_state_from_dict(data: dict[str, Any]) -> RunState:
             workspace_root=str(provenance_data["workspace_root"])
             if provenance_data.get("workspace_root") is not None
             else None,
+            project_cwd=str(provenance_data["project_cwd"]) if provenance_data.get("project_cwd") is not None else None,
             source_session_id=str(provenance_data["source_session_id"])
             if provenance_data.get("source_session_id") is not None
             else None,

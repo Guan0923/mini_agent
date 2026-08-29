@@ -280,6 +280,10 @@ def test_v12_migration_rolls_back_when_running_head_is_ambiguous(tmp_path: Path)
 
 
 def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_path: Path) -> None:
+    session_workspace = tmp_path / "session-workspace"
+    project_workspace = tmp_path / "project-workspace"
+    session_workspace.mkdir()
+    project_workspace.mkdir()
     paths = ClientPaths(tmp_path / "data")
     index = AgentThreadIndex()
     store = SQLiteSessionStore(paths, index)
@@ -294,9 +298,16 @@ def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_pat
             id="source",
             parent=root,
             user_content="parent",
+            cwd=str(session_workspace),
+            project_cwd=str(project_workspace),
         )
     )
-    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    parent_runner = AgentRunner(
+        _AnswerPlanner(),
+        ToolRegistry(),
+        workspace_root=str(session_workspace),
+        project_cwd=str(project_workspace),
+    )
     runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
     runtime.run.thread_id = session.session_id
     runtime.run.turn_id = source.id
@@ -317,7 +328,7 @@ def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_pat
             job_registry=registry,
         )
 
-    coordinator.bind_session(session.session_id, child_factory, tmp_path)
+    coordinator.bind_session(session.session_id, child_factory, session_workspace, project_workspace)
     response = json.loads(
         coordinator.invoke(
             runtime,
@@ -347,6 +358,15 @@ def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_pat
     children = store.list_child_thread_nodes(session.session_id, session.session_id)
     assert {item.thread_path for item in children} == {"/root/one", "/root/two"}
     assert all(item.thread_status == "opening" for item in children)
+    child_turns = [
+        store.get_node(session.session_id, index.head_for_thread(child.thread_id) or "") for child in children
+    ]
+    assert all(
+        isinstance(turn, RuntimeState)
+        and turn.cwd == str(session_workspace.resolve())
+        and turn.project_cwd == str(project_workspace.resolve())
+        for turn in child_turns
+    )
     deadline = monotonic() + 5
     pending = queue.pending_deliveries()
     while monotonic() < deadline and len(pending) < 2:

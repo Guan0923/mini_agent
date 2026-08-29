@@ -98,6 +98,7 @@ class RuntimeState:
     running_mode: RunningMode = "agent"
     usage: dict[str, int | None] = field(default_factory=lambda: {name: None for name in USAGE_FIELDS})
     cwd: str = ""
+    project_cwd: str = ""
     timestamp: str = field(default_factory=utc_iso)
     status: NodeStatus = "running"
     current_data_idx: int = 0
@@ -150,6 +151,7 @@ class RuntimeState:
         if timestamp.tzinfo is None or timestamp.utcoffset() != timedelta(0):
             raise RuntimeStateValidationError("timestamp must be UTC and timezone-aware.")
         object.__setattr__(self, "cwd", _normalize_cwd(self.cwd))
+        object.__setattr__(self, "project_cwd", _normalize_cwd(self.project_cwd, name="project_cwd"))
         object.__setattr__(self, "model", _normalize_model(self.model))
         object.__setattr__(self, "usage", _normalize_usage(self.usage))
         object.__setattr__(self, "data", validate_data(self.data))
@@ -224,6 +226,7 @@ class RuntimeState:
             "running_mode": self.running_mode,
             "usage": _clone(self.usage),
             "cwd": self.cwd,
+            "project_cwd": self.project_cwd,
             "timestamp": self.timestamp,
             "status": self.status,
             "current_data_idx": self.current_data_idx,
@@ -253,6 +256,7 @@ class RuntimeState:
             "running_mode",
             "usage",
             "cwd",
+            "project_cwd",
             "timestamp",
             "status",
             "current_data_idx",
@@ -278,6 +282,7 @@ class RuntimeState:
             running_mode=raw["running_mode"],
             usage=_mapping(raw["usage"], "usage"),
             cwd=_string(raw, "cwd"),
+            project_cwd=_string(raw, "project_cwd"),
             timestamp=_string(raw, "timestamp"),
             status=raw["status"],
             current_data_idx=raw["current_data_idx"],
@@ -299,6 +304,7 @@ class RuntimeState:
         permission_mode: PermissionMode = "read_only",
         running_mode: RunningMode = "agent",
         cwd: str = "",
+        project_cwd: str = "",
         first_kept_item_size: int = DEFAULT_FIRST_KEPT_ITEM_SIZE,
         compaction_id: str | None = None,
         data: Any | None = None,
@@ -321,6 +327,7 @@ class RuntimeState:
             permission_mode=permission_mode,
             running_mode=running_mode,
             cwd=cwd,
+            project_cwd=project_cwd,
             timestamp=timestamp or utc_iso(),
             status=status,
             data=data if data is not None else turn_payload(user_content),

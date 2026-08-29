@@ -20,7 +20,7 @@ class CommandLease:
     logon_sid: str
     account_sid: str
     service_sid: str
-    workspace: str
+    workspaces: tuple[str, ...]
     temp_dir: str
     file_mode: str
     workspace_cap_sid: str
@@ -58,12 +58,16 @@ class CommandLeaseStore:
             if not any(item.job_id == lease.job_id for item in values):
                 return True
             remaining = tuple(item for item in values if item.job_id != lease.job_id)
-            workspace = Path(lease.workspace)
+            workspaces = tuple(Path(workspace) for workspace in lease.workspaces)
             temp_path = Path(lease.temp_dir)
-            checks = [
-                self.acl_manager.revoke_lease(workspace, lease.workspace_cap_sid),
-                self.acl_manager.revoke_lease(workspace, lease.service_sid),
-            ]
+            checks: list[bool] = []
+            for workspace in workspaces:
+                checks.extend(
+                    (
+                        self.acl_manager.revoke_lease(workspace, lease.workspace_cap_sid),
+                        self.acl_manager.revoke_lease(workspace, lease.service_sid),
+                    )
+                )
             for deny_path in lease.deny_paths:
                 checks.extend(
                     (
@@ -71,11 +75,14 @@ class CommandLeaseStore:
                         self.acl_manager.revoke_lease(Path(deny_path), lease.temp_cap_sid),
                     )
                 )
-            account_still_used = any(
-                item.account_sid == lease.account_sid and Path(item.workspace) == workspace for item in remaining
-            )
-            if not account_still_used:
-                checks.append(self.acl_manager.revoke_lease(workspace, lease.account_sid))
+            for workspace in workspaces:
+                account_still_used = any(
+                    item.account_sid == lease.account_sid
+                    and any(Path(other_workspace) == workspace for other_workspace in item.workspaces)
+                    for item in remaining
+                )
+                if not account_still_used:
+                    checks.append(self.acl_manager.revoke_lease(workspace, lease.account_sid))
             if temp_path.exists():
                 checks.extend(
                     (
@@ -123,6 +130,9 @@ class CommandLeaseStore:
                     or not lease.workspace_cap_sid
                     or not lease.temp_cap_sid
                     or not lease.capability_digest
+                    or not isinstance(lease.workspaces, (list, tuple))
+                    or not lease.workspaces
+                    or not all(isinstance(path, str) and path for path in lease.workspaces)
                     or not isinstance(lease.deny_paths, (list, tuple))
                     or not all(isinstance(path, str) and path for path in lease.deny_paths)
                     or not isinstance(lease.path_identities, dict)
@@ -136,6 +146,7 @@ class CommandLeaseStore:
                     CommandLease(
                         **{
                             **asdict(lease),
+                            "workspaces": tuple(lease.workspaces),
                             "deny_paths": tuple(lease.deny_paths),
                             "path_identities": dict(lease.path_identities),
                         }

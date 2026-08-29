@@ -38,19 +38,20 @@ def test_mcp_server_registers_the_safe_tool_definitions(tmp_path: Path) -> None:
 
 
 def test_mcp_invokes_a_safe_tool_inside_the_workspace(tmp_path: Path) -> None:
-    (tmp_path / "note.txt").write_text("hello from Mini-Agent\n", encoding="utf-8")
+    path = tmp_path / "note.txt"
+    path.write_text("hello from Mini-Agent\n", encoding="utf-8")
     adapter = McpToolAdapter(build_tool_registry(tmp_path))
 
-    result = adapter.invoke("read_file", {"path": "note.txt"})
+    result = adapter.invoke("read_file", {"path": str(path)})
 
     assert result.isError is False
-    assert result.content[0].text == "note.txt: lines 1-1 of 1\nhello from Mini-Agent\n"
+    assert result.content[0].text == (f"{path.resolve().as_posix()}: lines 1-1 of 1\n1 | hello from Mini-Agent\n")
 
 
 def test_mcp_preserves_workspace_and_argument_validation(tmp_path: Path) -> None:
     adapter = McpToolAdapter(build_tool_registry(tmp_path))
 
-    traversal = adapter.invoke("read_file", {"path": "../outside.txt"})
+    traversal = adapter.invoke("read_file", {"path": str(tmp_path.parent / "outside.txt")})
     invalid = adapter.invoke("read_file", {})
 
     assert traversal.isError is True

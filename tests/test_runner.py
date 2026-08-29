@@ -64,6 +64,9 @@ def test_jsonl_error_includes_provider_diagnostics(tmp_path: Path) -> None:
 class PlanResearchPlanner:
     name = "plan-research"
 
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+
     def decide(self, history: list[dict[str, str]], mode: str, on_reasoning=None) -> AgentAction:
         if mode == "plan":
             if history[-1]["content"].startswith("[Tool result]"):
@@ -72,17 +75,25 @@ class PlanResearchPlanner:
                     tool=REQUEST_PLAN_REVIEW_NAME,
                     arguments={"plan": "1. Read the note.\n2. Write the reviewed result."},
                 )
-            return AgentAction(type="tool_call", tool="read_file", arguments={"path": "note.txt"})
+            return AgentAction(
+                type="tool_call",
+                tool="read_file",
+                arguments={"path": str(self.workspace / "note.txt")},
+            )
         if history[-1]["content"].startswith("[Tool result]"):
             return AgentAction(type="final_answer", answer="Implemented from the reviewed plan.")
-        return AgentAction(type="tool_call", tool="write_file", arguments={"path": "result.txt", "content": "done"})
+        return AgentAction(
+            type="tool_call",
+            tool="write_file",
+            arguments={"path": str(self.workspace / "result.txt"), "content": "done"},
+        )
 
 
 def test_plan_mode_researches_read_only_tools_then_hands_off_to_default_execution(tmp_path: Path) -> None:
     (tmp_path / "note.txt").write_text("reviewed", encoding="utf-8")
     requests = []
 
-    state = AgentRunner(PlanResearchPlanner(), ToolRegistry(tmp_path)).run(
+    state = AgentRunner(PlanResearchPlanner(tmp_path), ToolRegistry(tmp_path)).run(
         "review the note",
         mode="plan",
         interrupt=lambda request: (
@@ -127,7 +138,7 @@ def test_local_read_only_tool_skips_approval(tmp_path: Path) -> None:
     (tmp_path / "note.txt").write_text("read safely", encoding="utf-8")
     events = []
     state = AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)).run(
-        "read note.txt",
+        f"read {tmp_path / 'note.txt'}",
         lambda _: False,
         on_event=events.append,
         interrupt=lambda _request: InterruptDecision("cancel"),

@@ -15,7 +15,7 @@ def local_sandbox_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         factory,
         "_sandbox_runtime",
-        lambda _config: (
+        lambda _config, **_kwargs: (
             SandboxLauncher(is_windows=False, allow_local_backend=True),
             {},
         ),

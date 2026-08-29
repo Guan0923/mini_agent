@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -287,8 +288,16 @@ def test_parent_bridge_applies_backpressure_without_losing_events() -> None:
 
 
 def test_workspace_lock_path_normalization_rejects_alias_escape(tmp_path: Path) -> None:
-    direct = normalized_workspace_path(tmp_path, "file.txt")
-    assert normalized_workspace_path(tmp_path, "folder/../file.txt") == direct
-    assert normalized_workspace_path(tmp_path, ".\\file.txt") == direct
+    project_workspace = tmp_path / "project"
+    project_workspace.mkdir()
+    direct = normalized_workspace_path((tmp_path, project_workspace), str(tmp_path / "file.txt"))
+    assert (
+        normalized_workspace_path((tmp_path, project_workspace), str(tmp_path / "folder" / ".." / "file.txt")) == direct
+    )
+    assert normalized_workspace_path((tmp_path, project_workspace), str(tmp_path / "." / "file.txt")) == direct
+    assert normalized_workspace_path(
+        (tmp_path, project_workspace),
+        str(project_workspace / "file.txt"),
+    ) == os.path.normcase(str(project_workspace / "file.txt"))
     with pytest.raises(ToolError, match="stay inside"):
-        normalized_workspace_path(tmp_path, "../file.txt")
+        normalized_workspace_path((tmp_path, project_workspace), str(tmp_path.parent / "file.txt"))

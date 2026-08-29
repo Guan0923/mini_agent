@@ -45,6 +45,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         permission_mode: str = "read_only",
         running_mode: str = "agent",
         cwd: str = "",
+        project_cwd: str = "",
         thinking_level: str = "medium",
         references: Sequence[Mapping[str, str]] | None = None,
         delivery_id: str | None = None,
@@ -74,6 +75,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         self.permission_mode = permission_mode
         self.running_mode = running_mode
         self.cwd = cwd
+        self.project_cwd = project_cwd
         self.references = [dict(item) for item in references or []]
         self.delivery_id = delivery_id or ""
         self.isolated_thread_context = isolated_thread_context
@@ -221,6 +223,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
             permission_mode=self.permission_mode,
             running_mode=self.running_mode,
             cwd=self.cwd,
+            project_cwd=self.project_cwd,
             data=None,
         )
         if self.delivery_id:

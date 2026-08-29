@@ -10,12 +10,6 @@ from ..core.context import RuntimeState
 from ..core.ports import RuntimeStore
 
 
-class TaskPreprocessor(Protocol):
-    """Prepare one user task before it enters the runtime."""
-
-    def expand(self, task: str) -> str: ...
-
-
 class SessionStore(RuntimeStore, Protocol):
     """Persist session metadata, messages, runs, and resumable state."""
 
