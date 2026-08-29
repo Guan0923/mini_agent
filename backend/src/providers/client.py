@@ -111,7 +111,7 @@ class LLMClient:
         model_snapshot.setdefault("context_length", self.config.context_size)
         model_snapshot.setdefault("output_length", self.config.max_tokens)
         model_snapshot.setdefault("thinking", "enable")
-        model_snapshot.setdefault("temperature", 1.0)
+        model_snapshot.setdefault("temperature", 0.0)
         if captured is None:
             runtime.state.model = str(model_snapshot["current_model"])
         elif not runtime.state.model or runtime.state.model == "unknown":

@@ -68,33 +68,6 @@
   box-shadow: 0 0 0 2px rgba(64, 112, 244, 0.25);
 }
 
-.global-error {
-  position: absolute;
-  top: 12px;
-  left: 50%;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  max-width: min(640px, calc(100% - 32px));
-  padding: 9px 12px;
-  border: 1px solid #fecaca;
-  border-radius: 9px;
-  background: #fff7f7;
-  color: #b91c1c;
-  font-size: 13px;
-  transform: translateX(-50%);
-}
-
-.global-error button {
-  padding: 0 3px;
-  border: none;
-  background: transparent;
-  color: inherit;
-  font-size: 18px;
-  cursor: pointer;
-}
-
 .history-empty,
 .empty-state {
   padding: 20px 12px;

@@ -64,7 +64,6 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     draftMode: "agent",
     displayMode: "medium",
     providerConfig: null,
-    actionError: null,
     settingsOpen: false,
     setSettingsOpen: vi.fn(),
     onProfileChange: vi.fn(),
@@ -98,7 +97,6 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     onRefresh: vi.fn().mockResolvedValue(undefined),
     onRun: vi.fn().mockResolvedValue(undefined),
     onStopRun: vi.fn(),
-    onClearError: vi.fn(),
     onDisplayModeUpdate: vi.fn(),
     onProviderConfigUpdate: vi.fn(),
     sandboxHealth: {

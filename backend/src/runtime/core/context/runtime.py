@@ -214,7 +214,7 @@ class AgentRuntime:
                         if isinstance(config_output, int) and config_output > 0
                         else 8192,
                         "thinking": "enable",
-                        "temperature": 1.0,
+                        "temperature": 0.0,
                     }
                 else:
                     if isinstance(config_model, str) and config_model:
@@ -233,7 +233,7 @@ class AgentRuntime:
                     "context_length": 128000,
                     "output_length": 8192,
                     "thinking": "enable",
-                    "temperature": 1.0,
+                    "temperature": 0.0,
                 }
         model = pending.get("model")
         if isinstance(model, dict):
@@ -263,7 +263,7 @@ class AgentRuntime:
             output_length = self.state.model_snapshot.get("output_length")
             if isinstance(output_length, int) and output_length > 0:
                 self.state.request_parameters["max_tokens"] = output_length
-            self.state.request_parameters["temperature"] = self.state.model_snapshot.get("temperature", 1.0)
+            self.state.request_parameters["temperature"] = self.state.model_snapshot.get("temperature", 0.0)
             self.state.request_parameters["reasoning_effort"] = self.state.model_snapshot.get(
                 "reasoning_effort", "medium"
             )

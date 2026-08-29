@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { projectTurnPath } from "../../app/runtime/runtimeDetailProjection";
+import { TURN_PROTOCOL_VERSION } from "../../app/runtime/runtimeNodeNormalization";
 import type { QueuedMessage } from "../../app/types";
 import { compactTurn, patchRuntimeConfig, steerTurn } from "../../api";
 import type {
@@ -33,7 +34,7 @@ function turn(id: string, userText: string, parent?: RuntimeStateNode): RuntimeS
     parent_session_id: parent?.session_id ?? "",
     id,
     parent_id: parent?.id ?? "",
-    version: "0.0.1",
+    version: TURN_PROTOCOL_VERSION,
     firstKeptItemSize: 8,
     compactionId: id,
     user: "user-1",
@@ -50,6 +51,7 @@ function turn(id: string, userText: string, parent?: RuntimeStateNode): RuntimeS
     running_mode: "agent",
     usage: { input_tokens: 1, cached_tokens: 0, output_tokens: 1, reasoning_tokens: 0, total_tokens: 2 },
     cwd: "C:\\workspace",
+    project_cwd: "",
     timestamp: `2026-08-26T00:00:0${parent ? 1 : 0}Z`,
     status: "success",
     current_data_idx: 0,

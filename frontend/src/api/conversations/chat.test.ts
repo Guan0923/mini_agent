@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { streamAttachedTurn, streamChat } from "./chat";
+import { TURN_PROTOCOL_VERSION } from "../../app/runtime/runtimeNodeNormalization";
 import type { RuntimeStateNode, StreamMessage } from "../../types";
 
 function turn(status: RuntimeStateNode["status"] = "running"): RuntimeStateNode {
@@ -11,7 +12,7 @@ function turn(status: RuntimeStateNode["status"] = "running"): RuntimeStateNode 
     parent_session_id: "",
     id: "turn_1",
     parent_id: "",
-    version: "0.0.1",
+    version: TURN_PROTOCOL_VERSION,
     firstKeptItemSize: 8,
     compactionId: "turn_1",
     user: "user_1",
@@ -34,6 +35,7 @@ function turn(status: RuntimeStateNode["status"] = "running"): RuntimeStateNode 
       total_tokens: 0,
     },
     cwd: "C:\\workspace",
+    project_cwd: "",
     timestamp: "2026-08-25T00:00:00Z",
     status,
     current_data_idx: 0,

@@ -95,6 +95,7 @@ export interface RuntimeTurnNode {
   running_mode: ChatMode;
   usage: RuntimeNodeUsage;
   cwd: string;
+  project_cwd: string;
   timestamp: string;
   status: RuntimeNodeStatus;
   current_data_idx: number;

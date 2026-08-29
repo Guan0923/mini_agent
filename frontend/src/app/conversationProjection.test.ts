@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Conversation, RuntimeStateNode, RuntimeTreeNode } from "../types";
 import { withLoadedTurns } from "./conversationProjection";
+import { TURN_PROTOCOL_VERSION } from "./runtime/runtimeNodeNormalization";
 
 const turn = (
   id: string,
@@ -14,7 +15,7 @@ const turn = (
   parent_id: parentId,
   parent_session_id: "session",
   parent_thread_id: parentId === "root" ? "session" : threadId,
-  version: "1",
+  version: TURN_PROTOCOL_VERSION,
   firstKeptItemSize: 0,
   compactionId: id,
   user: "",
@@ -37,6 +38,7 @@ const turn = (
     reasoning_tokens: null,
   },
   cwd: "C:\\work",
+  project_cwd: "",
   timestamp: `2026-08-29T00:00:0${id === "anchor" ? 1 : 2}+00:00`,
   status: "success",
   current_data_idx: 0,

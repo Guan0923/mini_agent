@@ -380,6 +380,7 @@ def test_root_and_turn_shapes_are_strict() -> None:
     assert turn.parent_session_id == turn.parent_thread_id == root.session_id
     assert turn.compaction_id == turn.id
     assert turn.first_kept_item_size == 8
+    assert turn.model["temperature"] == 0.0
     assert turn.selected_messages[0]["role"] == "user"
     assert turn.selected_messages[1]["role"] == "assistant"
     payload = turn.to_dict()
@@ -1868,5 +1869,5 @@ def test_real_http_sse_generates_title_with_isolated_model_request(
     assert title_request["parameters"] == {
         "thinking": {"type": "disabled"},
         "max_tokens": 32,
-        "temperature": 1.0,
+        "temperature": 0.0,
     }

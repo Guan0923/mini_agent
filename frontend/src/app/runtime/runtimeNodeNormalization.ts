@@ -16,7 +16,7 @@ export const DEFAULT_RUNTIME_NODE_MODEL: RuntimeNodeModel = {
   context_length: 128000,
   output_length: 8192,
   thinking: "enable",
-  temperature: 1,
+  temperature: 0,
 };
 
 export const EMPTY_RUNTIME_NODE_USAGE: RuntimeNodeUsage = {
@@ -26,6 +26,8 @@ export const EMPTY_RUNTIME_NODE_USAGE: RuntimeNodeUsage = {
   reasoning_tokens: null,
   total_tokens: null,
 };
+
+export const TURN_PROTOCOL_VERSION = "0.0.2" as const;
 
 const REASONING_EFFORTS = new Set<ReasoningEffort>(["low", "medium", "high", "xhigh", "max"]);
 const THINKING_MODES = new Set<ThinkingMode>(["enable", "disable"]);
@@ -96,10 +98,10 @@ export function normalizeRuntimeNode(node: RuntimeTreeNode): RuntimeTreeNode;
 export function normalizeRuntimeNode(node: RuntimeTreeNode): RuntimeTreeNode {
   if (isRuntimeRootNode(node)) return structuredClone(node);
   const turn = node as RuntimeStateNode;
-  if (!turn || typeof turn !== "object" || turn.version !== "0.0.1") {
+  if (!turn || typeof turn !== "object" || turn.version !== TURN_PROTOCOL_VERSION) {
     throw new Error("Unsupported Turn version");
   }
-  for (const key of ["thread_id", "parent_thread_id", "session_id", "parent_session_id", "id", "parent_id", "user", "provider_name", "cwd", "timestamp"] as const) {
+  for (const key of ["thread_id", "parent_thread_id", "session_id", "parent_session_id", "id", "parent_id", "user", "provider_name", "cwd", "project_cwd", "timestamp"] as const) {
     if (typeof turn[key] !== "string") throw new Error(`Invalid Turn field: ${key}`);
   }
   if (!turn.thread_id || !turn.session_id || !turn.id || !turn.provider_name) throw new Error("Turn identifiers are required");

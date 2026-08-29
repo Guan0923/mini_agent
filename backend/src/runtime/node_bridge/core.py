@@ -70,7 +70,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         snapshot.setdefault("thinking", "enable")
         snapshot.setdefault("context_length", 128000)
         snapshot.setdefault("output_length", 8192)
-        snapshot.setdefault("temperature", 1.0)
+        snapshot.setdefault("temperature", 0.0)
         self.model_config = snapshot
         self.permission_mode = permission_mode
         self.running_mode = running_mode

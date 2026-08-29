@@ -1,5 +1,5 @@
-import { Alert, Button, Drawer, Grid, Layout, Splitter } from "antd";
-import { CloseOutlined, MenuOutlined } from "@ant-design/icons";
+import { Button, Drawer, Grid, Layout, Splitter } from "antd";
+import { MenuOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
 import type { LocalProfile, RightPanelWindow } from "../types";
 import type { AgentConfig, ProviderConfig } from "../api";
@@ -45,7 +45,6 @@ export interface AgentShellProps {
   draftMode: ChatMode;
   displayMode: DisplayMode;
   providerConfig: ProviderConfig | null;
-  actionError: string | null;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
   onProfileChange: (profile: LocalProfile) => void;
@@ -82,7 +81,6 @@ export interface AgentShellProps {
   queuedMessages?: Map<string, QueuedMessage[]>;
   onQueuedMessagesChange?: (conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) => void;
   onQueuedMessagesRefresh?: (conversationId: string) => Promise<void>;
-  onClearError: () => void;
   onDisplayModeUpdate: (config: AgentConfig) => void;
   onProviderConfigUpdate: (config: ProviderConfig) => void;
   sandboxHealth: SandboxHealthState;
@@ -186,7 +184,6 @@ export default function AgentShell(props: AgentShellProps) {
     && panel.payload?.capabilities.terminal_available === true;
   const mainContent = (
     <>
-      {props.actionError && <Alert className="global-error" type="error" showIcon title={props.actionError} action={<IconAction label="关闭错误" icon={<CloseOutlined />} onClick={props.onClearError} />} />}
       {props.page === "chat" ? (
         <ChatPage
           conversation={props.current}

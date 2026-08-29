@@ -1,5 +1,5 @@
 import type { NodeFrameType, RuntimeNodeFrame, RuntimeStateNode, RuntimeTreeNode, TurnItem } from "../../types";
-import { isRuntimeTurnNode, normalizeRuntimeNode } from "./runtimeNodeNormalization";
+import { isRuntimeTurnNode, normalizeRuntimeNode, TURN_PROTOCOL_VERSION } from "./runtimeNodeNormalization";
 
 export interface RuntimeNodeAccumulator {
   nodes: Map<string, RuntimeStateNode>;
@@ -17,6 +17,7 @@ const PATCH_FIELDS = new Set<keyof RuntimeStateNode>([
   "running_mode",
   "usage",
   "cwd",
+  "project_cwd",
   "timestamp",
   "status",
   "current_data_idx",
@@ -38,11 +39,11 @@ function isTokenCount(value: unknown): boolean {
 }
 
 function validatePatchValue(name: keyof RuntimeStateNode, value: unknown): void {
-  if (name === "version" && value === "0.0.1") return;
+  if (name === "version" && value === TURN_PROTOCOL_VERSION) return;
   if (name === "firstKeptItemSize" && Number.isInteger(value) && (value as number) >= 0) return;
   if (name === "current_data_idx" && Number.isInteger(value) && (value as number) >= 0) return;
   if (name === "compactionId" && typeof value === "string" && value.length > 0) return;
-  if (["user", "cwd", "timestamp"].includes(name) && typeof value === "string") return;
+  if (["user", "cwd", "project_cwd", "timestamp"].includes(name) && typeof value === "string") return;
   if (name === "provider_name" && typeof value === "string" && value.length > 0) return;
   if (name === "status" && STATUSES.has(String(value))) return;
   if (name === "permission_mode" && PERMISSION_MODES.has(String(value))) return;

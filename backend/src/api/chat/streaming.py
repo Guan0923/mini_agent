@@ -299,7 +299,7 @@ def _stream(
                             else 8192,
                             "reasoning_effort": reasoning_effort,
                             "thinking": "enable",
-                            "temperature": 1.0,
+                            "temperature": 0.0,
                             **(model_snapshot or {}),
                         },
                         permission_mode=permission_mode or "read_only",
