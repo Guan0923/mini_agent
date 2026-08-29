@@ -56,9 +56,9 @@ class SQLiteSessionMixin:
                     timestamp=timestamp,
                 )
                 connection.execute(
-                    "INSERT INTO thread_nodes(session_id,thread_id,parent_thread_id,thread_path,thread_task,thread_status,depth,created_at,updated_at) "
-                    "VALUES (?,?,NULL,'/root','','opening',0,?,?)",
-                    (session.session_id, session.session_id, timestamp, timestamp),
+                    "INSERT INTO thread_nodes(session_id,thread_id,root_thread_id,parent_thread_id,thread_path,thread_task,thread_status,depth,created_at,updated_at) "
+                    "VALUES (?,?,?,NULL,'/root','','opening',0,?,?)",
+                    (session.session_id, session.session_id, session.session_id, timestamp, timestamp),
                 )
         except Exception:
             if not root_existed:

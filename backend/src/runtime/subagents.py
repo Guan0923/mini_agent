@@ -200,7 +200,14 @@ class SubagentCoordinator:
         for name, path in zip(names, paths, strict=True):
             if "/" in name or name in {".", ".."} or name != name.strip():
                 raise ToolError("subagent_name cannot contain '/' or surrounding whitespace.")
-            if getattr(self._index, "thread_for_path")(runtime.state.session_id, path) is not None:
+            if (
+                getattr(self._index, "thread_for_path")(
+                    runtime.state.session_id,
+                    source_node.root_thread_id,
+                    path,
+                )
+                is not None
+            ):
                 raise ToolError(f"Agent Thread path already exists: {path}")
 
         source_turn = self._source_turn(runtime, source_id)
@@ -252,6 +259,7 @@ class SubagentCoordinator:
             node = ThreadNode(
                 runtime.state.session_id,
                 thread_id,
+                source_node.root_thread_id,
                 source_id,
                 path,
                 task,
@@ -373,7 +381,7 @@ class SubagentCoordinator:
         session_id = runtime.state.session_id
         source = getattr(self._store, "get_thread_node")(session_id, source_id)
         target = getattr(self._store, "get_thread_node")(session_id, target_id)
-        if source is None or target is None:
+        if source is None or target is None or source.root_thread_id != target.root_thread_id:
             raise ToolError("Both source and target must be nodes in the same Agent tree.")
         if target.thread_status != "opening":
             raise ToolError("Target Agent Thread is closed.")
@@ -476,13 +484,17 @@ class SubagentCoordinator:
         runtime_config: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         self._require_services()
-        source = getattr(self._store, "get_thread_node")(session_id, session_id)
         target = getattr(self._store, "get_thread_node")(session_id, target_thread_id)
+        source = (
+            getattr(self._store, "get_thread_node")(session_id, target.root_thread_id) if target is not None else None
+        )
         if (
             source is None
             or source.depth != 0
+            or source.root_thread_id != source.thread_id
             or target is None
             or target.session_id != session_id
+            or target.root_thread_id != source.thread_id
             or target.depth <= 0
         ):
             raise ToolError("The target must be a Subagent Thread in this Session tree.")
@@ -493,7 +505,7 @@ class SubagentCoordinator:
             raise ToolError("Agent message requires text or references.")
         return self._dispatch_message(
             session_id,
-            session_id,
+            source.thread_id,
             target_thread_id,
             content,
             references=parsed_references,

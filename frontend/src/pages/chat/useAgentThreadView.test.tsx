@@ -90,6 +90,17 @@ const initialConversations: Record<string, Conversation> = {
     messages: [],
     runtimeNodes: [],
   },
+  thread_a_fork: {
+    id: "thread_a_fork",
+    sessionId: "session_a",
+    threadId: "thread_a_fork",
+    title: "A（分支）",
+    messages: [
+      { id: "fork-user", role: "user", content: "fork task", events: [] },
+      { id: "fork-assistant", role: "assistant", content: "fork answer", events: [] },
+    ],
+    runtimeNodes: [childA1],
+  },
 };
 
 function Harness() {
@@ -110,7 +121,15 @@ function Harness() {
       <button onClick={() => view.selectThread("thread_a_child")}>select child A</button>
       <button onClick={() => view.selectThread("session_a")}>select root A</button>
       <button onClick={() => setCurrentId("session_a")}>session A</button>
+      <button onClick={() => setCurrentId("thread_a_fork")}>fork A</button>
       <button onClick={() => setCurrentId("session_b")}>session B</button>
+      <button onClick={() => setConversations((current) => ({
+        ...current,
+        session_a: {
+          ...current.session_a,
+          runtimeNodes: [...(current.session_a.runtimeNodes ?? []), turn("session_a", "session_a", "turn_root_2")],
+        },
+      }))}>append root Turn</button>
       <output data-testid="canonical-thread">{canonical.threadId}</output>
       <output data-testid="canonical-messages">{canonical.messages.map((message) => message.content).join("|")}</output>
       <output data-testid="view-thread">{view.conversation?.threadId}</output>
@@ -148,7 +167,16 @@ beforeEach(() => {
 });
 
 describe("useAgentThreadView", () => {
-  it("remembers each Session selection and aborts the old Thread stream without rewriting canonical chat", async () => {
+  it("invalidates the current root tree when its canonical Turn set changes", async () => {
+    render(<Harness />);
+    expect(screen.getByTestId("tree-invalidation")).toHaveTextContent("0");
+
+    fireEvent.click(screen.getByRole("button", { name: "append root Turn" }));
+
+    await waitFor(() => expect(screen.getByTestId("tree-invalidation")).toHaveTextContent("1"));
+  });
+
+  it("isolates and remembers selection by Sidebar root while aborting the old Thread stream", async () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole("button", { name: "select child A" }));
 
@@ -158,8 +186,13 @@ describe("useAgentThreadView", () => {
     expect(screen.getByTestId("canonical-thread")).toHaveTextContent("session_a");
     expect(screen.getByTestId("canonical-messages")).toHaveTextContent("root task|root answer");
 
-    fireEvent.click(screen.getByRole("button", { name: "session B" }));
+    fireEvent.click(screen.getByRole("button", { name: "fork A" }));
     await waitFor(() => expect(streams[0].signal.aborted).toBe(true));
+    expect(screen.getByTestId("view-thread")).toHaveTextContent("thread_a_fork");
+    expect(screen.getByTestId("view-messages")).toHaveTextContent("fork task");
+    expect(api.streamAgentThread).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "session B" }));
     expect(screen.getByTestId("view-thread")).toHaveTextContent("session_b");
 
     fireEvent.click(screen.getByRole("button", { name: "session A" }));

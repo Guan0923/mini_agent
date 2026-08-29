@@ -62,6 +62,7 @@ export default function AgentThreadPicker({
 
   const picker = (
     <Tree<PickerNode>
+      key={`${rootThreadId}:${invalidation}`}
       aria-label="Agent Thread 树"
       blockNode
       loadData={loadChildren}

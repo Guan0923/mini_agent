@@ -36,6 +36,7 @@ class RuntimeThread:
 class ThreadNode:
     session_id: str
     thread_id: str
+    root_thread_id: str
     parent_thread_id: str | None
     thread_path: str
     thread_task: str
@@ -45,7 +46,7 @@ class ThreadNode:
     updated_at: str
 
     def __post_init__(self) -> None:
-        if not self.session_id or not self.thread_id:
+        if not self.session_id or not self.thread_id or not self.root_thread_id:
             raise ValueError("ThreadNode identifiers are required.")
         if not self.thread_path.startswith("/root"):
             raise ValueError("thread_path must start with /root.")
@@ -53,6 +54,10 @@ class ThreadNode:
             raise ValueError("thread_status must be opening or closed.")
         if isinstance(self.depth, bool) or self.depth < 0:
             raise ValueError("ThreadNode depth must be non-negative.")
+        if self.depth == 0 and (self.root_thread_id != self.thread_id or self.parent_thread_id is not None):
+            raise ValueError("An Agent-tree root must own itself and have no parent.")
+        if self.depth > 0 and self.parent_thread_id is None:
+            raise ValueError("A Subagent Thread must have a parent.")
 
     def to_dict(self) -> dict[str, object]:
         return {

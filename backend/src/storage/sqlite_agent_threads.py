@@ -42,6 +42,7 @@ class SQLiteAgentThreadMixin:
         return ThreadNode(
             session_id=str(row["session_id"]),
             thread_id=str(row["thread_id"]),
+            root_thread_id=str(row["root_thread_id"]),
             parent_thread_id=str(row["parent_thread_id"]) if row["parent_thread_id"] is not None else None,
             thread_path=str(row["thread_path"]),
             thread_task=str(row["thread_task"]),
@@ -85,11 +86,12 @@ class SQLiteAgentThreadMixin:
     @staticmethod
     def _insert_thread_node(connection: sqlite3.Connection, item: ThreadNode) -> None:
         connection.execute(
-            "INSERT INTO thread_nodes(session_id,thread_id,parent_thread_id,thread_path,thread_task,thread_status,depth,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO thread_nodes(session_id,thread_id,root_thread_id,parent_thread_id,thread_path,thread_task,thread_status,depth,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 item.session_id,
                 item.thread_id,
+                item.root_thread_id,
                 item.parent_thread_id,
                 item.thread_path,
                 item.thread_task,
@@ -136,6 +138,16 @@ class SQLiteAgentThreadMixin:
                     or item.runtime.running_turn_id != item.turn.id
                 ):
                     raise ValueError("Preallocated Agent Turn does not match its Thread record.")
+                parent = connection.execute(
+                    "SELECT root_thread_id,depth FROM thread_nodes WHERE session_id=? AND thread_id=?",
+                    (session_id, item.node.parent_thread_id),
+                ).fetchone()
+                if (
+                    parent is None
+                    or item.node.depth != int(parent["depth"]) + 1
+                    or item.node.root_thread_id != str(parent["root_thread_id"])
+                ):
+                    raise ValueError("Agent Thread parent and root ownership do not match.")
                 self._insert_runtime_thread(connection, item.runtime)
                 self._insert_thread_node(connection, item.node)
                 self._insert_thread_context(connection, item.context)
@@ -279,6 +291,50 @@ class SQLiteAgentThreadMixin:
         if result is None:
             raise KeyError(thread_id)
         return result
+
+    def _ensure_agent_tree_root_record(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        thread_id: str,
+        timestamp: str,
+    ) -> None:
+        runtime = connection.execute(
+            "SELECT origin_kind,current_turn_id FROM runtime_threads WHERE session_id=? AND thread_id=?",
+            (session_id, thread_id),
+        ).fetchone()
+        if runtime is None or str(runtime["origin_kind"]) not in {"main", "fork"}:
+            raise ValueError("A Sidebar Thread requires a main or fork Runtime Thread.")
+        existing = connection.execute(
+            "SELECT root_thread_id,parent_thread_id,depth FROM thread_nodes WHERE session_id=? AND thread_id=?",
+            (session_id, thread_id),
+        ).fetchone()
+        if existing is not None:
+            if (
+                str(existing["root_thread_id"]) != thread_id
+                or existing["parent_thread_id"] is not None
+                or int(existing["depth"]) != 0
+            ):
+                raise ValueError("Sidebar Thread Agent-tree root is inconsistent.")
+            return
+        task = ""
+        current_turn_id = str(runtime["current_turn_id"] or "")
+        if current_turn_id:
+            payload = self._json_object(connection, session_id, "runtime_node", current_turn_id)
+            try:
+                content = payload["data"][int(payload.get("current_data_idx") or 0)][0]["content"]  # type: ignore[index,union-attr]
+                task = next(
+                    (str(item.get("text") or "") for item in content if item.get("type") == "text"),
+                    "",
+                )
+            except (IndexError, KeyError, TypeError, ValueError):
+                task = ""
+        connection.execute(
+            "INSERT INTO thread_nodes(session_id,thread_id,root_thread_id,parent_thread_id,thread_path,thread_task,thread_status,depth,created_at,updated_at) "
+            "VALUES (?,?,?,NULL,'/root',?,'opening',0,?,?)",
+            (session_id, thread_id, thread_id, task, timestamp, timestamp),
+        )
 
     @staticmethod
     def _ensure_runtime_thread_record(

@@ -1107,8 +1107,8 @@ def test_missing_ancestor_and_bad_version_index_are_rejected() -> None:
         RuntimeStateTree([root, first, RuntimeState.from_dict(cross_session)]).ancestors(("session_2", "turn_2"))
 
 
-@pytest.mark.parametrize("schema_version", [9, 10, 11])
-def test_pre_v12_database_is_rejected_without_migration_or_deletion(tmp_path: Path, schema_version: int) -> None:
+@pytest.mark.parametrize("schema_version", [9, 10, 11, 12])
+def test_pre_v13_database_is_rejected_without_migration_or_deletion(tmp_path: Path, schema_version: int) -> None:
     path = tmp_path / f"v{schema_version}.db"
     connection = sqlite3.connect(path)
     connection.executescript(SCHEMA)
@@ -1118,7 +1118,7 @@ def test_pre_v12_database_is_rejected_without_migration_or_deletion(tmp_path: Pa
         (schema_version,),
     )
     connection.commit()
-    with pytest.raises(RuntimeError, match="requires v12"):
+    with pytest.raises(RuntimeError, match="requires v13"):
         SQLiteSchemaMixin._assert_supported_schema(connection)
     assert path.exists()
     connection.close()

@@ -26,19 +26,36 @@ function mergeNodes(current: RuntimeTreeNode[] | undefined, updates: RuntimeTree
 }
 
 export function useAgentThreadView({ canonical, enabled, onUpdate }: UseAgentThreadViewOptions) {
-  const [selectedBySession, setSelectedBySession] = useState<Record<string, string>>({});
+  const [selectedByRootThread, setSelectedByRootThread] = useState<Record<string, string>>({});
   const [pendingByThread, setPendingByThread] = useState<Record<string, ChatMessage[]>>({});
   const [treeInvalidation, setTreeInvalidation] = useState(0);
   const [streamError, setStreamError] = useState<string | null>(null);
   const updateRef = useRef(onUpdate);
+  const rootTreeStateByThread = useRef<Record<string, string>>({});
   updateRef.current = onUpdate;
 
   const sessionId = canonical?.sessionId;
-  const rootThreadId = sessionId;
-  const selectedThreadId = sessionId
-    ? selectedBySession[sessionId] ?? rootThreadId
+  const rootThreadId = canonical?.threadId;
+  const selectedThreadId = rootThreadId
+    ? selectedByRootThread[rootThreadId] ?? rootThreadId
     : canonical?.threadId;
   const isSubagent = Boolean(enabled && sessionId && selectedThreadId && selectedThreadId !== rootThreadId);
+  const rootTurnState = (canonical?.runtimeNodes ?? [])
+    .filter(isRuntimeTurnNode)
+    .filter((node) => node.thread_id === rootThreadId)
+    .map((node) => `${node.id}:${node.status}`)
+    .join("|");
+  const lastCanonicalMessage = canonical?.messages[canonical.messages.length - 1];
+  const rootTreeState = `${rootTurnState}#${canonical?.messages.length ?? 0}:${lastCanonicalMessage?.running ? "running" : "idle"}`;
+
+  useEffect(() => {
+    if (!rootThreadId) return;
+    const previous = rootTreeStateByThread.current[rootThreadId];
+    rootTreeStateByThread.current[rootThreadId] = rootTreeState;
+    if (previous !== undefined && previous !== rootTreeState) {
+      setTreeInvalidation((current) => current + 1);
+    }
+  }, [rootThreadId, rootTreeState]);
 
   const viewConversation = useMemo(() => {
     if (!canonical || !isSubagent || !selectedThreadId) return canonical;
@@ -140,8 +157,8 @@ export function useAgentThreadView({ canonical, enabled, onUpdate }: UseAgentThr
   }, [canonical?.id, enabled, isSubagent, selectedThreadId, sessionId]);
 
   function selectThread(threadId: string) {
-    if (!sessionId) return;
-    setSelectedBySession((current) => ({ ...current, [sessionId]: threadId }));
+    if (!rootThreadId) return;
+    setSelectedByRootThread((current) => ({ ...current, [rootThreadId]: threadId }));
   }
 
   async function sendMessage(values: {

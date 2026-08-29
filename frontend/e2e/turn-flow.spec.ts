@@ -183,6 +183,7 @@ test("Trace audit lists two real Turns oldest first and loads them independently
 });
 
 test("Agent Thread tree streams an idle nested Agent message and keeps Chat and Trace aligned", async ({ page }) => {
+  test.setTimeout(90_000);
   const resetResponse = await page.request.post("/api/test/trace-model-reset");
   expect(resetResponse.ok(), `${resetResponse.status()} ${await resetResponse.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", {
@@ -322,6 +323,113 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
   const modelCalls = await page.request.get("/api/test/trace-model-calls");
   expect(modelCalls.ok()).toBeTruthy();
   expect((await modelCalls.json() as { calls: number }).calls).toBeGreaterThanOrEqual(2);
+
+  await page.getByRole("button", { name: "Thread", exact: true }).click();
+  tree = page.getByRole("tree", { name: "Agent Thread 树" });
+  await tree.getByText("root", { exact: true }).click();
+  await page.getByRole("button", { name: "Chat", exact: true }).click();
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(sidebar.thread_id);
+
+  const forkResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/fork"),
+  );
+  await page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }).click();
+  const forkResponse = await forkResponsePromise;
+  expect(forkResponse.ok(), `${forkResponse.status()} ${await forkResponse.text()}`).toBeTruthy();
+  const forked = await forkResponse.json() as {
+    sidebar_thread: { session_id: string; thread_id: string };
+  };
+  expect(forked.sidebar_thread.session_id).toBe(sidebar.session_id);
+  expect(forked.sidebar_thread.thread_id).not.toBe(sidebar.thread_id);
+  await expect(page.getByRole("button", { name: "Agent Thread Navigation（分支）", exact: true })).toBeVisible();
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(forked.sidebar_thread.thread_id);
+
+  await page.getByRole("button", { name: "Thread", exact: true }).click();
+  tree = page.getByRole("tree", { name: "Agent Thread 树" });
+  const forkRootItem = tree.getByText("root", { exact: true }).locator("xpath=ancestor::*[@role='treeitem'][1]");
+  const emptyForkChildrenResponse = page.waitForResponse((response) =>
+    response.url().includes(
+      `/api/agent-threads/${encodeURIComponent(forked.sidebar_thread.thread_id)}/children`,
+    ),
+  );
+  await forkRootItem.locator(".ant-tree-switcher").click();
+  const emptyForkChildren = await emptyForkChildrenResponse;
+  expect(emptyForkChildren.ok(), `${emptyForkChildren.status()} ${await emptyForkChildren.text()}`).toBeTruthy();
+  expect(await emptyForkChildren.json()).toEqual([]);
+  await expect(tree.getByText("direct · opening", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Thread", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("agent thread navigation e2e");
+  const forkTurnResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await forkTurnResponse).ok()).toBeTruthy();
+  await expect(page.locator(".message.assistant").last()).toContainText("Agent Thread tree is ready.", {
+    timeout: 15_000,
+  });
+  await expect(page.getByRole("button", { name: "暂停", exact: true })).toHaveCount(0, { timeout: 15_000 });
+
+  await page.getByRole("button", { name: "Thread", exact: true }).click();
+  tree = page.getByRole("tree", { name: "Agent Thread 树" });
+  const reloadedForkRoot = tree.getByText("root", { exact: true }).locator(
+    "xpath=ancestor::*[@role='treeitem'][1]",
+  );
+  const forkChildrenResponse = page.waitForResponse((response) =>
+    response.url().includes(
+      `/api/agent-threads/${encodeURIComponent(forked.sidebar_thread.thread_id)}/children`,
+    ),
+  );
+  await reloadedForkRoot.locator(".ant-tree-switcher").click();
+  const forkChildren = await forkChildrenResponse;
+  expect(forkChildren.ok(), `${forkChildren.status()} ${await forkChildren.text()}`).toBeTruthy();
+  const forkDirectSummary = (await forkChildren.json() as Array<{ thread_id: string }>)[0];
+  expect(forkDirectSummary?.thread_id).toBeTruthy();
+  expect(forkDirectSummary.thread_id).not.toBe(directSummary.thread_id);
+  const forkDirectLabel = tree.getByText("direct · opening", { exact: true });
+  const forkDirectChildrenResponse = page.waitForResponse((response) =>
+    response.url().includes(`/api/agent-threads/${encodeURIComponent(forkDirectSummary.thread_id)}/children`),
+  );
+  await forkDirectLabel.locator("xpath=ancestor::*[@role='treeitem'][1]").locator(".ant-tree-switcher").click();
+  const forkDirectChildren = await forkDirectChildrenResponse;
+  expect(forkDirectChildren.ok(), `${forkDirectChildren.status()} ${await forkDirectChildren.text()}`).toBeTruthy();
+  const forkNestedSummary = (await forkDirectChildren.json() as Array<{ thread_id: string }>)[0];
+  expect(forkNestedSummary?.thread_id).toBeTruthy();
+  expect(forkNestedSummary.thread_id).not.toBe(nestedThreadId);
+  await tree.getByText("nested · opening", { exact: true }).click();
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(forkNestedSummary.thread_id);
+  await expect(page.locator(".message.assistant").last()).toContainText(
+    "Agent Thread response from local HTTP.", { timeout: 15_000 },
+  );
+
+  const originalChildren = await page.request.get(
+    `/api/agent-threads/${encodeURIComponent(sidebar.thread_id)}/children?session_id=${encodeURIComponent(sidebar.session_id)}`,
+  );
+  const isolatedForkChildren = await page.request.get(
+    `/api/agent-threads/${encodeURIComponent(forked.sidebar_thread.thread_id)}/children?session_id=${encodeURIComponent(sidebar.session_id)}`,
+  );
+  expect(originalChildren.ok()).toBeTruthy();
+  expect(isolatedForkChildren.ok()).toBeTruthy();
+  expect((await originalChildren.json() as Array<{ thread_id: string }>).map((node) => node.thread_id))
+    .toEqual([directSummary.thread_id]);
+  expect((await isolatedForkChildren.json() as Array<{ thread_id: string }>).map((node) => node.thread_id))
+    .toEqual([forkDirectSummary.thread_id]);
+
+  await page.getByRole("button", { name: "Agent Thread Navigation", exact: true }).click();
+  await page.getByRole("button", { name: "Thread", exact: true }).click();
+  tree = page.getByRole("tree", { name: "Agent Thread 树" });
+  await tree.getByText("root", { exact: true }).locator("xpath=ancestor::*[@role='treeitem'][1]")
+    .locator(".ant-tree-switcher").click();
+  await tree.getByText("direct · opening", { exact: true }).locator("xpath=ancestor::*[@role='treeitem'][1]")
+    .locator(".ant-tree-switcher").click();
+  await tree.getByText("nested · opening", { exact: true }).click();
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(nestedThreadId);
+
+  await page.getByRole("button", { name: "Agent Thread Navigation（分支）", exact: true }).click();
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(forkNestedSummary.thread_id);
+  await page.getByRole("button", { name: "Trace", exact: true }).click();
+  await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(forkNestedSummary.thread_id);
+  await expect(page.locator(".trace-turn-collapse > .ant-collapse-item")).toHaveCount(1);
 });
 
 test("chat stays bottom-anchored and exposes a centered translucent return button only while reading above", async ({ page }) => {

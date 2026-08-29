@@ -207,7 +207,13 @@ def _finished_source(store: SQLiteSessionStore, session_id: str, *, turn_id: str
     return writer.finalize(source, "success")
 
 
-def _agent_create(session_id: str, parent: RuntimeState, *, name: str) -> AgentThreadCreate:
+def _agent_create(
+    session_id: str,
+    parent: RuntimeState,
+    *,
+    name: str,
+    root_thread_id: str | None = None,
+) -> AgentThreadCreate:
     timestamp = utc_iso()
     thread_id = new_thread_id()
     turn = RuntimeState.create(
@@ -222,7 +228,8 @@ def _agent_create(session_id: str, parent: RuntimeState, *, name: str) -> AgentT
         ThreadNode(
             session_id,
             thread_id,
-            session_id,
+            root_thread_id or session_id,
+            parent.thread_id,
             f"/root/{name}",
             f"task:{name}",
             "opening",
@@ -242,6 +249,7 @@ def _nested_agent_create(
     name: str,
     parent_path: str,
     depth: int,
+    root_thread_id: str | None = None,
 ) -> AgentThreadCreate:
     timestamp = utc_iso()
     thread_id = new_thread_id()
@@ -257,6 +265,7 @@ def _nested_agent_create(
         ThreadNode(
             session_id,
             thread_id,
+            root_thread_id or session_id,
             parent.thread_id,
             f"{parent_path}/{name}",
             f"task:{name}",
@@ -282,7 +291,7 @@ def test_agent_thread_index_rebuilds_and_tracks_committed_heads(tmp_path: Path) 
     assert index.threads_for_session(session.session_id) == frozenset({session.session_id, child.node.thread_id})
     assert index.session_for_thread(child.node.thread_id) == session.session_id
     assert index.head_for_thread(child.node.thread_id) == child.turn.id
-    assert index.thread_for_path(session.session_id, "/root/worker") == child.node.thread_id
+    assert index.thread_for_path(session.session_id, session.session_id, "/root/worker") == child.node.thread_id
     assert index.path_for_thread(child.node.thread_id) == "/root/worker"
 
     rebuilt = AgentThreadIndex()
@@ -360,6 +369,30 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             )
             store.create_agent_threads(sidebar["session_id"], [grandchild])
 
+            fork_response = client.post(f"/api/turns/{source.id}/fork", json={})
+            assert fork_response.status_code == 201, fork_response.text
+            fork_payload = fork_response.json()
+            fork_turn = RuntimeState.from_dict(fork_payload["turn"])
+            fork_thread_id = str(fork_payload["sidebar_thread"]["thread_id"])
+            assert fork_turn.thread_id == fork_thread_id
+            assert fork_turn.data == source.data
+            fork_root = store.get_thread_node(sidebar["session_id"], fork_thread_id)
+            assert fork_root is not None and fork_root.root_thread_id == fork_thread_id
+            assert (
+                client.get(
+                    f"/api/agent-threads/{fork_thread_id}/children",
+                    params={"session_id": sidebar["session_id"]},
+                ).json()
+                == []
+            )
+            fork_child = _agent_create(
+                sidebar["session_id"],
+                fork_turn,
+                name="worker",
+                root_thread_id=fork_thread_id,
+            )
+            store.create_agent_threads(sidebar["session_id"], [fork_child])
+
             children = client.get(
                 f"/api/agent-threads/{sidebar['session_id']}/children",
                 params={"session_id": sidebar["session_id"]},
@@ -368,6 +401,19 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             assert children.json() == [
                 {
                     "thread_id": child.node.thread_id,
+                    "thread_path": "/root/worker",
+                    "thread_task": "task:worker",
+                    "thread_status": "opening",
+                }
+            ]
+            fork_children = client.get(
+                f"/api/agent-threads/{fork_thread_id}/children",
+                params={"session_id": sidebar["session_id"]},
+            )
+            assert fork_children.status_code == 200
+            assert fork_children.json() == [
+                {
+                    "thread_id": fork_child.node.thread_id,
                     "thread_path": "/root/worker",
                     "thread_task": "task:worker",
                     "thread_status": "opening",
@@ -412,6 +458,34 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             assert envelope.references == ({"source": "project", "path": "README.md"},)
             assert envelope.payload["runtime_config"]["permission_mode"] == "workspace_write"
 
+            fork_message = client.post(
+                f"/api/agent-threads/{fork_child.node.thread_id}/messages",
+                json={
+                    "session_id": sidebar["session_id"],
+                    "content": "fork-only message",
+                },
+            )
+            assert fork_message.status_code == 202, fork_message.text
+            fork_envelope = queue.peek_thread(fork_child.node.thread_id)
+            assert fork_envelope is not None
+            assert fork_envelope.source_thread_id == fork_thread_id
+
+            source_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+            source_runtime = source_runner.new_runtime(task="root", session_id=sidebar["session_id"])
+            source_runtime.run.thread_id = sidebar["thread_id"]
+            source_runtime.run.turn_id = source.id
+            source_runtime.services.runtime_node_context = lambda: [source]
+            with pytest.raises(ToolError, match="same Agent tree"):
+                state.subagent_coordinator.invoke(
+                    source_runtime,
+                    "send_agent_message",
+                    {
+                        "target_thread_id": fork_child.node.thread_id,
+                        "subagent_tasks": "cross-tree message",
+                    },
+                )
+            source_runner.close()
+
             nested_message = client.post(
                 f"/api/agent-threads/{grandchild.node.thread_id}/messages",
                 json={
@@ -450,6 +524,73 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             assert crossed_stream.status_code == 404
     finally:
         state.close()
+
+
+def test_fork_sidebar_root_can_delegate_its_own_subagent(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "fork-agents"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("fork agents")
+    store.create_sidebar_thread(
+        session_id=session.session_id,
+        thread_id=session.session_id,
+        title="fork agents",
+    )
+    source = _finished_source(store, session.session_id)
+    fork = store.fork_turn_node(source.id, new_turn_id="turn_fork_agent", thread_id="thread_fork_agent")
+    store.create_sidebar_thread(
+        session_id=session.session_id,
+        thread_id=fork.thread_id,
+        title="fork agents（分支）",
+    )
+
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="fork root", session_id=session.session_id)
+    runtime.run.thread_id = fork.thread_id
+    runtime.run.turn_id = fork.id
+    runtime.services.runtime_node_context = lambda: [fork]
+    coordinator = SubagentCoordinator(
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(_AnswerPlanner(), ToolRegistry(), job_registry=registry),
+        tmp_path,
+    )
+    try:
+        delegated = json.loads(
+            coordinator.invoke(
+                runtime,
+                "delegate_tasks",
+                {
+                    "subagent_count": 1,
+                    "subagent_name": ["worker"],
+                    "subagent_tasks": ["fork-only task"],
+                    "context_transfer_strategy": ["independent"],
+                },
+            )
+        )
+        child_id = delegated["subagents"][0]["thread_id"]
+        child = store.get_thread_node(session.session_id, child_id)
+        assert child is not None and child.root_thread_id == fork.thread_id
+        assert child.parent_thread_id == fork.thread_id and child.thread_path == "/root/worker"
+        assert store.list_child_thread_nodes(session.session_id, session.session_id) == []
+
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            child_runtime = store.get_runtime_thread(session.session_id, child_id)
+            if child_runtime is not None and child_runtime.running_turn_id is None:
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("fork-owned Subagent did not finish")
+    finally:
+        registry.close_all(reason="test complete", timeout=5)
+        parent_runner.close()
 
 
 def test_agent_thread_message_returns_503_when_redis_is_unavailable(tmp_path: Path) -> None:
@@ -539,8 +680,9 @@ def test_idle_turn_creation_uses_sqlite_cas(tmp_path: Path) -> None:
     assert runtime_thread is not None and runtime_thread.running_turn_id in {"turn_one", "turn_two"}
 
 
-def _create_v12_database(path: Path, session_id: str) -> None:
+def _create_v13_database(path: Path, session_id: str, *, orphan_sidebar: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = utc_iso()
     root = RuntimeRootState.create(session_id, id="root")
     main = RuntimeState.create(
         session_id=session_id,
@@ -555,98 +697,165 @@ def _create_v12_database(path: Path, session_id: str) -> None:
     fork.thread_id = "thread_fork"
     fork.compaction_id = fork.id
     fork = RuntimeState.from_dict(fork.to_dict())
+    side = RuntimeState.from_dict(fork.to_dict())
+    side.id = "side_turn"
+    side.thread_id = "thread_side"
+    side.compaction_id = side.id
+    side = RuntimeState.from_dict(side.to_dict())
+    child = RuntimeState.create(
+        session_id=session_id,
+        thread_id="thread_child",
+        id="child_turn",
+        parent=main,
+        user_content="task:worker",
+    )
+    child.status = "success"
+    child = RuntimeState.from_dict(child.to_dict())
     with sqlite3.connect(path) as connection:
         connection.executescript(
             """
-            CREATE TABLE store_metadata(session_id TEXT PRIMARY KEY,schema_version INTEGER NOT NULL CHECK(schema_version=12),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            CREATE TABLE store_metadata(session_id TEXT PRIMARY KEY,schema_version INTEGER NOT NULL CHECK(schema_version=13),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
             CREATE TABLE json_objects(session_id TEXT NOT NULL,namespace TEXT NOT NULL,object_id TEXT NOT NULL,payload_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(session_id,namespace,object_id));
             CREATE TABLE workspace_files(session_id TEXT NOT NULL,relative_path TEXT NOT NULL,size INTEGER NOT NULL,sha256 TEXT NOT NULL,mtime_ns INTEGER NOT NULL,PRIMARY KEY(session_id,relative_path));
             CREATE TABLE sandbox_approvals(request_hash TEXT PRIMARY KEY,session_id TEXT NOT NULL,command_hash TEXT NOT NULL,cwd_hash TEXT NOT NULL,permission_target TEXT NOT NULL,network_target_hash TEXT NOT NULL,command_summary TEXT NOT NULL,cwd_summary TEXT NOT NULL,created_at TEXT NOT NULL);
+            CREATE TABLE runtime_threads(session_id TEXT NOT NULL,thread_id TEXT PRIMARY KEY,origin_kind TEXT NOT NULL,current_turn_id TEXT,running_turn_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            CREATE INDEX runtime_threads_session_idx ON runtime_threads(session_id,created_at,thread_id);
+            CREATE TABLE thread_nodes(session_id TEXT NOT NULL,thread_id TEXT PRIMARY KEY REFERENCES runtime_threads(thread_id) ON DELETE CASCADE,parent_thread_id TEXT REFERENCES thread_nodes(thread_id),thread_path TEXT NOT NULL,thread_task TEXT NOT NULL,thread_status TEXT NOT NULL,depth INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(session_id,thread_path));
+            CREATE INDEX thread_nodes_parent_idx ON thread_nodes(session_id,parent_thread_id,created_at,thread_id);
+            CREATE TABLE thread_contexts(thread_id TEXT PRIMARY KEY REFERENCES thread_nodes(thread_id) ON DELETE CASCADE,requested_strategy TEXT NOT NULL,effective_strategy TEXT NOT NULL,source_turn_id TEXT NOT NULL,source_data_idx INTEGER NOT NULL,snapshot_json TEXT,summary TEXT);
             """
         )
         connection.execute(
-            "INSERT INTO store_metadata VALUES (?,12,?,?)",
-            (session_id, utc_iso(), utc_iso()),
+            "INSERT INTO store_metadata VALUES (?,13,?,?)",
+            (session_id, timestamp, timestamp),
         )
         session_payload = {
             "session_id": session_id,
             "title": "migrated",
-            "created_at": utc_iso(),
-            "updated_at": utc_iso(),
+            "created_at": timestamp,
+            "updated_at": timestamp,
             "title_is_custom": False,
         }
+        sidebar_payloads = (
+            {
+                "thread_id": session_id,
+                "session_id": session_id,
+                "title": "migrated",
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "archived_at": None,
+                "deleted_at": None,
+                "title_is_custom": False,
+            },
+            {
+                "thread_id": "thread_fork",
+                "session_id": session_id,
+                "title": "migrated fork",
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "archived_at": None,
+                "deleted_at": None,
+                "title_is_custom": False,
+            },
+        )
         for namespace, object_id, payload in (
             ("session", session_id, session_payload),
             ("runtime_node", root.id, root.to_dict()),
             ("runtime_node", main.id, main.to_dict()),
             ("runtime_node", fork.id, fork.to_dict()),
+            ("runtime_node", side.id, side.to_dict()),
+            ("runtime_node", child.id, child.to_dict()),
+            *(("sidebar_thread", item["thread_id"], item) for item in sidebar_payloads),
         ):
             connection.execute(
                 "INSERT INTO json_objects VALUES (?,?,?,?,?)",
-                (session_id, namespace, object_id, json.dumps(payload), utc_iso()),
+                (session_id, namespace, object_id, json.dumps(payload), timestamp),
+            )
+        for values in (
+            (session_id, session_id, "main", main.id, None, timestamp, timestamp),
+            (session_id, fork.thread_id, "fork", fork.id, None, timestamp, timestamp),
+            (session_id, side.thread_id, "fork", side.id, None, timestamp, timestamp),
+            (session_id, child.thread_id, "subagent", child.id, None, timestamp, timestamp),
+        ):
+            connection.execute("INSERT INTO runtime_threads VALUES (?,?,?,?,?,?,?)", values)
+        connection.execute(
+            "INSERT INTO thread_nodes VALUES (?,?,NULL,'/root','first task','opening',0,?,?)",
+            (session_id, session_id, timestamp, timestamp),
+        )
+        connection.execute(
+            "INSERT INTO thread_nodes VALUES (?,?,?,'/root/worker','task:worker','opening',1,?,?)",
+            (session_id, child.thread_id, session_id, timestamp, timestamp),
+        )
+        connection.execute(
+            "INSERT INTO thread_contexts VALUES (?,?,?,?,?,?,?)",
+            (child.thread_id, "independent", "independent", main.id, 0, None, None),
+        )
+        if orphan_sidebar:
+            orphan = {**sidebar_payloads[1], "thread_id": "thread_orphan", "title": "orphan"}
+            connection.execute(
+                "INSERT INTO json_objects VALUES (?,?,?,?,?)",
+                (session_id, "sidebar_thread", orphan["thread_id"], json.dumps(orphan), timestamp),
             )
 
 
-def test_v12_migrates_to_v13_and_v11_is_left_untouched(tmp_path: Path) -> None:
+def test_v13_migrates_to_v14_with_independent_sidebar_roots_and_excludes_side_chat(tmp_path: Path) -> None:
     paths = ClientPaths(tmp_path / "data")
     paths.ensure()
     session_id = "session_migrate"
     database = paths.session_db(session_id)
-    _create_v12_database(database, session_id)
+    _create_v13_database(database, session_id)
 
     store = SQLiteSessionStore(paths)
     threads = store.list_runtime_threads(session_id)
     assert {(item.thread_id, item.origin_kind) for item in threads} == {
         (session_id, "main"),
         ("thread_fork", "fork"),
+        ("thread_side", "fork"),
+        ("thread_child", "subagent"),
     }
-    assert store.get_thread_node(session_id, session_id).thread_task == "first task"
-    assert store.get_thread_node(session_id, "thread_fork") is None
+    main_root = store.get_thread_node(session_id, session_id)
+    child = store.get_thread_node(session_id, "thread_child")
+    fork_root = store.get_thread_node(session_id, "thread_fork")
+    assert main_root is not None and main_root.root_thread_id == session_id
+    assert child is not None and child.root_thread_id == session_id
+    assert fork_root is not None and fork_root.root_thread_id == "thread_fork"
+    assert fork_root.thread_path == "/root" and fork_root.depth == 0
+    assert store.list_child_thread_nodes(session_id, "thread_fork") == []
+    assert store.get_thread_node(session_id, "thread_side") is None
+
+    fork_turn = store.get_node(session_id, "fork_turn")
+    assert isinstance(fork_turn, RuntimeState)
+    fork_child = _agent_create(session_id, fork_turn, name="worker", root_thread_id="thread_fork")
+    store.create_agent_threads(session_id, [fork_child])
+    assert store.get_thread_node(session_id, fork_child.node.thread_id).thread_path == "/root/worker"
+    assert store.get_thread_node(session_id, "thread_child").thread_path == "/root/worker"
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT schema_version FROM store_metadata").fetchone()[0] == 13
+        assert connection.execute("SELECT schema_version FROM store_metadata").fetchone()[0] == 14
 
     rejected_id = "session_rejected"
     rejected = paths.session_db(rejected_id)
-    _create_v12_database(rejected, rejected_id)
+    _create_v13_database(rejected, rejected_id)
     with sqlite3.connect(rejected) as connection:
         connection.execute("PRAGMA ignore_check_constraints=ON")
-        connection.execute("UPDATE store_metadata SET schema_version=11")
+        connection.execute("UPDATE store_metadata SET schema_version=12")
     before = rejected.read_bytes()
     with pytest.raises(RuntimeError, match="Unsupported state.db schema"):
         store.get_session(rejected_id)
     assert rejected.read_bytes() == before
 
 
-def test_v12_migration_rolls_back_when_running_head_is_ambiguous(tmp_path: Path) -> None:
+def test_v13_migration_rolls_back_when_sidebar_runtime_is_missing(tmp_path: Path) -> None:
     paths = ClientPaths(tmp_path / "data")
     paths.ensure()
-    session_id = "session_ambiguous"
+    session_id = "session_orphan"
     database = paths.session_db(session_id)
-    _create_v12_database(database, session_id)
-    with sqlite3.connect(database) as connection:
-        raw = connection.execute(
-            "SELECT payload_json FROM json_objects WHERE namespace='runtime_node' AND object_id='main_turn'"
-        ).fetchone()[0]
-        first = json.loads(raw)
-        first["status"] = "running"
-        second = {**first, "id": "main_turn_two", "timestamp": utc_iso()}
-        connection.execute(
-            "UPDATE json_objects SET payload_json=? WHERE namespace='runtime_node' AND object_id='main_turn'",
-            (json.dumps(first),),
-        )
-        connection.execute(
-            "INSERT INTO json_objects VALUES (?,?,?,?,?)",
-            (session_id, "runtime_node", second["id"], json.dumps(second), utc_iso()),
-        )
+    _create_v13_database(database, session_id, orphan_sidebar=True)
 
-    with pytest.raises(RuntimeError, match="only one running Turn"):
+    with pytest.raises(RuntimeError, match="no main or fork Runtime Thread"):
         SQLiteSessionStore(paths).list_runtime_threads(session_id)
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT schema_version FROM store_metadata").fetchone()[0] == 12
-        assert (
-            connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_threads'").fetchone()
-            is None
-        )
+        assert connection.execute("SELECT schema_version FROM store_metadata").fetchone()[0] == 13
+        assert connection.execute("PRAGMA table_info(thread_nodes)").fetchall()[2][1] == "parent_thread_id"
 
 
 def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_path: Path) -> None:
