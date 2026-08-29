@@ -36,6 +36,7 @@ def complete_run(
     run.history = runtime.state.messages
     run.status = "completed"
     run.final_answer = (message.content or "") if final_answer is None else final_answer
+    run.add_event("final", "Task completed")
     publish = runtime.services.publish or (lambda _event: None)
     kind = event_kind or ("plan" if run.mode == "plan" else "response")
     publish(RuntimeEvent(kind, run.final_answer, {"streamed": response_streamed}))
@@ -60,6 +61,7 @@ def fail_run(
     run.status = "failed"
     run.stop_reason = stop_reason
     run.final_answer = message
+    run.add_event("error", message, **data)
     publish = runtime.services.publish or (lambda _event: None)
     publish(RuntimeEvent("error", message, dict(data)))
 
@@ -86,6 +88,7 @@ def cancel_run(
     run.stop_reason = stop_reason
     run.final_answer = reason
     run.history = runtime.state.messages
+    run.add_event("cancelled", reason, stop_reason=stop_reason)
     publish = runtime.services.publish or (lambda _event: None)
     publish(RuntimeEvent("cancelled", reason, {"stop_reason": stop_reason}))
 
@@ -103,6 +106,7 @@ def record_plan_feedback(runtime: AgentRuntime, supplement: str | None) -> str |
         return None
     runtime.state.messages.append(UserMessage(content=f"[Plan feedback]\n{feedback}"))
     runtime.run.history = runtime.state.messages
+    runtime.run.add_event("feedback_received", "Human plan feedback received", supplement=feedback)
     publish = runtime.services.publish or (lambda _event: None)
     publish(RuntimeEvent("feedback_received", feedback))
     runtime.save()

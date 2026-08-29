@@ -17,7 +17,6 @@ from backend.tools import ToolRegistry
 from tests.local_store import session_store
 
 PLAN = "# Reviewed change\n\n## Summary\nImplement the reviewed change."
-APPROVED_PLAN = f"<approved_plan>\n{PLAN}\n</approved_plan>"
 
 
 def review_message(call_id: str = "review_1") -> AssistantMessage:
@@ -94,12 +93,12 @@ def test_plan_implement_keeps_control_call_as_ordinary_history(tmp_path: Path) -
     assert planner.agent_histories[-1] == [
         UserMessage(content="Plan the change"),
         completed_review_message(),
-        UserMessage(content=APPROVED_PLAN),
+        UserMessage(content=PLAN),
     ]
     assert all(message.role != "artifact" for message in service.runtime.state.messages)
 
 
-def test_plan_implement_after_compaction_keeps_session_and_wraps_approved_plan(tmp_path: Path) -> None:
+def test_plan_implement_after_compaction_keeps_session_and_uses_raw_plan(tmp_path: Path) -> None:
     planner = PlanMessagePlanner()
     service = build_service(tmp_path, planner)
     source = service.new_session("Source conversation")
@@ -116,7 +115,7 @@ def test_plan_implement_after_compaction_keeps_session_and_wraps_approved_plan(t
     assert result.mode == "agent"
     assert service.active_session is not None
     assert service.active_session.session_id == source.session_id
-    assert planner.agent_histories[-1][-1] == UserMessage(content=APPROVED_PLAN)
+    assert planner.agent_histories[-1][-1] == UserMessage(content=PLAN)
 
 
 def test_legacy_artifact_message_is_not_loadable() -> None:

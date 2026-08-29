@@ -55,7 +55,7 @@ REQUEST_USER_INPUT_SPEC = ToolSpec(
         "Use this only after read-only exploration cannot resolve an important product or implementation choice. "
         "Each question must provide two or three mutually exclusive options with concise trade-off descriptions. "
         "The client adds a separate free-form 'Other' option. Call this control tool by itself; do not "
-        "combine it with other tools in the same response."
+        "combine it with request_plan_review, web_search, web_fetch, read_file, glob, or grep in the same response."
     ),
     parameters=_PARAMETERS,
 )

@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 SOURCE = ROOT / "backend" / "src"
+CLOUD_SOURCE = ROOT / "cloud" / "src"
 
 
 def _module_imports(path: Path) -> set[str]:
@@ -25,10 +26,14 @@ def _package_imports(path: Path) -> set[str]:
 
 def _run_isolated_import(statement: str, forbidden: tuple[str, ...]) -> None:
     checks = "\n".join(f"assert {name!r} not in sys.modules, {name!r}" for name in forbidden)
+    # `backend/src` must not be on the path: the flat layout puts backend's own
+    # `cloud` subpackage directly under `backend/src`, which would shadow the
+    # standalone `cloud` package. `backend` resolves via the editable install.
+    environment = {**os.environ, "PYTHONPATH": str(CLOUD_SOURCE)}
     subprocess.run(
         [sys.executable, "-c", f"import sys\n{statement}\n{checks}"],
         cwd=ROOT,
-        env=os.environ,
+        env=environment,
         check=True,
         capture_output=True,
         text=True,
@@ -58,6 +63,7 @@ def test_jobs_import_does_not_load_outer_layers_or_third_party() -> None:
             "backend.mcp",
             "backend.api",
             "backend.storage",
+            "backend.sync",
             "backend.providers",
             "backend.planning",
             "requests",
@@ -71,26 +77,26 @@ def test_chat_completions_adapter_does_not_own_http_transport() -> None:
     assert "requests" not in imports
 
 
-def test_removed_account_cloud_and_sync_sources_are_absent() -> None:
-    removed_sources = (
-        ROOT / "cloud" / "pyproject.toml",
-        ROOT / "cloud" / "src" / "cloud",
-        SOURCE / "api" / "auth",
-        SOURCE / "api" / "sync_routes.py",
-        SOURCE / "cloud",
-        SOURCE / "storage" / "auth",
-        SOURCE / "sync",
+def test_backend_does_not_import_tui() -> None:
+    imports = _package_imports(SOURCE)
+    assert not any(name == "tui" or name.startswith("tui.") for name in imports)
+
+
+def test_cloud_app_does_not_load_backend_runtime() -> None:
+    _run_isolated_import(
+        "import cloud.api.app",
+        ("backend", "backend.runtime", "backend.providers", "backend.tools", "backend.storage"),
     )
-    for path in removed_sources:
-        if path.suffix:
-            assert not path.exists()
-        else:
-            assert not any(path.rglob("*.py"))
+
+
+def test_cloud_source_has_no_local_runtime_or_sqlite_imports() -> None:
+    imports = _package_imports(CLOUD_SOURCE / "cloud")
+    assert not any(name == "sqlite3" or name == "backend" or name.startswith("backend.") for name in imports)
 
 
 def test_backend_has_no_cloud_database_or_mail_transport_imports() -> None:
     imports = _package_imports(SOURCE)
-    forbidden = {"psycopg", "smtplib", "pwdlib", "backend.cloud", "backend.sync"}
+    forbidden = {"psycopg", "smtplib", "pwdlib"}
     assert not any(name.split(".", 1)[0] in forbidden for name in imports)
 
 

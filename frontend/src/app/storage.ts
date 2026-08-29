@@ -1,6 +1,6 @@
 import type { SessionInfo } from "../api";
 import type { ChatMessage, Conversation } from "../types";
-import { normalizeRuntimeNode } from "./runtime/runtimeNodeNormalization";
+import { normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
 export const STORAGE_KEY = "mini-agent-conversations";
 export const ARCHIVE_READ_KEY = "mini-agent-archive-read";
@@ -64,9 +64,10 @@ export function loadConversations(key: string): Conversation[] {
   }
 }
 
-export function loadArchiveReadState(): ArchiveReadState {
+export function loadArchiveReadState(userId: string | undefined): ArchiveReadState {
+  if (!userId) return {};
   try {
-    const raw = localStorage.getItem(ARCHIVE_READ_KEY);
+    const raw = localStorage.getItem(`${ARCHIVE_READ_KEY}:${userId}`);
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};

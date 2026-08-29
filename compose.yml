@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mini_agent
+      POSTGRES_USER: mini_agent
+      POSTGRES_PASSWORD: mini_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - mini_agent_postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mini_agent -d mini_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  cloud:
+    build:
+      context: ./cloud
+    environment:
+      DATABASE_URL: postgresql://mini_agent:mini_agent@postgres:5432/mini_agent
+      MINI_AGENT_SECRET_KEY: ${MINI_AGENT_SECRET_KEY:?set a 32-byte cloud master secret}
+      MINI_AGENT_CLOUD_HOST: 0.0.0.0
+      MINI_AGENT_CLOUD_PORT: 8100
+      # Optional SMTP settings stay in the cloud process.  Leaving the host
+      # or sender empty intentionally selects the development NullMailer.
+      MINI_AGENT_SMTP_HOST: ${MINI_AGENT_SMTP_HOST:-}
+      MINI_AGENT_SMTP_PORT: ${MINI_AGENT_SMTP_PORT:-587}
+      MINI_AGENT_SMTP_USERNAME: ${MINI_AGENT_SMTP_USERNAME:-}
+      MINI_AGENT_SMTP_PASSWORD: ${MINI_AGENT_SMTP_PASSWORD:-}
+      MINI_AGENT_SMTP_FROM: ${MINI_AGENT_SMTP_FROM:-}
+      MINI_AGENT_SMTP_STARTTLS: ${MINI_AGENT_SMTP_STARTTLS:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/ready', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  mini_agent_postgres_data:

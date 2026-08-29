@@ -1,4 +1,4 @@
-export type Page = "chat" | "trash" | "benchmark";
+export type Page = "chat" | "trash" | "memory" | "benchmark";
 export type ChatMode = "agent" | "plan";
 export type PermissionMode = "read_only" | "workspace_write" | "full_access";
 export type DisplayMode = "minimal" | "medium" | "verbose" | "developer";
@@ -21,9 +21,17 @@ export interface SessionFileInfo {
   is_image: boolean;
 }
 
-export interface LocalProfile {
+export interface AuthUser {
+  id: string;
+  email: string | null;
+  kind?: "account" | "guest";
+  guest_import?: { guest_id: string; status: "pending"; created_at: number; updated_at: number } | null;
   display_name: string;
-  agent_preferences: string;
+  agent_preferences?: string;
+}
+
+export interface AuthResponse {
+  user: AuthUser;
 }
 
 export interface ToolEvent {
@@ -59,7 +67,6 @@ export interface RuntimeNodeUsage {
 
 export interface TurnItem {
   type: string;
-  status: "running" | "failed" | "success";
   text?: string;
   [key: string]: unknown;
 }
@@ -70,15 +77,8 @@ export interface TurnMessage {
   [key: string]: unknown;
 }
 
-/** Synthetic Session root. Its wire shape intentionally contains identifiers only. */
-export interface RuntimeRootNode {
-  session_id: string;
-  thread_id: string;
-  id: string;
-}
-
-/** Canonical executable Turn shared by the API and web reducer. */
-export interface RuntimeTurnNode {
+/** Canonical persisted node shared by API, TUI and the web reducer. */
+export interface RuntimeStateNode {
   thread_id: string;
   parent_thread_id: string;
   session_id: string;
@@ -101,46 +101,6 @@ export interface RuntimeTurnNode {
   data: TurnMessage[][];
 }
 
-export type RuntimeTreeNode = RuntimeRootNode | RuntimeTurnNode;
-export type RuntimeStateNode = RuntimeTurnNode;
-
-export interface TurnTraceToolOrigin {
-  kind: "local" | "mcp";
-  server?: string;
-  tool: string;
-}
-
-export interface TurnTraceTool {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-  origin: TurnTraceToolOrigin;
-}
-
-export interface TurnTraceContext {
-  system_message: string;
-  active_skills: Array<Record<string, unknown>>;
-  tools: TurnTraceTool[];
-  initialized_at: string;
-}
-
-export interface TurnTraceItem {
-  sequence: number;
-  message_idx: number;
-  item_idx: number;
-  role: "user" | "assistant";
-  item: TurnItem;
-  completed_at: string;
-}
-
-export interface TurnTraceResponse {
-  turn: RuntimeStateNode;
-  data_idx: number;
-  context: TurnTraceContext | null;
-  items: TurnTraceItem[];
-  last_sequence: number;
-}
-
 export type NodeFrameType = "turn.snapshot" | "turn.delta";
 
 export type RuntimeNodePatch = Partial<Omit<RuntimeStateNode,
@@ -150,8 +110,7 @@ export type RuntimeNodePatch = Partial<Omit<RuntimeStateNode,
 export type TurnDeltaOperation =
   | { op: "append_message"; data_idx: number; message_idx: number; message: TurnMessage }
   | { op: "append_item"; data_idx: number; message_idx: number; item_idx: number; item: TurnItem }
-  | { op: "append_text"; data_idx: number; message_idx: number; item_idx: number; delta: string }
-  | { op: "set_item_status"; data_idx: number; message_idx: number; item_idx: number; status: TurnItem["status"] };
+  | { op: "append_text"; data_idx: number; message_idx: number; item_idx: number; delta: string };
 
 export interface RuntimeNodeSnapshotFrame {
   type: "turn.snapshot";
@@ -228,7 +187,7 @@ export interface Conversation {
   deletedAt?: string;
   messagesLoaded?: boolean;
   lastNodeId?: string;
-  runtimeNodes?: RuntimeTreeNode[];
+  runtimeNodes?: RuntimeStateNode[];
   threadId?: string;
   activeTurnId?: string;
   projectId?: string;

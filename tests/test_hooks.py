@@ -31,7 +31,7 @@ from backend.sandbox import (
     SandboxLauncher,
     SandboxLimits,
 )
-from backend.sandbox.control.operation import sandbox_operation
+from backend.sandbox.operation import sandbox_operation
 from backend.tools import Tool, ToolError, ToolInvocationContext, ToolRegistry, WorkspaceCommand
 
 
@@ -189,12 +189,11 @@ def test_model_managers_receive_before_context_and_after_outcome(monkeypatch) ->
     assert observed == [("before", None), ("after", "succeeded")]
 
 
-@pytest.mark.parametrize("tool_name", ["web_search", "web_fetch", "mcp_demo_echo"])
-def test_external_tool_still_requires_approval_in_workspace_write(tool_name: str) -> None:
+def test_external_mcp_tool_call_is_authorized_by_before_tool_manager() -> None:
     calls: list[str] = []
     approvals = []
 
-    class ExternalToolPlanner:
+    class McpPlanner:
         def __init__(self) -> None:
             self.calls = 0
 
@@ -204,8 +203,8 @@ def test_external_tool_still_requires_approval_in_workspace_write(tool_name: str
                 return AssistantMessage(
                     tool_messages=[
                         ToolMessage(
-                            name=tool_name,
-                            call_id="call_external",
+                            name="mcp_demo_echo",
+                            call_id="call_mcp",
                             arguments={"value": "ok"},
                         )
                     ]
@@ -215,89 +214,28 @@ def test_external_tool_still_requires_approval_in_workspace_write(tool_name: str
     tools = ToolRegistry(
         [
             Tool(
-                tool_name,
-                "External tool",
+                "mcp_demo_echo",
+                "External MCP echo",
                 lambda value: calls.append(value) or value,
                 requires_confirmation=True,
-                read_only=tool_name.startswith("web_"),
+                read_only=False,
             )
         ]
     )
-    runner = AgentRunner(ExternalToolPlanner(), tools)
+    runner = AgentRunner(McpPlanner(), tools)
     runtime = runner.new_runtime(
-        task="call external tool",
+        task="call mcp",
         interrupt=lambda request: approvals.append(request) or InterruptDecision("continue"),
     )
-    runtime.state.permission_mode = "workspace_write"
 
     result = runner.run(runtime)
 
     assert result.status == "completed"
     assert calls == ["ok"]
-    assert approvals[0].data["tool"] == tool_name
+    assert approvals[0].data["tool"] == "mcp_demo_echo"
 
 
-@pytest.mark.parametrize(
-    ("tool_name", "arguments"),
-    [
-        ("create_directory", {"path": "created/nested"}),
-        ("write_file", {"path": "written.txt", "content": "created"}),
-        ("edit_file", {"path": "edited.txt", "old_text": "before", "new_text": "after"}),
-    ],
-)
-@pytest.mark.parametrize(
-    ("permission_mode", "expected_approvals"),
-    [("read_only", 1), ("workspace_write", 0), ("full_access", 0)],
-)
-def test_workspace_file_mutation_approval_matrix_executes_real_handler(
-    tmp_path: Path,
-    tool_name: str,
-    arguments: dict[str, object],
-    permission_mode: str,
-    expected_approvals: int,
-) -> None:
-    if tool_name == "edit_file":
-        (tmp_path / "edited.txt").write_text("before", encoding="utf-8")
-
-    class FileToolPlanner:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def decide(self, _runtime):
-            self.calls += 1
-            if self.calls == 1:
-                return AssistantMessage(
-                    tool_messages=[ToolMessage(name=tool_name, call_id="call_file", arguments=arguments)]
-                )
-            return AssistantMessage(content="done")
-
-    approvals = []
-    events = []
-    runner = AgentRunner(FileToolPlanner(), ToolRegistry(tmp_path), workspace_root=str(tmp_path))
-    runtime = runner.new_runtime(
-        task="mutate workspace",
-        on_event=events.append,
-        interrupt=lambda request: approvals.append(request) or InterruptDecision("continue"),
-    )
-    runtime.state.permission_mode = permission_mode
-
-    result = runner.run(runtime)
-
-    assert result.status == "completed"
-    assert len(approvals) == expected_approvals
-    assert [event.kind for event in events].count("approval_requested") == expected_approvals
-    if tool_name == "create_directory":
-        assert (tmp_path / "created" / "nested").is_dir()
-    elif tool_name == "write_file":
-        assert (tmp_path / "written.txt").read_text(encoding="utf-8") == "created"
-    else:
-        assert (tmp_path / "edited.txt").read_text(encoding="utf-8") == "after"
-
-
-@pytest.mark.parametrize("permission_mode", ["read_only", "workspace_write"])
-def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(
-    tmp_path: Path, permission_mode: str
-) -> None:
+def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(tmp_path: Path) -> None:
     class RecordingLauncher(SandboxLauncher):
         def __init__(self) -> None:
             super().__init__(is_windows=os.name == "nt", allow_local_backend=True, environment=os.environ)
@@ -335,13 +273,12 @@ def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(
         tools,
         workspace_root=str(tmp_path),
         sandbox_launcher=launcher,
-        sandbox_config={},
+        sandbox_config={"enabled": True},
     )
     runtime = runner.new_runtime(
         task="run approved command",
         interrupt=lambda request: requests.append(request) or InterruptDecision("continue"),
     )
-    runtime.state.permission_mode = permission_mode
 
     result = runner.run(runtime)
 

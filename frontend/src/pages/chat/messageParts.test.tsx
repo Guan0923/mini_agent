@@ -1,28 +1,25 @@
 import { App as AntApp } from "antd";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatMessage, DisplayMode, TurnItem } from "../../types";
-import { AssistantMessage, MessageActions, summarizeReasoningTail, ToolLine } from "./messageParts";
+import type { ChatMessage, TurnItem } from "../../types";
+import { AssistantMessage, MessageActions, summarizeThinking, ToolLine } from "./messageParts";
 
 describe("runtime thinking summary", () => {
-  it("normalizes whitespace into one line", () => {
-    expect(summarizeReasoningTail("\n\n  第一段思考  \n\n第二段\t继续 ")).toBe("第一段思考 第二段 继续");
+  it("uses the first non-empty paragraph and trims its edges", () => {
+    expect(summarizeThinking("\n\n  第一段思考  \n\n第二段")).toBe("第一段思考");
   });
 
-  it("keeps exactly two hundred and fifty Unicode graphemes without an ellipsis", () => {
-    const value = "中😀".repeat(125);
-    expect(Array.from(summarizeReasoningTail(value))).toHaveLength(250);
-    expect(summarizeReasoningTail(value)).toBe(value);
+  it("keeps exactly one hundred Unicode code points without an ellipsis", () => {
+    const value = "中😀".repeat(50);
+    expect(Array.from(summarizeThinking(value))).toHaveLength(100);
+    expect(summarizeThinking(value)).toBe(value);
   });
 
-  it("keeps the last two hundred and fifty graphemes and adds one leading ellipsis", () => {
-    const tail = "👨‍👩‍👧‍👦".repeat(250);
-    const summary = summarizeReasoningTail(`应被截断的前缀${tail}`);
-    expect(summary).toBe(`…${tail}`);
-  });
-
-  it("returns an empty fallback signal for blank content", () => {
-    expect(summarizeReasoningTail(" \n\t ")).toBe("");
+  it("adds five ASCII periods only when the paragraph is longer", () => {
+    const value = "中文😀".repeat(51);
+    const summary = summarizeThinking(value);
+    expect(summary.slice(0, -5)).toBe(Array.from(value).slice(0, 100).join(""));
+    expect(summary.endsWith(".....")).toBe(true);
   });
 });
 
@@ -43,33 +40,25 @@ describe("message actions", () => {
     expect(screen.queryByRole("button", { name: "回溯" })).not.toBeInTheDocument();
   });
 
-  it("keeps thinking Markdown compact without changing regular paragraph spacing", async () => {
+  it("keeps thinking Markdown at 1.5 line height without pre-wrapped outer whitespace", async () => {
     const fs = await vi.importActual<{ readFileSync(path: string, encoding: "utf8"): string }>("node:fs");
     const runtime = globalThis as typeof globalThis & { process: { cwd(): string } };
-    const css = ["chat-runtime.css", "chat-markdown.css"]
-      .map((file) => fs.readFileSync(`${runtime.process.cwd()}/src/styles/${file}`, "utf8"))
-      .join("\n");
+    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat.css`, "utf8");
     const rule = css.slice(css.indexOf(".thinking-content {"), css.indexOf(".shimmer-text {"));
 
     expect(rule).toMatch(/\.thinking-content\s*{[^}]*line-height:\s*1\.5;/s);
     expect(rule).toMatch(/\.thinking-content\s*{[^}]*white-space:\s*normal;/s);
     expect(rule).toMatch(/\.thinking-content \.markdown\s*{[^}]*white-space:\s*normal;/s);
-    expect(css).toMatch(/\.thinking-content \.markdown p\s*{[^}]*margin:\s*0;/s);
 
     const { container } = render(
       <>
         <style>{css}</style>
-        <div className="thinking-content"><div className="markdown"><p>第一段</p><p>第二段</p></div></div>
-        <div className="markdown regular-markdown"><p>普通第一段</p><p>普通第二段</p></div>
+        <div className="thinking-content"><div className="markdown">第一行<br />第二行</div></div>
       </>,
     );
     const thinking = container.querySelector<HTMLElement>(".thinking-content")!;
-    const thinkingParagraph = container.querySelector<HTMLElement>(".thinking-content .markdown p")!;
-    const regularParagraph = container.querySelector<HTMLElement>(".regular-markdown p")!;
     expect(window.getComputedStyle(thinking).lineHeight).toBe("1.5");
     expect(window.getComputedStyle(thinking).whiteSpace).toBe("normal");
-    expect(window.getComputedStyle(thinkingParagraph).marginBottom).toBe("0px");
-    expect(window.getComputedStyle(regularParagraph).marginBottom).toBe("10px");
   });
 });
 
@@ -86,12 +75,12 @@ function assistant(items: TurnItem[], running = false): ChatMessage {
   };
 }
 
-function renderAssistant(message: ChatMessage, display: DisplayMode = "developer") {
+function renderAssistant(message: ChatMessage) {
   return (
     <AntApp>
       <AssistantMessage
         msg={message}
-        display={display}
+        display="developer"
         busy={false}
         onDecision={vi.fn().mockResolvedValue(undefined)}
       />
@@ -102,7 +91,7 @@ function renderAssistant(message: ChatMessage, display: DisplayMode = "developer
 describe("assistant Item presentation", () => {
   it("hides Skill metadata and shows the running indicator instead of none", () => {
     render(renderAssistant(assistant([
-      { type: "skill_snapshot", event: "skills_selected", text: "none", skills: [], status: "success" },
+      { type: "skill_snapshot", event: "skills_selected", text: "none", skills: [] },
     ], true)));
 
     expect(screen.queryByText("none")).not.toBeInTheDocument();
@@ -111,7 +100,7 @@ describe("assistant Item presentation", () => {
 
   it("renders one pending tool approval card", () => {
     const message = assistant([
-      { type: "approval", event: "decision_requested", decision_id: "dec-search", kind: "tool", call_id: "call-search", tool: "web_search", arguments: { query: "local" }, text: "Call tool web_search?", status: "success" },
+      { type: "approval", event: "decision_requested", decision_id: "dec-search", kind: "tool", call_id: "call-search", tool: "web_search", arguments: { query: "local" }, text: "Call tool web_search?" },
     ], true);
     message.decision = {
       decision_id: "dec-search",
@@ -129,10 +118,10 @@ describe("assistant Item presentation", () => {
 
   it("renders resolved approval once in canonical Item order", () => {
     const { container } = render(renderAssistant(assistant([
-      { type: "tool_call", call_id: "call-search", name: "web_search", arguments: { query: "local" }, status: "success" },
-      { type: "approval", event: "approval_resolved", approval_status: "allowed", call_id: "call-search", tool: "web_search", status: "success" },
-      { type: "tool_result", call_id: "call-search", tool: "web_search", content: "local result", status: "success" },
-      { type: "text", text: "done", status: "success" },
+      { type: "tool_call", call_id: "call-search", name: "web_search", arguments: { query: "local" } },
+      { type: "approval", event: "approval_resolved", approval_status: "allowed", call_id: "call-search", tool: "web_search" },
+      { type: "tool_result", call_id: "call-search", tool: "web_search", content: "local result", status: "succeeded" },
+      { type: "text", text: "done" },
     ])));
 
     expect(screen.getAllByText("已允许 web_search")).toHaveLength(1);
@@ -147,7 +136,7 @@ describe("assistant Item presentation", () => {
 
   it("renders a denied approval as one static status", () => {
     render(renderAssistant(assistant([
-      { type: "approval", event: "approval_resolved", approval_status: "denied", call_id: "call-search", tool: "web_search", status: "success" },
+      { type: "approval", event: "approval_resolved", approval_status: "denied", call_id: "call-search", tool: "web_search" },
     ])));
 
     expect(screen.getAllByText("已拒绝 web_search")).toHaveLength(1);
@@ -156,13 +145,13 @@ describe("assistant Item presentation", () => {
 
   it("renders every Item in canonical order and keeps answers outside Collapse", async () => {
     const items: TurnItem[] = [
-      { type: "reasoning", text: "第一次思考", status: "success" },
-      { type: "tool_call", call_id: "call-1", name: "read_file", arguments: { path: "README.md" }, status: "success" },
-      { type: "tool_result", call_id: "call-1", tool: "read_file", content: "工具结果", status: "success" },
-      { type: "text", text: "中间回答", status: "success" },
-      { type: "reasoning", text: "第二次思考", status: "success" },
-      { type: "tool_call", call_id: "call-2", name: "glob", arguments: { pattern: "*.ts" }, status: "success" },
-      { type: "text", text: "最终回答", status: "success" },
+      { type: "reasoning", text: "第一次思考" },
+      { type: "tool_call", call_id: "call-1", name: "read_file", arguments: { path: "README.md" } },
+      { type: "tool_result", call_id: "call-1", tool: "read_file", content: "工具结果" },
+      { type: "text", text: "中间回答" },
+      { type: "reasoning", text: "第二次思考" },
+      { type: "tool_call", call_id: "call-2", name: "glob", arguments: { pattern: "*.ts" } },
+      { type: "text", text: "最终回答" },
     ];
     const { container } = render(renderAssistant(assistant(items)));
 
@@ -187,221 +176,45 @@ describe("assistant Item presentation", () => {
     expect(resultCollapse).toHaveTextContent("工具结果");
   });
 
-  it.each<DisplayMode>(["medium", "verbose", "developer"])(
-    "starts every runtime Collapse folded in %s mode",
-    (display) => {
-      const activeItems: TurnItem[] = [
-        { type: "reasoning", text: "实时思考", status: "running" },
-        { type: "tool_call", call_id: "call-folded", name: "read_file", arguments: {}, status: "running" },
-        { type: "tool_result", call_id: "call-folded", tool: "read_file", content: "实时结果", status: "running" },
-      ];
-
-      for (const item of activeItems) {
-        const view = render(renderAssistant(assistant([item], true), display));
-        expect(view.container.querySelector(".runtime-item-collapse .ant-collapse-item")).not.toHaveClass("ant-collapse-item-active");
-        view.unmount();
-      }
-    },
-  );
-
-  it("keeps manual expansion across active changes while new Items stay folded", async () => {
-    const first: TurnItem = { type: "reasoning", text: "流式思考", status: "running" };
-    const tool: TurnItem = { type: "tool_call", call_id: "call-1", name: "read_file", arguments: {}, status: "running" };
-    const result: TurnItem = { type: "tool_result", call_id: "call-1", tool: "read_file", content: "读取完成", status: "running" };
+  it("opens only the current Item, folds it when the next Item arrives, and preserves manual reopening", async () => {
+    const first: TurnItem = { type: "reasoning", text: "流式思考" };
+    const tool: TurnItem = { type: "tool_call", call_id: "call-1", name: "read_file", arguments: {} };
     const view = render(renderAssistant(assistant([first], true)));
 
     let collapses = view.container.querySelectorAll(".runtime-item-collapse");
-    expect(collapses[0].querySelector(".ant-collapse-item")).not.toHaveClass("ant-collapse-item-active");
-    expect(collapses[0].querySelector(".ant-collapse-header")).toHaveTextContent("流式思考");
-    expect(collapses[0].querySelectorAll(".runtime-status-dot")).toHaveLength(0);
+    expect(collapses[0].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active");
+    expect(collapses[0].querySelector(".shimmer-text.is-active")).toHaveTextContent("思考");
+
+    view.rerender(renderAssistant(assistant([first, tool], true)));
+    await waitFor(() => {
+      collapses = view.container.querySelectorAll(".runtime-item-collapse");
+      expect(collapses[0].querySelector(".ant-collapse-item")).not.toHaveClass("ant-collapse-item-active");
+      expect(collapses[1].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active");
+    });
     expect(collapses[0].querySelector(".shimmer-text.is-active")).toBeNull();
+    expect(collapses[1].querySelector(".shimmer-text.is-active")).toHaveTextContent("调用 read_file");
 
     fireEvent.click(collapses[0].querySelector(".ant-collapse-header")!);
     await waitFor(() => expect(collapses[0].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active"));
-    expect(collapses[0].querySelector(".ant-collapse-header")).toHaveTextContent("正在思考中");
-    expect(collapses[0].querySelectorAll(".runtime-status-dot")).toHaveLength(3);
-    expect(collapses[0].querySelector(".shimmer-text.is-active")).toBeNull();
+    view.rerender(renderAssistant(assistant([first, tool], true)));
+    expect(view.container.querySelectorAll(".runtime-item-collapse")[0].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active");
 
-    const updatedFirst: TurnItem = { type: "reasoning", text: "流式思考继续", status: "running" };
-    view.rerender(renderAssistant(assistant([updatedFirst], true)));
-    collapses = view.container.querySelectorAll(".runtime-item-collapse");
-    expect(collapses[0].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active");
-    expect(collapses[0].querySelector(".ant-collapse-header")).toHaveTextContent("正在思考中");
-    expect(collapses[0].querySelector(".shimmer-text.is-active")).toBeNull();
-
-    view.rerender(renderAssistant(assistant([updatedFirst, tool], true)));
-    collapses = view.container.querySelectorAll(".runtime-item-collapse");
-    expect(collapses[0].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active");
-    expect(collapses[1].querySelector(".ant-collapse-item")).not.toHaveClass("ant-collapse-item-active");
-    expect(collapses[0].querySelector(".shimmer-text.is-active")).toBeNull();
-    expect(collapses[0].querySelector(".ant-collapse-header")).toHaveTextContent("思考详情");
-    expect(collapses[1].querySelector(".ant-collapse-header")).toHaveTextContent("正在调用 read_file");
-    expect(collapses[1].querySelectorAll(".runtime-status-dot")).toHaveLength(3);
-    expect(collapses[1].querySelector(".shimmer-text.is-active")).toHaveTextContent("正在调用 read_file");
-
-    fireEvent.click(collapses[1].querySelector(".ant-collapse-header")!);
-    await waitFor(() => expect(collapses[1].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active"));
-    expect(collapses[1].querySelector(".shimmer-text.is-active")).toBeNull();
-    expect(collapses[1].querySelectorAll(".runtime-status-dot")).toHaveLength(3);
-
-    view.rerender(renderAssistant(assistant([updatedFirst, tool, result], true)));
-    collapses = view.container.querySelectorAll(".runtime-item-collapse");
-    expect(collapses[0].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active");
-    expect(collapses[1].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active");
-    expect(collapses[2].querySelector(".ant-collapse-item")).not.toHaveClass("ant-collapse-item-active");
-    expect(collapses[1].querySelector(".ant-collapse-header")).toHaveTextContent("调用 read_file");
-    expect(collapses[2].querySelector(".ant-collapse-header")).toHaveTextContent("正在处理 read_file 结果");
-    expect(collapses[2].querySelector(".shimmer-text.is-active")).toHaveTextContent("正在处理 read_file 结果");
-
-    fireEvent.click(collapses[2].querySelector(".ant-collapse-header")!);
-    await waitFor(() => expect(collapses[2].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active"));
+    view.rerender(renderAssistant(assistant([first, tool], false)));
+    await waitFor(() => expect(view.container.querySelectorAll(".runtime-item-collapse")[1].querySelector(".ant-collapse-item")).not.toHaveClass("ant-collapse-item-active"));
+    expect(view.container.querySelector(".shimmer-text.is-active")).toBeNull();
   });
 
-  it("keeps folded reasoning summaries pinned to the right edge", async () => {
-    let resizeCallback: ResizeObserverCallback | undefined;
-    class MockResizeObserver {
-      constructor(callback: ResizeObserverCallback) {
-        resizeCallback = callback;
-      }
-
-      observe = vi.fn();
-      unobserve = vi.fn();
-      disconnect = vi.fn();
-    }
-    const originalResizeObserver = window.ResizeObserver;
-    window.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
-
-    const view = render(renderAssistant(assistant([{ type: "reasoning", text: "初始思考", status: "running" }], true)));
-    const collapse = view.container.querySelector(".runtime-item-collapse")!;
-    expect(collapse.querySelector(".ant-collapse-item")).not.toHaveClass("ant-collapse-item-active");
-
-    const viewport = collapse.querySelector<HTMLElement>(".runtime-summary-viewport")!;
-    const summaryText = viewport.querySelector(".runtime-summary-text");
-    expect(viewport.querySelector(".shimmer-text")).toBeNull();
-    let clientWidth = 120;
-    let scrollWidth = 80;
-    Object.defineProperties(viewport, {
-      clientWidth: { configurable: true, get: () => clientWidth },
-      scrollWidth: { configurable: true, get: () => scrollWidth },
-    });
-
-    viewport.scrollLeft = 42;
-    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "短摘要更新", status: "running" }], true)));
-    expect(viewport.scrollLeft).toBe(0);
-    expect(collapse.querySelector(".runtime-summary-viewport")).toBe(viewport);
-    expect(viewport.querySelector(".runtime-summary-text")).toBe(summaryText);
-    expect(viewport.querySelector(".shimmer-text")).toBeNull();
-
-    clientWidth = 100;
-    scrollWidth = 260;
-    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "足够长的摘要更新并贴住最新字符", status: "running" }], true)));
-    expect(viewport.scrollLeft).toBe(160);
-
-    clientWidth = 150;
-    resizeCallback?.([], {} as ResizeObserver);
-    expect(viewport.scrollLeft).toBe(110);
-
-    clientWidth = 90;
-    scrollWidth = 240;
-    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "已完成且仍然跟随尾部", status: "success" }], false)));
-    const completedViewport = view.container.querySelector<HTMLElement>(".runtime-summary-viewport")!;
-    Object.defineProperties(completedViewport, {
-      clientWidth: { configurable: true, get: () => clientWidth },
-      scrollWidth: { configurable: true, get: () => scrollWidth },
-    });
-    resizeCallback?.([], {} as ResizeObserver);
-    expect(completedViewport.scrollLeft).toBe(150);
-    expect(completedViewport.querySelector(".shimmer-text.is-active")).toBeNull();
-    expect(completedViewport.querySelector(".runtime-summary-text")).toHaveTextContent("已完成且仍然跟随尾部");
-
-    window.ResizeObserver = originalResizeObserver;
-  });
-
-  it("uses static completed labels and distinguishes failed tool results", async () => {
-    const items: TurnItem[] = [
-      { type: "reasoning", text: "完成后的思考摘要", status: "success" },
-      { type: "tool_call", name: "read_file", arguments: {}, status: "success" },
-      { type: "tool_result", tool: "read_file", content: "成功结果", status: "success" },
-      { type: "tool_result", tool: "write_file", content: "失败结果", status: "failed" },
-    ];
-    const { container } = render(renderAssistant(assistant(items)));
-    const collapses = container.querySelectorAll(".runtime-item-collapse");
-
-    expect(collapses[0].querySelector(".ant-collapse-header")).toHaveTextContent("完成后的思考摘要");
-    expect(collapses[1].querySelector(".ant-collapse-header")).toHaveTextContent("调用 read_file");
-    expect(collapses[2].querySelector(".ant-collapse-header")).toHaveTextContent("read_file 结果");
-    expect(collapses[3].querySelector(".ant-collapse-header")).toHaveTextContent("write_file 失败");
-
-    fireEvent.click(collapses[0].querySelector(".ant-collapse-header")!);
-    fireEvent.click(collapses[1].querySelector(".ant-collapse-header")!);
-    await waitFor(() => expect(collapses[0].querySelector(".ant-collapse-item")).toHaveClass("ant-collapse-item-active"));
-    expect(collapses[0].querySelector(".ant-collapse-header")).toHaveTextContent("思考详情");
-    expect(collapses[1].querySelector(".ant-collapse-header")).toHaveTextContent("调用 read_file");
-    expect(container.querySelector(".shimmer-text.is-active")).toBeNull();
-  });
-
-  it("falls back to the active reasoning status when folded content is empty", () => {
-    const { container } = render(renderAssistant(assistant([{ type: "reasoning", text: "", status: "running" }], true)));
-    const collapse = container.querySelector(".runtime-item-collapse")!;
-    expect(collapse.querySelector(".ant-collapse-item")).not.toHaveClass("ant-collapse-item-active");
-    expect(collapse.querySelector(".shimmer-text.is-active")).toHaveTextContent("正在思考中");
-    expect(collapse.querySelectorAll(".runtime-status-dot")).toHaveLength(3);
-  });
-
-  it("renders only the current non-collapsible status in minimal mode", () => {
-    const view = render(renderAssistant(assistant([
-      { type: "reasoning", text: "历史思考", status: "success" },
-      { type: "tool_call", name: "read_file", arguments: { path: "README.md" }, status: "success" },
-      { type: "tool_result", tool: "read_file", content: "隐藏结果", status: "running" },
-    ], true), "minimal"));
-
-    expect(view.container.querySelector(".runtime-item-collapse")).toBeNull();
-    expect(view.container.querySelectorAll(".runtime-minimal-status")).toHaveLength(1);
-    expect(screen.getByRole("status", { name: "正在处理 read_file 结果" })).toBeInTheDocument();
-    expect(view.container.querySelectorAll(".runtime-status-dot")).toHaveLength(3);
-    expect(view.container).not.toHaveTextContent("历史思考");
-    expect(view.container).not.toHaveTextContent("隐藏结果");
-
-    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "实时思考", status: "running" }], true), "minimal"));
-    expect(screen.getByRole("status", { name: "思考中" })).toBeInTheDocument();
-    expect(view.container).not.toHaveTextContent("实时思考");
-
-    view.rerender(renderAssistant(assistant([{ type: "reasoning", text: "完成思考", status: "success" }]), "minimal"));
-    expect(view.container.querySelector(".runtime-minimal-status")).toBeNull();
-    expect(view.container.querySelector(".runtime-item-collapse")).toBeNull();
-  });
-
-  it("uses one non-repeating shimmer band and honors reduced motion for both animations", async () => {
+  it("uses white shimmer only for active Collapse titles and honors reduced motion", async () => {
     const fs = await vi.importActual<{ readFileSync(path: string, encoding: "utf8"): string }>("node:fs");
     const runtime = globalThis as typeof globalThis & { process: { cwd(): string } };
-    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat-runtime.css`, "utf8");
+    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat.css`, "utf8");
     const activeRule = css.slice(css.indexOf(".shimmer-text.is-active"), css.indexOf("@keyframes runtime-summary-shimmer"));
     const reducedMotion = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
 
     expect(activeRule).toContain("#ffffff");
     expect(activeRule).toMatch(/animation:\s*runtime-summary-shimmer/);
-    expect(activeRule).toMatch(/background-repeat:\s*no-repeat/);
-    expect(css).toMatch(/\.runtime-status-dot\s*{[^}]*animation:\s*runtime-status-dot 900ms ease-in-out infinite;/s);
-    expect(css).toMatch(/\.runtime-status-dot:nth-child\(2\)\s*{[^}]*animation-delay:\s*120ms;/s);
-    expect(css).toMatch(/\.runtime-status-dot:nth-child\(3\)\s*{[^}]*animation-delay:\s*240ms;/s);
-    expect(css).toMatch(/@keyframes runtime-status-dot[\s\S]*transform:\s*translateY\(-3px\);[\s\S]*background-color:\s*#ffffff;/);
     expect(reducedMotion).toMatch(/\.shimmer-text\.is-active\s*{[^}]*animation:\s*none;/s);
     expect(reducedMotion).toMatch(/-webkit-text-fill-color:\s*currentColor/);
-    expect(reducedMotion).toMatch(/\.runtime-status-dot\s*{[^}]*animation:\s*none;/s);
-  });
-
-  it("uses one unclipped summary track and matching header and body padding", async () => {
-    const fs = await vi.importActual<{ readFileSync(path: string, encoding: "utf8"): string }>("node:fs");
-    const runtime = globalThis as typeof globalThis & { process: { cwd(): string } };
-    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat-runtime.css`, "utf8");
-
-    expect(css).toMatch(/\.runtime-collapse\s*{[^}]*--runtime-collapse-inline-padding:\s*12px;/s);
-    expect(css).toMatch(/\.runtime-collapse \.ant-collapse-header\s*{[^}]*padding-inline:\s*var\(--runtime-collapse-inline-padding\)/s);
-    expect(css).toMatch(/\.runtime-collapse \.ant-collapse-body\s*{[^}]*padding-inline:\s*var\(--runtime-collapse-inline-padding\)/s);
-    expect(css).toMatch(/\.runtime-collapse \.ant-collapse-expand-icon\s*{[^}]*position:\s*absolute;[^}]*inset-inline-start:\s*0;/s);
-    expect(css).toMatch(/\.runtime-summary-viewport\s*{[^}]*width:\s*100%;[^}]*overflow:\s*hidden;/s);
-    expect(css).toMatch(/\.runtime-summary-track\s*{[^}]*width:\s*max-content;[^}]*white-space:\s*nowrap;/s);
-    expect(css).toMatch(/\.runtime-summary-viewport \.runtime-summary-text\s*{[^}]*overflow:\s*visible;[^}]*text-overflow:\s*clip;/s);
   });
 
   it("keeps tool results inside a pre block in developer mode", () => {
@@ -422,7 +235,7 @@ describe("assistant Item presentation", () => {
   });
 
   it("keeps answer Markdown code blocks separate from tool results", () => {
-    const message = assistant([{ type: "text", text: "```text\n最终答案代码\n```", status: "success" }]);
+    const message = assistant([{ type: "text", text: "```text\n最终答案代码\n```" }]);
     const { container } = render(renderAssistant(message));
 
     const answerCode = container.querySelector(".markdown pre");

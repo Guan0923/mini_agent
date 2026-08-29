@@ -131,33 +131,11 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
 def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
     return (
         Tool(
-            "create_directory",
-            (
-                "Recursively creates a directory inside the workspace. Missing parent directories are created. "
-                "The operation succeeds when the directory already exists."
-            ),
-            files.create_directory,
-            object_schema(
-                {
-                    "path": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Workspace-relative directory path.",
-                    },
-                },
-                ["path"],
-            ),
-            requires_confirmation=True,
-            read_only=False,
-            workspace_confined=True,
-        ),
-        Tool(
             "write_file",
             (
-                "Creates a UTF-8 text file inside the workspace, recursively creating missing parent "
-                "directories. Existing files are rejected unless overwrite=true. Use edit_file for targeted "
-                "changes; before replacing a complete existing file, read its current content and preserve "
-                "everything that should remain."
+                "Creates a UTF-8 text file inside the workspace. Existing files are rejected unless "
+                "overwrite=true. Use edit_file for targeted changes; before replacing a complete existing "
+                "file, read its current content and preserve everything that should remain."
             ),
             files.write_file,
             object_schema(
@@ -178,7 +156,6 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
             ),
             requires_confirmation=True,
             read_only=False,
-            workspace_confined=True,
         ),
         Tool(
             "edit_file",
@@ -206,7 +183,6 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
             ),
             requires_confirmation=True,
             read_only=False,
-            workspace_confined=True,
         ),
     )
 

@@ -115,7 +115,7 @@ class WorkspaceCommand:
                 policy = decision.command_policy(job_id, TerminalKind(self._terminal_type))
                 job_options["max_output_chars"] = decision.limits.output_chars
                 effective_timeout = min(timeout_seconds, decision.limits.wall_seconds)
-                sandbox_user_id = decision.user_id or "local"
+                sandbox_user_id = task_scope.owner.user_id or decision.user_id
                 job_options["popen_factory"] = decision.launcher.popen_factory(
                     policy,
                     user_id=sandbox_user_id,
@@ -160,7 +160,7 @@ class WorkspaceCommand:
             return context.job_scope, None
 
         registry = JobRegistry()
-        runner_scope = registry.root_scope().child(JobScopeKind.THREAD)
+        runner_scope = registry.root_scope().child(JobScopeKind.RUNNER)
         run_scope = runner_scope.child(JobScopeKind.RUN, session_id=context.session_id)
         return run_scope, registry
 

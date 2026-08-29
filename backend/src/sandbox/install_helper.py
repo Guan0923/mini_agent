@@ -64,7 +64,20 @@ def _service_sid(service_name: str) -> str:
 
 def _validate_payload(
     payload: Mapping[str, Any],
-) -> tuple[str, str, tuple[str, ...], str | None, Path | None, Path | None, Path | None, Path | None]:
+) -> tuple[
+    str,
+    str,
+    tuple[str, ...],
+    str | None,
+    Path | None,
+    Path | None,
+    Path | None,
+    Path | None,
+    Path | None,
+    Path | None,
+    Path | None,
+    Path | None,
+]:
     operation = payload.get("operation")
     service_name = payload.get("service_name")
     service_command = payload.get("service_command")
@@ -73,6 +86,10 @@ def _validate_payload(
     program_data_path = payload.get("program_data_path")
     service_code_path = payload.get("service_code_path")
     service_code_boundary_path = payload.get("service_code_boundary_path")
+    service_runtime_path = payload.get("service_runtime_path")
+    service_runtime_boundary_path = payload.get("service_runtime_boundary_path")
+    service_base_runtime_path = payload.get("service_base_runtime_path")
+    service_base_runtime_boundary_path = payload.get("service_base_runtime_boundary_path")
     if operation not in {"install", "repair"} or not isinstance(service_name, str) or not service_name:
         raise ValueError("invalid Broker installation operation")
     if (
@@ -91,10 +108,24 @@ def _validate_payload(
         raise ValueError("invalid Broker source path")
     if service_code_boundary_path is not None and not isinstance(service_code_boundary_path, str):
         raise ValueError("invalid Broker source boundary path")
+    if service_runtime_path is not None and not isinstance(service_runtime_path, str):
+        raise ValueError("invalid Broker runtime path")
+    if service_runtime_boundary_path is not None and not isinstance(service_runtime_boundary_path, str):
+        raise ValueError("invalid Broker runtime boundary path")
+    if service_base_runtime_path is not None and not isinstance(service_base_runtime_path, str):
+        raise ValueError("invalid Broker base runtime path")
+    if service_base_runtime_boundary_path is not None and not isinstance(service_base_runtime_boundary_path, str):
+        raise ValueError("invalid Broker base runtime boundary path")
     sid_path = Path(backend_sid_path) if backend_sid_path else None
     data_path = Path(program_data_path) if program_data_path else None
     code_path = Path(service_code_path) if service_code_path else None
     code_boundary_path = Path(service_code_boundary_path) if service_code_boundary_path else None
+    runtime_path = Path(service_runtime_path) if service_runtime_path else None
+    runtime_boundary_path = Path(service_runtime_boundary_path) if service_runtime_boundary_path else None
+    base_runtime_path = Path(service_base_runtime_path) if service_base_runtime_path else None
+    base_runtime_boundary_path = (
+        Path(service_base_runtime_boundary_path) if service_base_runtime_boundary_path else None
+    )
     if sid_path is not None and not sid_path.is_absolute():
         raise ValueError("Broker SID path must be absolute")
     if data_path is not None and not data_path.is_absolute():
@@ -103,8 +134,20 @@ def _validate_payload(
         raise ValueError("Broker source path must be absolute")
     if code_boundary_path is not None and not code_boundary_path.is_absolute():
         raise ValueError("Broker source boundary path must be absolute")
+    if runtime_path is not None and not runtime_path.is_absolute():
+        raise ValueError("Broker runtime path must be absolute")
+    if runtime_boundary_path is not None and not runtime_boundary_path.is_absolute():
+        raise ValueError("Broker runtime boundary path must be absolute")
+    if base_runtime_path is not None and not base_runtime_path.is_absolute():
+        raise ValueError("Broker base runtime path must be absolute")
+    if base_runtime_boundary_path is not None and not base_runtime_boundary_path.is_absolute():
+        raise ValueError("Broker base runtime boundary path must be absolute")
     if (code_path is None) != (code_boundary_path is None):
         raise ValueError("Broker source path and boundary must be provided together")
+    if (runtime_path is None) != (runtime_boundary_path is None):
+        raise ValueError("Broker runtime path and boundary must be provided together")
+    if (base_runtime_path is None) != (base_runtime_boundary_path is None):
+        raise ValueError("Broker base runtime path and boundary must be provided together")
     return (
         operation,
         service_name,
@@ -114,6 +157,10 @@ def _validate_payload(
         data_path,
         code_path,
         code_boundary_path,
+        runtime_path,
+        runtime_boundary_path,
+        base_runtime_path,
+        base_runtime_boundary_path,
     )
 
 
@@ -405,6 +452,10 @@ def run_transaction(payload: Mapping[str, Any]) -> int:
         data_path,
         code_path,
         code_boundary_path,
+        runtime_path,
+        runtime_boundary_path,
+        base_runtime_path,
+        base_runtime_boundary_path,
     ) = _validate_payload(payload)
     _persist_sid(sid_path, backend_sid)
     if sid_path is not None and backend_sid is not None:
@@ -421,7 +472,7 @@ def run_transaction(payload: Mapping[str, Any]) -> int:
                 "type=",
                 "own",
                 "start=",
-                "demand",
+                "auto",
                 "obj=",
                 f"NT SERVICE\\{service_name}",
                 "binPath=",
@@ -439,7 +490,7 @@ def run_transaction(payload: Mapping[str, Any]) -> int:
                 "type=",
                 "own",
                 "start=",
-                "demand",
+                "auto",
                 "obj=",
                 f"NT SERVICE\\{service_name}",
                 "binPath=",
@@ -449,6 +500,8 @@ def run_transaction(payload: Mapping[str, Any]) -> int:
         _run(["sc.exe", "sidtype", service_name, "unrestricted"])
     _secure_program_data(data_path, sid_path, service_name)
     _secure_source_code(code_path, code_boundary_path, service_name)
+    _secure_source_code(runtime_path, runtime_boundary_path, service_name)
+    _secure_source_code(base_runtime_path, base_runtime_boundary_path, service_name)
     _run(
         ["sc.exe", "start", service_name],
         failure_code=EXIT_SERVICE_START_FAILED,

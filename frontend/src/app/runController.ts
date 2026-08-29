@@ -1,8 +1,8 @@
 import { pauseTurn, SseProtocolError, streamAttachedTurn, streamChat, streamResume, streamRewind } from "../api";
 import type { ChatMessage, RuntimeStateNode, StreamMessage } from "../types";
 import type { ActiveRun, ChatRunRequest } from "./types";
-import { integrateRuntimeNodeUpdates, projectRuntimeNode } from "./runtime/runtimeDetailProjection";
-import { applyRuntimeNodeFrame, runtimeNodeAccumulator } from "./runtime/runtimeNodeReducer";
+import { integrateRuntimeNodeUpdates, projectRuntimeNode } from "./runtimeDetailProjection";
+import { applyRuntimeNodeFrame, runtimeNodeAccumulator } from "./runtimeNodeReducer";
 
 export interface RunControllerCallbacks {
   activeRuns: Map<string, ActiveRun>;
@@ -115,7 +115,6 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       providerName: request.providerName,
       model: request.model,
       references: request.references,
-      queuedDelivery: request.queuedDelivery,
     } as const;
 
     try {

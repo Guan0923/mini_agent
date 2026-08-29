@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import os
 import sys
 import threading
 import types
@@ -214,7 +213,6 @@ def test_dpapi_key_store_repairs_an_empty_placeholder(tmp_path: Path) -> None:
     assert store.load() == key
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows DPAPI test")
 def test_windows_dpapi_provider_accepts_pywin32_bytes_results(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeWin32Crypt:
         @staticmethod

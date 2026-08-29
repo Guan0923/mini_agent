@@ -27,7 +27,7 @@ from .errors import (
     JobScopeClosed,
 )
 from .output import CommandError, MessageErrorFormatter, format_command_output
-from .processes import ProcessFactory, ProcessGroup, SubprocessJob, TreeTerminator
+from .process_group import ProcessFactory, ProcessGroup, TreeTerminator
 from .registry import CloseReport, JobQuery, JobRegistry, ScopedJobInfo
 from .safety import ClassNameErrorFormatter, ErrorFormatter
 from .scheduling import (
@@ -41,6 +41,7 @@ from .scheduling import (
 )
 from .scope import JobOwner, JobScope, JobScopeKind
 from .service_job import ServiceDriver, ServiceHealth, ServiceJob
+from .subprocess_job import SubprocessJob
 from .thread_job import ThreadJob
 
 __all__ = [

@@ -13,22 +13,23 @@ dependencies = [
     "huggingface-hub>=0.30,<2",
     "jsonschema>=4.23,<5",
     "mcp>=1.28,<2",
+    "mdit-py-plugins>=0.6,<1",
     "cryptography>=44,<50",
     "keyring>=25,<26",
+    "pylatexenc>=2.10,<3",
     "pyyaml>=6,<7",
     "regex>=2024.11.6,<2027",
     "requests>=2.31,<3",
-    "redis>=5.2,<7",
     "urllib3>=2.2,<3",
     "tokenizers>=0.21,<1",
     "tiktoken>=0.9,<1",
     "uvicorn>=0.34,<1",
     "pywin32>=308; sys_platform == 'win32'",
-    "tzdata>=2025.2; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
 web = []
+sync = []
 
 [project.scripts]
 mini-agent-mcp = "backend.mcp.cli:main"

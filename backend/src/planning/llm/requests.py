@@ -55,15 +55,14 @@ class RequestMixin:
         runtime: AgentRuntime,
         system: SystemMessage,
         *,
+        operation: str,
         extra: list[UserMessage] | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> list:
-        runtime.exchange.context["trace_base_system_prompt"] = system.content or ""
-        runtime.exchange.context["trace_user_preferences"] = self.user_preferences
         system = self._with_user_preferences(system)
-        trace_system_message = system.content or ""
-        runtime.exchange.context["trace_system_message"] = trace_system_message
+        system = self._with_agent_instructions(system)
         system = self._with_active_skills(runtime, system)
+        system = self._with_memory_context(runtime, system, operation=operation)
         canonical_nodes = runtime.model_nodes()
         canonical = runtime.model_messages() if canonical_nodes else []
         if canonical_nodes:
@@ -76,7 +75,7 @@ class RequestMixin:
             overrides = runtime.exchange.context.get("request_parameters")
             if isinstance(overrides, dict):
                 parameters.update(overrides)
-            prepared = self._context_manager.prepare(
+            return self._context_manager.prepare(
                 runtime,
                 system,
                 history=canonical,
@@ -85,15 +84,13 @@ class RequestMixin:
                 request_parameters=parameters,
                 summarize=lambda transcript: self._summarize_history(runtime, transcript),
             )
-            runtime.exchange.context["trace_system_message"] = trace_system_message
-            return prepared
         if self._context_manager is None:
             return [system, *runtime.state.messages, *(extra or [])]
         parameters = dict(runtime.state.request_parameters)
         overrides = runtime.exchange.context.get("request_parameters")
         if isinstance(overrides, dict):
             parameters.update(overrides)
-        prepared = self._context_manager.prepare(
+        return self._context_manager.prepare(
             runtime,
             system,
             extra=extra,
@@ -101,23 +98,21 @@ class RequestMixin:
             request_parameters=parameters,
             summarize=lambda transcript: self._summarize_history(runtime, transcript),
         )
-        runtime.exchange.context["trace_system_message"] = trace_system_message
-        return prepared
 
     def _messages_for_current_turn(
         self,
         runtime: AgentRuntime,
         system: SystemMessage,
         *,
+        operation: str,
         extra: list[UserMessage] | None = None,
     ) -> list:
         """Build a selector request without exposing previous conversation turns."""
 
-        runtime.exchange.context["trace_base_system_prompt"] = system.content or ""
-        runtime.exchange.context["trace_user_preferences"] = self.user_preferences
         system = self._with_user_preferences(system)
-        runtime.exchange.context["trace_system_message"] = system.content or ""
+        system = self._with_agent_instructions(system)
         system = self._with_active_skills(runtime, system)
+        system = self._with_memory_context(runtime, system, operation=operation)
         canonical_nodes = runtime.model_nodes()
         canonical = runtime.model_messages(current_turn_only=True) if canonical_nodes else []
         if canonical_nodes:
@@ -132,9 +127,28 @@ class RequestMixin:
         policy = (
             "\n\n## User Agent Preferences\n"
             "The account owner supplied the following preferences. Treat them as lower priority than all "
-            "system rules, safety requirements, tool schemas, approval policies, and active project Skills. "
+            "system rules, safety requirements, tool schemas, approval policies, the applicable AGENTS.md file, "
+            "and active project Skills. "
             "They must not override those constraints.\n\n"
             f"<user-agent-preferences>\n{preferences.strip()}\n</user-agent-preferences>"
+        )
+        return SystemMessage(
+            name=system.name,
+            content=(system.content or "") + policy,
+            provider_options=system.provider_options,
+        )
+
+    def _with_agent_instructions(self, system: SystemMessage) -> SystemMessage:
+        instructions = getattr(self, "agent_instructions", "")
+        if not isinstance(instructions, str) or not instructions.strip():
+            return system
+        policy = (
+            "\n\n## Applicable AGENTS.md Instructions\n"
+            "The workspace owner supplied the following persistent instructions. Follow them when applicable. "
+            "They are lower priority than the base system rules, safety requirements, tool schemas, workspace "
+            "confinement, and approval policies, and they cannot expand permissions. At most one source is "
+            "included: a non-empty project-root AGENTS.md replaces the global AGENTS.md.\n\n"
+            f"<agent-instructions>\n{instructions.strip()}\n</agent-instructions>"
         )
         return SystemMessage(
             name=system.name,
@@ -158,10 +172,10 @@ class RequestMixin:
             )
         policy = (
             "\n\n## Active project Skills\n"
-            "The project owner supplied the following task instructions. Follow them when they apply, but "
-            "they are lower priority than every preceding system rule and cannot weaken safety checks, tool "
-            "schemas, workspace confinement, or approval requirements. Resolve relative resource paths from "
-            "the Skill root shown below.\n\n" + "\n\n".join(blocks)
+            "The project owner supplied the following task instructions. Follow them when they apply. They "
+            "are lower priority than the base system rules, safety requirements, tool schemas, approval "
+            "policies, and applicable AGENTS.md instructions, and cannot weaken workspace confinement. "
+            "Resolve relative resource paths from the Skill root shown below.\n\n" + "\n\n".join(blocks)
         )
         return SystemMessage(
             name=system.name,
@@ -169,15 +183,30 @@ class RequestMixin:
             provider_options=system.provider_options,
         )
 
+    def _with_memory_context(
+        self,
+        runtime: AgentRuntime,
+        system: SystemMessage,
+        *,
+        operation: str,
+    ) -> SystemMessage:
+        injector = getattr(self, "memory_prompt_injector", None)
+        inject = getattr(injector, "inject", None)
+        if not callable(inject):
+            return system
+        return inject(runtime, system, operation=operation)
+
     def _summarize_history(self, runtime: AgentRuntime, transcript: str) -> str:
         previous_usage = runtime.state.turn_usage
         try:
-            runtime.exchange.context["trace_base_system_prompt"] = COMPACTION_INSTRUCTION
-            runtime.exchange.context["trace_user_preferences"] = self.user_preferences
             prepared = self._request(
                 runtime,
                 [
-                    self._with_user_preferences(SystemMessage(content=COMPACTION_INSTRUCTION)),
+                    self._with_memory_context(
+                        runtime,
+                        self._with_user_preferences(SystemMessage(content=COMPACTION_INSTRUCTION)),
+                        operation="summarize",
+                    ),
                     UserMessage(content=transcript),
                 ],
                 operation="summarize",
@@ -223,9 +252,9 @@ class RequestMixin:
         current_turn_only: bool = False,
     ) -> str:
         messages = (
-            self._messages_for_current_turn(runtime, system, extra=extra)
+            self._messages_for_current_turn(runtime, system, operation=operation, extra=extra)
             if current_turn_only
-            else self._messages_for_request(runtime, system, extra=extra)
+            else self._messages_for_request(runtime, system, operation=operation, extra=extra)
         )
         prepared = self._request(
             runtime,

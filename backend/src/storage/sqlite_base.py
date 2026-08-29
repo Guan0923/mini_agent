@@ -12,9 +12,11 @@ from .sqlite_schema import SCHEMA
 
 
 class SQLiteBaseMixin:
-    def __init__(self, paths: ClientPaths) -> None:
+    def __init__(self, paths: ClientPaths, device_id: str) -> None:
         self.paths = paths
+        self.device_id = device_id
         self.paths.ensure()
+        self._sync_listener = None
 
     @contextmanager
     def _connection(self, session_id: str) -> Iterator[sqlite3.Connection]:
@@ -27,7 +29,7 @@ class SQLiteBaseMixin:
             # Inspect before DDL: unsupported databases remain untouched.
             self._assert_supported_schema(connection)
             connection.executescript(SCHEMA)
-            self._validate_schema(connection)
+            self._migrate_schema(connection)
             yield connection
             connection.commit()
         except Exception:
@@ -35,3 +37,10 @@ class SQLiteBaseMixin:
             raise
         finally:
             connection.close()
+
+    def set_sync_listener(self, listener) -> None:
+        self._sync_listener = listener
+
+    def _is_local_only(self, session_id: str) -> bool:
+        session = self.get_session(session_id)
+        return bool(session and session.local_only)

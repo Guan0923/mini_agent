@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-agent-tui"
+version = "0.0.1"
+description = "Mini-Agent terminal client (client tier)."
+requires-python = ">=3.11"
+dependencies = [
+    "mini-agent-backend",
+    "keyring>=25,<26",
+    "textual>=8.2,<9",
+]
+
+[project.scripts]
+mini-agent = "tui.cli:main"
+mini-agent-net = "tui.netcli:main"
+
+# The `src` directory *is* the `tui` package (flat source layout).
+[tool.setuptools]
+package-dir = {tui = "src"}

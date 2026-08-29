@@ -144,5 +144,6 @@ class SkillActivator:
             "source": source,
         }
         message = ", ".join(names) if names else "none"
+        runtime.run.add_event("skills_selected", "Skills selected", **data)
         publish = runtime.services.publish or (lambda _event: None)
         publish(RuntimeEvent("skills_selected", message, data))

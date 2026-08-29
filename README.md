@@ -1,65 +1,61 @@
 # Mini-Agent
 
-Mini-Agent 是纯本地、单用户的桌面 Agent 应用。React/Vite 前端通过 loopback HTTP/SSE 访问本机 FastAPI backend；对话运行时、模型 Provider、工具、Skills、MCP、Sandbox、项目、会话与设置均在本机运行和保存。
+Mini-Agent 是一个 local-first Agent 应用：Agent Runtime、模型调用、工具执行、会话历史和工作区在用户电脑上的 backend 中运行；浏览器前端通过 loopback HTTP/SSE 访问它。账户、邮件验证和加密云同步由可选的 cloud 服务提供，只有 cloud 访问 PostgreSQL。
 
-项目不包含账户、登录、设备授权、云同步、Cloud 服务或 PostgreSQL 部署层。
+当前客户端方向是 Web 前端；`tui/` 是仍可运行的遗留 Textual 入口，不再承载新功能。
 
-## 工作区组成
-
-| 目录 | 包 | 用途 |
-| --- | --- | --- |
-| [`backend/`](backend/README.md) | `mini-agent-backend` | FastAPI、本地 Agent Runtime、Provider、工具、MCP、Sandbox、Redis mailbox 与 SQLite/TOML 持久化 |
-| [`frontend/`](frontend/README.md) | `mini-agent-web` | React/Vite/TypeScript 客户端，包括 Chat、项目、设置和 Benchmark 界面 |
-| [`benchmarks/`](benchmarks/README.md) | benchmark harness | 9 个改编自开源基准的确定性任务、执行器与评分器 |
+## 架构
 
 ```text
-frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
-                              ├─ runtime / planning / providers / tools
-                              ├─ Skills / MCP / Sandbox
-                              ├─ ~/.mini_agent (TOML / SQLite / workspace)
-                              └─ Redis (queued messages / active Turn mailbox)
+React/Vite frontend ── HTTP/SSE ──> FastAPI backend (127.0.0.1:8000)
+                                      ├─ Runtime / planners / providers
+                                      ├─ tools / Skills / MCP / Sandbox
+                                      ├─ per-user SQLite / sync outbox
+                                      └─ optional HTTPS ──> cloud (8100) ──> PostgreSQL
 ```
 
-开发时 Vite 把 `/api` 和 `/benchmark` 代理到 backend；生产本地模式由 backend 直接托管 `frontend/dist`。
+- `frontend/` 只调用 backend API；开发时 Vite 将 `/api` 和 `/benchmark` 代理到 8000，生产时 backend 可托管 `frontend/dist`。
+- `backend/` 负责 FastAPI、Agent Runtime、会话、模型 Provider、工具、项目、MCP、Sandbox、审计和同步；不连接 PostgreSQL，不负责 SMTP 或 cloud 主密钥。
+- `cloud/` 负责账户、密码/验证码、设备授权、密钥封装、加密快照和 PostgreSQL。
+- `tui/` 直接复用 backend/domain/runtime 包，是兼容性入口，不是 Web API 替代实现。
+- `benchmarks/`、`docs/`、`scripts/` 是支持目录。
 
-## 环境要求
+## 能力
 
-- Python 3.11+
-- Node.js 20+
-- [`uv`](https://docs.astral.sh/uv/)
-- Docker Desktop（只用于仓库内 Redis 7.4）
-- Windows 开发环境使用 Conda `dev` 环境
+Web 对话、流式事件、历史/分支/恢复、消息队列、取消运行、Plan mode、用户澄清、Plan Review、工具审批、Full access、workspace-confined 文件/搜索/网页/命令工具、文件引用与上传、Provider 设置、项目 Skills 信任、单层 Subagents、只读 stdio MCP、审批型外部 MCP、Windows Sandbox Broker、本地 SQLite 和加密增量同步均已纳入当前架构。Broker 未就绪时严格沙箱不会自动降级为普通进程。
 
-## 安装与启动
+## 快速开始
 
-从仓库根目录安装 Python workspace 和前端依赖：
+需要 Python 3.11+、Node.js 20+ 和 `uv`；cloud/PostgreSQL 仅在对应功能需要时使用。
 
 ```powershell
-conda activate dev
 uv sync
 cd frontend
 npm ci
 cd ..
-docker compose up -d redis
-```
-
-启动 backend：
-
-```powershell
 uv run python -m backend.api
 ```
 
-另开终端启动 Vite：
+另开终端启动前端：
 
 ```powershell
-conda activate dev
 cd frontend
 npm run dev
 ```
 
-浏览器打开 <http://127.0.0.1:5173>。`/api/health` 只表示 backend 进程存活；`/api/ready` 会同时检查 SQLite 与 Redis，Redis 不可用时返回 503。
+浏览器打开 <http://127.0.0.1:5173>。只运行本地游客/离线 Agent 不需要 Docker 或 cloud。若不使用 `uv`，可执行 `python -m pip install -e "backend[sync]" -e tui`。
 
-生产本地模式先构建前端，再启动 backend：
+### 可选 cloud 和 PostgreSQL
+
+```powershell
+$env:MINI_AGENT_SECRET_KEY = "replace-with-a-32-byte-development-secret"
+docker compose up -d postgres cloud
+$env:CLOUD_URL = "http://127.0.0.1:8100"
+```
+
+`DATABASE_URL`、`MINI_AGENT_SECRET_KEY` 和 SMTP 只属于 cloud 进程/部署密钥，不要写入 frontend 或本地用户 TOML。
+
+### 生产本地模式
 
 ```powershell
 cd frontend
@@ -68,64 +64,69 @@ cd ..
 uv run python -m backend.api
 ```
 
-## 配置与本地数据
+backend 发现 `frontend/dist` 后会托管它。需要 HTTPS 或非默认来源时，在用户配置的 `[web]` 中设置精确的 `public_url`、`allowed_origins` 和 `cookie_secure`。
 
-可参考 [`config.toml.example`](config.toml.example) 创建 `~/.mini_agent/config.toml`。Mini-Agent 使用以下顶层结构：
-
-```text
-~/.mini_agent/
-├─ mcp/
-├─ plugins/
-├─ runtime/
-│  ├─ state.db
-│  ├─ projects.db
-│  └─ <session_id>/
-├─ skills/
-└─ config.toml
-```
-
-- `config.toml` 只保存非敏感的 Profile、Agent、Runtime、Sandbox、MCP 和 Skill 配置。
-- `runtime/state.db` 保存 Provider 元数据和加密后的 API Key。
-- `runtime/projects.db` 保存项目索引。
-- `runtime/<session_id>/` 保存会话数据库、workspace 和 uploads。
-- Redis 保存浏览器待发送草稿、active Turn steering mailbox 和幂等 receipt；未完成 delivery 的 receipt 不过期，acknowledged/returned receipt 保留 7 天，正式聊天历史仍以 SQLite 为权威。
-- Redis 使用 `compose.yaml` 的命名卷和 AOF（`appendfsync everysec`）。待发送消息是明文，只允许绑定 `127.0.0.1:6379`。
-- `MINI_AGENT_REDIS_URL` 默认是 `redis://127.0.0.1:6379/0`，属于部署环境变量，不写入 `config.toml`。
-- Provider API Key 使用 OS credential vault 中的安装级密钥加密，不写入 TOML，也不通过 API 回显。
-
-项目不会读取或迁移旧 UUID 用户目录、`user.db`、认证缓存、同步数据或旧密文。
-
-Redis 不可用时不会回退到浏览器或进程内队列：历史读取仍可用，但 Turn 创建/恢复、queued-message CRUD 和 steering 会被阻断；运行中的 Turn 在最近安全边界以 `message_queue_unavailable` 失败。
-
-## 安全边界
-
-- 浏览器写请求只允许配置的 loopback Origin；无 `Origin` 的本地 CLI 请求允许执行。
-- CORS 不启用 credentials，前端不发送登录 Cookie 或 Bearer 凭据。
-- 可用逗号分隔的 `MINI_AGENT_ALLOWED_ORIGINS` 配置额外的精确本地来源；不要使用通配 Origin。
-- 工具参数经过 schema、审批与 workspace 边界检查；项目 Skills 和外部 MCP 输出按不可信输入处理。
-- 严格 Sandbox Broker 未就绪时不会静默降级为普通进程。
-
-## 开发验证
+## 遗留 TUI
 
 ```powershell
-conda activate dev
+uv run python run.py --planner rule "calculate (18 + 6) * 4"
+uv run python -m tui
+uv run mini-agent --resume <session_id>
+```
+
+TUI 配置位于 `~/.mini_agent-cache/tui/config.toml`。Web 用户的 Provider、加密 API Key 和同步状态属于每个用户的 `user.db`，不会从 TUI 配置导入。
+
+## 本地数据与安全边界
+
+| 数据 | 位置 | 说明 |
+| --- | --- | --- |
+| 浏览器会话缓存 | `~/.mini_agent-cache/auth/client.db` | 哈希后的本地会话和身份缓存 |
+| 用户偏好 | `~/.mini_agent/<user_id>/config.toml` | 非敏感设置、能力开关和项目 Skill 信任 |
+| Provider/同步状态 | `~/.mini_agent/<user_id>/user.db` | 加密 API Key、cloud token、同步事务 |
+| 会话运行时 | `~/.mini_agent/<user_id>/runtime/<session_id>/` | `state.db`、`workspace/`、`uploads/` |
+| 脱敏日志 | `~/.mini_agent-cache/logs/<user_id>/` | JSONL 诊断与事件 |
+
+项目 `.mini_agent/skills/` 是不可信内容，项目 Skill 必须逐个审批。模型参数、网页结果和外部 MCP 输出都要经过 schema、路径边界和审批。不要提交 API Key、Cookie、认证头、sync token、SMTP 密码、cloud 主密钥或真实用户数据。
+
+## 目录结构
+
+```text
+backend/src/domain/          provider-neutral domain
+backend/src/planning/        rule/LLM planner
+backend/src/runtime/         application/conversation/execution/Plan/recovery
+backend/src/providers/       generic transport and provider adapters
+backend/src/tools/           ToolRegistry and grouped tools
+backend/src/mcp/             stdio server and external MCP client
+backend/src/storage/         local SQLite and user settings
+backend/src/sync/            encrypted snapshot sync/outbox
+backend/src/observability/   redaction and JSONL events
+frontend/                    React/Vite/TypeScript client
+cloud/src/cloud/             account and PostgreSQL service
+tui/src/                     deprecated Textual client
+benchmarks/                  benchmark tasks and graders
+docs/                        architecture and development notes
+tests/                       focused Python tests
+```
+
+依赖方向保持向内：domain 不依赖外层；provider 不导入 storage；frontend 不导入 Python；PostgreSQL 只由 cloud 访问。详见 [docs/architecture.md](docs/architecture.md)、[docs/development.md](docs/development.md) 和 [frontend/README.md](frontend/README.md)。
+
+## 开发与验证
+
+```powershell
 uv run python -m ruff check .
 uv run python -m ruff format --check .
 uv run python -m pytest -q
-
 cd frontend
 npm run typecheck
-npm test
+npm test -- --run
 npm run build
 ```
 
-真实浏览器 Turn 流程使用真实 backend、Vite 和本地假模型服务：
+PostgreSQL 集成测试使用独立测试数据库。Windows 若 pytest 临时目录 ACL 阻止创建目录，请使用当前用户有权限的唯一 `--basetemp`，不要删除其他任务的临时目录。
 
-```powershell
-cd frontend
-npm run test:e2e
-```
+## 入口
 
-HTTP、Provider 和 E2E 测试不会调用付费模型 API。Windows 若 pytest 临时目录 ACL 阻止创建目录，请指定一个当前用户可写、此前不存在的唯一 `--basetemp`。
-
-更多设计约束见 [`docs/architecture.md`](docs/architecture.md) 与 [`docs/development.md`](docs/development.md)。
+- Backend：`python -m backend.api`，默认 `127.0.0.1:8000`
+- Frontend：`cd frontend; npm run dev`，默认 `127.0.0.1:5173`
+- Cloud：`python -m cloud` 或 Compose，默认 `127.0.0.1:8100`
+- Read-only MCP：`mini-agent-mcp --workspace <path>`

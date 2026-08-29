@@ -12,6 +12,7 @@ from .sqlite_runtime import SQLiteRuntimeMixin
 from .sqlite_schema import SQLiteSchemaMixin
 from .sqlite_sessions import SQLiteSessionMixin
 from .sqlite_sidebar_threads import SQLiteSidebarThreadMixin
+from .sqlite_sync import SQLiteSyncMixin
 
 
 class SQLiteSessionStore(
@@ -20,6 +21,7 @@ class SQLiteSessionStore(
     SQLiteSessionMixin,
     SQLiteSidebarThreadMixin,
     SQLiteRuntimeMixin,
+    SQLiteSyncMixin,
     SQLiteSchemaMixin,
 ):
     """Local durable store; each session owns one self-contained state.db."""

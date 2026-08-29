@@ -105,17 +105,12 @@ def test_resume_creates_linked_attempt_without_replaying_indeterminate_tool(tmp_
         tool for message in result.history if isinstance(message, AssistantMessage) for tool in message.tool_messages
     ]
     assert [(tool.call_id, tool.status) for tool in indeterminate] == [("call_side_effect", "indeterminate")]
-    turn = store.find_node(result.turn_id)
-    assert turn is not None and turn.status == "success"
-    items = [item for message in turn.data[result.data_idx] for item in message["content"]]
-    tool_call = next(item for item in items if item["type"] == "tool_call")
-    assert tool_call["status"] == "failed"
-    assert tool_call["replay_safe"] is False
-    tool_result = next(item for item in items if item["type"] == "tool_result")
-    assert tool_result["status"] == "failed"
-    assert tool_result["failure_code"] == "indeterminate"
-    assert tool_result["retryable"] is False
-    assert any(item["type"] == "text" and "Recovered without replaying" in item["text"] for item in items)
+    source_messages = store.load_runtime_messages(session_id, source_run_id)
+    assert {message.kind for message in source_messages} >= {"run_interrupted", "tool_indeterminate"}
+    indeterminate_event = next(message for message in source_messages if message.kind == "tool_indeterminate")
+    assert indeterminate_event.data["session_id"] == session_id
+    assert indeterminate_event.data["workspace_root"] == str(tmp_path.resolve())
+    assert indeterminate_event.data["workflow_id"] == result.provenance.workflow_id
     archived = store.load_runtime(session_id)
     assert archived is not None
     assert any(summary.run_id == source_run_id for summary in archived.run_history)
@@ -143,26 +138,20 @@ def test_cooperative_pause_is_cancelled_resumable_and_preserves_workflow_identit
     assert resumed is not None and resumed.status == "completed"
     assert resumed.provenance.workflow_id == workflow_id
     assert resumed.provenance.attempt == 2
-    import json
     import sqlite3
 
     with sqlite3.connect(store.paths.session_db(service.active_session.session_id)) as connection:
-        rows = connection.execute(
-            "SELECT namespace,payload_json FROM json_objects WHERE namespace IN ('checkpoint','run')"
+        transition_reason = connection.execute(
+            "SELECT reason FROM checkpoints WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+            (paused.run_id,),
+        ).fetchone()[0]
+        attempt_starts = connection.execute(
+            "SELECT started_at FROM session_runs WHERE workflow_id = ? ORDER BY attempt",
+            (workflow_id,),
         ).fetchall()
-    objects = [(namespace, json.loads(payload)) for namespace, payload in rows]
-    checkpoint_reasons = {
-        payload["reason"]
-        for namespace, payload in objects
-        if namespace == "checkpoint" and payload.get("run_id") == paused.run_id
-    }
-    workflow_attempts = sorted(
-        int(payload["provenance"]["attempt"])
-        for namespace, payload in objects
-        if namespace == "run" and payload.get("provenance", {}).get("workflow_id") == workflow_id
-    )
-    assert "run_cancelled" in checkpoint_reasons
-    assert workflow_attempts == [1, 2]
+    assert transition_reason == "run_cancelled"
+    assert len(attempt_starts) == 2
+    assert attempt_starts[0][0] != attempt_starts[1][0]
 
 
 def test_plan_review_handoff_creates_new_workflow_with_parent_source(tmp_path: Path) -> None:
@@ -328,10 +317,4 @@ def test_checkpoint_event_persists_local_sqlite_state(tmp_path: Path) -> None:
     assert restored.current_run is not None
     assert restored.current_run.run_id == completed.run_id
     assert restored.current_run.status == "completed"
-    turn = store.find_node(completed.turn_id)
-    assert turn is not None and turn.status == "success"
-    assert any(
-        item.get("type") == "text" and item.get("text") == "Resumed."
-        for message in turn.data[completed.data_idx]
-        for item in message["content"]
-    )
+    assert store.load_runtime_messages(service.runtime.state.session_id, completed.run_id)

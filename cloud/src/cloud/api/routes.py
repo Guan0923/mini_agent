@@ -1,0 +1,292 @@
+"""Versioned cloud API routes."""
+
+from __future__ import annotations
+
+import base64
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from cloud.auth.mail import MailDeliveryError
+from cloud.auth.types import AuthError, AuthStorageUnavailable, RateLimitError, UserIdentity
+from cloud.sync.repository import CloudSyncConflict
+
+
+class EmailRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class RegisterRequest(EmailRequest):
+    code: str = Field(min_length=6, max_length=6)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class LoginRequest(EmailRequest):
+    password: str = Field(min_length=1, max_length=128)
+
+
+class DeviceStartRequest(BaseModel):
+    server_url: str = Field(default="", max_length=2000)
+
+
+class DevicePollRequest(BaseModel):
+    poll_secret: str = Field(min_length=20, max_length=256)
+
+
+class DeviceApproveRequest(BaseModel):
+    grant: str = Field(min_length=20, max_length=256)
+    approved: bool
+
+
+class KeyRequest(BaseModel):
+    dek: str = Field(min_length=32, max_length=256)
+
+
+class SyncPushRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=160)
+    parent_revision: int = Field(ge=0)
+    device_id: str = Field(min_length=1, max_length=160)
+    event_id: str = Field(min_length=1, max_length=200)
+    event_ids: list[str] = Field(default_factory=list, max_length=4096)
+    envelope: dict[str, object]
+    checksum: str = Field(min_length=64, max_length=128)
+
+
+def _state(request: Request):
+    return request.app.state.cloud
+
+
+def _identity(value: UserIdentity) -> dict[str, object]:
+    return {"id": value.id, "email": value.email, "kind": value.kind}
+
+
+def _token_from_header(authorization: str | None) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录。")
+    token = authorization[7:].strip()
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录。")
+    return token
+
+
+def current_identity(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> UserIdentity:
+    token = _token_from_header(authorization)
+    resolved = _state(request).auth_service.resolve_token(token)
+    if resolved is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录状态已过期，请重新登录。")
+    identity, kind = resolved
+    request.state.cloud_token = token
+    request.state.cloud_auth_kind = kind
+    return identity
+
+
+def _auth_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, RateLimitError):
+        return HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(exc.retry_after)})
+    if isinstance(exc, MailDeliveryError):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, AuthStorageUnavailable):
+        return HTTPException(status_code=503, detail="云端认证数据库暂不可用。")
+    if isinstance(exc, AuthError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail="云端服务暂时无法处理请求。")
+
+
+def build_router() -> APIRouter:
+    router = APIRouter(prefix="/v1", tags=["cloud"])
+
+    @router.post("/sync/push")
+    def sync_push(
+        body: SyncPushRequest,
+        request: Request,
+        identity: Annotated[UserIdentity, Depends(current_identity)],
+    ) -> dict[str, object]:
+        envelope = body.envelope
+        if envelope.get("algorithm") != "AES-256-GCM":
+            raise HTTPException(status_code=422, detail="加密事件批次算法不受支持。")
+        if not envelope.get("nonce") or not envelope.get("ciphertext"):
+            raise HTTPException(status_code=422, detail="加密事件批次缺少认证字段。")
+        if len(body.checksum) != 64 or any(char not in "0123456789abcdef" for char in body.checksum.lower()):
+            raise HTTPException(status_code=422, detail="加密事件批次校验和格式无效。")
+        if str(envelope.get("checksum") or "") != body.checksum:
+            raise HTTPException(status_code=422, detail="加密事件批次校验和无效。")
+        declared_count = body.envelope.get("event_count")
+        if declared_count is not None:
+            try:
+                count = int(declared_count)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail="事件数量格式无效。") from exc
+            if count != len(body.event_ids):
+                raise HTTPException(status_code=422, detail="事件数量与加密批次不匹配。")
+        if len(set(body.event_ids)) != len(body.event_ids):
+            raise HTTPException(status_code=422, detail="事件 ID 不得重复。")
+        try:
+            return _state(request).events.push_events(
+                identity.id,
+                session_id=body.session_id,
+                parent_revision=body.parent_revision,
+                device_id=body.device_id,
+                event_id=body.event_id,
+                event_ids=body.event_ids,
+                envelope=body.envelope,
+                checksum=body.checksum,
+            )
+        except CloudSyncConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.get("/sync/pull")
+    def sync_pull(
+        request: Request,
+        identity: Annotated[UserIdentity, Depends(current_identity)],
+        session_id: str,
+        after_revision: int = 0,
+    ) -> dict[str, object]:
+        if after_revision < 0:
+            raise HTTPException(status_code=422, detail="after_revision must be non-negative")
+        return _state(request).events.pull_events(identity.id, session_id=session_id, after_revision=after_revision)
+
+    @router.get("/sync/heads")
+    def sync_heads(
+        request: Request,
+        identity: Annotated[UserIdentity, Depends(current_identity)],
+    ) -> dict[str, object]:
+        reader = getattr(_state(request).events, "list_heads", None)
+        return {"heads": reader(identity.id) if callable(reader) else []}
+
+    @router.post("/auth/register/code", status_code=202)
+    def register_code(body: EmailRequest, request: Request) -> dict[str, str]:
+        try:
+            _state(request).auth_service.request_code(
+                body.email, "register", request.client.host if request.client else None
+            )
+        except Exception as exc:
+            raise _auth_error(exc) from exc
+        return {"detail": "如果邮箱可用，验证码已发送。"}
+
+    @router.post("/auth/register")
+    def register(body: RegisterRequest, request: Request) -> dict[str, object]:
+        try:
+            identity, token = _state(request).auth_service.register(body.email, body.code, body.password)
+        except Exception as exc:
+            raise _auth_error(exc) from exc
+        return {"user": _identity(identity), "access_token": token, "token_type": "Bearer", "expires_in": 2_592_000}
+
+    @router.post("/auth/login")
+    def login(body: LoginRequest, request: Request) -> dict[str, object]:
+        try:
+            identity, token = _state(request).auth_service.login(
+                body.email, body.password, request.client.host if request.client else None
+            )
+        except Exception as exc:
+            raise _auth_error(exc) from exc
+        return {"user": _identity(identity), "access_token": token, "token_type": "Bearer", "expires_in": 2_592_000}
+
+    @router.post("/auth/password-reset/code", status_code=202)
+    def reset_code(body: EmailRequest, request: Request) -> dict[str, str]:
+        try:
+            _state(request).auth_service.request_code(
+                body.email, "reset", request.client.host if request.client else None
+            )
+        except Exception as exc:
+            raise _auth_error(exc) from exc
+        return {"detail": "如果邮箱已注册，验证码已发送。"}
+
+    @router.post("/auth/password-reset/confirm")
+    def reset_password(body: RegisterRequest, request: Request) -> dict[str, object]:
+        try:
+            identity, token = _state(request).auth_service.reset_password(body.email, body.code, body.password)
+        except Exception as exc:
+            raise _auth_error(exc) from exc
+        return {"user": _identity(identity), "access_token": token, "token_type": "Bearer", "expires_in": 2_592_000}
+
+    @router.get("/auth/me")
+    def me(identity: Annotated[UserIdentity, Depends(current_identity)]) -> dict[str, object]:
+        return {"user": _identity(identity)}
+
+    @router.post("/auth/logout")
+    def logout(request: Request, identity: Annotated[UserIdentity, Depends(current_identity)]) -> dict[str, str]:
+        del identity
+        _state(request).auth.revoke_token(request.state.cloud_token)
+        return {"detail": "已退出登录。"}
+
+    @router.post("/devices/start")
+    def device_start(body: DeviceStartRequest, request: Request) -> dict[str, object]:
+        poll, browser, expires = _state(request).auth_service.start_device(body.server_url)
+        return {
+            "poll_secret": poll,
+            "verification_url": _state(request).auth_service.device_url(browser),
+            "expires_in": expires,
+            "poll_interval": 2,
+        }
+
+    @router.get("/devices/info")
+    def device_info(grant: str, request: Request) -> dict[str, object]:
+        value = _state(request).auth.device_info(grant)
+        if value is None:
+            raise HTTPException(status_code=404, detail="设备授权请求不存在或已过期。")
+        return value
+
+    @router.post("/devices/approve")
+    def device_approve(
+        body: DeviceApproveRequest,
+        request: Request,
+        identity: Annotated[UserIdentity, Depends(current_identity)],
+    ) -> dict[str, str]:
+        accepted = _state(request).auth.approve_device(body.grant, identity.id, body.approved)
+        if not accepted:
+            raise HTTPException(status_code=410, detail="设备授权请求不存在、已处理或已过期。")
+        return {"status": "approved" if body.approved else "denied"}
+
+    @router.post("/devices/token")
+    def device_token(body: DevicePollRequest, request: Request) -> JSONResponse:
+        status_name, token = _state(request).auth.poll_device(body.poll_secret)
+        if status_name == "pending":
+            return JSONResponse({"status": "authorization_pending"}, status_code=202)
+        if status_name == "approved" and token:
+            return JSONResponse(
+                {"status": "approved", "access_token": token, "token_type": "Bearer", "expires_in": 2_592_000}
+            )
+        if status_name == "denied":
+            return JSONResponse({"status": "access_denied"}, status_code=403)
+        if status_name == "expired":
+            return JSONResponse({"status": "expired"}, status_code=410)
+        return JSONResponse({"status": "invalid_grant"}, status_code=400)
+
+    @router.post("/sync/keys")
+    @router.post("/sync/keys/ensure")
+    def ensure_key(
+        body: KeyRequest, request: Request, identity: Annotated[UserIdentity, Depends(current_identity)]
+    ) -> dict[str, bool]:
+        try:
+            dek = base64.b64decode(body.dek.encode("ascii"), altchars=b"-_", validate=True)
+        except (ValueError, UnicodeError) as exc:
+            raise HTTPException(status_code=422, detail="数据密钥格式无效。") from exc
+        if len(dek) != 32:
+            raise HTTPException(status_code=422, detail="数据密钥长度无效。")
+        try:
+            _state(request).events.ensure_user_key(identity.id, dek)
+        except CloudSyncConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"stored": True}
+
+    @router.get("/sync/keys")
+    @router.get("/sync/keys/recover")
+    def recover_key(
+        request: Request, identity: Annotated[UserIdentity, Depends(current_identity)]
+    ) -> dict[str, str | None]:
+        key = _state(request).events.recover_user_key(identity.id)
+        return {"dek": base64.urlsafe_b64encode(key).decode("ascii") if key is not None else None}
+
+    return router
+
+
+__all__ = ["build_router", "current_identity"]

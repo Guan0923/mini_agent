@@ -14,6 +14,7 @@ from backend.domain.skills import SkillSnapshot
 MAX_SKILL_BYTES = 64 * 1024
 MAX_INSTRUCTION_LINES = 1_000
 MAX_METADATA_BYTES = 2 * 1024
+_ALLOWED_FRONTMATTER_KEYS = frozenset({"name", "description", "metadata", "allowed-tools"})
 _NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _EXPLICIT_PATTERN = re.compile(r"(?<![\w$])\$([a-z0-9]+(?:-[a-z0-9]+)*)\b")
 
@@ -84,44 +85,6 @@ def validate_allowed_tools(value: object, path: Path) -> tuple[str, ...]:
             raise SkillConfigurationError(f"Skill allowed-tools must contain only non-empty strings: {path}")
         tools.append(item)
     return tuple(tools)
-
-
-@dataclass(frozen=True)
-class _SkillFrontmatter:
-    """Supported values selected from an otherwise open frontmatter mapping."""
-
-    name: str
-    description: str
-    metadata: tuple[tuple[str, str], ...]
-    allowed_tools: tuple[str, ...]
-
-
-def select_frontmatter(path: Path, directory_name: str, **kwargs: object) -> _SkillFrontmatter | None:
-    """Select supported Skill fields while ignoring every other frontmatter key."""
-    name = kwargs.get("name")
-    description = kwargs.get("description")
-    if not isinstance(name, str) or not name.strip():
-        return None
-    if len(name) > 64 or _NAME_PATTERN.fullmatch(name) is None or name != directory_name:
-        return None
-    if not isinstance(description, str) or not description.strip():
-        return None
-
-    try:
-        metadata = validate_metadata(kwargs["metadata"], path) if "metadata" in kwargs else ()
-    except SkillConfigurationError:
-        metadata = ()
-    try:
-        allowed_tools = validate_allowed_tools(kwargs["allowed-tools"], path) if "allowed-tools" in kwargs else ()
-    except SkillConfigurationError:
-        allowed_tools = ()
-
-    return _SkillFrontmatter(
-        name=name,
-        description=description.strip(),
-        metadata=metadata,
-        allowed_tools=allowed_tools,
-    )
 
 
 @dataclass(frozen=True)
@@ -198,8 +161,6 @@ class SkillCatalog:
                 raise SkillConfigurationError(f"Skill directory is missing SKILL.md: {directory}")
             cls._confined(manifest, resolved_directory, "SKILL.md")
             definition = cls._load_manifest(manifest, directory.name, owner_root, absolute_root=absolute_roots)
-            if definition is None:
-                continue
             if definition.name in definitions:
                 raise SkillConfigurationError(f"Duplicate Skill name {definition.name!r}: {manifest}")
             definitions[definition.name] = definition
@@ -217,21 +178,44 @@ class SkillCatalog:
     @classmethod
     def _load_manifest(
         cls, path: Path, directory_name: str, workspace: Path, *, absolute_root: bool = False
-    ) -> SkillDefinition | None:
+    ) -> SkillDefinition:
         raw = read_manifest_bytes(path)
         frontmatter, _body_lines = parse_manifest(raw, path)
-        selected = select_frontmatter(path, directory_name, **frontmatter)
-        if selected is None:
-            return None
+        unknown = set(frontmatter) - _ALLOWED_FRONTMATTER_KEYS
+        if unknown:
+            rendered = ", ".join(sorted(unknown))
+            raise SkillConfigurationError(
+                f"Skill frontmatter contains unknown key(s): {rendered}. "
+                "Allowed: name, description, metadata, allowed-tools."
+            )
+        if "name" not in frontmatter or "description" not in frontmatter:
+            raise SkillConfigurationError(f"Skill frontmatter must contain 'name' and 'description': {path}")
+        name = frontmatter["name"]
+        description = frontmatter["description"]
+        if not isinstance(name, str) or not name.strip():
+            raise SkillConfigurationError(f"Skill name must be a non-empty string: {path}")
+        if len(name) > 64 or _NAME_PATTERN.fullmatch(name) is None:
+            raise SkillConfigurationError(
+                f"Skill name must use lowercase letters, digits, and hyphens and be at most 64 characters: {path}"
+            )
+        if name != directory_name:
+            raise SkillConfigurationError(f"Skill name {name!r} must match directory name {directory_name!r}: {path}")
+        if not isinstance(description, str) or not description.strip():
+            raise SkillConfigurationError(f"Skill description must be a non-empty string: {path}")
+
+        metadata = validate_metadata(frontmatter["metadata"], path) if "metadata" in frontmatter else ()
+        allowed_tools = (
+            validate_allowed_tools(frontmatter["allowed-tools"], path) if "allowed-tools" in frontmatter else ()
+        )
         resolved_skill_root = path.parent.resolve()
         display_root = (
             resolved_skill_root.as_posix() if absolute_root else resolved_skill_root.relative_to(workspace).as_posix()
         )
         return SkillDefinition(
-            name=selected.name,
-            description=selected.description,
-            metadata=selected.metadata,
-            allowed_tools=selected.allowed_tools,
+            name=name,
+            description=description.strip(),
+            metadata=metadata,
+            allowed_tools=allowed_tools,
             root=display_root,
             manifest=resolved_skill_root / "SKILL.md",
         )

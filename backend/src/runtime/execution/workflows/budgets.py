@@ -62,7 +62,13 @@ def _fail_for_budget(runtime: AgentRuntime, limit_type: str, reason: str) -> Non
 
 def _claim_model_turn(runtime: AgentRuntime, operation: str) -> bool:
     runtime.run.model_turns += 1
-    del operation
+    runtime.run.add_event(
+        "model",
+        "Logical model turn started",
+        operation=operation,
+        model_turn=runtime.run.model_turns,
+        unlimited=True,
+    )
     runtime.save()
     return True
 

@@ -57,12 +57,13 @@ class Session:
     client_id: str | None = None
     archived_at: str | None = None
     deleted_at: str | None = None
+    local_only: bool = False
     title_is_custom: bool = False
 
 
 @dataclass(frozen=True)
 class SessionSummary:
-    """Session metadata used by listings and the Web sidebar."""
+    """Session metadata used by listing and the TUI status view."""
 
     session_id: str
     title: str
@@ -76,6 +77,7 @@ class SessionSummary:
     archived_at: str | None = None
     deleted_at: str | None = None
     last_node_id: str | None = None
+    local_only: bool = False
     title_is_custom: bool = False
 
     @property

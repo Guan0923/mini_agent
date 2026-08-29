@@ -12,8 +12,7 @@ def command_tool(commands: WorkspaceCommand) -> Tool:
         "run_command",
         (
             "Executes a general Bash command on Unix-like systems or PowerShell command on Windows from "
-            "the workspace. Use read_file, glob, grep, create_directory, write_file, or edit_file for ordinary "
-            "file work. "
+            "the workspace. Use read_file, glob, grep, write_file, or edit_file for ordinary file work. "
             "Use this fallback for tests, builds, Git, scripts, computation, and operations without a "
             "dedicated tool. Commands may modify files or access paths outside the workspace and therefore "
             "require approval. Output is limited to 20,000 characters; timeout_seconds is at most 120."

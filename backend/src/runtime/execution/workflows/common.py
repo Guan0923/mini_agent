@@ -105,10 +105,17 @@ def _publish_repairs(runtime: AgentRuntime, capabilities: PlannerCapabilities) -
             if outcome == "repaired"
             else "Malformed model output could not be repaired automatically."
         )
+        runtime.run.add_event("model_repair", message, **repair)
         # Keep repair diagnostics in the internal runtime/audit stream. The
         # event publisher filters this kind from user-facing SSE and nodes,
         # while the correction message remains in the next model request.
         _publish(runtime, RuntimeEvent("model_repair", message, dict(repair)))
+
+
+def _record_reasoning(runtime: AgentRuntime, message: AssistantMessage, streamed: bool) -> None:
+    if not message.reasoning:
+        return
+    runtime.run.add_event("reasoning", "Model reasoning", content=message.reasoning)
 
 
 def _publish_assistant_message(
@@ -137,6 +144,7 @@ def _publish_assistant_message(
 
 
 def _publish_tool_call(runtime: AgentRuntime, tool: ToolMessage) -> None:
+    runtime.run.add_event("tool_call", f"Calling {tool.name}", call_id=tool.call_id, arguments=dict(tool.arguments))
     _publish(
         runtime,
         RuntimeEvent("tool_call", tool.name, {"call_id": tool.call_id, "arguments": dict(tool.arguments)}),
@@ -145,10 +153,12 @@ def _publish_tool_call(runtime: AgentRuntime, tool: ToolMessage) -> None:
 
 def _publish_tool_result(runtime: AgentRuntime, tool: ToolMessage) -> None:
     result = tool.content or ""
+    runtime.run.add_event("tool_result", f"{tool.name} succeeded", call_id=tool.call_id, result=result)
     _publish(runtime, RuntimeEvent("tool_result", result, {"tool": tool.name, "call_id": tool.call_id}))
 
 
 def _publish_tool_failure(runtime: AgentRuntime, tool: ToolMessage, error: str) -> None:
+    runtime.run.add_event("tool_failed", f"{tool.name} failed", call_id=tool.call_id, error=error)
     _publish(runtime, RuntimeEvent("tool_failed", error, {"tool": tool.name, "call_id": tool.call_id}))
 
 
@@ -156,6 +166,14 @@ def _publish_tool_recovery(runtime: AgentRuntime, tool: ToolMessage, error: str)
     """Record recoverable tool feedback without exposing it to the user stream."""
 
     attempt = len(runtime.run.actions)
+    runtime.run.add_event(
+        "tool_recovery",
+        f"Recovering from {tool.name} failure",
+        tool=tool.name,
+        call_id=tool.call_id,
+        error=_truncate(error),
+        attempt=attempt,
+    )
     _publish(
         runtime,
         RuntimeEvent(
@@ -184,6 +202,14 @@ def _fail_pending_tools(
             if failure_code is None:
                 _publish_tool_failure(runtime, tool, error)
                 continue
+            runtime.run.add_event(
+                "tool_failed",
+                f"{tool.name} failed",
+                tool=tool.name,
+                call_id=tool.call_id,
+                error=error,
+                failure_code=failure_code,
+            )
             _publish(
                 runtime,
                 RuntimeEvent(
@@ -229,6 +255,7 @@ def _execute_tool(runtime: AgentRuntime, index: int, executor: ToolStepExecutor)
     tool = message.tool_messages[index]
     runtime.state.active_tool_index = index
     runtime.run.actions.append(tool)
+    runtime.run.add_event("model", "Model tool call validated", tool=tool.name, mode=runtime.run.mode)
     return executor.execute(runtime)
 
 

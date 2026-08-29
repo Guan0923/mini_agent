@@ -40,6 +40,7 @@ class DecisionMixin:
             self._messages_for_request(
                 runtime,
                 system,
+                operation="decision",
                 extra=[correction] if correction is not None else None,
                 tools=allowed,
             ),
@@ -76,7 +77,7 @@ class DecisionMixin:
         )
         prepared = self._request(
             runtime,
-            self._messages_for_request(runtime, system, tools=[]),
+            self._messages_for_request(runtime, system, operation="finalize", tools=[]),
             operation="finalize",
             output_mode="text",
             allowed_tools=[],

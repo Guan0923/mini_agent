@@ -11,10 +11,6 @@ class PlanningError(RuntimeError):
         self.diagnostics = diagnostics or {}
 
 
-class TracePersistenceError(RuntimeError):
-    """A required Turn audit snapshot could not be saved before transport."""
-
-
 class ModelOutputError(PlanningError):
     """A model response was received but did not satisfy the required contract."""
 

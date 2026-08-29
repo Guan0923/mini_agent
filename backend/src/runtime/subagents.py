@@ -176,7 +176,8 @@ class SubagentCoordinator:
             while pending:
                 bridge.drain()
                 now = monotonic()
-                cancelled = runtime.stop_requested()
+                cancel_requested = runtime.services.cancel_requested
+                cancelled = bool(cancel_requested is not None and cancel_requested())
                 expired_batch = batch_control.elapsed(now) >= self._settings.batch_timeout_seconds
                 for task_id in list(pending):
                     task = next(item for item in tasks if item.id == task_id)
@@ -374,6 +375,7 @@ class SubagentCoordinator:
 
     @staticmethod
     def _event(runtime: AgentRuntime, kind: str, message: str, **data: Any) -> None:
+        runtime.run.add_event(kind, message, **data)
         publish = runtime.services.publish
         if publish is not None:
             publish(RuntimeEvent(kind, message, data))

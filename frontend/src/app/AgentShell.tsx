@@ -1,7 +1,7 @@
 import { Alert, Button, Drawer, Grid, Layout } from "antd";
 import { CloseOutlined, MenuOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
-import type { LocalProfile } from "../types";
+import type { AuthUser } from "../types";
 import type { AgentConfig, ProviderConfig } from "../api";
 import type { ChatRunRequest } from "./types";
 import type { ChatMode, Conversation, DisplayMode, Page } from "../types";
@@ -11,12 +11,12 @@ import AppSidebar from "../components/AppSidebar";
 import BenchmarkPage from "../pages/BenchmarkPage";
 import ChatPage from "../pages/ChatPage";
 import TrashPage from "../pages/TrashPage";
+import MemoryPage from "../pages/MemoryPage";
 import UserSettingsModal from "../components/UserSettingsModal";
 import IconAction from "../components/IconAction";
-import type { SandboxHealthState } from "./useSandboxHealth";
 
 export interface AgentShellProps {
-  profile: LocalProfile;
+  user: AuthUser | null;
   page: Page;
   current: Conversation | null;
   activeConversations: Conversation[];
@@ -33,7 +33,7 @@ export interface AgentShellProps {
   actionError: string | null;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
-  onProfileChange: (profile: LocalProfile) => void;
+  onUserUpdate: (patch: Partial<AuthUser>) => void;
   onNew: (title?: string) => Promise<string>;
   onNewProject: () => Promise<void>;
   onNewProjectConversation: (projectId: string) => Promise<void>;
@@ -48,6 +48,7 @@ export interface AgentShellProps {
   onArchive: (id: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onRestore: (id: string) => Promise<void>;
+  onSignOut: () => Promise<void>;
   onProfileUpdate: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
   onUpdate: (id: string, updater: (conversation: Conversation) => Conversation) => void;
   onModeChange: (mode: ChatMode) => void;
@@ -61,11 +62,9 @@ export interface AgentShellProps {
   onStopRun: (conversationId: string) => void;
   queuedMessages?: Map<string, QueuedMessage[]>;
   onQueuedMessagesChange?: (conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) => void;
-  onQueuedMessagesRefresh?: (conversationId: string) => Promise<void>;
   onClearError: () => void;
   onDisplayModeUpdate: (config: AgentConfig) => void;
   onProviderConfigUpdate: (config: ProviderConfig) => void;
-  sandboxHealth: SandboxHealthState;
 }
 
 export default function AgentShell(props: AgentShellProps) {
@@ -110,7 +109,7 @@ export default function AgentShell(props: AgentShellProps) {
   };
   const sidebar = (
     <AppSidebar
-      profile={props.profile}
+      user={props.user}
       conversations={props.activeConversations}
       projects={props.projects}
       projectsLoaded={props.projectsLoaded}
@@ -130,6 +129,10 @@ export default function AgentShell(props: AgentShellProps) {
       onRename={props.onRename}
       onArchive={props.onArchive}
       onDelete={props.onDelete}
+      onSignOut={async () => {
+        closeMobile();
+        await props.onSignOut();
+      }}
       onProfileUpdate={props.onProfileUpdate}
       onOpenSettings={() => props.setSettingsOpen(true)}
       collapsed={sidebarCollapsed}
@@ -170,21 +173,18 @@ export default function AgentShell(props: AgentShellProps) {
               onStopRun={props.onStopRun}
               queuedMessages={props.queuedMessages?.get(props.current?.id ?? "") ?? []}
               onQueuedMessagesChange={props.onQueuedMessagesChange}
-              onQueuedMessagesRefresh={props.onQueuedMessagesRefresh}
-              sandboxHealth={props.sandboxHealth}
             />
-          ) : props.page === "trash" ? <TrashPage conversations={props.archivedConversations} projects={props.removedProjects} onRestore={props.onRestore} onDelete={props.onDelete} onRestoreProject={props.onRestoreProject} /> : <BenchmarkPage />}
+          ) : props.page === "trash" ? <TrashPage conversations={props.archivedConversations} projects={props.removedProjects} onRestore={props.onRestore} onDelete={props.onDelete} onRestoreProject={props.onRestoreProject} /> : props.page === "memory" ? <MemoryPage /> : <BenchmarkPage />}
         </Layout.Content>
       </Layout>
       <UserSettingsModal
         open={props.settingsOpen}
-        profile={props.profile}
+        user={props.user}
         onClose={() => props.setSettingsOpen(false)}
-        onProfileChange={props.onProfileChange}
+        onUserUpdate={props.onUserUpdate}
         activeSessionId={props.current?.sessionId}
         onAgentConfigUpdate={props.onDisplayModeUpdate}
         onProviderConfigUpdate={props.onProviderConfigUpdate}
-        sandboxHealth={props.sandboxHealth}
       />
     </Layout>
   );

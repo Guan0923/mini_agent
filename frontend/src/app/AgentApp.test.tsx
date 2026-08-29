@@ -2,7 +2,7 @@ import { act, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionInfo } from "../api";
 import type { ProjectInfo } from "../api/projects";
-import type { RuntimeRootNode, RuntimeStateNode } from "../types";
+import type { AuthUser, RuntimeStateNode } from "../types";
 import type { AgentShellProps } from "./AgentShell";
 import AgentApp from "./AgentApp";
 
@@ -12,14 +12,11 @@ const api = vi.hoisted(() => ({
   deleteSession: vi.fn(),
   forkTurn: vi.fn(),
   getSettings: vi.fn(),
-  getSandboxStatus: vi.fn(),
   getSessionNodes: vi.fn(),
   listSessions: vi.fn(),
-  listQueuedMessages: vi.fn(),
   renameSession: vi.fn(),
   restoreSession: vi.fn(),
   pauseTurn: vi.fn(),
-  repairSandboxBroker: vi.fn(),
   streamAttachedTurn: vi.fn(),
   streamChat: vi.fn(),
   streamResume: vi.fn(),
@@ -38,10 +35,22 @@ const projectsApi = vi.hoisted(() => ({
   revokeProjectSkillTrust: vi.fn(),
 }));
 
+const auth = vi.hoisted(() => ({
+  user: {
+    id: "user-1",
+    email: "user@example.com",
+    kind: "account",
+    display_name: "User",
+  } as AuthUser,
+  setUser: vi.fn(),
+  signOut: vi.fn(),
+}));
+
 const shell = vi.hoisted(() => ({ props: null as AgentShellProps | null }));
 
 vi.mock("../api", () => api);
 vi.mock("../api/projects", () => projectsApi);
+vi.mock("../auth/AuthProvider", () => ({ useAuth: () => auth }));
 vi.mock("./AgentShell", () => ({
   default: (props: AgentShellProps) => {
     shell.props = props;
@@ -79,7 +88,7 @@ function turn(
   sessionId: string,
   threadId: string,
   turnId: string,
-  parent?: RuntimeStateNode | RuntimeRootNode,
+  parent?: RuntimeStateNode,
   userText = "源消息",
 ): RuntimeStateNode {
   return {
@@ -110,8 +119,8 @@ function turn(
     status: "success",
     current_data_idx: 0,
     data: [[
-      { role: "user", content: [{ type: "text", text: userText, status: "success" }] },
-      { role: "assistant", content: [{ type: "text", text: "回答", status: "success" }] },
+      { role: "user", content: [{ type: "text", text: userText }] },
+      { role: "assistant", content: [{ type: "text", text: "回答" }] },
     ]],
   };
 }
@@ -138,11 +147,8 @@ describe("AgentApp new conversation initialization", () => {
     vi.clearAllMocks();
     shell.props = null;
     api.getSettings.mockRejectedValue(new Error("settings unavailable"));
-    api.getSandboxStatus.mockResolvedValue({ installed: true, healthy: true });
     api.getSessionNodes.mockResolvedValue([]);
     api.listSessions.mockResolvedValue([]);
-    api.listQueuedMessages.mockResolvedValue([]);
-    api.pauseTurn.mockResolvedValue(undefined);
     api.streamAttachedTurn.mockResolvedValue("completed");
     projectsApi.listProjects.mockResolvedValue([]);
   });
@@ -191,14 +197,17 @@ describe("AgentApp new conversation initialization", () => {
     await expectKnownEmptySession("session-project-new");
   });
 
-  it("adopts the backend-generated first-message title on refresh", async () => {
+  it("keeps the authoritative first-message title after the optimistic title is refreshed", async () => {
     const initial = session("session-title");
     initial.thread_id = initial.session_id;
     api.listSessions.mockResolvedValue([initial]);
     await renderReady();
     await waitFor(() => expect(shell.props?.current?.id).toBe(initial.session_id));
 
-    expect(shell.props?.current?.title).toBe("新对话");
+    act(() => {
+      shell.props!.onUpdate(initial.session_id, (current) => ({ ...current, title: "临时乐观标题" }));
+    });
+    await waitFor(() => expect(shell.props?.current?.title).toBe("临时乐观标题"));
 
     api.listSessions.mockResolvedValue([{ ...initial, title: "第一条用户消息", title_is_custom: false }]);
     await act(async () => {
@@ -210,15 +219,10 @@ describe("AgentApp new conversation initialization", () => {
 
   it("keeps the active rewind boundary when sidebar summaries and the full Turn tree reload", async () => {
     const initial = { ...session("session-rewind"), thread_id: "session-rewind" };
-    const syntheticRoot: RuntimeRootNode = {
-      session_id: initial.session_id,
-      thread_id: initial.thread_id,
-      id: "turn-synthetic-root",
-    };
-    const root = turn(initial.session_id, initial.thread_id, "turn-root", syntheticRoot, "保留消息");
+    const root = turn(initial.session_id, initial.thread_id, "turn-root", undefined, "保留消息");
     const descendant = turn(initial.session_id, initial.thread_id, "turn-descendant", root, "应隐藏消息");
     api.listSessions.mockResolvedValue([initial]);
-    api.getSessionNodes.mockResolvedValue([syntheticRoot, root, descendant]);
+    api.getSessionNodes.mockResolvedValue([root, descendant]);
     await renderReady();
     await waitFor(() => expect(shell.props?.current?.activeTurnId).toBe(descendant.id));
 
@@ -235,11 +239,11 @@ describe("AgentApp new conversation initialization", () => {
     });
 
     expect(shell.props?.current?.activeTurnId).toBe(root.id);
-    expect(shell.props?.current?.runtimeNodes).toHaveLength(3);
+    expect(shell.props?.current?.runtimeNodes).toHaveLength(2);
     expect(shell.props?.current?.messages.map((message) => message.content)).toEqual(["保留消息", "回答"]);
   });
 
-  it("uses the backend branch-suffixed title when the UI creates a fork", async () => {
+  it("lets the backend inherit the source title when the UI creates a fork", async () => {
     const source = { ...session("session-fork"), thread_id: "session-fork", title: "源对话标题" };
     api.listSessions.mockResolvedValue([source]);
     await renderReady();
@@ -264,7 +268,7 @@ describe("AgentApp new conversation initialization", () => {
       sidebar_thread: {
         thread_id: "thread-fork",
         session_id: source.session_id,
-        title: `${source.title}（分支）`,
+        title: source.title,
         created_at: "2026-08-26T00:00:00Z",
         updated_at: "2026-08-26T00:00:00Z",
         title_is_custom: false,
@@ -277,14 +281,14 @@ describe("AgentApp new conversation initialization", () => {
     });
 
     expect(api.forkTurn).toHaveBeenCalledWith("turn-source");
-    expect(shell.props?.current).toMatchObject({ id: "thread-fork", title: "源对话标题（分支）" });
+    expect(shell.props?.current).toMatchObject({ id: "thread-fork", title: "源对话标题" });
   });
 
   it("attaches exactly once to a running Turn loaded after refresh", async () => {
     const summary = { ...session("session-running"), thread_id: "session-running" };
     const running = turn("session-running", "session-running", "turn-running");
     running.status = "running";
-    running.data[0][1].content = [{ type: "reasoning", text: "已恢复", status: "running" }];
+    running.data[0][1].content = [{ type: "reasoning", text: "已恢复" }];
     api.listSessions.mockResolvedValue([summary]);
     api.getSessionNodes.mockResolvedValue([running]);
     let finish!: () => void;
@@ -305,24 +309,5 @@ describe("AgentApp new conversation initialization", () => {
     await act(async () => Promise.resolve());
     expect(api.streamAttachedTurn).toHaveBeenCalledTimes(1);
     await act(async () => finish());
-  });
-
-  it("does not attach and pauses every known running Turn while the Broker is unhealthy", async () => {
-    const summary = { ...session("session-running"), thread_id: "session-running" };
-    const running = turn("session-running", "session-running", "turn-running");
-    running.status = "running";
-    api.getSandboxStatus.mockResolvedValue({
-      installed: true,
-      healthy: false,
-      detail: "Broker service stopped",
-    });
-    api.listSessions.mockResolvedValue([summary]);
-    api.getSessionNodes.mockResolvedValue([running]);
-
-    await renderReady();
-
-    await waitFor(() => expect(api.pauseTurn).toHaveBeenCalledWith("turn-running"));
-    expect(api.streamAttachedTurn).not.toHaveBeenCalled();
-    expect(shell.props?.sandboxHealth.phase).toBe("unhealthy");
   });
 });

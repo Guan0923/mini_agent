@@ -1,28 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  archiveSession,
   createSession,
+  deleteSession,
+  forkTurn,
   getSettings,
   getSessionNodes,
-  listQueuedMessages,
   listSessions,
-  pauseTurn,
+  renameSession,
+  restoreSession,
   updateProfile,
   type ProviderConfig,
   type SessionInfo,
 } from "../api";
-import { listProjects, type ProjectInfo } from "../api/projects";
+import { changeProjectPath, createProject, createProjectSession, listProjects, removeProject, renameProject, restoreProject, revokeProjectSkillTrust, type ProjectInfo } from "../api/projects";
+import { useAuth } from "../auth/AuthProvider";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
 import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnreadArchived, summaryToConversation, STORAGE_KEY, ARCHIVE_READ_KEY } from "./storage";
 import type { ArchiveReadState } from "./storage";
 import AgentShell from "./AgentShell";
 import { createRunController } from "./runController";
 import type { QueuedMessage } from "./types";
+import { loadQueuedMessages, saveQueuedMessages } from "./queuedMessages";
 import { effectiveDisplayMode } from "./displayMode";
-import { isRuntimeTurnNode } from "./runtime/runtimeNodeNormalization";
-import { withLoadedTurns } from "./conversationProjection";
-import { createConversationActions } from "./conversationActions";
-import { createProjectActions } from "./projectActions";
-import { useSandboxHealth } from "./useSandboxHealth";
+import { projectTurnPath } from "./runtimeDetailProjection";
 import type {
   ChatMessage,
   ChatMode,
@@ -30,16 +31,39 @@ import type {
   Page,
   DisplayMode,
   RuntimeStateNode,
-  RuntimeTreeNode,
-  LocalProfile,
 } from "../types";
 
+function withLoadedTurns(
+  conversation: Conversation,
+  nodes: RuntimeStateNode[],
+  preferredActiveTurnId?: string,
+): Conversation {
+  const threadId = conversation.threadId ?? conversation.sessionId;
+  const threadNodes = nodes.filter((node) => node.thread_id === threadId);
+  const selected = threadNodes.find((node) => node.id === (preferredActiveTurnId ?? conversation.activeTurnId));
+  const parentIds = new Set(threadNodes.map((node) => node.parent_id).filter(Boolean));
+  const leaves = threadNodes
+    .filter((node) => !parentIds.has(node.id))
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  const fallback = leaves[leaves.length - 1];
+  const activeTurnId = selected?.id ?? fallback?.id;
+  const map = new Map(nodes.map((node) => [`${node.session_id}:${node.id}`, node] as const));
+  return {
+    ...conversation,
+    runtimeNodes: nodes,
+    activeTurnId,
+    lastNodeId: activeTurnId,
+    messages: activeTurnId ? projectTurnPath(map, activeTurnId) : [],
+    messagesLoaded: true,
+  };
+}
+
 function AgentApp() {
-  const [profile, setProfile] = useState<LocalProfile>({ display_name: "本地用户", agent_preferences: "" });
+  const { user, setUser, signOut } = useAuth();
   const [page, setPage] = useState<Page>("chat");
-  const storageKey = STORAGE_KEY;
+  const storageKey = `${STORAGE_KEY}:${user?.id ?? "anonymous"}`;
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations(storageKey));
-  const [archiveReadState, setArchiveReadState] = useState<ArchiveReadState>(() => loadArchiveReadState());
+  const [archiveReadState, setArchiveReadState] = useState<ArchiveReadState>(() => loadArchiveReadState(user?.id));
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [modeBySession, setModeBySession] = useState<Record<string, ChatMode>>(() => loadSessionModes(localStorage));
@@ -53,36 +77,48 @@ function AgentApp() {
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const activeRunsRef = useRef(new Map<string, import("./types").ActiveRun>());
-  const pausedForSandboxOutageRef = useRef(new Set<string>());
-  const sandboxHealth = useSandboxHealth();
-  const [queuedMessages, setQueuedMessages] = useState<Map<string, QueuedMessage[]>>(() => new Map());
+  const [queuedMessages, setQueuedMessages] = useState(
+    () => loadQueuedMessages(localStorage, user?.id),
+  );
 
   useEffect(() => {
+    if (!user?.id) {
+      setDisplayMode("medium");
+      setProviderConfig(null);
+      return undefined;
+    }
     let active = true;
     void getSettings()
       .then((settings) => {
         if (active) {
           setDisplayMode(effectiveDisplayMode(settings.agent_config.display_mode));
           setProviderConfig(settings.provider_config?.id ? settings.provider_config : null);
-          setProfile({
-            display_name: settings.profile.display_name.trim() || "本地用户",
-            agent_preferences: settings.profile.agent_preferences,
-          });
+          if (user) {
+            const profileName = settings.profile.display_name.trim()
+              || user.display_name?.trim()
+              || (user.kind === "guest" ? "游客用户" : "用户");
+            setUser({
+              ...user,
+              display_name: profileName,
+              agent_preferences: settings.profile.agent_preferences,
+            });
+          }
         }
       })
       .catch(() => undefined);
     return () => {
       active = false;
     };
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     localStorage.setItem(storageKey, JSON.stringify(conversations));
   }, [conversations, storageKey]);
 
   useEffect(() => {
-    localStorage.setItem(ARCHIVE_READ_KEY, JSON.stringify(archiveReadState));
-  }, [archiveReadState]);
+    if (!user?.id) return;
+    localStorage.setItem(`${ARCHIVE_READ_KEY}:${user.id}`, JSON.stringify(archiveReadState));
+  }, [archiveReadState, user?.id]);
 
   useEffect(() => {
     saveSessionModes(localStorage, modeBySession);
@@ -130,7 +166,7 @@ function AgentApp() {
       // The browser cache can predate project metadata.  The project index is
       // authoritative for session membership, so use its binding list to
       // prevent a hidden project session from being re-imported as an
-      // ordinary local conversation.
+      // ordinary cloud-synced conversation.
       const byClient = new Map<string, SessionInfo>();
       const bySession = new Map<string, SessionInfo>();
       const deletedByClient = new Map<string, SessionInfo>();
@@ -164,7 +200,7 @@ function AgentApp() {
         if (conversation.sessionId && projectSessionIds.has(conversation.sessionId)) continue;
 
         // A stale browser copy of a project conversation must never be
-        // re-imported as an ordinary local conversation.
+        // re-imported as an ordinary cloud-synced conversation.
         if (conversation.projectId || conversation.localOnly) continue;
 
         if (conversation.messages.length > 0) {
@@ -239,24 +275,6 @@ function AgentApp() {
     return undefined;
   }, [current?.id, current?.sessionId, current?.messagesLoaded, current?.runtimeNodes]);
 
-  useEffect(() => {
-    if (!current?.id || !current.threadId) return;
-    let active = true;
-    void listQueuedMessages(current.threadId)
-      .then((items) => {
-        if (!active) return;
-        setQueuedMessages((previous) => {
-          const next = new Map(previous);
-          next.set(current.id, items);
-          return next;
-        });
-      })
-      .catch((error) => {
-        if (active) setActionError(String((error as Error).message ?? error));
-      });
-    return () => { active = false; };
-  }, [current?.id, current?.threadId]);
-
   function updateConversation(id: string, updater: (conversation: Conversation) => Conversation) {
     setConversations((previous) => previous.map((conversation) => (conversation.id === id ? updater(conversation) : conversation)));
   }
@@ -267,18 +285,8 @@ function AgentApp() {
       const next = updater(previous.get(conversationId) ?? []);
       if (next.length > 0) queues.set(conversationId, next);
       else queues.delete(conversationId);
+      saveQueuedMessages(localStorage, user?.id, queues);
       return queues;
-    });
-  }
-
-  async function refreshQueuedMessages(conversationId: string): Promise<void> {
-    const target = conversations.find((item) => item.id === conversationId);
-    if (!target?.threadId) return;
-    const items = await listQueuedMessages(target.threadId);
-    setQueuedMessages((previous) => {
-      const next = new Map(previous);
-      next.set(conversationId, items);
-      return next;
     });
   }
 
@@ -304,11 +312,11 @@ function AgentApp() {
   }
 
   async function recoverConversation(conversationId: string, sessionId: string, turnId?: string): Promise<void> {
-    let nodes: RuntimeTreeNode[] = [];
+    let nodes: RuntimeStateNode[] = [];
     for (let attempt = 0; attempt < 40; attempt += 1) {
       nodes = await getSessionNodes(sessionId);
       const target = turnId ? nodes.find((node) => node.id === turnId) : undefined;
-      if (!target || !isRuntimeTurnNode(target) || target.status !== "running") break;
+      if (!target || target.status !== "running") break;
       await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 50));
     }
     updateConversation(conversationId, (conversation) => withLoadedTurns(conversation, nodes));
@@ -324,63 +332,9 @@ function AgentApp() {
   });
 
   useEffect(() => {
-    if (sandboxHealth.phase === "healthy") {
-      pausedForSandboxOutageRef.current.clear();
-      return;
-    }
-    if (sandboxHealth.phase !== "unhealthy") return;
-    const runningTurnIds = new Set<string>();
-    const turnSessions = new Map<string, { conversationId: string; sessionId: string }>();
-    for (const active of activeRunsRef.current.values()) {
-      if (active.turnId) runningTurnIds.add(active.turnId);
-    }
-    for (const conversation of conversations) {
-      for (const node of conversation.runtimeNodes ?? []) {
-        if (isRuntimeTurnNode(node) && node.status === "running") {
-          runningTurnIds.add(node.id);
-          if (conversation.sessionId) {
-            turnSessions.set(node.id, { conversationId: conversation.id, sessionId: conversation.sessionId });
-          }
-        }
-      }
-    }
-    if (turnSessions.size > 0) {
-      setConversations((previous) => previous.map((conversation) => {
-        const nodes = conversation.runtimeNodes;
-        if (!nodes?.some((node) => runningTurnIds.has(node.id))) return conversation;
-        return withLoadedTurns(conversation, nodes.map((node) => (
-          isRuntimeTurnNode(node) && runningTurnIds.has(node.id) ? { ...node, status: "paused" } : node
-        )));
-      }));
-    }
-    for (const turnId of runningTurnIds) {
-      if (pausedForSandboxOutageRef.current.has(turnId)) continue;
-      pausedForSandboxOutageRef.current.add(turnId);
-      void pauseTurn(turnId).catch(async () => {
-        pausedForSandboxOutageRef.current.delete(turnId);
-        const target = turnSessions.get(turnId);
-        if (!target) return;
-        try {
-          const nodes = await getSessionNodes(target.sessionId);
-          updateConversation(target.conversationId, (conversation) => withLoadedTurns(conversation, nodes));
-        } catch {
-          // The next health transition or session reload retries reconciliation.
-        }
-      });
-    }
-  }, [conversations, sandboxHealth.phase]);
-
-  useEffect(() => {
-    if (
-      sandboxHealth.phase !== "healthy"
-      || !current?.sessionId
-      || !current.runtimeNodes
-      || activeRunsRef.current.has(current.id)
-    ) return;
+    if (!current?.sessionId || !current.runtimeNodes || activeRunsRef.current.has(current.id)) return;
     const activeTurn = current.runtimeNodes.find(
-      (node): node is RuntimeStateNode => isRuntimeTurnNode(node)
-        && node.id === current.activeTurnId
-        && node.status === "running",
+      (node) => node.id === current.activeTurnId && node.status === "running",
     );
     if (!activeTurn) return;
     void runConversation({
@@ -398,16 +352,7 @@ function AgentApp() {
       model: activeTurn.model,
       sourceNodeId: activeTurn.id,
     });
-  }, [current?.id, current?.sessionId, current?.activeTurnId, current?.runtimeNodes, sandboxHealth.phase]);
-
-  async function runConversationWithSandbox(request: import("./types").ChatRunRequest): Promise<void> {
-    if (sandboxHealth.phase !== "healthy") {
-      throw new Error(sandboxHealth.phase === "checking"
-        ? "正在检查沙箱 Broker，暂时无法运行 Agent。"
-        : `沙箱 Broker 不可用：${sandboxHealth.detail ?? "健康检查未通过。"}`);
-    }
-    await runConversation(request);
-  }
+  }, [current?.id, current?.sessionId, current?.activeTurnId, current?.runtimeNodes]);
 
   async function ensureSession(id: string): Promise<string> {
     const conversation = conversations.find((item) => item.id === id);
@@ -453,6 +398,241 @@ function AgentApp() {
     return conversation.id;
   }
 
+  async function newProject(): Promise<void> {
+    if (projectLoading) return;
+    setProjectLoading(true);
+    setActionError(null);
+    try {
+      const result = await createProject();
+      if (!result) return;
+      const conversation = summaryToConversation(result.session, {
+        id: result.session.session_id,
+        clientId: result.session.client_id ?? result.session.session_id,
+        title: result.session.title || "新对话",
+        messages: [],
+        messagesLoaded: true,
+        runtimeNodes: [],
+      });
+      setProjects((previous) => [result.project, ...previous.filter((item) => item.project_id !== result.project.project_id)]);
+      setConversations((previous) => [conversation, ...previous]);
+      setCurrentId(conversation.id);
+      setPage("chat");
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    } finally {
+      setProjectLoading(false);
+    }
+  }
+
+  async function newProjectConversation(projectId: string): Promise<void> {
+    setActionError(null);
+    try {
+      const existing = activeConversations.find(
+        (conversation) =>
+          conversation.projectId === projectId &&
+          conversation.messages.length === 0 &&
+          (conversation.messageCount ?? 0) === 0,
+      );
+      if (existing) {
+        setCurrentId(existing.id);
+        setPage("chat");
+        return;
+      }
+      const result = await createProjectSession(projectId, crypto.randomUUID());
+      const conversation = summaryToConversation(result.session, {
+        id: result.session.session_id,
+        clientId: result.session.client_id ?? result.session.session_id,
+        title: result.session.title || "新对话",
+        messages: [],
+        messagesLoaded: true,
+        runtimeNodes: [],
+      });
+      setConversations((previous) => [conversation, ...previous]);
+      setProjects((previous) => previous.map((item) => item.project_id === projectId ? result.project : item));
+      setCurrentId(conversation.id);
+      setPage("chat");
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    }
+  }
+
+  async function removeProjectFromSidebar(projectId: string): Promise<void> {
+    setActionError(null);
+    try {
+      await removeProject(projectId);
+      setProjects((previous) => previous.filter((item) => item.project_id !== projectId));
+      const removed = await listProjects("removed").catch(() => []);
+      setRemovedProjects(removed);
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    }
+  }
+
+  async function renameProjectFromSidebar(projectId: string, name: string): Promise<void> {
+    setActionError(null);
+    try {
+      const updated = await renameProject(projectId, name);
+      setProjects((previous) => previous.map((item) => item.project_id === projectId ? updated : item));
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+      throw error;
+    }
+  }
+
+  async function changeProjectPathFromSidebar(projectId: string): Promise<void> {
+    setActionError(null);
+    try {
+      const updated = await changeProjectPath(projectId);
+      if (!updated) return;
+      setProjects((previous) => previous.map((item) => item.project_id === projectId ? updated : item));
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+      throw error;
+    }
+  }
+
+  async function revokeProjectSkillTrustFromSidebar(projectId: string): Promise<void> {
+    setActionError(null);
+    try {
+      await revokeProjectSkillTrust(projectId);
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+      throw error;
+    }
+  }
+
+  async function restoreProjectFromTrash(projectId: string): Promise<void> {
+    setActionError(null);
+    try {
+      const restored = await restoreProject(projectId);
+      setProjects((previous) => [restored, ...previous.filter((item) => item.project_id !== projectId)]);
+      setRemovedProjects((previous) => previous.filter((item) => item.project_id !== projectId));
+      await refreshSessions();
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    }
+  }
+
+  function selectConversation(id: string) {
+    setCurrentId(id);
+    setPage("chat");
+  }
+
+  async function renameConversation(id: string, title: string) {
+    setActionError(null);
+    try {
+      const conversation = conversations.find((item) => item.id === id);
+      const sessionId = await ensureSession(id);
+      const summary = await renameSession(conversation?.threadId ?? sessionId, title);
+      updateConversation(id, (conversation) => summaryToConversation(summary, conversation));
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+      throw error;
+    }
+  }
+
+  async function archiveConversation(id: string) {
+    setActionError(null);
+    try {
+      const conversation = conversations.find((item) => item.id === id);
+      const sessionId = await ensureSession(id);
+      const summary = await archiveSession(conversation?.threadId ?? sessionId);
+      updateConversation(id, (conversation) => summaryToConversation(summary, conversation));
+      if (currentId === id) setCurrentId(activeConversations.find((conversation) => conversation.id !== id)?.id ?? null);
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    }
+  }
+
+  async function deleteConversation(id: string) {
+    setActionError(null);
+    try {
+      const conversation = conversations.find((item) => item.id === id);
+      const sessionId = await ensureSession(id);
+      await deleteSession(conversation?.threadId ?? sessionId);
+      setConversations((previous) => previous.filter((conversation) => conversation.id !== id));
+      if (currentId === id) setCurrentId(null);
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    }
+  }
+
+  async function restoreConversation(id: string) {
+    setActionError(null);
+    try {
+      const conversation = conversations.find((item) => item.id === id);
+      if (!conversation) return;
+      const sessionId = await ensureSession(id);
+      const summary = await restoreSession(conversation.threadId ?? sessionId);
+      updateConversation(id, (currentConversation) => summaryToConversation(summary, currentConversation));
+      if (!currentId) setCurrentId(conversation.id);
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    }
+  }
+
+  async function forkConversation(id: string, messageId: string) {
+    setActionError(null);
+    const source = conversations.find((conversation) => conversation.id === id);
+    if (!source) return;
+    const index = source.messages.findIndex((message) => message.id === messageId);
+    if (index < 0 || source.messages[index].role !== "assistant") return;
+    try {
+      await ensureSession(id);
+      const sourceTurnId = source.messages[index].sourceNodeId;
+      if (!sourceTurnId) throw new Error("fork requires an assistant Turn");
+      const forked = await forkTurn(sourceTurnId);
+      const sidebar = forked.sidebar_thread;
+      const branch = withLoadedTurns({
+        id: sidebar.thread_id,
+        clientId: sidebar.thread_id,
+        sessionId: sidebar.session_id,
+        threadId: sidebar.thread_id,
+        activeTurnId: forked.turn.id,
+        title: sidebar.title,
+        messages: [],
+        messagesLoaded: false,
+        updatedAt: sidebar.updated_at,
+      }, await getSessionNodes(sidebar.session_id));
+      setConversations((previous) => [branch, ...previous]);
+      setCurrentId(branch.id);
+      setPage("chat");
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+    }
+  }
+
+  async function rewindConversation(id: string, messageId: string): Promise<{ content: string; sessionId: string; sourceNodeId?: string; rewindTurnId?: string } | undefined> {
+    setActionError(null);
+    const source = conversations.find((conversation) => conversation.id === id);
+    if (!source) return undefined;
+    const index = source.messages.findIndex((message) => message.id === messageId);
+    if (index < 0 || source.messages[index].role !== "user") return undefined;
+    try {
+      const sessionId = await ensureSession(id);
+      const turnId = source.messages[index].nodeId;
+      if (!turnId) throw new Error("rewind requires a user Turn");
+      setCurrentId(id);
+      setPage("chat");
+      return {
+        content: source.messages[index].content,
+        sessionId,
+        sourceNodeId: turnId,
+        rewindTurnId: turnId,
+      };
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+      return undefined;
+    }
+  }
+  async function reloadConversation(id: string, preferredActiveTurnId?: string): Promise<void> {
+    const conversation = conversations.find((item) => item.id === id);
+    if (!conversation) throw new Error("会话不存在");
+    const sessionId = await ensureSession(id);
+    const nodes = await getSessionNodes(sessionId);
+    updateConversation(id, (currentConversation) => withLoadedTurns(currentConversation, nodes, preferredActiveTurnId));
+  }
+
   async function refreshSessions(): Promise<void> {
     const summaries = await listSessions("active");
     setConversations((previous) => {
@@ -469,47 +649,25 @@ function AgentApp() {
     });
   }
 
-  const {
-    newProject,
-    newProjectConversation,
-    removeProjectFromSidebar,
-    renameProjectFromSidebar,
-    changeProjectPathFromSidebar,
-    revokeProjectSkillTrustFromSidebar,
-    restoreProjectFromTrash,
-  } = createProjectActions({
-    projectLoading,
-    activeConversations,
-    setProjectLoading,
-    setProjects,
-    setRemovedProjects,
-    setConversations,
-    setCurrentId,
-    setPage,
-    setActionError,
-    refreshSessions,
-  });
-
-  const {
-    renameConversation,
-    archiveConversation,
-    deleteConversation,
-    restoreConversation,
-    forkConversation,
-    rewindConversation,
-    reloadConversation,
-    useSession,
-  } = createConversationActions({
-    conversations,
-    activeConversations,
-    currentId,
-    ensureSession,
-    updateConversation,
-    setConversations,
-    setCurrentId,
-    setPage,
-    setActionError,
-  });
+  async function useSession(sessionId: string): Promise<string> {
+    let target = conversations.find((item) => item.threadId === sessionId || item.sessionId === sessionId);
+    if (!target) {
+      const summaries = await listSessions("active");
+      const summary = summaries.find((item) => item.thread_id === sessionId || item.session_id === sessionId);
+      if (!summary) throw new Error(`未知会话：${sessionId}`);
+      target = summaryToConversation(summary);
+      setConversations((previous) => [target!, ...previous]);
+    }
+    setCurrentId(target.id);
+    setPage("chat");
+    if (!target.messagesLoaded) {
+      const nodes = await getSessionNodes(target.sessionId ?? sessionId);
+      setConversations((previous) => previous.map((item) => (
+        item.id === target!.id ? withLoadedTurns(item, nodes) : item
+      )));
+    }
+    return target.id;
+  }
 
   function setConversationMode(conversation: Conversation | null, mode: ChatMode) {
     if (!conversation) {
@@ -522,7 +680,7 @@ function AgentApp() {
 
   return (
     <AgentShell
-      profile={profile}
+      user={user}
       page={page}
       current={current}
       activeConversations={activeConversations}
@@ -539,7 +697,7 @@ function AgentApp() {
       actionError={actionError}
       settingsOpen={settingsOpen}
       setSettingsOpen={setSettingsOpen}
-      onProfileChange={setProfile}
+      onUserUpdate={(patch) => setUser(user ? { ...user, ...patch } : user)}
       onNew={newConversation}
       onNewProject={newProject}
       onNewProjectConversation={newProjectConversation}
@@ -554,9 +712,10 @@ function AgentApp() {
       onArchive={archiveConversation}
       onDelete={deleteConversation}
       onRestore={restoreConversation}
+      onSignOut={signOut}
       onProfileUpdate={async (profile) => {
         const updated = await updateProfile(profile);
-        setProfile(updated);
+        if (user) setUser({ ...user, ...updated });
       }}
       onUpdate={updateConversation}
       onModeChange={(mode) => setConversationMode(current, mode)}
@@ -566,15 +725,13 @@ function AgentApp() {
       onSelectSession={useSession}
       onReload={reloadConversation}
       onRefresh={refreshSessions}
-      onRun={runConversationWithSandbox}
+      onRun={runConversation}
       onStopRun={stopConversation}
       queuedMessages={queuedMessages}
       onQueuedMessagesChange={updateQueuedMessages}
-      onQueuedMessagesRefresh={refreshQueuedMessages}
       onClearError={() => setActionError(null)}
       onDisplayModeUpdate={(config) => setDisplayMode(effectiveDisplayMode(config.display_mode))}
       onProviderConfigUpdate={setProviderConfig}
-      sandboxHealth={sandboxHealth}
     />
   );
 }

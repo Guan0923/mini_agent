@@ -1,33 +1,46 @@
+"""PostgreSQL integration-test isolation."""
+
 from __future__ import annotations
+
+import os
 
 import pytest
 
-from backend.api.state import WebAppState
-from backend.runtime.application import factory
-from backend.sandbox import SandboxLauncher
-from backend.storage.message_queue import MemoryMessageQueue
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql://mini_agent:mini_agent@127.0.0.1:5432/mini_agent_test",
+)
+os.environ.setdefault("TEST_DATABASE_URL", TEST_DATABASE_URL)
+os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
 
 
-@pytest.fixture
-def local_sandbox_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Use the explicit local test launcher when a test does not exercise Broker isolation."""
-
-    monkeypatch.setattr(
-        factory,
-        "_sandbox_runtime",
-        lambda _config: (
-            SandboxLauncher(is_windows=False, allow_local_backend=True),
-            {},
-        ),
-    )
+_POSTGRES_TEST_MODULES = {
+    "test_plan_message_flow",
+    "test_plan_questions",
+    "test_resume",
+    "test_runtime_context",
+    "test_runtime_messages",
+    "test_sessions",
+    "test_steering",
+    "test_time_tools",
+    "test_sync_server",
+    "test_web_auth_postgres",
+}
 
 
 @pytest.fixture(autouse=True)
-def use_in_memory_message_queue(monkeypatch: pytest.MonkeyPatch) -> None:
-    original = WebAppState.__init__
+def reset_postgres_schema(request: pytest.FixtureRequest) -> None:
+    """Isolate only legacy PostgreSQL integration tests.
 
-    def init(self, *args, **kwargs):
-        kwargs.setdefault("message_queue", MemoryMessageQueue())
-        original(self, *args, **kwargs)
+    Keeping the import and connection local means the local-first client test
+    suite can run without installing the optional server dependencies.
+    """
 
-    monkeypatch.setattr(WebAppState, "__init__", init)
+    if request.module.__name__.rsplit(".", 1)[-1] not in _POSTGRES_TEST_MODULES:
+        return
+
+    import psycopg
+
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True, connect_timeout=3) as connection:
+        connection.execute("DROP SCHEMA public CASCADE")
+        connection.execute("CREATE SCHEMA public")

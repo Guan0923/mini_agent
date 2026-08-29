@@ -6,7 +6,6 @@ from backend.domain.runtime_state import (
     InMemoryNodeStore,
     NodeFrame,
     NodeWriter,
-    RuntimeRootState,
     RuntimeState,
     RuntimeStateValidationError,
 )
@@ -15,13 +14,12 @@ from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 
 
-def make_running_turn(*, parent: RuntimeRootState | None = None) -> RuntimeState:
+def make_running_turn() -> RuntimeState:
     return RuntimeState.create(
         session_id="session_1",
         thread_id="session_1",
         id="turn_1",
-        parent=parent,
-        user_content=[{"type": "text", "text": "start", "status": "success"}],
+        user_content=[{"type": "text", "text": "start"}],
         provider_name="local",
     )
 
@@ -29,11 +27,7 @@ def make_running_turn(*, parent: RuntimeRootState | None = None) -> RuntimeState
 def test_running_turn_may_end_in_user_but_terminal_turn_must_end_in_assistant() -> None:
     running = make_running_turn()
     running.data[0].append(
-        {
-            "role": "user",
-            "delivery_id": "delivery_1",
-            "content": [{"type": "text", "text": "redirect", "status": "success"}],
-        }
+        {"role": "user", "steering_id": "steer_1", "content": [{"type": "text", "text": "redirect"}]}
     )
     running = RuntimeState.from_dict(running.to_dict())
     assert [message["role"] for message in running.data[0]] == ["user", "assistant", "user"]
@@ -46,21 +40,16 @@ def test_running_turn_may_end_in_user_but_terminal_turn_must_end_in_assistant() 
 
 def test_writer_emits_append_message_then_message_indexed_item_and_text_operations() -> None:
     frames: list[NodeFrame] = []
-    store = InMemoryNodeStore()
-    writer = NodeWriter(store, emit=frames.append)
-    turn = writer.create(make_running_turn(parent=store.ensure_root_node("session_1", id="turn_root")))
+    writer = NodeWriter(InMemoryNodeStore(), emit=frames.append)
+    turn = writer.create(make_running_turn())
     turn = writer.append_message(
         turn,
-        {
-            "role": "user",
-            "delivery_id": "delivery_1",
-            "content": [{"type": "text", "text": "redirect", "status": "success"}],
-        },
+        {"role": "user", "steering_id": "steer_1", "content": [{"type": "text", "text": "redirect"}]},
     )
     turn = writer.append_message(turn, {"role": "assistant", "content": []})
     turn = writer.append_items(
         turn,
-        [{"type": "text", "text": "new ", "status": "running"}],
+        [{"type": "text", "text": "new "}],
         message_idx=3,
         persist=False,
     )
@@ -74,7 +63,7 @@ def test_writer_emits_append_message_then_message_indexed_item_and_text_operatio
             "data_idx": 0,
             "message_idx": 3,
             "item_idx": 0,
-            "item": {"type": "text", "text": "new ", "status": "running"},
+            "item": {"type": "text", "text": "new "},
         },
     )
     assert frames[4].operations[0]["message_idx"] == 3
@@ -97,7 +86,7 @@ def test_runtime_bridge_appends_canonical_user_before_starting_the_next_assistan
         RuntimeEvent(
             "steering_applied",
             data={
-                "delivery_id": "delivery_1",
+                "steering_id": "steer_1",
                 "content": "redirect",
                 "references": [{"source": "project", "path": "README.md"}],
             },
@@ -105,45 +94,32 @@ def test_runtime_bridge_appends_canonical_user_before_starting_the_next_assistan
     )
     after_user = bridge.writer.current("session_1", "turn_1")
     assert [message["role"] for message in after_user.data[0]] == ["user", "assistant", "user"]
-    assert after_user.data[0][-1]["delivery_id"] == "delivery_1"
-
-    bridge.handle(
-        RuntimeEvent(
-            "steering_applied",
-            data={"delivery_id": "delivery_1", "content": "redirect"},
-        )
-    )
-    deduplicated = bridge.writer.current("session_1", "turn_1")
-    assert [message["role"] for message in deduplicated.data[0]] == ["user", "assistant", "user"]
+    assert after_user.data[0][-1]["steering_id"] == "steer_1"
 
     bridge.handle(RuntimeEvent("response_delta", "new answer"))
     completed = bridge.finish("success")
     assert completed is not None
     assert [message["role"] for message in completed.data[0]] == ["user", "assistant", "user", "assistant"]
-    assert completed.data[0][-1]["content"] == [{"type": "text", "text": "new answer", "status": "success"}]
+    assert completed.data[0][-1]["content"] == [{"type": "text", "text": "new answer"}]
 
 
 def test_runtime_model_history_includes_every_same_turn_message_and_file_reference() -> None:
     turn = make_running_turn()
-    turn.data[0][1]["content"] = [{"type": "text", "text": "first answer", "status": "success"}]
+    turn.data[0][1]["content"] = [{"type": "text", "text": "first answer"}]
     turn.data[0].extend(
         [
             {
                 "role": "user",
-                "delivery_id": "delivery_1",
+                "steering_id": "steer_1",
                 "content": [
                     {
                         "type": "text",
                         "text": "redirect",
-                        "status": "success",
                         "references": [{"source": "project", "path": "README.md"}],
                     }
                 ],
             },
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "second answer", "status": "success"}],
-            },
+            {"role": "assistant", "content": [{"type": "text", "text": "second answer"}]},
         ]
     )
     turn = RuntimeState.from_dict(turn.to_dict())

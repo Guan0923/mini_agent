@@ -210,11 +210,11 @@ def test_cancel_after_seal_is_noop_succeeded() -> None:
 
 def test_close_times_out_logs_diagnostic_and_stays_non_terminal(caplog) -> None:
     entered = threading.Event()
-    release = threading.Event()
 
     def target() -> None:
         entered.set()
-        release.wait()
+        while True:  # uncooperative: never returns
+            time.sleep(0.01)
 
     job = make_job("job-stubborn", target)
     job.start()
@@ -229,20 +229,20 @@ def test_close_times_out_logs_diagnostic_and_stays_non_terminal(caplog) -> None:
         job._worker_thread is not None and str(job._worker_thread.ident) in rec.message for rec in caplog.records
     )
     assert any(job._worker_thread is not None and job._worker_thread.name in rec.message for rec in caplog.records)
-    release.set()
-    job.close(timeout=5)
-    assert job.info().state is JobState.CANCELLED
+    # A later close/cancel still works without raising.
+    assert job.cancel() is True
+    job.close(timeout=0.05)
 
 
 def test_scope_close_reports_stubborn_job_in_timed_out() -> None:
     registry = JobRegistry()
     scope = registry.root_scope()
     entered = threading.Event()
-    release = threading.Event()
 
     def target() -> None:
         entered.set()
-        release.wait()
+        while True:
+            time.sleep(0.01)
 
     job = ThreadJob(registry.new_job_id(), target)
     registry.submit(job, scope=scope, lane=JobLane.BACKGROUND, admission=AdmissionPolicy())
@@ -252,9 +252,8 @@ def test_scope_close_reports_stubborn_job_in_timed_out() -> None:
     assert job._id not in report.closed
     # After the timed-out close the job is still non-terminal.
     assert job.info().state is JobState.RUNNING
-    release.set()
+    # Cleaning up is still possible afterwards so the process can exit.
     job.close(timeout=5)
-    assert job.info().state is JobState.CANCELLED
 
 
 # ---------------------------------------------------------------------------

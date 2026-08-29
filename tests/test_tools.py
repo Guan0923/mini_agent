@@ -1,30 +1,21 @@
-import os
-import shlex
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from backend.api.pause_control import TurnPauseController
-from backend.domain import AssistantMessage, ToolMessage
 from backend.jobs import (
     AdmissionPolicy,
     JobKind,
     JobLane,
     JobLimitPolicy,
-    JobQuery,
     JobRegistry,
     JobScopeKind,
     JobState,
     LaneLimits,
     ThreadJob,
 )
-from backend.planning import RuleBasedPlanner
-from backend.runtime import AgentRunner
-from backend.runtime.execution.steps import ToolStepExecutor
 from backend.tools import Tool, ToolError, ToolInvocationContext, ToolRegistry, WorkspaceCommand
 from backend.tools.default_tools.command import command_tool
 
@@ -143,7 +134,6 @@ def test_command_tool_uses_git_bash_executable_when_selected(tmp_path: Path, mon
     assert calls == [["git-bash.exe", "-lc", "echo hi"]]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows WSL path mapping test")
 def test_command_tool_maps_workspace_for_wsl(tmp_path: Path, monkeypatch) -> None:
     from backend.tools.terminal import windows_workspace_to_wsl
 
@@ -224,11 +214,15 @@ def test_command_output_uses_one_shared_limit_and_preserves_both_streams(tmp_pat
 
 def test_command_job_reuses_parent_slot_and_is_visible_in_shared_registry(tmp_path: Path) -> None:
     limits = {lane: LaneLimits(max_running=1, max_queued=1) for lane in JobLane}
-    registry = JobRegistry(policy=JobLimitPolicy(system=limits, session=limits, thread=limits))
-    session_scope = registry.root_scope().child(JobScopeKind.SESSION, session_id="session-1")
-    thread_scope = session_scope.child(JobScopeKind.THREAD, thread_id="thread-1")
+    registry = JobRegistry(policy=JobLimitPolicy(system=limits, user=limits, runner=limits))
+    user_scope = registry.root_scope().child(
+        JobScopeKind.USER,
+        user_id="user-1",
+        session_id="session-1",
+    )
+    runner_scope = user_scope.child(JobScopeKind.RUNNER)
     parent_job_id = registry.new_job_id()
-    run_scope = thread_scope.child(
+    run_scope = runner_scope.child(
         JobScopeKind.RUN,
         run_id="run-1",
         parent_job_id=parent_job_id,
@@ -256,7 +250,7 @@ def test_command_job_reuses_parent_slot_and_is_visible_in_shared_registry(tmp_pa
     parent_job = ThreadJob(parent_job_id, invoke_command)
     registry.submit(
         parent_job,
-        scope=thread_scope,
+        scope=user_scope,
         lane=JobLane.FOREGROUND,
         admission=AdmissionPolicy(),
     )
@@ -265,7 +259,9 @@ def test_command_job_reuses_parent_slot_and_is_visible_in_shared_registry(tmp_pa
     assert parent_job.info().state is JobState.SUCCEEDED
     assert result["output"] == "stdout:\nmanaged\n"
     command_records = [
-        item for item in registry.list(JobQuery(session_id="session-1")) if item.info.kind is JobKind.SUBPROCESS
+        item
+        for item in registry.list_for_user("user-1", session_id="session-1")
+        if item.info.kind is JobKind.SUBPROCESS
     ]
     assert len(command_records) == 1
     assert command_records[0].parent_job_id == parent_job_id
@@ -325,94 +321,6 @@ def test_command_runtime_cancellation_terminates_managed_process(tmp_path: Path)
     assert "stdout:\npartial" in str(exc_info.value)
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows terminal cancellation integration test")
-def test_real_long_running_command_is_cancelled_by_turn_pause(tmp_path: Path) -> None:
-    marker = tmp_path / "command-started.txt"
-    if os.name == "nt":
-        marker_path = str(marker).replace("'", "''")
-        command_text = f"[System.IO.File]::WriteAllText('{marker_path}', 'started'); Start-Sleep -Seconds 30"
-    else:
-        command_text = f"printf started > {shlex.quote(str(marker))}; sleep 30"
-    controller = TurnPauseController()
-    command = WorkspaceCommand(tmp_path, terminal_type="powershell" if os.name == "nt" else "bash")
-    failure: list[BaseException] = []
-
-    def invoke() -> None:
-        try:
-            command.run_with_context(
-                ToolInvocationContext(cancel_requested=controller.is_requested),
-                command_text,
-                timeout_seconds=60,
-            )
-        except BaseException as exc:
-            failure.append(exc)
-
-    worker = threading.Thread(target=invoke, daemon=True)
-    started_at = time.monotonic()
-    worker.start()
-    try:
-        deadline = time.monotonic() + 5.0
-        while not marker.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert marker.exists(), f"the real child process did not start: {failure!r}"
-        assert controller.request_pause() is True
-        worker.join(5.0)
-    finally:
-        controller.request_pause()
-
-    assert not worker.is_alive()
-    assert time.monotonic() - started_at < 10.0
-    assert len(failure) == 1
-    assert isinstance(failure[0], ToolError)
-    assert "cancelled" in str(failure[0]).lower()
-
-
-def test_non_cooperative_tool_late_result_is_not_published_after_pause() -> None:
-    entered = threading.Event()
-    release = threading.Event()
-
-    def late_tool() -> str:
-        entered.set()
-        assert release.wait(3.0)
-        return "late success must be discarded"
-
-    tools = ToolRegistry(
-        [
-            Tool(
-                "late_tool",
-                "Return only after the test releases it.",
-                late_tool,
-                {"type": "object", "properties": {}, "required": []},
-            )
-        ]
-    )
-    runtime = AgentRunner(RuleBasedPlanner(), tools).new_runtime(task="invoke late tool")
-    controller = TurnPauseController()
-    runtime.services.suspend_requested = controller.is_requested
-    published = []
-    runtime.services.publish = lambda event: published.append(event) if not controller.is_requested() else None
-    tool_message = ToolMessage(name="late_tool", call_id="call_late", arguments={})
-    runtime.state.active_message = AssistantMessage(tool_messages=[tool_message])
-    runtime.state.active_tool_index = 0
-    outcomes = []
-
-    worker = threading.Thread(target=lambda: outcomes.append(ToolStepExecutor().execute(runtime)), daemon=True)
-    worker.start()
-    assert entered.wait(3.0)
-    assert controller.request_pause() is True
-    release.set()
-    worker.join(3.0)
-
-    assert not worker.is_alive()
-    assert len(outcomes) == 1 and outcomes[0].success is False
-    assert tool_message.status == "failed"
-    assert tool_message.content == "Tool invocation cancelled."
-    published_kinds = [event.kind for event in published]
-    assert published_kinds.count("tool_call") == 1
-    assert "tool_result" not in published_kinds
-    assert "tool_failed" not in published_kinds
-
-
 def test_command_tool_requires_confirmation_and_validates_timeout(tmp_path: Path) -> None:
     tools = ToolRegistry(tmp_path)
 
@@ -458,10 +366,7 @@ def test_upload_file_tool_reads_only_inside_uploads_root(tmp_path: Path) -> None
         registry.invoke("read_upload_file", {"path": "../outside.txt"})
 
 
-def test_build_application_registers_upload_tool_when_root_provided(
-    tmp_path: Path,
-    local_sandbox_runtime: None,
-) -> None:
+def test_build_application_registers_upload_tool_when_root_provided(tmp_path: Path) -> None:
     from backend.configuration import ClientPaths
     from backend.runtime import build_application
 

@@ -13,7 +13,7 @@ from ..core.context import PreparedResponse, RuntimeExchange, RuntimeState
 from ..core.events import RuntimeEvent
 
 _SENSITIVE_KEY = re.compile(
-    r"(?:api[_-]?key|authorization|cookie|password|secret|token)",
+    r"(?:^|[_-])(?:api[_-]?key|authorization|cookie|password|secret|token)(?:$|[_-])",
     re.IGNORECASE,
 )
 _SENSITIVE_VALUE = re.compile(
@@ -57,18 +57,6 @@ _IDENTIFIER_KEYS = frozenset(
 )
 _PREVIEW_CHARS = 200
 LOG_SCHEMA_VERSION = 2
-_TRACE_OMITTED_KEYS = frozenset(
-    {
-        "credential",
-        "credentials",
-        "header",
-        "headers",
-        "provider_wire_request",
-        "provider_wire_response",
-        "wire_request",
-        "wire_response",
-    }
-)
 
 
 def model_request_data(state: RuntimeState, exchange: RuntimeExchange) -> dict[str, Any]:
@@ -156,7 +144,7 @@ def model_error_data(state: RuntimeState, exchange: RuntimeExchange, error: Exce
 
 
 def persistent_event(event: RuntimeEvent, include_full_messages: bool) -> tuple[str, dict[str, Any]]:
-    """Create the data representation shared by checkpoints and JSONL logs."""
+    """Create the data representation shared by checkpoints, PostgreSQL, and JSONL."""
 
     message = _redact_text(event.message)
     if not include_full_messages and message:
@@ -183,35 +171,6 @@ def _message_to_record(message: Any) -> dict[str, Any]:
             if isinstance(tool, dict):
                 tool.pop("provider_options", None)
     return payload
-
-
-def neutral_message_record(message: Any) -> dict[str, Any]:
-    """Serialize one provider-neutral message without provider wire extensions."""
-
-    return _message_to_record(message)
-
-
-def redact_audit_value(value: Any) -> Any:
-    """Recursively redact secrets while retaining complete audit-safe content."""
-
-    return _persistent_value(value, True)
-
-
-def turn_trace_audit_value(value: Any) -> Any:
-    """Drop forbidden transport fields, then recursively redact audit content."""
-
-    if isinstance(value, Mapping):
-        filtered: dict[str, Any] = {}
-        for raw_key, item_value in value.items():
-            key = str(raw_key)
-            normalized = re.sub(r"(?<!^)(?=[A-Z])", "_", key).replace("-", "_").casefold()
-            if normalized in _TRACE_OMITTED_KEYS:
-                continue
-            filtered[key] = turn_trace_audit_value(item_value)
-        return _persistent_value(filtered, True)
-    if isinstance(value, (list, tuple)):
-        return [turn_trace_audit_value(item) for item in value]
-    return _persistent_value(value, True)
 
 
 def _persistent_value(value: Any, include_full_messages: bool, key: str | None = None) -> Any:

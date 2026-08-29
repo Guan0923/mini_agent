@@ -25,6 +25,34 @@ _CONFIG_SECRET_KEY_RE = re.compile(
 )
 
 
+def validate_identity_id(value: str, *, require_uuid: bool = False) -> str:
+    """Validate an identity directory name without accepting path syntax.
+
+    Web identities always use the lower-case, hyphenated representation
+    returned by :func:`uuid.uuid4`.  ``require_uuid=False`` is retained only
+    for the standalone/offline TUI's historical device directory; it still
+    rejects separators, emails and traversal components.
+    """
+
+    from uuid import UUID
+
+    candidate = str(value or "")
+    if not _SAFE_ID_RE.fullmatch(candidate) or candidate in {".", ".."}:
+        raise ConfigurationError("Unsafe identity id for local data path.")
+    parsed = None
+    try:
+        parsed = UUID(candidate)
+    except (ValueError, AttributeError) as exc:
+        if require_uuid:
+            raise ConfigurationError("Authenticated identity id must be a UUID.") from exc
+    else:
+        if require_uuid and str(parsed) != candidate:
+            raise ConfigurationError("Authenticated identity id must use canonical UUID syntax.")
+    if require_uuid and parsed is None:
+        raise ConfigurationError("Authenticated identity id must be a UUID.")
+    return candidate
+
+
 @dataclass(frozen=True)
 class ClientPaths:
     """All mutable client data, outside the project workspace."""
@@ -33,33 +61,79 @@ class ClientPaths:
 
     @classmethod
     def from_home(cls, home: Path | None = None) -> ClientPaths:
-        return cls((home or Path.home()) / ".mini_agent")
+        # The standalone TUI is legacy-only.  Keep its implicit device tree
+        # outside the authenticated Web data root so it cannot recreate
+        # root-level files alongside ``~/.mini_agent/<user_id>`` trees.
+        return cls((home or Path.home()) / ".mini_agent-cache" / "tui")
 
     @property
     def config_file(self) -> Path:
         return self.root / "config.toml"
 
     @property
-    def state_db(self) -> Path:
-        """Local provider metadata and encrypted credentials."""
+    def user_db(self) -> Path:
+        """Canonical per-user settings database for authenticated clients."""
 
-        return self.runtime_dir / "state.db"
+        return self.root / "user.db"
 
     @property
     def projects_db(self) -> Path:
-        """Local project index used by the Web application."""
+        """Local-only project index; never included in cloud event sync."""
 
-        return self.runtime_dir / "projects.db"
+        return self.root / "projects.db"
+
+    @property
+    def memories_dir(self) -> Path:
+        """Optional per-user memory state, created only when memory is enabled or written."""
+
+        return self.root / "memories"
+
+    @property
+    def memory_db(self) -> Path:
+        """Authoritative per-user memory database."""
+
+        return self.memories_dir / "memory.db"
+
+    @property
+    def raw_memories_file(self) -> Path:
+        """Rebuildable Markdown projection of active durable memories."""
+
+        return self.memories_dir / "raw_memories.md"
+
+    @property
+    def rollout_summaries_dir(self) -> Path:
+        """Rebuildable per-session evidence projections."""
+
+        return self.memories_dir / "rollout_summaries"
 
     @property
     def runtime_dir(self) -> Path:
-        """Runtime data used by the local application."""
+        """Runtime shared by Web and TUI; no client-type directory is used."""
 
         return self.root / "runtime"
 
     @property
+    def sync_dir(self) -> Path:
+        return self.root / "sync"
+
+    @property
+    def sync_staging_dir(self) -> Path:
+        return self.sync_dir / "staging"
+
+    @property
+    def sync_recovery_dir(self) -> Path:
+        return self.sync_dir / "recovery"
+
+    @property
     def skills_dir(self) -> Path:
         return self.root / "skills"
+
+    @property
+    def logs_dir(self) -> Path:
+        """Optional TUI-only diagnostics kept outside the user snapshot tree."""
+
+        cache_parent = self.root.parent.parent if self.root.parent.name == ".mini_agent-cache" else self.root.parent
+        return cache_parent / ".mini_agent-cache" / "logs" / self.root.name
 
     @property
     def plugins_dir(self) -> Path:
@@ -111,9 +185,20 @@ class ClientPaths:
         return self.session_root(session_id) / "workspace"
 
     def session_uploads(self, session_id: str) -> Path:
-        """Return the upload directory below the session workspace."""
+        """Return the canonical upload directory below the session workspace.
+
+        Uploads belong to the session payload and are therefore kept inside
+        ``workspace`` so every workspace copy/restore path carries them
+        automatically.  The pre-v0.4 sibling ``uploads`` directory is a legacy
+        layout and is migrated into this location by :meth:`ensure_session`.
+        """
 
         return self.session_workspace(session_id) / "uploads"
+
+    def legacy_session_uploads(self, session_id: str) -> Path:
+        """Return the legacy sibling uploads directory for migration only."""
+
+        return self.session_root(session_id) / "uploads"
 
     def ensure_session(self, session_id: str) -> Path:
         if self.runtime_dir.is_symlink():
@@ -135,7 +220,50 @@ class ClientPaths:
         # contract must be complete even for callers that prepare a workspace
         # before opening the session store.
         self.session_db(session_id).touch(exist_ok=True)
+        self.migrate_legacy_uploads(session_id)
         return root
+
+    def migrate_legacy_uploads(self, session_id: str) -> None:
+        """Move a pre-canonical sibling ``uploads`` directory into the workspace.
+
+        Older sessions stored uploads next to the workspace at
+        ``runtime/<session>/uploads``.  The canonical location is now
+        ``workspace/uploads`` so workspace copies, event sync, branch
+        creation and guest imports carry uploads automatically.  The migration
+        refuses symbolic links and special files and leaves an already
+        canonical session untouched.
+        """
+
+        legacy = self.legacy_session_uploads(session_id)
+        if legacy.is_symlink():
+            raise ConfigurationError("Legacy uploads directory cannot be a symbolic link.")
+        if not legacy.is_dir():
+            return
+        canonical = self.session_uploads(session_id)
+        if canonical.is_symlink():
+            raise ConfigurationError("Session uploads directory cannot be a symbolic link.")
+        canonical.mkdir(parents=True, exist_ok=True)
+        for item in legacy.iterdir():
+            if item.is_symlink():
+                raise ConfigurationError(f"Legacy upload contains a symbolic link: {item.name}")
+            if item.is_dir():
+                target = canonical / item.name
+                if target.exists() or target.is_symlink():
+                    raise ConfigurationError(f"Legacy upload collides with canonical entry: {item.name}")
+                item.rename(target)
+            elif item.is_file():
+                target = canonical / item.name
+                if target.exists() or target.is_symlink():
+                    raise ConfigurationError(f"Legacy upload collides with canonical entry: {item.name}")
+                item.rename(target)
+            else:
+                raise ConfigurationError(f"Legacy upload contains a special file: {item.name}")
+        try:
+            legacy.rmdir()
+        except OSError:
+            # A concurrent writer may have repopulated the legacy directory;
+            # leave it in place rather than failing session provisioning.
+            pass
 
     def ensure(self) -> None:
         if self.root.exists() and self.root.is_symlink():
@@ -149,18 +277,75 @@ class ClientPaths:
             self.mcp_dir,
             self.mcp_resources_dir,
             self.runtime_dir,
+            self.sync_dir,
+            self.sync_staging_dir,
+            self.sync_recovery_dir,
         ):
             if directory.is_symlink():
                 raise ConfigurationError(f"User data directory cannot be a symbolic link: {directory}")
             if directory.exists() and not directory.is_dir():
                 raise ConfigurationError(f"User data path must be a directory: {directory}")
             directory.mkdir(parents=True, exist_ok=True)
-        for file in (self.config_file, self.state_db, self.projects_db, self.mcp_file, self.mcp_trust_file):
+        for file in (self.config_file, self.user_db, self.projects_db, self.mcp_file, self.mcp_trust_file):
             if file.is_symlink():
                 raise ConfigurationError(f"User data file cannot be a symbolic link: {file}")
             if file.exists() and not file.is_file():
                 raise ConfigurationError(f"User data path must be a file: {file}")
             file.touch(exist_ok=True)
+        # TUI diagnostics deliberately live outside the snapshot-owned user
+        # root.  Creating the directory here keeps the path usable for the
+        # standalone TUI without reintroducing runtime/web or runtime/tui.
+        cache_root = self.root.parent / ".mini_agent-cache"
+        logs_root = cache_root / "logs"
+        if cache_root.is_symlink() or (cache_root.exists() and not cache_root.is_dir()):
+            raise ConfigurationError("Diagnostics cache root cannot be a symbolic link or regular file.")
+        if logs_root.is_symlink() or (logs_root.exists() and not logs_root.is_dir()):
+            raise ConfigurationError("Diagnostics logs path cannot be a symbolic link or regular file.")
+        cache_root.mkdir(parents=True, exist_ok=True)
+        logs_root.mkdir(parents=True, exist_ok=True)
+        if self.logs_dir.is_symlink():
+            raise ConfigurationError("Diagnostics directory cannot be a symbolic link.")
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+
+    def ensure_memories(self) -> Path:
+        """Lazily create the isolated memory directory contract.
+
+        This method is intentionally not called by :meth:`ensure`; ordinary
+        login, AGENTS discovery, and session provisioning must not opt a user
+        into memory storage as a side effect.
+        """
+
+        if self.root.is_symlink():
+            raise ConfigurationError("User data root cannot be a symbolic link.")
+        if self.root.exists() and not self.root.is_dir():
+            raise ConfigurationError("User data root must be a directory.")
+        self.root.mkdir(parents=True, exist_ok=True)
+        root = self.root.resolve()
+        memories = self.memories_dir
+        if memories.is_symlink():
+            raise ConfigurationError("Memories directory cannot be a symbolic link.")
+        if memories.exists() and not memories.is_dir():
+            raise ConfigurationError("Memories path must be a directory.")
+        resolved_memories = memories.resolve()
+        if resolved_memories.parent != root:
+            raise ConfigurationError("Memories directory must remain inside the user data root.")
+        memories.mkdir(parents=True, exist_ok=True)
+        summaries = self.rollout_summaries_dir
+        if summaries.is_symlink():
+            raise ConfigurationError("Memory rollout summaries cannot be a symbolic link.")
+        if summaries.exists() and not summaries.is_dir():
+            raise ConfigurationError("Memory rollout summaries path must be a directory.")
+        if summaries.resolve().parent != resolved_memories:
+            raise ConfigurationError("Memory rollout summaries must remain inside the memories directory.")
+        summaries.mkdir(parents=True, exist_ok=True)
+        for file in (self.memory_db, self.raw_memories_file):
+            if file.is_symlink():
+                raise ConfigurationError("Memory files cannot be symbolic links.")
+            if file.exists() and not file.is_file():
+                raise ConfigurationError("Memory file path must be a regular file.")
+            if file.resolve().parent != resolved_memories:
+                raise ConfigurationError("Memory files must remain inside the memories directory.")
+        return memories
 
 
 def load_config(path: Path) -> dict[str, object]:
@@ -183,26 +368,48 @@ def initialize_config(paths: ClientPaths, workspace: Path) -> dict[str, object]:
 
     del workspace
     paths.ensure()
-    # ``ClientPaths.ensure`` creates the contract files up front. An empty
-    # TOML file is still uninitialized and receives non-sensitive defaults.
+    # ``ClientPaths.ensure`` creates the contract files up front so callers
+    # can rely on their presence.  An empty TOML file is still an
+    # uninitialized store and must receive the safe defaults below; otherwise
+    # a first standalone-TUI launch would end up with no model/runtime tables.
     if paths.config_file.exists() and paths.config_file.stat().st_size > 0:
-        return LocalConfigStore(paths.config_file).ensure_defaults({})
+        values = load_config(paths.config_file)
+        # Web identities use user.db for provider credentials.  Sanitize an
+        # existing account TOML even when a caller reaches the composition
+        # root without first going through ``user_paths``.  The root-level
+        # standalone TUI keeps its historical model.toml compatibility.
+        if _is_authenticated_user_root(paths.root):
+            values = UserConfigStore(paths.config_file).ensure_defaults({})
+        return _ensure_device_id(paths, values)
     config: dict[str, dict[str, object]] = {
-        "profile": {"display_name": "本地用户", "agent_preferences": ""},
-        "agent": {
-            "tone": "balanced",
-            "verbosity": "balanced",
-            "initiative": "balanced",
-            "custom_instructions": "",
-            "display_mode": "medium",
-            "timezone": "Asia/Shanghai",
-            "location_enabled": False,
+        "model": {
+            "provider": "chat_completions",
+            "provider_name": "default",
+            "protocol": "chat_completions",
+            "base_url": "",
+            "model": "",
+            "max_tokens": 8192,
+            "context_size": 1_024_000,
+            "tokenizer_model": "",
         },
         "runtime": {"log_full_messages": True, "max_tool_calls": 32},
         "capabilities": {"skills": True, "plugins": False, "mcp": False},
+        "memory": {
+            "use_memories": False,
+            "generate_memories": False,
+            "automatic_memory_enabled": False,
+            "disable_on_external_context": True,
+            "extraction_model": "",
+            "consolidation_model": "",
+            "retrieval_limit": 40,
+            "injection_max_items": 8,
+            "injection_max_tokens": 1200,
+            "injection_max_bytes": 8192,
+        },
+        "sync": {"auto_save_enabled": False, "auto_save_rule": "idle_5m"},
     }
     _atomic_write(paths.config_file, _to_toml(config))
-    return load_config(paths.config_file)
+    return _ensure_device_id(paths, load_config(paths.config_file))
 
 
 def section(values: Mapping[str, object], name: str) -> Mapping[str, object]:
@@ -262,8 +469,8 @@ def atomic_write_text(path: Path, content: str) -> None:
     _atomic_write(path, content)
 
 
-class LocalConfigStore:
-    """Small, dependency-free, cross-process TOML store for one installation."""
+class UserConfigStore:
+    """Small, dependency-free, cross-process TOML store for one user root."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -371,3 +578,26 @@ def _is_config_secret_key(key: str) -> bool:
     if lowered.endswith(("_ref", "_reference")):
         return False
     return _CONFIG_SECRET_KEY_RE.search(key) is not None
+
+
+def _is_authenticated_user_root(path: Path) -> bool:
+    """Return whether a config belongs to the canonical UUID user tree."""
+
+    try:
+        validate_identity_id(Path(path).name, require_uuid=True)
+    except ConfigurationError:
+        return False
+    return True
+
+
+def _ensure_device_id(paths: ClientPaths, values: dict[str, object]) -> dict[str, object]:
+    sync = dict(section(values, "sync"))
+    if isinstance(sync.get("device_id"), str) and sync["device_id"]:
+        return values
+    if _is_authenticated_user_root(paths.root):
+        return UserConfigStore(paths.config_file).ensure_defaults({"sync": {"device_id": f"web_{paths.root.name}"}})
+    sync["device_id"] = f"device_{uuid4().hex}"
+    normalized = {name: dict(value) for name, value in values.items() if isinstance(value, dict)}
+    normalized["sync"] = sync
+    _atomic_write(paths.config_file, _to_toml(normalized))
+    return load_config(paths.config_file)

@@ -8,11 +8,11 @@ from typing import Any
 from backend.domain import (
     FAILED_TERMINAL_MESSAGE,
     AssistantMessage,
-    MessageQueueUnavailable,
     ResumePreview,
     RunMode,
     RunProvenance,
     RunState,
+    RuntimeStateNode,
     RunTrigger,
     Session,
     SkillSnapshot,
@@ -28,24 +28,17 @@ from ..core.events import RuntimeEvent
 from ..execution import RuntimeRunner
 from ..node_bridge import RuntimeEventNodeBridge
 from ..persistence.recording import persistent_event
-from .bridge_support import ConversationNodeBridgeMixin
 from .ports import SessionStore, TaskPreprocessor
 from .recovery.resuming import prepare_resume
 from .recovery.resuming import resume_session as resume_conversation
 from .session_control import ConversationSessionController
 
 
-def _handoff_user_prompt(task: str, *, mode: RunMode) -> str:
-    if mode != "agent":
-        return task
-    return f"<approved_plan>\n{task}\n</approved_plan>"
-
-
 class TaskPreparationError(ValueError):
     pass
 
 
-class ConversationService(ConversationNodeBridgeMixin, ConversationSessionController):
+class ConversationService(ConversationSessionController):
     def __init__(
         self,
         runner: RuntimeRunner,
@@ -61,11 +54,204 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         self._session_provisioner = session_provisioner
         self._session_provisioner_cleanup = session_provisioner_cleanup
         # Web streaming installs its bridge before invoking this service so it
-        # can expose the active leaf to PATCH /runtime-config.  Embedding
-        # callers leave this unset; ``_run_single_turn`` then owns a
+        # can expose the active leaf to PATCH /runtime-config.  Local TUI and
+        # embedding callers leave this unset; ``_run_single_turn`` then owns a
         # bridge and projects the same canonical node lifecycle internally.
         self.runtime_node_bridge: RuntimeEventNodeBridge | None = None
         self._node_bridge_events_external = False
+
+    def attach_runtime_node_bridge(
+        self,
+        bridge: RuntimeEventNodeBridge,
+        *,
+        events_external: bool = True,
+    ) -> None:
+        """Attach a caller-owned bridge for the next execution.
+
+        The Web SSE layer needs to register the bridge before the worker
+        starts, while the local service creates one lazily.  Marking event
+        ownership prevents the Web sink from receiving the same event twice.
+        """
+
+        self.runtime_node_bridge = bridge
+        self._node_bridge_events_external = events_external
+
+    def compact_context(
+        self,
+        *,
+        source_node_id: str | None = None,
+        compact_turn_id: str | None = None,
+    ):
+        """Compact an idle conversation through the canonical message-tree bridge."""
+
+        if self.runtime is None:
+            return super().compact_context()
+        bridge = self.runtime_node_bridge
+        if bridge is None or bridge.closed:
+            bridge = self._node_bridge_for_runtime(
+                "",
+                source_node_id=source_node_id,
+                compaction_turn_id=compact_turn_id,
+            )
+            self.runtime_node_bridge = bridge
+            self._node_bridge_events_external = False
+        previous_on_event = self.runtime.services.on_event
+        if bridge is not None:
+            bridge.bind_runtime(self.runtime)
+            bridge.start_for_compaction()
+
+            def sink(event):
+                bridge.handle(event)
+                if previous_on_event is not None:
+                    previous_on_event(event)
+
+            self.runtime.services.on_event = sink
+        canonical_context = bool(self.runtime.model_nodes())
+        try:
+            result = super().compact_context()
+            if result.compacted and bridge is not None and bridge.finish("success") is None:
+                raise RuntimeError("Compaction Turn could not be finalized.")
+        finally:
+            self.runtime.services.on_event = previous_on_event
+            if bridge is not None:
+                bridge.closed = True
+            self.runtime_node_bridge = None
+            self._node_bridge_events_external = False
+        if canonical_context and result.compacted:
+            # Refresh the in-process planner state from the durable Turn tree.
+            projected = self.runtime.model_messages()
+            self.runtime.state.messages = projected
+            if self.runtime.state.current_run is not None:
+                self.runtime.state.current_run.history = self.runtime.state.messages
+                self.runtime.state.current_run.turn_start_index = min(1, len(projected))
+            self.runtime.save()
+        self.conversation = text_messages(self.runtime.state.messages)
+        return result
+
+    def compact_turn(self, source_node_id: str, compact_turn_id: str) -> RuntimeStateNode:
+        """Create one finalized Compaction Turn from an exact source Turn."""
+
+        result = self.compact_context(
+            source_node_id=source_node_id,
+            compact_turn_id=compact_turn_id,
+        )
+        if not result.compacted or self.session_store is None or self.active_session is None:
+            raise RuntimeError("Conversation context did not produce a Compaction Turn.")
+        getter = getattr(self.session_store, "get_node", None)
+        if not callable(getter):
+            raise RuntimeError("The Turn store cannot load the completed Compaction Turn.")
+        compacted = getter(self.active_session.session_id, compact_turn_id)
+        if not isinstance(compacted, RuntimeStateNode) or compacted.status != "success":
+            raise RuntimeError("The completed Compaction Turn is unavailable.")
+        return compacted
+
+    def _node_bridge_for_runtime(
+        self,
+        prompt: str,
+        references: list[Mapping[str, str]] | None = None,
+        *,
+        source_node_id: str | None = None,
+        compaction_turn_id: str | None = None,
+    ) -> RuntimeEventNodeBridge | None:
+        """Create a local bridge from the latest durable node configuration."""
+
+        if self.session_store is None or not callable(getattr(self.session_store, "create_node", None)):
+            return None
+        session = self.active_session
+        if session is None or self.runtime is None:
+            return None
+        store = self.session_store
+        # Prefer the latest durable leaf's top-level runtime settings.  This
+        # preserves a provider/model/permission change across turns even when
+        # the legacy RuntimeState checkpoint still has older compatibility
+        # fields.  A provider client supplies defaults for an empty session.
+        latest = None
+        if source_node_id:
+            getter = getattr(store, "get_node", None)
+            latest = getter(session.session_id, source_node_id) if callable(getter) else None
+            if latest is None:
+                raise ValueError("Unknown source Turn.")
+        loader = getattr(store, "load_nodes", None)
+        if latest is None and callable(loader):
+            nodes = list(loader(session.session_id))
+            if nodes:
+                parent_keys = {(node.parent_session_id, node.parent_id) for node in nodes if node.parent_id}
+                leaves = [node for node in nodes if (node.session_id, node.id) not in parent_keys]
+                if leaves:
+                    latest = max(leaves, key=lambda node: (node.timestamp, node.id))
+
+        client = getattr(getattr(self.runtime.services, "planner", None), "client", None)
+        config = getattr(client, "config", None)
+        provider_name = str(
+            (latest.provider_name if latest is not None else "")
+            or getattr(self.runtime.state, "provider_name", "")
+            or getattr(config, "provider_name", None)
+            or getattr(config, "provider", None)
+            or "unknown"
+        )
+        model_config = dict(latest.model) if latest is not None else dict(self.runtime.state.model_snapshot or {})
+        model_config.setdefault(
+            "current_model", getattr(config, "model", None) or self.runtime.state.model or "unknown"
+        )
+        model_config.setdefault("context_length", getattr(config, "context_size", 128000))
+        model_config.setdefault("output_length", getattr(config, "max_tokens", 8192))
+        model_config.setdefault("reasoning_effort", "medium")
+        model_config.setdefault("thinking", "enable")
+        model_config.setdefault("temperature", 1.0)
+        permission_mode = latest.permission_mode if latest is not None else self.runtime.state.permission_mode
+        running_mode = latest.running_mode if latest is not None else self.runtime.state.running_mode
+        return RuntimeEventNodeBridge(
+            store,
+            session_id=session.session_id,
+            thread_id=latest.thread_id if latest is not None else session.session_id,
+            source_node_id=latest.id if source_node_id and latest is not None else None,
+            compaction_turn_id=compaction_turn_id,
+            prompt=prompt,
+            user=str(getattr(self.runtime.state, "user", "") or ""),
+            provider_name=provider_name,
+            model=str(model_config.get("current_model") or "unknown"),
+            model_config=model_config,
+            permission_mode=permission_mode,
+            running_mode=running_mode,
+            cwd=str(getattr(self.runtime.state, "workspace_root", "") or ""),
+            references=references,
+            emit=lambda _frame: None,
+        )
+
+    def _bind_node_bridge(
+        self,
+        prompt: str,
+        on_event: EventHandler | None,
+        references: list[Mapping[str, str]] | None = None,
+        *,
+        running_mode: RunMode | None = None,
+    ) -> None:
+        """Bind a bridge to the runtime and compose its local event sink."""
+
+        bridge = self.runtime_node_bridge
+        if bridge is None or bridge.closed:
+            bridge = self._node_bridge_for_runtime(prompt, references)
+            self.runtime_node_bridge = bridge
+            self._node_bridge_events_external = False
+        if bridge is None or self.runtime is None:
+            return
+        if running_mode in {"agent", "plan"}:
+            bridge.running_mode = running_mode
+        bridge.bind_runtime(self.runtime)
+        if not bridge.started:
+            bridge.start()
+        if self._node_bridge_events_external:
+            # The caller (Web SSE) already invokes bridge.handle from its
+            # transport sink and owns frame publication/active registration.
+            return
+        previous = on_event
+
+        def sink(event: RuntimeEvent) -> None:
+            bridge.handle(event)
+            if previous is not None:
+                previous(event)
+
+        self.runtime.services.on_event = sink
 
     def run_task(
         self,
@@ -80,8 +266,6 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         trigger: RunTrigger = "embedding",
         request_parameters: Mapping[str, Any] | None = None,
         references: Sequence[Mapping[str, str]] = (),
-        delivery_id: str | None = None,
-        on_started: Callable[[], None] | None = None,
     ) -> RunState:
         prepared = self._prepare(task, structured=bool(references))
         state = self._run_single_turn(
@@ -95,8 +279,6 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
             trigger=trigger,
             request_parameters=request_parameters,
             references=list(references),
-            delivery_id=delivery_id,
-            on_started=on_started,
         )
         handoff = state.handoff
         if handoff is None:
@@ -122,11 +304,10 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
                     bridge.record_compaction_failure(safe_message)
                     bridge.closed = True
                 return state
-        handoff_prompt = _handoff_user_prompt(handoff.task, mode=handoff.mode)
         if bridge is not None and not bridge.closed:
-            bridge.start_child(handoff_prompt, running_mode=handoff.mode)
+            bridge.start_child(handoff.task, running_mode=handoff.mode)
         follow_up = self._run_single_turn(
-            handoff_prompt,
+            handoff.task,
             mode=handoff.mode,
             on_event=on_event,
             interrupt=interrupt,
@@ -159,8 +340,6 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         source_run_id: str | None = None,
         request_parameters: Mapping[str, Any] | None = None,
         references: list[Mapping[str, str]] | None = None,
-        delivery_id: str | None = None,
-        on_started: Callable[[], None] | None = None,
     ) -> RunState:
         provenance = RunProvenance(
             trigger=trigger,
@@ -180,7 +359,6 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
                 run_id,
                 prepared,
                 provenance,
-                delivery_id=delivery_id,
             )
         else:
             if self.runtime is None:
@@ -214,8 +392,8 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         if request_parameters:
             self.runtime.state.request_parameters.update(dict(request_parameters))
         runtime = self.runner.bind(self.runtime)
-        # The canonical message-tree bridge is installed for embedding
-        # executions as well as Web SSE.  Web attaches a bridge
+        # The canonical message-tree bridge is installed for local TUI and
+        # embedding executions as well as Web SSE.  Web attaches a bridge
         # ahead of time so it can expose the active dynamic leaf to PATCH;
         # local callers get an equivalent bridge here.
         self._bind_node_bridge(prepared, on_event, references, running_mode=mode)
@@ -228,16 +406,7 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         if mode in {"agent", "plan"}:
             self.runtime.state.running_mode = mode
         try:
-            if on_started is not None:
-                on_started()
             state = self.runner.run(runtime)
-        except MessageQueueUnavailable as exc:
-            self._record_unexpected_failure(
-                exc,
-                message="消息队列连接中断，Turn 已失败。",
-                publish_error=False,
-            )
-            raise
         except Exception as exc:
             bridge = self.runtime_node_bridge
             if bridge is not None and not self._node_bridge_events_external:
@@ -311,13 +480,7 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         except ToolError as exc:
             raise TaskPreparationError(str(exc)) from exc
 
-    def _record_unexpected_failure(
-        self,
-        error: Exception,
-        *,
-        message: str = FAILED_TERMINAL_MESSAGE,
-        publish_error: bool = True,
-    ) -> None:
+    def _record_unexpected_failure(self, error: Exception) -> None:
         if self.runtime is None or self.runtime.state.current_run is None:
             return
         run = self.runtime.state.current_run
@@ -328,25 +491,26 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
             None,
         )
         if assistant is None:
-            self.runtime.state.messages.append(AssistantMessage(content=message))
-        elif message not in (assistant.content or ""):
-            assistant.content = f"{assistant.content}\n\n{message}".strip()
+            self.runtime.state.messages.append(AssistantMessage(content=FAILED_TERMINAL_MESSAGE))
+        elif FAILED_TERMINAL_MESSAGE not in (assistant.content or ""):
+            assistant.content = f"{assistant.content}\n\n{FAILED_TERMINAL_MESSAGE}".strip()
         run.history = self.runtime.state.messages
-        run.final_answer = message
+        run.final_answer = FAILED_TERMINAL_MESSAGE
+        run.add_event("error", FAILED_TERMINAL_MESSAGE, error_type=error.__class__.__name__)
         self.runtime.state.status = "idle"
         self.runtime.state.usage = self.runtime.state.turn_usage
         self.runtime.state.turn_usage = None
         publish = self.runtime.services.publish
         if publish is not None:
             publish(RuntimeEvent("thinking_end", data={"interrupted": True}))
-            if publish_error:
-                publish(
-                    RuntimeEvent(
-                        "error",
-                        message,
-                        {"error_type": error.__class__.__name__, "unexpected": True},
-                    )
+            publish(
+                RuntimeEvent(
+                    "error",
+                    FAILED_TERMINAL_MESSAGE,
+                    {"error_type": error.__class__.__name__, "unexpected": True},
                 )
+            )
+            run.add_event("run_finished", "Run finished", status=run.status)
             publish(RuntimeEvent("run_finished", run.status, {"final_answer": run.final_answer}))
         self.runtime.save()
         if self.session_store is not None and self.active_session is not None:

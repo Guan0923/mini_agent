@@ -1,46 +1,129 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { App as AntApp, Button, Dropdown, FloatButton, Grid } from "antd";
-import { VerticalAlignBottomOutlined } from "@ant-design/icons";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { Button, FloatButton, Grid, Input, Modal, message } from "antd";
+import { LeftOutlined, RightOutlined, VerticalAlignBottomOutlined } from "@ant-design/icons";
+import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
   compactTurn,
-  createQueuedMessage,
-  deleteQueuedMessage,
+  deleteSessionFile,
+  initProjectAgents,
   listSkills,
+  patchTurnCurrentData,
+  patchRuntimeConfig,
+  searchSessionFiles,
   sessionFileContentUrl,
   steerTurn,
   submitDecision,
-  updateQueuedMessage,
+  uploadSessionFiles,
 } from "../../api";
+import type { ProviderConfig } from "../../api";
 import { HELP_TEXT, parseCommand } from "../../commands";
 import { commandKeyAction, commandSuggestions, completionText, nextCommandIndex } from "../../commands/completion";
-import { fileKeyAction } from "../../commands/fileCompletion";
-import Composer from "./Composer";
+import { completionToken, fileKeyAction, toCandidates, type FileCandidate, type FileTrigger } from "../../commands/fileCompletion";
+import MarkdownContent from "../../components/MarkdownContent";
+import ShimmerText from "../../components/ShimmerText";
+import { AssistantMessage, MessageActions, MessageReferenceChip } from "./messageParts";
+import Composer, { type ComposerActionMode, type SettingsSelectKey } from "./Composer";
+import type { FileMentionChange, FileMentionEditorHandle } from "./FileMentionEditor";
+import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
 import { latestTodoList } from "./todoPanel";
-import { messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "../../app/runtime/runtimeDetailProjection";
-import { leafNodes } from "../../app/runtime/runtimeNodeReducer";
+import { messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "../../app/runtimeDetailProjection";
+import { leafNodes } from "../../app/runtimeNodeReducer";
 import type { QueuedMessage } from "../../app/types";
-import { isRuntimeTurnNode } from "../../app/runtime/runtimeNodeNormalization";
+import { mergeQueuedMessages } from "../../app/queuedMessages";
+import { DEFAULT_RUNTIME_NODE_MODEL, normalizeRuntimeNodeModel } from "../../app/runtimeNodeNormalization";
 import type {
   ChatMessage,
   ChatMode,
   Conversation,
   DecisionRequest,
+  DisplayMode,
   FileReference,
+  Page,
+  PermissionMode,
+  ReasoningEffort,
+  RuntimeNodeModel,
   RuntimeStateNode,
 } from "../../types";
-import { ChatMessageList } from "./ChatMessageList";
-import TracePage from "./TracePage";
-import { composerAction, type ChatPageProps } from "./contracts";
-import { useComposerFiles } from "./useComposerFiles";
-import { useMessageEditing } from "./useMessageEditing";
-import { useRuntimeControls } from "./useRuntimeControls";
 
-export { composerAction } from "./contracts";
+interface Props {
+  conversation: Conversation | null;
+  displayMode?: DisplayMode;
+  providerConfig?: ProviderConfig | null;
+  mode?: ChatMode;
+  onModeChange?: (mode: ChatMode) => void;
+  onUpdate: (id: string, updater: (conversation: Conversation) => Conversation) => void;
+  onNew: (title?: string) => Promise<string> | string;
+  onNavigate: (page: Page) => void;
+  onEnsureSession?: (id: string) => Promise<string>;
+  onFork?: (conversationId: string, messageId: string) => Promise<void>;
+  onRewind?: (conversationId: string, messageId: string) => Promise<RewindResult | string | undefined>;
+  onSelectSession?: (id: string) => Promise<string>;
+  onReload?: (id: string, preferredActiveTurnId?: string) => Promise<void>;
+  onRefresh?: () => Promise<void>;
+  running?: boolean;
+  onRun?: (request: ChatRunRequest) => Promise<void>;
+  onStopRun?: (conversationId: string) => void;
+  queuedMessages?: QueuedMessage[];
+  onQueuedMessagesChange?: (conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) => void;
+}
 
-const BOTTOM_THRESHOLD_PX = 24;
+interface RewindResult {
+  content: string;
+  sessionId: string;
+  threadId?: string;
+  turnId?: string;
+  sourceNodeId?: string;
+  rewindTurnId?: string;
+}
 
-function isScrollContainerAtBottom(scrollContainer: HTMLDivElement): boolean {
-  return scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight <= BOTTOM_THRESHOLD_PX;
+/** One file being uploaded or already stored in the session uploads. */
+interface PendingUpload {
+  uid: string;
+  name: string;
+  isImage: boolean;
+  status: "uploading" | "done" | "error";
+  percent: number;
+  /** The original file, kept for retries. */
+  file?: File;
+  /** Server path once the upload completed. */
+  path?: string;
+  error?: string;
+}
+
+interface ChatRunRequest {
+  conversationId: string;
+  sessionId: string;
+  threadId?: string;
+  turnId?: string;
+  prompt: string | null;
+  resume: boolean;
+  mode: ChatMode;
+  permissionMode: PermissionMode;
+  reasoningEffort: ReasoningEffort;
+  providerName?: string;
+  model?: RuntimeNodeModel;
+  sourceNodeId?: string;
+  rewindTurnId?: string;
+  references?: FileReference[];
+  waitForActiveRun?: boolean;
+  onBaseline?: (turn: RuntimeStateNode) => void;
+}
+
+export function composerAction(
+  status: RuntimeStateNode["status"] | undefined,
+  hasDraft: boolean,
+  uploading = false,
+): { mode: ComposerActionMode; disabled: boolean } {
+  const mode: ComposerActionMode = status === "running" && !hasDraft
+    ? "pause"
+    : status === "paused" && !hasDraft
+      ? "resume"
+      : "send";
+  return { mode, disabled: uploading || (mode === "send" && !hasDraft) };
+}
+
+function nativeTextArea(ref: TextAreaRef | null): HTMLTextAreaElement | null {
+  return ref?.resizableTextArea?.textArea ?? null;
 }
 
 export default function ChatPage({
@@ -63,34 +146,54 @@ export default function ChatPage({
   onStopRun,
   queuedMessages = [],
   onQueuedMessagesChange = () => undefined,
-  onQueuedMessagesRefresh = async () => undefined,
-  sandboxHealth = { phase: "healthy", detail: null },
-}: ChatPageProps) {
-  const { message } = AntApp.useApp();
+}: Props) {
   const mode = selectedMode ?? "agent";
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false && (typeof window === "undefined" || window.innerWidth < 768);
+  const [input, setInput] = useState("");
   const [queueSubmitting, setQueueSubmitting] = useState(false);
   const [compactionPending, setCompactionPending] = useState(false);
+  const [agentInitPending, setAgentInitPending] = useState(false);
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>("read_only");
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
+  const [providerName, setProviderName] = useState("unknown");
+  const [runtimeModel, setRuntimeModel] = useState<RuntimeNodeModel>(DEFAULT_RUNTIME_NODE_MODEL);
+  const [runtimeConfigPending, setRuntimeConfigPending] = useState<Record<SettingsSelectKey, boolean>>({
+    mode: false,
+    permission: false,
+    reasoning: false,
+  });
+  const runtimeConfigPendingRef = useRef(runtimeConfigPending);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [openSettingsSelect, setOpenSettingsSelect] = useState<SettingsSelectKey | null>(null);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const [commandMenuDismissedFor, setCommandMenuDismissedFor] = useState<string | null>(null);
-  const [isAtBottom, setIsAtBottom] = useState(true);
-  const [dismissedTodoPanels, setDismissedTodoPanels] = useState<Set<string>>(() => new Set());
-  const [mainView, setMainView] = useState<"chat" | "trace">("chat");
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingDraft, setEditingDraft] = useState("");
+  const [rewindPending, setRewindPending] = useState(false);
+  const [editingSubmitting, setEditingSubmitting] = useState(false);
+  const editingSubmittingRef = useRef(false);
+  const [references, setReferences] = useState<FileReference[]>([]);
+  const [fileTriggerState, setFileTriggerState] = useState<FileTrigger | null>(null);
+  const [fileCandidates, setFileCandidates] = useState<FileCandidate[]>([]);
+  const [activeFileIndex, setActiveFileIndex] = useState(0);
+  const [fileMenuDismissedFor, setFileMenuDismissedFor] = useState<string | null>(null);
+  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
+  const fileSearchTimerRef = useRef<number | null>(null);
+  const latestFileTriggerRef = useRef<FileTrigger | null>(null);
+  const fileMenuDismissedPromptRef = useRef<string | null>(null);
+  const editorRef = useRef<FileMentionEditorHandle>(null);
+  const editRef = useRef<TextAreaRef>(null);
+  const fullAccessConfirmRef = useRef<{ destroy: () => void } | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
-  const shouldStickToBottomRef = useRef(true);
-  const scrollConversationIdRef = useRef<string | undefined>(undefined);
+  const discardedUploadUidsRef = useRef(new Set<string>());
   const queueFlushRef = useRef(false);
   // IDs captured when a queue flush starts. Items added while that flush
   // is running belong to the next FIFO pass and must never be removed when
   // the submitted user frames are acknowledged.
+  const queueInFlightIdsRef = useRef<Set<string> | null>(null);
   const queueAutoBlockedRef = useRef(false);
-  const acknowledgedDeliveryIdsRef = useRef(new Set<string>());
-  const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null);
-
-  useEffect(() => {
-    setEditingQueuedMessageId(null);
-  }, [conversation?.id]);
+  const acknowledgedSteeringIdsRef = useRef(new Set<string>());
 
   const messages = conversation?.messages ?? [];
   // A queue flush has no optimistic assistant message by design. Keep the
@@ -98,45 +201,13 @@ export default function ChatPage({
   // request is sent until its SSE cleanup, including the tiny interval
   // between the optimistic user bubble and the first turn.snapshot frame.
   const busy = Boolean(runningProp) || queueSubmitting;
-  const sandboxBlocked = sandboxHealth.phase !== "healthy";
-  const interactionBusy = busy || compactionPending || sandboxBlocked;
-  const composerFiles = useComposerFiles({
-    conversationId: conversation?.id,
-    sessionId: conversation?.sessionId,
-    interactionBusy,
-    onTextChanged: () => {
-      setCommandMenuDismissedFor(null);
-      setActiveCommandIndex(0);
-    },
-  });
-  const {
-    input,
-    setInput,
-    references,
-    setReferences,
-    pendingUploads,
-    setPendingUploads,
-    fileCandidates,
-    activeFileIndex,
-    setActiveFileIndex,
-    fileTriggerState,
-    fileMenuAvailable,
-    setFileMenuDismissedFor,
-    editorRef,
-    handleEditorChange,
-    completeFile,
-    handlePickFiles,
-    removePendingUpload,
-    retryUpload,
-    collectedReferences,
-    clearComposer,
-  } = composerFiles;
+  const interactionBusy = busy || compactionPending || agentInitPending;
   const todo = useMemo(() => latestTodoList(messages), [messages]);
   const filteredCommands = commandSuggestions(input);
   const commandMenuVisible = !interactionBusy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
   // The file menu is mutually exclusive with the slash-command menu and only
   // appears while the caret still sits inside an `@` trigger.
-  const fileMenuVisible = !commandMenuVisible && fileMenuAvailable;
+  const fileMenuVisible = !interactionBusy && fileMenuDismissedFor !== input && fileTriggerState !== null && fileCandidates.length > 0;
   const display = configuredDisplayMode ?? "medium";
 
   const activeRuntimeNode = (() => {
@@ -145,7 +216,7 @@ export default function ChatPage({
     );
     if (conversation?.activeTurnId) {
       const persisted = nodes.find((node) => node.id === conversation.activeTurnId);
-      if (persisted && isRuntimeTurnNode(persisted)) return persisted;
+      if (persisted) return persisted;
     }
     const sessionLeaves = leafNodes(nodes, conversation?.sessionId);
     if (!sessionLeaves.length) return undefined;
@@ -158,77 +229,6 @@ export default function ChatPage({
     const sorted = [...sessionLeaves].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
     return sorted[sorted.length - 1];
   })();
-  const todoPanelKey = `${conversation?.id ?? "draft"}:${activeRuntimeNode?.id ?? conversation?.activeTurnId ?? "no-turn"}`;
-  const todoCompleted = todo !== null && todo.length > 0 && todo.every((item) => item.status === "completed");
-  const visibleTodo = todo?.length && !todoCompleted && !dismissedTodoPanels.has(todoPanelKey) ? todo : null;
-  const todoClosable = Boolean(visibleTodo) && !busy;
-  const closeTodoPanel = useCallback(() => {
-    setDismissedTodoPanels((current) => {
-      if (current.has(todoPanelKey)) return current;
-      const next = new Set(current);
-      next.add(todoPanelKey);
-      return next;
-    });
-  }, [todoPanelKey]);
-  const currentThreadId = activeRuntimeNode?.thread_id ?? conversation?.threadId ?? conversation?.sessionId;
-  const traceTurns = (conversation?.runtimeNodes ?? []).filter(
-    (node): node is RuntimeStateNode => isRuntimeTurnNode(node) && node.thread_id === currentThreadId,
-  );
-  const hasTurnTree = traceTurns.length > 0;
-  const visibleMainView = hasTurnTree ? mainView : "chat";
-  useEffect(() => {
-    if (!hasTurnTree) setMainView("chat");
-  }, [conversation?.id, hasTurnTree]);
-  const runtimeControls = useRuntimeControls({
-    conversation,
-    activeRuntimeNode,
-    busy: busy || sandboxBlocked,
-    providerConfig,
-    mode,
-    onModeChange,
-    onFailure: (error) => setLast({ error: `运行配置更新失败：${String((error as Error).message ?? error)}` }),
-  });
-  const {
-    permissionMode,
-    reasoningEffort,
-    runtimeConfigPending,
-    settingsOpen,
-    setSettingsOpen,
-    openSettingsSelect,
-    setOpenSettingsSelect,
-    activeUsage,
-    usagePercent,
-    requestProviderName,
-    requestModel,
-    changeRunningMode,
-    changePermissionMode,
-    changeReasoningEffort,
-  } = runtimeControls;
-  const messageEditing = useMessageEditing({
-    conversation,
-    interactionBusy,
-    activeRuntimeNode,
-    onRewind,
-    onFork,
-    onUpdate,
-    runPrompt,
-    onError: (error) => setLast({ error: String((error as Error).message ?? error) }),
-  });
-  const {
-    editingMessageId,
-    editingDraft,
-    setEditingDraft,
-    rewindPending,
-    editingSubmitting,
-    editRef,
-    beginEdit,
-    cancelEdit,
-    saveEdit,
-    handleUserBubbleClick,
-    forkMessage,
-    changeMessageVersion,
-    messageVersion,
-  } = messageEditing;
   const hasDraft = Boolean(input.trim() || references.length > 0 || pendingUploads.some((upload) => upload.status === "done"));
   const composerActionState = composerAction(
     activeRuntimeNode?.status,
@@ -237,36 +237,7 @@ export default function ChatPage({
   );
   const actionMode = composerActionState.mode;
   const projectUnavailable = conversation?.projectId !== undefined && conversation.projectAvailable === false;
-
-  const syncBottomState = useCallback((scrollContainer: HTMLDivElement) => {
-    const nextIsAtBottom = isScrollContainerAtBottom(scrollContainer);
-    shouldStickToBottomRef.current = nextIsAtBottom;
-    setIsAtBottom((current) => current === nextIsAtBottom ? current : nextIsAtBottom);
-  }, []);
-
-  useLayoutEffect(() => {
-    const scrollContainer = chatScrollRef.current;
-    if (!scrollContainer) return;
-    const conversationChanged = scrollConversationIdRef.current !== conversation?.id;
-    scrollConversationIdRef.current = conversation?.id;
-    if (conversationChanged) shouldStickToBottomRef.current = true;
-    if (!shouldStickToBottomRef.current) return;
-    scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    syncBottomState(scrollContainer);
-  }, [conversation?.id, conversation?.messages, syncBottomState]);
-
-  useEffect(() => {
-    const scrollContainer = chatScrollRef.current;
-    const scrollContent = scrollContainer?.querySelector<HTMLElement>(".chat-scroll-content");
-    if (!scrollContainer || !scrollContent || typeof ResizeObserver !== "function") return;
-    const observer = new ResizeObserver(() => {
-      if (shouldStickToBottomRef.current) scrollContainer.scrollTop = scrollContainer.scrollHeight;
-      syncBottomState(scrollContainer);
-    });
-    observer.observe(scrollContainer);
-    observer.observe(scrollContent);
-    return () => observer.disconnect();
-  }, [conversation?.id, syncBottomState]);
+  const canPatchRuntimeConfig = activeRuntimeNode?.status === "running";
 
   useEffect(() => {
     const status = activeRuntimeNode?.status;
@@ -275,8 +246,7 @@ export default function ChatPage({
       return;
     }
     if (
-      !sandboxBlocked
-      && !queueFlushRef.current
+      !queueFlushRef.current
       && !queueAutoBlockedRef.current
       && queuedMessages.length > 0
       && conversation?.id
@@ -286,18 +256,376 @@ export default function ChatPage({
       setQueueSubmitting(true);
       void flushQueuedMessages();
     }
-  }, [activeRuntimeNode?.id, activeRuntimeNode?.status, busy, queuedMessages.length, conversation?.id, sandboxBlocked]);
+  }, [activeRuntimeNode?.id, activeRuntimeNode?.status, busy, queuedMessages.length, conversation?.id]);
 
   useEffect(() => {
     if (!conversation?.id || !activeRuntimeNode) return;
     const ids = activeRuntimeNode.data[activeRuntimeNode.current_data_idx]
-      ?.filter((item) => item.role === "user" && typeof item.delivery_id === "string")
-      .map((item) => String(item.delivery_id)) ?? [];
-    const fresh = ids.filter((id) => !acknowledgedDeliveryIdsRef.current.has(id));
+      ?.filter((item) => item.role === "user" && typeof item.steering_id === "string")
+      .map((item) => String(item.steering_id)) ?? [];
+    const fresh = ids.filter((id) => !acknowledgedSteeringIdsRef.current.has(id));
     if (fresh.length === 0) return;
-    fresh.forEach((id) => acknowledgedDeliveryIdsRef.current.add(id));
-    void onQueuedMessagesRefresh(conversation.id);
-  }, [activeRuntimeNode?.data, activeRuntimeNode?.current_data_idx, conversation?.id, onQueuedMessagesRefresh]);
+    fresh.forEach((id) => acknowledgedSteeringIdsRef.current.add(id));
+    const accepted = new Set(fresh);
+    onQueuedMessagesChange(conversation.id, (items) =>
+      items.filter((item) => !item.sendingSteeringId || !accepted.has(item.sendingSteeringId)));
+  }, [activeRuntimeNode?.data, activeRuntimeNode?.current_data_idx, conversation?.id, onQueuedMessagesChange]);
+
+  useEffect(() => {
+    if (!conversation?.id || queuedMessages.every((item) => !item.sendingSteeringId)) return;
+    const activeId = activeRuntimeNode?.status === "running" ? activeRuntimeNode.id : undefined;
+    if (queuedMessages.every((item) => !item.sendingSteeringId || item.sendingTurnId === activeId)) return;
+    onQueuedMessagesChange(conversation.id, (items) => items.map((item) => {
+      if (!item.sendingSteeringId || item.sendingTurnId === activeId) return item;
+      const { sendingSteeringId: _steering, sendingTurnId: _turn, ...pending } = item;
+      return pending;
+    }));
+  }, [activeRuntimeNode?.id, activeRuntimeNode?.status, conversation?.id, onQueuedMessagesChange, queuedMessages]);
+
+  useEffect(() => {
+    const node = activeRuntimeNode;
+    if (!node) return;
+    const model = normalizeRuntimeNodeModel(node.model);
+    setProviderName(node.provider_name || "unknown");
+    setRuntimeModel((current) => (
+      runtimeConfigPendingRef.current.reasoning ? { ...model, reasoning_effort: current.reasoning_effort } : model
+    ));
+    if (!runtimeConfigPendingRef.current.permission) setPermissionMode(node.permission_mode || "read_only");
+    if (!runtimeConfigPendingRef.current.reasoning) setReasoningEffort(model.reasoning_effort);
+    if (!runtimeConfigPendingRef.current.mode && node.running_mode && node.running_mode !== mode) {
+      onModeChange(node.running_mode);
+    }
+  }, [activeRuntimeNode?.id, activeRuntimeNode?.provider_name, activeRuntimeNode?.model, activeRuntimeNode?.permission_mode, activeRuntimeNode?.running_mode]);
+
+  function nearestUsage(node: RuntimeStateNode | undefined): { total: number; context: number } | undefined {
+    if (!node) return undefined;
+    const nodes = conversation?.runtimeNodes ?? [];
+    const byKey = new Map(nodes.map((item) => [`${item.session_id}:${item.id}`, item] as const));
+    let current: RuntimeStateNode | undefined = node;
+    const seen = new Set<string>();
+    while (current && !seen.has(`${current.session_id}:${current.id}`)) {
+      seen.add(`${current.session_id}:${current.id}`);
+      const total = current.usage?.total_tokens;
+      const context = current.model?.context_length;
+      if (typeof total === "number" && typeof context === "number" && context > 0) return { total, context };
+      current = current.parent_id ? byKey.get(`${current.parent_session_id}:${current.parent_id}`) : undefined;
+    }
+    return undefined;
+  }
+
+  const activeUsage = nearestUsage(activeRuntimeNode);
+  const activeRuntimeModel = normalizeRuntimeNodeModel(activeRuntimeNode?.model);
+  const usagePercent = activeUsage ? Math.max(0, Math.min(100, (activeUsage.total / activeUsage.context) * 100)) : 0;
+  const configuredProviderName = providerConfig?.provider_name?.trim();
+  const requestProviderName = configuredProviderName || (providerName && providerName !== "unknown" ? providerName : undefined);
+  const requestModel = (() => {
+    if (providerConfig?.model) {
+      return {
+        ...runtimeModel,
+        reasoning_effort: reasoningEffort,
+        current_model: providerConfig.model,
+        context_length: providerConfig.context_size,
+        output_length: providerConfig.max_tokens,
+      };
+    }
+    return runtimeModel.current_model && runtimeModel.current_model !== "unknown"
+      ? { ...runtimeModel, reasoning_effort: reasoningEffort }
+      : undefined;
+  })();
+
+  async function updateRuntimeConfig(patch: {
+    provider_name?: string;
+    model?: Partial<RuntimeNodeModel>;
+    permission_mode?: PermissionMode;
+    full_access_acknowledged?: boolean;
+    running_mode?: ChatMode;
+  }): Promise<RuntimeStateNode> {
+    if (!conversation?.sessionId || !activeRuntimeNode || activeRuntimeNode.status !== "running") {
+      throw new Error("当前没有可更新的 running Turn。");
+    }
+    return patchRuntimeConfig(conversation.sessionId, {
+      node_id: activeRuntimeNode.id,
+      provider_name: patch.provider_name,
+      model: patch.model,
+      permission_mode: patch.permission_mode,
+      full_access_acknowledged: patch.full_access_acknowledged,
+      running_mode: patch.running_mode,
+    });
+  }
+
+  useEffect(() => {
+    if (!busy || !canPatchRuntimeConfig || !activeRuntimeNode || !configuredProviderName || !requestModel) return;
+    if (
+      activeRuntimeNode.provider_name === configuredProviderName
+      && activeRuntimeModel.current_model === requestModel.current_model
+      && activeRuntimeModel.context_length === requestModel.context_length
+      && activeRuntimeModel.output_length === requestModel.output_length
+    ) return;
+    void updateRuntimeConfig({
+      provider_name: configuredProviderName,
+      model: requestModel,
+    }).catch((error) => {
+      setLast({ error: `运行配置更新失败：${String((error as Error).message ?? error)}` });
+    });
+  }, [
+    busy,
+    canPatchRuntimeConfig,
+    activeRuntimeNode?.id,
+    activeRuntimeNode?.status,
+    activeRuntimeNode?.provider_name,
+    activeRuntimeModel.current_model,
+    activeRuntimeModel.context_length,
+    activeRuntimeModel.output_length,
+    configuredProviderName,
+    requestModel?.current_model,
+    requestModel?.context_length,
+    requestModel?.output_length,
+  ]);
+
+  function runtimeConfigFailure(error: unknown) {
+    setLast({ error: `运行配置更新失败：${String((error as Error).message ?? error)}` });
+  }
+
+  function setRuntimeConfigFieldPending(field: SettingsSelectKey, pending: boolean) {
+    runtimeConfigPendingRef.current = { ...runtimeConfigPendingRef.current, [field]: pending };
+    setRuntimeConfigPending(runtimeConfigPendingRef.current);
+  }
+
+  async function changeRunningMode(value: ChatMode) {
+    const previous = mode;
+    if (canPatchRuntimeConfig) {
+      setRuntimeConfigFieldPending("mode", true);
+    }
+    onModeChange(value);
+    setOpenSettingsSelect(null);
+    if (!canPatchRuntimeConfig) return;
+    try {
+      const updated = await updateRuntimeConfig({ running_mode: value });
+      onModeChange(updated.running_mode);
+    } catch (error) {
+      onModeChange(previous);
+      runtimeConfigFailure(error);
+    } finally {
+      setRuntimeConfigFieldPending("mode", false);
+    }
+  }
+
+  async function changePermissionMode(value: PermissionMode) {
+    const previous = permissionMode;
+    if (value === "full_access" && previous !== "full_access") {
+      const confirmed = await new Promise<boolean>((resolve) => {
+        fullAccessConfirmRef.current = Modal.confirm({
+          title: "启用 Full access？",
+          content: "这会同时放开文件和网络访问，并标记为非沙箱运行。",
+          okText: "继续",
+          cancelText: "取消",
+          onOk: () => {
+            fullAccessConfirmRef.current = null;
+            resolve(true);
+          },
+          onCancel: () => {
+            fullAccessConfirmRef.current = null;
+            resolve(false);
+          },
+        });
+      });
+      if (!confirmed) return;
+    }
+    if (canPatchRuntimeConfig) {
+      setRuntimeConfigFieldPending("permission", true);
+    }
+    setPermissionMode(value);
+    setOpenSettingsSelect(null);
+    if (!canPatchRuntimeConfig) return;
+    try {
+      const updated = await updateRuntimeConfig({
+        permission_mode: value,
+        full_access_acknowledged: value === "full_access",
+      });
+      setPermissionMode(updated.permission_mode);
+    } catch (error) {
+      setPermissionMode(previous);
+      runtimeConfigFailure(error);
+    } finally {
+      setRuntimeConfigFieldPending("permission", false);
+    }
+  }
+
+  async function changeReasoningEffort(value: ReasoningEffort) {
+    const previous = reasoningEffort;
+    if (canPatchRuntimeConfig) {
+      setRuntimeConfigFieldPending("reasoning", true);
+    }
+    setReasoningEffort(value);
+    setRuntimeModel((current) => ({ ...current, reasoning_effort: value }));
+    setOpenSettingsSelect(null);
+    if (!canPatchRuntimeConfig) return;
+    try {
+      const updated = await updateRuntimeConfig({ model: { reasoning_effort: value } });
+      const accepted = normalizeRuntimeNodeModel(updated.model).reasoning_effort;
+      setReasoningEffort(accepted);
+      setRuntimeModel((current) => ({ ...current, reasoning_effort: accepted }));
+    } catch (error) {
+      setReasoningEffort(previous);
+      setRuntimeModel((current) => ({ ...current, reasoning_effort: previous }));
+      runtimeConfigFailure(error);
+    } finally {
+      setRuntimeConfigFieldPending("reasoning", false);
+    }
+  }
+
+  useEffect(() => () => {
+    // Static antd confirmations are mounted outside ChatPage.  Tie the
+    // confirmation lifetime back to this page so a conversation switch or
+    // unmount cannot leave an orphaned modal blocking the next interaction.
+    fullAccessConfirmRef.current?.destroy();
+    fullAccessConfirmRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    for (const upload of pendingUploads) {
+      if (upload.status === "uploading") discardedUploadUidsRef.current.add(upload.uid);
+    }
+    editorRef.current?.clear();
+    setInput("");
+    setReferences([]);
+    setFileTriggerState(null);
+    setFileCandidates([]);
+    fileMenuDismissedPromptRef.current = null;
+    setFileMenuDismissedFor(null);
+    setPendingUploads([]);
+    editingSubmittingRef.current = false;
+    setEditingSubmitting(false);
+    // Upload callbacks use the uid set above to delete files that finish after
+    // the composer has moved to another conversation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation?.id]);
+
+  useEffect(() => {
+    if (editingMessageId) {
+      editRef.current?.focus();
+      nativeTextArea(editRef.current)?.select();
+    }
+  }, [editingMessageId]);
+
+  function handleEditorChange(change: FileMentionChange) {
+    const { prompt: value, references: inlineReferences, trigger } = change;
+    const dismissedPrompt = fileMenuDismissedPromptRef.current;
+    const preserveDismissedMenu = dismissedPrompt === value;
+    if (!preserveDismissedMenu && dismissedPrompt !== null) fileMenuDismissedPromptRef.current = null;
+    setInput(value);
+    setReferences(inlineReferences);
+    setCommandMenuDismissedFor(null);
+    setActiveCommandIndex(0);
+    setFileTriggerState(trigger);
+    latestFileTriggerRef.current = trigger;
+    if (!trigger) {
+      if (fileSearchTimerRef.current !== null) {
+        window.clearTimeout(fileSearchTimerRef.current);
+        fileSearchTimerRef.current = null;
+      }
+      setFileCandidates([]);
+      setFileMenuDismissedFor(null);
+      return;
+    }
+    setFileMenuDismissedFor(preserveDismissedMenu ? value : null);
+    setActiveFileIndex(0);
+    if (fileSearchTimerRef.current !== null) {
+      window.clearTimeout(fileSearchTimerRef.current);
+    }
+    fileSearchTimerRef.current = window.setTimeout(() => {
+      fileSearchTimerRef.current = null;
+      if (latestFileTriggerRef.current?.query !== trigger.query || latestFileTriggerRef.current?.start !== trigger.start) return;
+      void searchFiles(trigger);
+    }, 250);
+  }
+
+  async function searchFiles(trigger: FileTrigger) {
+    if (!conversation?.sessionId) return;
+    try {
+      const results = await searchSessionFiles(conversation.sessionId, trigger.query, 20);
+      setFileCandidates(toCandidates(results));
+    } catch {
+      setFileCandidates([]);
+    }
+  }
+
+  function completeFile(index = activeFileIndex) {
+    const candidate = fileCandidates[index];
+    if (!candidate || !fileTriggerState) return;
+    const token = completionToken(candidate.reference.path);
+    const completedPrompt = `${input.slice(0, fileTriggerState.start)}${token}${input.slice(fileTriggerState.end)}`;
+    fileMenuDismissedPromptRef.current = completedPrompt;
+    setFileMenuDismissedFor(completedPrompt);
+    setFileCandidates([]);
+    editorRef.current?.replaceCurrentMention(candidate.reference, candidate.label);
+  }
+
+  function handlePickFiles(files: FileList | File[]) {
+    if (!conversation?.sessionId) return;
+    const selected = Array.from(files).filter((file) => file.size > 0);
+    if (selected.length === 0) return;
+    const sessionId = conversation.sessionId;
+    const uploads: PendingUpload[] = selected.map((file) => ({
+      uid: crypto.randomUUID(),
+      name: file.name,
+      isImage: file.type.startsWith("image/"),
+      status: "uploading",
+      percent: 0,
+      file,
+    }));
+    setPendingUploads((current) => [...current, ...uploads]);
+    void uploadSessionFiles(sessionId, selected, (percent) => {
+      setPendingUploads((current) => current.map((item) => uploads.some((upload) => upload.uid === item.uid) && item.status === "uploading" ? { ...item, percent } : item));
+    }).then((results) => {
+      const discardedPaths: string[] = [];
+      setPendingUploads((current) => {
+        const next = [...current];
+        results.forEach((result, index) => {
+          const upload = uploads[index];
+          if (!upload) return;
+          const position = next.findIndex((item) => item.uid === upload.uid);
+          if (position === -1 || discardedUploadUidsRef.current.has(upload.uid)) {
+            discardedUploadUidsRef.current.delete(upload.uid);
+            discardedPaths.push(result.path);
+            return;
+          }
+          next[position] = {
+            ...next[position],
+            status: "done",
+            percent: 100,
+            path: result.path,
+          };
+        });
+        return next;
+      });
+      for (const path of discardedPaths) void deleteSessionFile(sessionId, "upload", path).catch(() => undefined);
+    }).catch((error) => {
+      const message = String((error as Error).message ?? error);
+      setPendingUploads((current) => current.map((item) => uploads.some((upload) => upload.uid === item.uid) ? { ...item, status: "error", error: message } : item));
+    });
+  }
+
+  function removePendingUpload(index: number) {
+    const upload = pendingUploads[index];
+    if (!upload) return;
+    if (upload.status === "uploading") {
+      discardedUploadUidsRef.current.add(upload.uid);
+    }
+    if (upload.status === "done" && upload.path && conversation?.sessionId) {
+      // Removing an upload deletes the server file. Inline mentions remain
+      // independent and may intentionally become unavailable.
+      void deleteSessionFile(conversation.sessionId, "upload", upload.path).catch(() => undefined);
+    }
+    setPendingUploads((current) => current.filter((_item, itemIndex) => itemIndex !== index));
+  }
+
+  function retryUpload(index: number) {
+    const upload = pendingUploads[index];
+    if (!upload || !conversation?.sessionId || !upload.file) return;
+    setPendingUploads((current) => current.filter((_item, itemIndex) => itemIndex !== index));
+    handlePickFiles([upload.file]);
+  }
 
   function completeCommand(index = activeCommandIndex) {
     const command = filteredCommands[index];
@@ -354,9 +682,7 @@ export default function ChatPage({
     rewindTurnId?: string,
     waitForActiveRun = false,
     onBaseline?: (turn: RuntimeStateNode) => void,
-    queuedDelivery?: { deliveryId: string; messageIds: string[] },
   ) {
-    if (sandboxBlocked) throw new Error("沙箱 Broker 尚未确认健康。");
     if (!onRun) throw new Error("ChatPage requires the Turn run controller.");
     await onRun({
         conversationId,
@@ -375,7 +701,6 @@ export default function ChatPage({
         rewindTurnId,
         waitForActiveRun,
         onBaseline,
-        queuedDelivery,
     });
   }
 
@@ -384,22 +709,15 @@ export default function ChatPage({
     onQueuedMessagesChange(conversation.id, updater);
   }
 
-  async function queueCurrentPrompt(prompt: string, itemReferences?: FileReference[]) {
+  function queueCurrentPrompt(prompt: string, itemReferences?: FileReference[]) {
     if (!prompt.trim() && (!itemReferences || itemReferences.length === 0)) return;
-    if (!conversation?.id || !conversation.threadId) return;
-    try {
-      const stored = editingQueuedMessageId
-        ? await updateQueuedMessage(conversation.threadId, editingQueuedMessageId, prompt, itemReferences ?? [])
-        : await createQueuedMessage(conversation.threadId, crypto.randomUUID(), prompt, itemReferences ?? []);
-      updateQueue((items) => editingQueuedMessageId
-        ? items.map((item) => item.id === stored.id ? stored : item)
-        : [...items, stored]);
-      setEditingQueuedMessageId(null);
-    } catch (error) {
-      setLast({ error: String((error as Error).message ?? error) });
-      return;
-    }
-    clearComposer();
+    updateQueue((items) => [
+      ...items,
+      { id: crypto.randomUUID(), content: prompt, references: itemReferences },
+    ]);
+    editorRef.current?.clear();
+    setInput("");
+    setReferences([]);
     // The uploaded files are already represented by references on this queue
     // item.  Detach them from the composer so a subsequent queued message
     // cannot accidentally inherit the same upload; keep the server-side files
@@ -407,15 +725,24 @@ export default function ChatPage({
     setPendingUploads([]);
   }
 
+  function queueReferences(): FileReference[] {
+    const uploadedReferences = pendingUploads
+      .filter((upload) => upload.status === "done" && upload.path)
+      .map((upload) => ({ source: "upload" as const, path: upload.path! }));
+    return [...references, ...uploadedReferences].filter((reference, index, all) =>
+      all.findIndex((candidate) => candidate.source === reference.source && candidate.path === reference.path) === index,
+    );
+  }
+
   function editQueuedMessage(item: QueuedMessage) {
-    if (item.state !== "pending") return;
+    if (item.sendingSteeringId) return;
     const currentPrompt = input.trim();
-    const currentReferences = collectedReferences();
+    const currentReferences = queueReferences();
     if (currentPrompt || currentReferences.length > 0) {
       void message.warning("输入框有内容，无法修改队列消息");
       return;
     }
-    setEditingQueuedMessageId(item.id);
+    updateQueue((items) => items.filter((candidate) => candidate.id !== item.id));
     editorRef.current?.restore(item.content, item.references);
     setInput(item.content);
     setReferences(item.references ?? []);
@@ -423,23 +750,27 @@ export default function ChatPage({
   }
 
   function sendQueuedMessage(item: QueuedMessage) {
-    if (item.state !== "pending") return;
+    if (item.sendingSteeringId) return;
     void submitSteering([item]);
   }
 
   async function submitSteering(items: QueuedMessage[]) {
-    if (sandboxBlocked || !conversation?.id || !activeRuntimeNode || activeRuntimeNode.status !== "running" || items.length === 0) return;
-    const deliveryId = crypto.randomUUID();
+    if (!conversation?.id || !activeRuntimeNode || activeRuntimeNode.status !== "running" || items.length === 0) return;
+    const merged = mergeQueuedMessages(items);
+    const steeringId = items.length === 1 ? items[0].id : crypto.randomUUID();
     try {
-      await steerTurn(activeRuntimeNode.id, deliveryId, items.map((item) => item.id));
-      await onQueuedMessagesRefresh(conversation.id);
+      await steerTurn(activeRuntimeNode.id, steeringId, merged.content, merged.references);
+      const submitted = new Set(items.map((item) => item.id));
+      updateQueue((current) => current.map((item) => submitted.has(item.id)
+        ? { ...item, sendingSteeringId: steeringId, sendingTurnId: activeRuntimeNode.id }
+        : item));
     } catch (error) {
       setLast({ error: String((error as Error).message ?? error) });
     }
   }
 
   function pauseOrSteer() {
-    const pending = queuedMessages.filter((item) => item.state === "pending");
+    const pending = queuedMessages.filter((item) => !item.sendingSteeringId);
     if (pending.length > 0) {
       void submitSteering(pending);
       return;
@@ -452,41 +783,34 @@ export default function ChatPage({
     // Snapshot both content and IDs. React may persist a new queue while this
     // request is in flight; that new content belongs to the next merged Turn.
     const items = queuedMessages.slice();
-    if (sandboxBlocked) {
-      queueFlushRef.current = false;
-      setQueueSubmitting(false);
-      return;
-    }
     if (!conversation?.sessionId || items.length === 0) {
       queueFlushRef.current = false;
+      queueInFlightIdsRef.current = null;
       setQueueSubmitting(false);
       return;
     }
-    const pendingItems = items.filter((item) => item.state === "pending");
-    if (pendingItems.length === 0) {
-      queueFlushRef.current = false;
-      setQueueSubmitting(false);
-      return;
-    }
-    const deliveryId = crypto.randomUUID();
+    if (!queueInFlightIdsRef.current) queueInFlightIdsRef.current = new Set(items.map((item) => item.id));
+    const submittedIds = queueInFlightIdsRef.current;
+    const merged = mergeQueuedMessages(items);
     let acknowledged = false;
     try {
       const source = activeRuntimeNode;
       await dispatchRun(
         conversation.id,
         conversation.sessionId,
-        null,
+        merged.content,
         false,
         source?.id ?? null,
-        undefined,
+        merged.references,
         undefined,
         true,
         () => {
           if (acknowledged) return;
           acknowledged = true;
-          void onQueuedMessagesRefresh(conversation.id);
+          onQueuedMessagesChange(conversation.id, (current) =>
+            current.filter((item) => !submittedIds.has(item.id)));
+          queueInFlightIdsRef.current = null;
         },
-        { deliveryId, messageIds: pendingItems.map((item) => item.id) },
       );
       if (!acknowledged) queueAutoBlockedRef.current = true;
     } catch (error) {
@@ -526,6 +850,7 @@ export default function ChatPage({
       const messages = [...visibleMessages, userMessage, assistantMessage];
       return {
         ...current,
+        title: current.title === "新对话" ? prompt.slice(0, 18) + (prompt.length > 18 ? "…" : "") : current.title,
         messageCount: messages.filter((message) => message.role === "user" || message.role === "assistant").length,
         messages,
         runtimeNodes,
@@ -547,21 +872,34 @@ export default function ChatPage({
 
 
   async function executeCommand(name: string, argument: string) {
-    if (compactionPending) return;
-    clearComposer();
+    if (compactionPending || agentInitPending) return;
+    editorRef.current?.clear();
+    setReferences([]);
     setCommandMenuDismissedFor(null);
     setActiveCommandIndex(0);
     setSettingsOpen(false);
-    if (name === "/trace") {
-      setMainView("trace");
-      return;
-    }
     if (name === "/help") {
       await insert(HELP_TEXT);
       return;
     }
     if (name === "/new") {
       await onNew(argument || undefined);
+      return;
+    }
+    if (name === "/init") {
+      if (!conversation?.projectId) {
+        await insert("⚠️ 当前会话未关联项目，无法创建 AGENTS.md。请先从侧边栏选择或创建项目。");
+        return;
+      }
+      setAgentInitPending(true);
+      try {
+        const result = await initProjectAgents(conversation.projectId);
+        await insert(`✅ 已在当前项目根目录创建 \`${result.path}\`（${result.byte_count} 字节），后续任务将读取其中的指令。`);
+      } catch (error) {
+        await insert(`⚠️ 初始化失败：${String((error as Error).message ?? error)}`);
+      } finally {
+        setAgentInitPending(false);
+      }
       return;
     }
     if (name === "/skills") {
@@ -588,7 +926,7 @@ export default function ChatPage({
   }
 
   async function send() {
-    if (compactionPending || sandboxBlocked) return;
+    if (compactionPending || agentInitPending) return;
     const prompt = input.trim();
     // A running assistant no longer blocks the composer: a draft is handed
     // to the in-memory FIFO queue below.  Only an in-progress upload prevents
@@ -607,7 +945,7 @@ export default function ChatPage({
       );
       return;
     }
-    const mergedReferences = collectedReferences();
+    const mergedReferences = queueReferences();
     if (!prompt && mergedReferences.length === 0) return;
     // Slash commands are control actions, not conversational turns.  They
     // must never be persisted into the running FIFO queue.  Keep command
@@ -619,10 +957,11 @@ export default function ChatPage({
       return;
     }
     if (activeRuntimeNode?.status === "running") {
-      await queueCurrentPrompt(prompt, mergedReferences);
+      queueCurrentPrompt(prompt, mergedReferences);
       return;
     }
-    clearComposer();
+    editorRef.current?.clear();
+    setReferences([]);
     await runPrompt(
       prompt,
       undefined,
@@ -645,15 +984,98 @@ export default function ChatPage({
     }
   }
 
+  function beginEdit(message: ChatMessage) {
+    if (interactionBusy || !onRewind || !message.content) return;
+    setEditingMessageId(message.id);
+    setEditingDraft(message.content);
+  }
+
+  function cancelEdit() {
+    setEditingMessageId(null);
+    setEditingDraft("");
+  }
+
+  async function saveEdit(message: ChatMessage) {
+    if (!conversation || !onRewind || interactionBusy || !editingDraft.trim() || rewindPending || editingSubmitting || editingSubmittingRef.current) {
+      return;
+    }
+    setRewindPending(true);
+    editingSubmittingRef.current = true;
+    setEditingSubmitting(true);
+    try {
+      const result = await onRewind(conversation.id, message.id);
+      if (result === undefined) return;
+      const nextPrompt = editingDraft.trim();
+      const sessionId = typeof result === "string" ? conversation.sessionId : result.sessionId;
+      if (!sessionId) return;
+      cancelEdit();
+      await runPrompt(
+        nextPrompt,
+        {
+          conversationId: conversation.id,
+          sessionId,
+          rewindTurnId: typeof result === "string" ? message.nodeId : result.rewindTurnId ?? message.nodeId,
+        },
+        message.references,
+      );
+    } finally {
+      setRewindPending(false);
+      editingSubmittingRef.current = false;
+      setEditingSubmitting(false);
+    }
+  }
+
+  function handleUserBubbleClick(event: ReactMouseEvent<HTMLDivElement>, message: ChatMessage) {
+    if (
+      interactionBusy ||
+      !onRewind ||
+      !message.content ||
+      event.button !== 0 ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey
+    ) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("a,button,textarea,input,code,pre,details,summary")) return;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) return;
+    beginEdit(message);
+  }
+
+  function forkMessage(messageId: string) {
+    if (!conversation || !onFork || interactionBusy) return;
+    void onFork(conversation.id, messageId);
+  }
+
+  async function changeMessageVersion(message: ChatMessage, direction: -1 | 1) {
+    if (!conversation || !message.nodeId || interactionBusy) return;
+    const turn = conversation.runtimeNodes?.find((item) => item.id === message.nodeId);
+    if (!turn) return;
+    const nextIndex = turn.current_data_idx + direction;
+    if (nextIndex < 0 || nextIndex >= turn.data.length) return;
+    try {
+      const updated = await patchTurnCurrentData(turn.id, nextIndex);
+      onUpdate(conversation.id, (current) => {
+        const map = new Map((current.runtimeNodes ?? []).map((item) => [`${item.session_id}:${item.id}`, item] as const));
+        map.set(`${updated.session_id}:${updated.id}`, updated);
+        const activeTurnId = current.activeTurnId ?? activeRuntimeNode?.id ?? updated.id;
+        return { ...current, runtimeNodes: [...map.values()], messages: projectTurnPath(map, activeTurnId) };
+      });
+    } catch (error) {
+      setLast({ error: String((error as Error).message ?? error) });
+    }
+  }
+
+  function messageVersion(message: ChatMessage) {
+    const turn = conversation?.runtimeNodes?.find((item) => item.id === message.nodeId);
+    return turn ? { index: turn.current_data_idx, total: turn.data.length } : undefined;
+  }
+
   function scrollToBottom() {
     const scrollContainer = chatScrollRef.current;
     if (!scrollContainer) return;
     scrollContainer.scrollTo({ top: scrollContainer.scrollHeight, behavior: "smooth" });
-  }
-
-  function handleChatScroll() {
-    const scrollContainer = chatScrollRef.current;
-    if (scrollContainer) syncBottomState(scrollContainer);
   }
 
 
@@ -672,58 +1094,115 @@ export default function ChatPage({
 
   return (
     <div className="chat-page">
-      {hasTurnTree && currentThreadId ? <div className="trace-toolbar" role="navigation" aria-label="主内容视图">
-        <Dropdown
-          trigger={["click"]}
-          menu={{
-            selectable: true,
-            selectedKeys: [currentThreadId],
-            items: [{ key: currentThreadId, label: currentThreadId }],
-          }}
-        >
-          <Button type="text">Thread</Button>
-        </Dropdown>
-        <span className="trace-toolbar-thread-id" title={currentThreadId}>{currentThreadId}</span>
-        <Button type="text" aria-pressed={visibleMainView === "chat"} onClick={() => setMainView("chat")}>Chat</Button>
-        <Button type="text" aria-pressed={visibleMainView === "trace"} onClick={() => setMainView("trace")}>Trace</Button>
-      </div> : null}
-      {visibleMainView === "trace" ? <TracePage turns={traceTurns} /> : <>
       <div className="chat-content">
-        <ChatMessageList
-          messages={messages}
-          sessionId={conversation?.sessionId}
-          display={display}
-          interactionBusy={interactionBusy}
-          isMobile={isMobile}
-          compactionPending={compactionPending}
-          chatScrollRef={chatScrollRef}
-          onScroll={handleChatScroll}
-          editingMessageId={editingMessageId}
-          editingDraft={editingDraft}
-          editRef={editRef}
-          rewindPending={rewindPending}
-          editingSubmitting={editingSubmitting}
-          canEdit={Boolean(onRewind)}
-          setEditingDraft={setEditingDraft}
-          cancelEdit={cancelEdit}
-          saveEdit={saveEdit}
-          beginEdit={beginEdit}
-          handleUserBubbleClick={handleUserBubbleClick}
-          messageVersion={messageVersion}
-          changeMessageVersion={changeMessageVersion}
-          onDecision={chooseDecision}
-          onFork={onFork ? forkMessage : undefined}
-          sandboxFailure={sandboxHealth.phase === "unhealthy" ? sandboxHealth.detail ?? "健康检查未通过。" : null}
-        />
-        {!isAtBottom ? (
-          <FloatButton
-            className="chat-scroll-bottom-button"
-            icon={<VerticalAlignBottomOutlined />}
-            tooltip="滚动到底部"
-            aria-label="滚动到底部"
-            onClick={scrollToBottom}
-          />
-        ) : null}
+        <div className="chat-scroll" ref={chatScrollRef} data-conversation-scroll>
+          <div className="chat-scroll-content">
+            <div className="chat-messages">
+              {messages.length === 0 ? (
+                <div className="welcome">
+                  <div className="logo">Mini-Agent</div>
+                  <p className="welcome-sub">向你的智能体提问，它会调用文件、Shell、Web 等工具完成任务</p>
+                </div>
+              ) : messages.map((message) => message.role === "user" ? (
+                <div
+                  className="message user"
+                  id={conversationTurnId(message.id)}
+                  data-chat-anchor-key={message.id}
+                  key={message.id}
+                >
+                  <div className={editingMessageId === message.id ? "message-content is-editing" : "message-content"}>
+                    {editingMessageId === message.id ? (
+                      <div className="message-edit" aria-label="编辑用户消息">
+                        <Input.TextArea
+                          className="message-edit-input"
+                          ref={editRef}
+                          aria-label="编辑用户消息"
+                          value={editingDraft}
+                          disabled={interactionBusy}
+                          onChange={(event) => setEditingDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              cancelEdit();
+                            } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                              event.preventDefault();
+                              void saveEdit(message);
+                            }
+                          }}
+                          autoSize={{ minRows: 2, maxRows: 8 }}
+                        />
+                        <div className="message-edit-actions">
+                          <Button type="text" onClick={cancelEdit}>取消</Button>
+                          <Button type="primary" onClick={() => void saveEdit(message)} loading={rewindPending || editingSubmitting} disabled={!editingDraft.trim() || editingSubmitting || rewindPending || interactionBusy}>保存并重新生成</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className="bubble user-bubble"
+                        onClick={(event) => handleUserBubbleClick(event, message)}
+                        title={onRewind && !interactionBusy ? "点击编辑此消息" : undefined}
+                      >
+                        <MarkdownContent text={message.content} />
+                        {message.references && message.references.length > 0 ? (
+                          <div className="message-references" aria-label="消息引用">
+                            {message.references.map((reference) => (
+                              <MessageReferenceChip key={`${reference.source}:${reference.path}`} reference={reference} sessionId={conversation?.sessionId} />
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                    {editingMessageId !== message.id ? (
+                      <>
+                        <MessageActions
+                          msg={message}
+                          busy={interactionBusy}
+                          onEdit={onRewind ? () => beginEdit(message) : undefined}
+                        />
+                        {messageVersion(message) ? (
+                          <div className="message-version-controls" aria-label="消息版本切换">
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<LeftOutlined />}
+                              aria-label="上一个消息版本"
+                              disabled={interactionBusy || messageVersion(message)!.index === 0}
+                              onClick={() => void changeMessageVersion(message, -1)}
+                            />
+                            <span aria-live="polite">{messageVersion(message)!.index + 1} / {messageVersion(message)!.total}</span>
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<RightOutlined />}
+                              aria-label="下一个消息版本"
+                              disabled={interactionBusy || messageVersion(message)!.index >= messageVersion(message)!.total - 1}
+                              onClick={() => void changeMessageVersion(message, 1)}
+                            />
+                          </div>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+              ) : (
+                <AssistantMessage
+                  key={message.id}
+                  msg={message}
+                  display={display}
+                  onDecision={chooseDecision}
+                  busy={interactionBusy}
+                  onFork={onFork && (message.status === "success" || message.status === "failed") ? () => forkMessage(message.id) : undefined}
+                />
+              ))}
+              {compactionPending ? (
+                <div className="message assistant runtime-compaction-progress" role="status" aria-live="polite">
+                  <ShimmerText active>正在执行compaction操作中</ShimmerText>
+                </div>
+              ) : null}
+          </div>
+          </div>
+          {!isMobile ? <ConversationTimeline messages={messages} scrollContainerRef={chatScrollRef} /> : null}
+        </div>
       </div>
       <Composer
         input={input}
@@ -738,9 +1217,7 @@ export default function ChatPage({
         modePending={runtimeConfigPending.mode}
         permissionPending={runtimeConfigPending.permission}
         reasoningPending={runtimeConfigPending.reasoning}
-        todos={visibleTodo}
-        todoClosable={todoClosable}
-        onTodoClose={closeTodoPanel}
+        todos={todo}
         usagePercent={usagePercent}
         usageTotalTokens={activeUsage?.total ?? null}
         usageContextLength={activeUsage?.context}
@@ -760,11 +1237,9 @@ export default function ChatPage({
         onStop={pauseOrSteer}
         onSend={() => void send()}
         actionMode={actionMode}
-        submitDisabled={sandboxBlocked || projectUnavailable || compactionPending || composerActionState.disabled}
-        disabled={sandboxBlocked || projectUnavailable || compactionPending}
-        disabledReason={sandboxBlocked
-          ? sandboxHealth.phase === "checking" ? "正在检查沙箱 Broker" : "沙箱 Broker 不可用"
-          : conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
+        submitDisabled={projectUnavailable || compactionPending || agentInitPending || composerActionState.disabled}
+        disabled={projectUnavailable || compactionPending || agentInitPending}
+        disabledReason={conversation?.projectAvailable === false ? "项目 cwd 不可用，恢复文件夹后才能运行" : undefined}
         fileCandidates={fileCandidates}
         fileMenuVisible={fileMenuVisible}
         activeFileIndex={activeFileIndex}
@@ -779,10 +1254,7 @@ export default function ChatPage({
         onQueueSend={sendQueuedMessage}
         onQueueEdit={editQueuedMessage}
         onQueueDelete={(item) => {
-          if (item.state !== "pending" || !conversation?.threadId) return;
-          void deleteQueuedMessage(conversation.threadId, item.id)
-            .then(() => updateQueue((items) => items.filter((candidate) => candidate.id !== item.id)))
-            .catch((error) => setLast({ error: String((error as Error).message ?? error) }));
+          if (!item.sendingSteeringId) updateQueue((items) => items.filter((candidate) => candidate.id !== item.id));
         }}
         onRemoveUpload={removePendingUpload}
         onRetryUpload={retryUpload}
@@ -793,7 +1265,14 @@ export default function ChatPage({
           }
         }}
       />
-      </>}
+      <FloatButton
+        className="chat-scroll-bottom-button"
+        icon={<VerticalAlignBottomOutlined />}
+        tooltip="滚动到底部"
+        aria-label="滚动到底部"
+        style={{ right: 24, bottom: 96 }}
+        onClick={scrollToBottom}
+      />
     </div>
   );
 }

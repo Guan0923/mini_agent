@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
-from backend.api.routes.settings import SandboxConfigPayload
+from backend.configuration import UserConfigStore
 from backend.domain import SystemMessage, ToolSpec, UserMessage
-from backend.providers import ChatCompletionsAdapter, LLMClient, MessagesAdapter, ModelConfig, ResponsesAdapter
+from backend.providers import (
+    ChatCompletionsAdapter,
+    LLMClient,
+    MessagesAdapter,
+    ModelConfig,
+    ResponsesAdapter,
+)
 from backend.runtime.core.context import AgentRuntime
-from backend.storage.settings import LocalSettingsStore
+from backend.storage.user_settings import UserSettingsStore
 
 
 def runtime_for(*messages, stream: bool = False) -> AgentRuntime:
@@ -26,7 +34,13 @@ def runtime_for(*messages, stream: bool = False) -> AgentRuntime:
 
 
 def config(protocol: str) -> ModelConfig:
-    return ModelConfig("secret", "https://example.test/v1", "demo", provider="openai", protocol=protocol)
+    return ModelConfig(
+        "secret",
+        "https://example.test/v1",
+        "demo",
+        provider="openai",
+        protocol=protocol,
+    )
 
 
 def test_llm_client_selects_each_supported_protocol() -> None:
@@ -35,16 +49,27 @@ def test_llm_client_selects_each_supported_protocol() -> None:
     assert isinstance(LLMClient(config("messages")).llm, MessagesAdapter)
 
 
-def test_responses_adapter_converts_json_output() -> None:
+def test_responses_adapter_converts_json_and_streamed_output() -> None:
     adapter = ResponsesAdapter(config("responses"))
     runtime = runtime_for(UserMessage(content="hello"))
     runtime.exchange.raw_response = {
         "id": "resp_1",
         "model": "demo",
         "output": [
-            {"type": "message", "content": [{"type": "output_text", "text": "Hi"}]},
-            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Think"}]},
-            {"type": "function_call", "id": "fc_1", "name": "lookup", "arguments": '{"q":"x"}'},
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hi"}],
+            },
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "Think"}],
+            },
+            {
+                "type": "function_call",
+                "id": "fc_1",
+                "name": "lookup",
+                "arguments": '{"q":"x"}',
+            },
         ],
         "usage": {"input_tokens": 2, "output_tokens": 3},
     }
@@ -53,85 +78,220 @@ def test_responses_adapter_converts_json_output() -> None:
 
     assert prepared.message.content == "Hi"
     assert prepared.message.reasoning == "Think"
+    assert prepared.message.tool_messages[0].call_id == "fc_1"
     assert prepared.message.tool_messages[0].arguments == {"q": "x"}
     assert prepared.usage == {"input_tokens": 2, "output_tokens": 3}
+
+    streamed = runtime_for(UserMessage(content="hello"), stream=True)
+    streamed.exchange.raw_response = [
+        {"__sse_event": "response.output_text.delta", "delta": "A"},
+        {"__sse_event": "response.reasoning_summary_text.delta", "delta": "B"},
+        {
+            "__sse_event": "response.completed",
+            "response": {
+                "id": "resp_2",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "A"}]}],
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+        },
+    ]
+    chunks: list[str] = []
+    streamed.exchange.on_content = chunks.append
+    streamed_prepared = adapter.prepare_response(streamed)
+
+    assert streamed_prepared.message.content == "A"
+    assert chunks == ["A"]
 
 
 def test_messages_adapter_preserves_system_and_tool_blocks() -> None:
     adapter = MessagesAdapter(config("messages"))
+    tool = ToolSpec("lookup", "Look up a value.", {"type": "object"})
     runtime = runtime_for(SystemMessage(content="rules"), UserMessage(content="hello"))
-    runtime.exchange.allowed_tools = [ToolSpec("lookup", "Look up a value.", {"type": "object"})]
-
+    runtime.exchange.allowed_tools = [tool]
     payload = adapter.prepare_request(runtime)
 
     assert payload["system"] == [{"type": "text", "text": "rules"}]
     assert payload["messages"] == [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
     assert payload["tools"][0]["input_schema"] == {"type": "object"}
 
+    runtime.exchange.raw_response = {
+        "id": "msg_1",
+        "model": "demo",
+        "content": [
+            {"type": "thinking", "thinking": "Think"},
+            {"type": "text", "text": "Done"},
+            {"type": "tool_use", "id": "tool_1", "name": "lookup", "input": {"q": "x"}},
+        ],
+        "usage": {"input_tokens": 4, "output_tokens": 5},
+        "stop_reason": "tool_use",
+    }
+    prepared = adapter.prepare_response(runtime)
 
-def test_local_settings_encrypts_provider_key_and_reopens_without_identity(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("MINI_AGENT_LOCAL_DEK_FALLBACK", "test-local-key-material-that-is-at-least-32-bytes")
-    state_db = tmp_path / ".mini_agent" / "runtime" / "state.db"
-    config_file = tmp_path / ".mini_agent" / "config.toml"
-    store = LocalSettingsStore(state_db, config_file)
+    assert prepared.message.content == "Done"
+    assert prepared.message.reasoning == "Think"
+    assert prepared.message.tool_messages[0].arguments == {"q": "x"}
+    assert prepared.finish_reason == "tool_use"
 
-    saved = store.update_provider_config(
+
+def test_user_settings_are_isolated_and_api_keys_are_not_returned(tmp_path) -> None:
+    first_id = str(uuid4())
+    second_id = str(uuid4())
+    first = UserSettingsStore(tmp_path / first_id / "user.db")
+    second = UserSettingsStore(tmp_path / second_id / "user.db")
+
+    assert first.profile_for_user(first_id) == {"display_name": "", "agent_preferences": ""}
+    first.update_profile(first_id, display_name=" One ", agent_preferences=" concise ")
+    first.update_agent_config(first_id, {"tone": "direct", "custom_instructions": "Use bullets"})
+    saved = first.update_provider_config(
+        first_id,
         {
-            "provider_name": "work-openai",
+            "provider": "openai",
             "protocol": "responses",
             "base_url": "https://example.test/v1",
             "model": "demo",
             "api_key": "secret-key",
-        }
+        },
     )
 
     assert saved["api_key_configured"] is True
     assert "api_key" not in saved
-    with sqlite3.connect(state_db) as connection:
-        raw = connection.execute("SELECT provider_configs_json FROM provider_settings WHERE id = 1").fetchone()[0]
-    assert raw.startswith("[")
-    assert "secret-key" not in raw
-    assert "v4:" in raw
-    reopened = LocalSettingsStore(state_db, config_file)
-    assert reopened.model_config().api_key == "secret-key"
+    assert first.profile_for_user(first_id)["display_name"] == "One"
+    assert first.agent_preferences_for_user(first_id) == "Preferred tone: direct\nUse bullets\nconcise"
+    assert second.profile_for_user(second_id) == {"display_name": "", "agent_preferences": ""}
+    assert second.provider_config_for_user(second_id)["api_key_configured"] is False
+    with sqlite3.connect(first.path) as connection:
+        raw = connection.execute(
+            "SELECT api_key_ciphertext FROM user_provider_settings WHERE user_id = ?",
+            (first_id,),
+        ).fetchone()[0]
+    assert raw and "secret-key" not in raw
+    assert first.model_config_for_user(first_id).api_key == "secret-key"
 
 
-def test_local_profile_and_agent_preferences_are_stored_in_toml(tmp_path: Path) -> None:
-    store = LocalSettingsStore(tmp_path / "runtime" / "state.db", tmp_path / "config.toml")
-
-    store.update_profile(display_name=" One ", agent_preferences=" concise ")
-    store.update_agent_config({"tone": "direct", "custom_instructions": "Use bullets"})
-
-    assert store.profile() == {"display_name": "One", "agent_preferences": "concise"}
-    assert store.agent_preferences() == "Preferred tone: direct\nUse bullets\nconcise"
-
-
-def test_sandbox_enabled_parameter_is_removed_from_every_settings_projection(tmp_path: Path) -> None:
-    store = LocalSettingsStore(tmp_path / "runtime" / "state.db", tmp_path / "config.toml")
-    current = store.sandbox_config()
+def test_legacy_disabled_sandbox_is_migrated_to_mandatory_enabled(tmp_path: Path) -> None:
+    user_id = str(uuid4())
+    store = UserSettingsStore(tmp_path / user_id / "user.db")
+    current = store.sandbox_config_for_user(user_id)
     store.config_store.update({"sandbox": {**current, "enabled": False}})
 
-    normalized = store.sandbox_config()
-    updated = store.update_sandbox_config({"enabled": False})
+    migrated = store.sandbox_config_for_user(user_id)
 
-    assert "enabled" not in normalized
-    assert "enabled" not in updated
-    assert "enabled" not in store.config_store.read()["sandbox"]
-    assert "enabled" not in SandboxConfigPayload.model_fields
-    assert "enabled" not in SandboxConfigPayload.model_json_schema()["properties"]
+    assert migrated["enabled"] is True
+    assert store.config_store.read()["sandbox"]["enabled"] is True
+    with pytest.raises(ValueError, match="cannot be disabled"):
+        store.update_sandbox_config(user_id, {"enabled": False})
 
 
-def test_provider_names_are_case_insensitive_unique_and_renamable(tmp_path: Path) -> None:
-    store = LocalSettingsStore(tmp_path / "runtime" / "state.db", tmp_path / "config.toml")
+def test_legacy_profile_is_migrated_to_user_db_once(tmp_path: Path) -> None:
+    user_id = str(uuid4())
+    root = tmp_path / user_id
+    config = UserConfigStore(root / "config.toml")
+    config.update({"profile": {"display_name": "旧名字", "agent_preferences": "旧偏好"}})
+
+    store = UserSettingsStore(root / "user.db")
+    assert store.profile_for_user(user_id) == {"display_name": "旧名字", "agent_preferences": "旧偏好"}
+
+    config.update({"profile": {"display_name": "后来修改", "agent_preferences": "后来偏好"}})
+    assert UserSettingsStore(root / "user.db").profile_for_user(user_id) == {
+        "display_name": "旧名字",
+        "agent_preferences": "旧偏好",
+    }
+
+
+def test_legacy_preferences_fill_an_empty_database_field_without_overwriting_name(tmp_path: Path) -> None:
+    user_id = str(uuid4())
+    root = tmp_path / user_id
+    config = UserConfigStore(root / "config.toml")
+    config.update({"profile": {"display_name": "旧名字", "agent_preferences": "旧偏好"}})
+
+    UserSettingsStore(root / "user.db")
+    with sqlite3.connect(root / "user.db") as connection:
+        connection.execute("UPDATE user_profiles SET display_name = ?, agent_preferences = ?", ("自定义名", ""))
+        connection.execute("DELETE FROM app_metadata WHERE key = 'profile_migrated_v1'")
+        connection.commit()
+
+    reopened = UserSettingsStore(root / "user.db")
+    assert reopened.profile_for_user(user_id) == {"display_name": "自定义名", "agent_preferences": "旧偏好"}
+
+
+def test_provider_names_are_case_insensitive_unique_and_renamable(tmp_path) -> None:
+    user_id = str(uuid4())
+    store = UserSettingsStore(tmp_path / user_id / "user.db")
     first = store.update_provider_config(
-        {"provider_name": "Work-OpenAI", "base_url": "https://example.test/v1", "model": "demo"}
+        user_id,
+        {
+            "provider_name": "Work-OpenAI",
+            "provider": "openai",
+            "base_url": "https://example.test/v1",
+            "model": "demo",
+            "api_key": "secret-key",
+        },
     )
     second = store.add_provider_config(
-        {"provider_name": "Anthropic-Work", "base_url": "https://anthropic.test/v1", "model": "claude"}
+        user_id,
+        {
+            "provider_name": "Anthropic-Work",
+            "provider": "anthropic",
+            "base_url": "https://anthropic.test/v1",
+            "model": "claude",
+        },
     )
 
     with pytest.raises(ValueError, match="already exists"):
-        store.update_provider_config_by_id(second["id"], {"provider_name": "work-openai"})
-    renamed = store.update_provider_config_by_id(first["id"], {"provider_name": "work-openai-v2"})
+        store.update_provider_config_by_id(user_id, second["id"], {"provider_name": "work-openai"})
+
+    renamed = store.update_provider_config_by_id(user_id, first["id"], {"provider_name": "work-openai-v2"})
     assert renamed["provider_name"] == "work-openai-v2"
-    assert store.model_config("WORK-OPENAI-V2").model == "demo"
+    assert store.model_config_for_provider_name(user_id, "WORK-OPENAI-V2").model == "demo"
+
+    with pytest.raises(ValueError, match="exceeds 80"):
+        store.update_provider_config_by_id(user_id, first["id"], {"provider_name": "x" * 81})
+
+
+def test_legacy_provider_name_migration_resolves_default_collision(tmp_path) -> None:
+    user_id = str(uuid4())
+    store = UserSettingsStore(tmp_path / user_id / "user.db")
+    current = store.update_provider_config(
+        user_id,
+        {
+            "provider_name": "default",
+            "protocol": "responses",
+            "base_url": "https://example.test/v1",
+            "model": "primary",
+        },
+    )
+    legacy = {
+        "id": "provider-old-12345678",
+        "is_active": False,
+        "provider": "deepseek",
+        "provider_name": "deepseek",
+        "protocol": "chat_completions",
+        "base_url": "https://legacy.test/v1",
+        "model": "legacy",
+        "max_tokens": 8192,
+        "context_size": 1024000,
+        "tokenizer_model": "deepseek-ai/DeepSeek-V3",
+        "api_key_ciphertext": "",
+    }
+    with sqlite3.connect(store.path) as connection:
+        raw = connection.execute(
+            "SELECT provider_configs_json FROM user_provider_settings WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
+        records = json.loads(raw)
+        records.append(legacy)
+        connection.execute(
+            "UPDATE user_provider_settings SET provider_configs_json = ? WHERE user_id = ?",
+            (json.dumps(records), user_id),
+        )
+        connection.commit()
+
+    migrated = store.provider_configs_for_user(user_id)
+
+    assert migrated[0]["id"] == current["id"]
+    assert migrated[0]["provider_name"] == "default"
+    assert migrated[1]["provider_name"] == "default-12345678"
+    assert migrated[1]["tokenizer_model"] == ""
+    model_config = store.model_config_for_provider_name(user_id, "DEFAULT-12345678")
+    assert model_config.provider == "chat_completions"
+    assert model_config.provider_name == "default-12345678"

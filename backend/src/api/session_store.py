@@ -1,4 +1,4 @@
-"""Shared access to the local Session/Turn store."""
+"""Shared authenticated access to a user's local Session/Turn store."""
 
 from __future__ import annotations
 
@@ -7,10 +7,13 @@ from fastapi import HTTPException
 from .state import WebAppState
 
 
-def session_store(state: WebAppState):
+def session_store(state: WebAppState, user_id: str):
     from backend.storage.sqlite import SQLiteSessionStore
 
-    return SQLiteSessionStore(state.paths)
+    store = SQLiteSessionStore(state.user_paths(user_id), f"web_{user_id}")
+    if state.event_sync_manager is not None:
+        store.set_sync_listener(lambda: state.mark_sync_dirty(user_id))
+    return store
 
 
 def require_session(store, session_id: str):
@@ -36,8 +39,8 @@ def mutation_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=409 if isinstance(exc, RuntimeError) else 400, detail=str(exc))
 
 
-def summary_payload(state: WebAppState, summary) -> dict[str, object]:
-    project = state.projects.session_project(summary.session_id)
+def summary_payload(state: WebAppState, user_id: str, summary) -> dict[str, object]:
+    project = state.projects(user_id).session_project(summary.session_id)
     return {
         "session_id": summary.session_id,
         "title": summary.title,
@@ -50,6 +53,7 @@ def summary_payload(state: WebAppState, summary) -> dict[str, object]:
         "client_id": summary.client_id,
         "archived_at": summary.archived_at,
         "deleted_at": summary.deleted_at,
+        "local_only": summary.local_only,
         "title_is_custom": summary.title_is_custom,
         "project_id": project.project_id if project is not None else None,
         "project_available": project.available if project is not None else None,

@@ -59,9 +59,7 @@ def test_mcp_preserves_workspace_and_argument_validation(tmp_path: Path) -> None
     assert "Invalid arguments" in invalid.content[0].text
 
 
-@pytest.mark.parametrize(
-    "name", ["create_directory", "write_file", "edit_file", "run_command", "web_search", "web_fetch"]
-)
+@pytest.mark.parametrize("name", ["write_file", "edit_file", "run_command", "web_search", "web_fetch"])
 def test_mcp_does_not_expose_tools_that_need_confirmation(tmp_path: Path, name: str) -> None:
     adapter = McpToolAdapter(build_tool_registry(tmp_path))
 

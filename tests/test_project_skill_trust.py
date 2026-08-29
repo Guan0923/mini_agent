@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 
-from backend.configuration import LocalConfigStore
+from backend.configuration import UserConfigStore
 from backend.domain import SkillSelection
 from backend.runtime import AgentRunner
 from backend.skills import ProjectSkillGate, ProjectSkillTrustStore, SkillCatalog, SkillDefinition
@@ -94,7 +94,7 @@ def user_root() -> Path:
 
 @pytest.fixture
 def trust_store(user_root: Path) -> ProjectSkillTrustStore:
-    config = LocalConfigStore(user_root / "config.toml")
+    config = UserConfigStore(user_root / "config.toml")
     config.update({"runtime": {"max_tool_calls": 32}})
     return ProjectSkillTrustStore(config)
 
@@ -102,7 +102,7 @@ def trust_store(user_root: Path) -> ProjectSkillTrustStore:
 def test_trust_requires_exact_tree_hash(user_root: Path) -> None:
     project_id = "project_1"
     workspace_sha = _h("workspace-a")
-    config = LocalConfigStore(user_root / "config.toml")
+    config = UserConfigStore(user_root / "config.toml")
     config.update({"runtime": {"max_tool_calls": 32}})
     store = ProjectSkillTrustStore(config)
     t1 = _h("tree-v1")
@@ -119,7 +119,7 @@ def test_trust_requires_exact_tree_hash(user_root: Path) -> None:
 
 
 def test_skills_are_tracked_independently(user_root: Path) -> None:
-    store = ProjectSkillTrustStore(LocalConfigStore(user_root / "config.toml"))
+    store = ProjectSkillTrustStore(UserConfigStore(user_root / "config.toml"))
     store.record_trust("p", _h("w"), "alpha", _h("ta"))
     store.record_trust("p", _h("w"), "beta", _h("tb"))
 
@@ -133,7 +133,7 @@ def test_skills_are_tracked_independently(user_root: Path) -> None:
 
 
 def test_revoke_project_removes_all_skills(user_root: Path) -> None:
-    store = ProjectSkillTrustStore(LocalConfigStore(user_root / "config.toml"))
+    store = ProjectSkillTrustStore(UserConfigStore(user_root / "config.toml"))
     store.record_trust("p", _h("w"), "alpha", _h("ta"))
     store.record_trust("p", _h("w"), "beta", _h("tb"))
 
@@ -143,7 +143,7 @@ def test_revoke_project_removes_all_skills(user_root: Path) -> None:
 
 
 def test_project_path_change_invalidates_trust(user_root: Path) -> None:
-    store = ProjectSkillTrustStore(LocalConfigStore(user_root / "config.toml"))
+    store = ProjectSkillTrustStore(UserConfigStore(user_root / "config.toml"))
     store.record_trust("p", _h("path-v1"), "demo", _h("t"))
 
     assert store.is_trusted("p", _h("path-v1"), "demo", _h("t")) is True
@@ -151,18 +151,18 @@ def test_project_path_change_invalidates_trust(user_root: Path) -> None:
 
 
 def test_trust_preserves_other_config_sections(user_root: Path) -> None:
-    config = LocalConfigStore(user_root / "config.toml")
+    config = UserConfigStore(user_root / "config.toml")
     config.update({"runtime": {"max_tool_calls": 32}})
     store = ProjectSkillTrustStore(config)
     store.record_trust("p", _h("w"), "alpha", _h("ta"))
 
-    reader = LocalConfigStore(user_root / "config.toml").read()
+    reader = UserConfigStore(user_root / "config.toml").read()
     assert reader["project_skill_trust"]
     assert reader["runtime"] == {"max_tool_calls": 32}
 
 
 def test_trusted_skills_report(user_root: Path) -> None:
-    store = ProjectSkillTrustStore(LocalConfigStore(user_root / "config.toml"))
+    store = ProjectSkillTrustStore(UserConfigStore(user_root / "config.toml"))
     store.record_trust("p", _h("w"), "alpha", _h("ta"))
     store.record_trust("p", _h("w"), "beta", _h("tb"))
 
@@ -171,7 +171,7 @@ def test_trusted_skills_report(user_root: Path) -> None:
 
 
 def test_agent_preferences_section_is_not_required(user_root: Path) -> None:
-    store = ProjectSkillTrustStore(LocalConfigStore(user_root / "config.toml"))
+    store = ProjectSkillTrustStore(UserConfigStore(user_root / "config.toml"))
     assert store.trusted_skills("missing", _h("w")) == {}
     assert store.is_trusted("missing", _h("w"), "demo", _h("t")) is False
 
@@ -179,7 +179,7 @@ def test_agent_preferences_section_is_not_required(user_root: Path) -> None:
 def test_gate_skips_untrusted_skills_without_interrupt(tmp_path: Path, user_root: Path) -> None:
     _write_project_skill(tmp_path, "alpha")
     _write_project_skill(tmp_path, "beta")
-    gate = ProjectSkillGate(tmp_path, "project_1", ProjectSkillTrustStore(LocalConfigStore(user_root / "config.toml")))
+    gate = ProjectSkillGate(tmp_path, "project_1", ProjectSkillTrustStore(UserConfigStore(user_root / "config.toml")))
     planner = SelectingPlanner()
     runtime = AgentRunner(planner, ToolRegistry(), skill_catalog=SkillCatalog()).new_runtime(task="hello")
 
@@ -192,7 +192,7 @@ def test_gate_skips_untrusted_skills_without_interrupt(tmp_path: Path, user_root
 def test_gate_approves_one_skill_at_a_time(tmp_path: Path, user_root: Path) -> None:
     _write_project_skill(tmp_path, "alpha")
     _write_project_skill(tmp_path, "beta")
-    store = ProjectSkillTrustStore(LocalConfigStore(user_root / "config.toml"))
+    store = ProjectSkillTrustStore(UserConfigStore(user_root / "config.toml"))
     gate = ProjectSkillGate(tmp_path, "project_1", store)
     runtime = AgentRunner(SelectingPlanner(), ToolRegistry(), skill_catalog=SkillCatalog()).new_runtime(task="task")
     runtime.services.interrupt = RecordingInterrupt(["trust", "skip"])
@@ -208,7 +208,7 @@ def test_gate_approves_one_skill_at_a_time(tmp_path: Path, user_root: Path) -> N
 def test_gate_with_output_repair_keeps_untrusted_out_of_run(tmp_path: Path, user_root: Path) -> None:
     _write_project_skill(tmp_path, "alpha")
     _write_project_skill(tmp_path, "beta")
-    store = ProjectSkillTrustStore(LocalConfigStore(user_root / "config.toml"))
+    store = ProjectSkillTrustStore(UserConfigStore(user_root / "config.toml"))
     gate = ProjectSkillGate(tmp_path, "project_1", store)
     planner = SelectingPlanner(("alpha", "beta"))
     runner = AgentRunner(
@@ -235,7 +235,7 @@ def test_runner_uses_only_trusted_project_skills_for_selection(tmp_path: Path, u
 
     _write_project_skill(tmp_path, "alpha")
     _write_project_skill(tmp_path, "beta")
-    store = ProjectSkillTrustStore(LocalConfigStore(user_root / "config.toml"))
+    store = ProjectSkillTrustStore(UserConfigStore(user_root / "config.toml"))
     alpha = next(c for c in discover_project_skills(tmp_path, "project_1") if c.name == "alpha")
     store.record_trust("project_1", workspace_sha256(tmp_path), "alpha", alpha.tree_sha256)
     gate = ProjectSkillGate(tmp_path, "project_1", store)

@@ -18,16 +18,18 @@ from backend.api.session_files.store import (
 )
 from backend.api.state import WebAppState
 from backend.configuration import ClientPaths
+from backend.storage.auth import LocalAuthStore
 
 
 @pytest.fixture()
 def state(tmp_path: Path) -> WebAppState:
-    return WebAppState(tmp_path / "web")
+    return WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
 
 
 @pytest.fixture()
 def client(state: WebAppState) -> TestClient:
     test_client = TestClient(create_app(state))
+    test_client.post("/api/auth/guest")
     session = test_client.post("/api/sidebar-threads", json={}).json()
     test_client.session_id = session["session_id"]  # type: ignore[attr-defined]
     return test_client
@@ -76,7 +78,8 @@ def test_upload_round_trip_and_binary_integrity(client: TestClient) -> None:
 
 
 def test_project_file_head_probe(client: TestClient, state: WebAppState) -> None:
-    workspace = state.session_workspace(client.session_id)  # type: ignore[attr-defined]
+    identity = client.get("/api/auth/me").json()
+    workspace = state.user_workspace(identity["id"], client.session_id)  # type: ignore[attr-defined]
     project_file = workspace / "biome.jsonc"
     project_file.write_text("{}", encoding="utf-8")
 
@@ -102,8 +105,12 @@ def test_image_preview_is_inline_and_download_is_attachment(client: TestClient) 
     assert download.headers["content-disposition"].startswith("attachment")
 
 
-def test_upload_isolation_between_sessions(state: WebAppState) -> None:
+def test_upload_isolation_between_sessions_and_users(state: WebAppState) -> None:
+    from backend.api.auth.service import COOKIE_NAME
+    from backend.storage.auth.types import UserIdentity
+
     with TestClient(create_app(state)) as first:
+        first.post("/api/auth/guest")
         session_a = first.post("/api/sidebar-threads", json={}).json()["session_id"]
         uploaded = first.post(
             f"/api/sessions/{session_a}/files",
@@ -113,6 +120,23 @@ def test_upload_isolation_between_sessions(state: WebAppState) -> None:
         session_b = first.post("/api/sidebar-threads", json={}).json()["session_id"]
         missing = first.get(f"/api/sessions/{session_b}/files/content?source=upload&path=secret.txt")
         assert missing.status_code == 404
+
+        # A different authenticated identity must not read the first user's
+        # session files even when it knows the session id.
+        second = TestClient(create_app(state))
+        other = state.auth.upsert_identity(
+            UserIdentity("223e4567-e89b-12d3-a456-426614174000", "other@example.com", "account")
+        )
+        token = state.auth.create_session(other.id, "browser")
+        second.cookies.set(COOKIE_NAME, token)
+        other_user = second.get(f"/api/sessions/{session_a}/files/content?source=upload&path=secret.txt")
+        assert other_user.status_code == 404
+        other_session = second.post("/api/sidebar-threads", json={}).json()["session_id"]
+        other_upload = second.post(
+            f"/api/sessions/{other_session}/files",
+            files=[("files", ("mine.txt", io.BytesIO(b"mine"), "text/plain"))],
+        )
+        assert other_upload.status_code == 200
 
 
 def test_upload_name_sanitization_and_conflict_naming(client: TestClient) -> None:
@@ -148,8 +172,9 @@ def test_upload_batch_limits_and_atomicity(client: TestClient) -> None:
 
 
 def test_search_combines_project_and_upload_sources(client: TestClient, state: WebAppState) -> None:
+    identity = client.get("/api/auth/me").json()
     session_id = client.session_id  # type: ignore[attr-defined]
-    workspace = state.session_workspace(session_id)
+    workspace = state.user_workspace(identity["id"], session_id)
     (workspace / "project-note.md").write_text("# project", encoding="utf-8")
 
     _upload(client, [("uploaded.png", b"\x89PNG\r\n\x1a\n" + b"0" * 16)])

@@ -3,23 +3,16 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { projectTurnPath } from "../../app/runtime/runtimeDetailProjection";
+import { projectTurnPath } from "../../app/runtimeDetailProjection";
 import type { QueuedMessage } from "../../app/types";
-import { compactTurn, patchRuntimeConfig, steerTurn } from "../../api";
-import type {
-  ChatMessage,
-  ChatMode,
-  Conversation,
-  RuntimeRootNode,
-  RuntimeStateNode,
-  TodoStatus,
-  ToolEvent,
-} from "../../types";
+import { compactTurn, initProjectAgents, patchRuntimeConfig, steerTurn } from "../../api";
+import type { ChatMode, Conversation, RuntimeStateNode } from "../../types";
 import ChatPage, { composerAction } from "./ChatPage";
 
 vi.mock("../../api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../api")>(),
   compactTurn: vi.fn(),
+  initProjectAgents: vi.fn(),
   patchRuntimeConfig: vi.fn(),
   steerTurn: vi.fn().mockResolvedValue(undefined),
 }));
@@ -53,8 +46,8 @@ function turn(id: string, userText: string, parent?: RuntimeStateNode): RuntimeS
     status: "success",
     current_data_idx: 0,
     data: [[
-      { role: "user", content: [{ type: "text", text: userText, status: "success" }] },
-      { role: "assistant", content: [{ type: "text", text: `${userText}-answer`, status: "success" }] },
+      { role: "user", content: [{ type: "text", text: userText }] },
+      { role: "assistant", content: [{ type: "text", text: `${userText}-answer` }] },
     ]],
   };
 }
@@ -63,10 +56,12 @@ function Harness({
   onRun,
   onRewind,
   onReload = vi.fn(),
+  projectId,
 }: {
   onRun: ReturnType<typeof vi.fn>;
   onRewind: ReturnType<typeof vi.fn>;
   onReload?: ReturnType<typeof vi.fn>;
+  projectId?: string;
 }) {
   const root = turn("turn-root", "root");
   const target = turn("turn-target", "target", root);
@@ -82,6 +77,7 @@ function Harness({
     activeTurnId: descendant.id,
     lastNodeId: descendant.id,
     messagesLoaded: true,
+    projectId,
     messages: projectTurnPath(map, descendant.id),
   });
 
@@ -108,12 +104,10 @@ function QueueHarness({
   terminalStatus,
   onRun,
   runGate,
-  sandboxHealth,
 }: {
   terminalStatus: RuntimeStateNode["status"];
   onRun: ReturnType<typeof vi.fn>;
   runGate?: Promise<void>;
-  sandboxHealth?: { phase: "checking" | "healthy" | "unhealthy"; detail: string | null };
 }) {
   const [node, setNode] = useState(() => {
     const value = turn("turn-running", "running");
@@ -123,24 +117,16 @@ function QueueHarness({
   const [queued, setQueued] = useState<QueuedMessage[]>([
     {
       id: "queued-1",
-      thread_id: "session-rewind",
       content: "第一条",
       references: [{ source: "project", path: "README.md" }],
-      state: "pending",
-      created_at: "2026-01-01T00:00:00Z",
-      updated_at: "2026-01-01T00:00:00Z",
     },
     {
       id: "queued-2",
-      thread_id: "session-rewind",
       content: "第二条",
       references: [
         { source: "project", path: "README.md" },
         { source: "upload", path: "notes.txt" },
       ],
-      state: "pending",
-      created_at: "2026-01-01T00:00:01Z",
-      updated_at: "2026-01-01T00:00:01Z",
     },
   ]);
   const conversation: Conversation = {
@@ -161,20 +147,6 @@ function QueueHarness({
         running={node.status === "running"}
         queuedMessages={queued}
         onQueuedMessagesChange={(_conversationId, updater) => setQueued((current) => updater(current))}
-        onQueuedMessagesRefresh={async () => {
-          const hasAcknowledgedDelivery = node.data[node.current_data_idx]
-            .some((item) => item.role === "user" && typeof item.delivery_id === "string");
-          if (hasAcknowledgedDelivery) {
-            setQueued((current) => current.filter((item) => item.state !== "dispatched"));
-            return;
-          }
-          const calls = vi.mocked(steerTurn).mock.calls;
-          const latest = calls[calls.length - 1];
-          const dispatchedIds = new Set(latest?.[2] ?? []);
-          setQueued((current) => current.map((item) => dispatchedIds.has(item.id)
-            ? { ...item, state: "dispatched" }
-            : item));
-        }}
         onUpdate={() => undefined}
         onNew={async () => conversation.id}
         onNavigate={() => undefined}
@@ -182,11 +154,6 @@ function QueueHarness({
         onRun={async (request) => {
           onRun(request);
           const accepted = turn("turn-queued", request.prompt ?? "");
-          if (request.queuedDelivery) {
-            accepted.data[0][0].delivery_id = request.queuedDelivery.deliveryId;
-            const submitted = new Set(request.queuedDelivery.messageIds);
-            setQueued((current) => current.filter((item) => !submitted.has(item.id)));
-          }
           accepted.status = "running";
           setNode(accepted);
           request.onBaseline?.(accepted);
@@ -195,22 +162,13 @@ function QueueHarness({
             setNode((current) => ({ ...current, status: "success" }));
           }
         }}
-        sandboxHealth={sandboxHealth}
       />
       <button type="button" onClick={() => setNode((current) => ({ ...current, status: terminalStatus }))}>
         结束当前 Turn
       </button>
       <button type="button" onClick={() => setQueued((current) => [
         ...current,
-        {
-          id: "queued-during-submit",
-          thread_id: "session-rewind",
-          content: "提交期间新增",
-          references: [],
-          state: "pending",
-          created_at: "2026-01-01T00:00:02Z",
-          updated_at: "2026-01-01T00:00:02Z",
-        },
+        { id: "queued-during-submit", content: "提交期间新增" },
       ])}>
         提交期间新增队列项
       </button>
@@ -218,8 +176,8 @@ function QueueHarness({
         const data = structuredClone(current.data);
         data[current.current_data_idx].push({
           role: "user",
-          delivery_id: "delivery-1",
-          content: [{ type: "text", text: "第一条", status: "success" }],
+          steering_id: "queued-1",
+          content: [{ type: "text", text: "第一条" }],
         });
         return { ...current, data };
       })}>
@@ -265,276 +223,12 @@ function ConfigHarness() {
   );
 }
 
-function NewConversationTitleHarness({ onRun }: { onRun: ReturnType<typeof vi.fn> }) {
-  const [conversation, setConversation] = useState<Conversation>({
-    id: "session-title",
-    sessionId: "session-title",
-    threadId: "session-title",
-    title: "新对话",
-    runtimeNodes: [],
-    messagesLoaded: true,
-    messages: [],
-  });
-  return (
-    <AntApp>
-      <ChatPage
-        conversation={conversation}
-        onUpdate={(_id, updater) => setConversation((current) => updater(current))}
-        onNew={async () => conversation.id}
-        onNavigate={() => undefined}
-        onEnsureSession={async () => conversation.sessionId!}
-        onRun={async (request) => { onRun(request); }}
-      />
-      <output data-testid="conversation-title">{conversation.title}</output>
-    </AntApp>
-  );
-}
-
-function scrollMessage(id: string, role: ChatMessage["role"], content: string): ChatMessage {
-  return { id, role, content, events: [] };
-}
-
-function ScrollHarness({
-  conversationId = "session-scroll",
-  messages,
-}: {
-  conversationId?: string;
-  messages: ChatMessage[];
-}) {
-  const conversation: Conversation = {
-    id: conversationId,
-    sessionId: conversationId,
-    threadId: conversationId,
-    title: "scroll",
-    messagesLoaded: true,
-    messages,
-  };
-  return (
-    <AntApp>
-      <ChatPage
-        conversation={conversation}
-        onUpdate={() => undefined}
-        onNew={async () => conversation.id}
-        onNavigate={() => undefined}
-        onEnsureSession={async () => conversation.sessionId!}
-        onRun={async () => undefined}
-      />
-    </AntApp>
-  );
-}
-
-function TodoHarness({ status, running }: { status: TodoStatus; running: boolean }) {
-  const todoEvent: ToolEvent = {
-    kind: "tool_call",
-    message: "todo_write",
-    data: {
-      tool: "todo_write",
-      call_id: "todo-call",
-      arguments: { todos: [{ content: "完成 Todo 面板", status }] },
-    },
-  };
-  const conversation: Conversation = {
-    id: "session-todo",
-    sessionId: "session-todo",
-    threadId: "session-todo",
-    title: "todo",
-    messagesLoaded: true,
-    messages: [{ id: "assistant-todo", role: "assistant", content: "", events: [todoEvent] }],
-  };
-  return (
-    <AntApp>
-      <ChatPage
-        conversation={conversation}
-        running={running}
-        onUpdate={() => undefined}
-        onNew={async () => conversation.id}
-        onNavigate={() => undefined}
-        onEnsureSession={async () => conversation.sessionId!}
-        onRun={async () => undefined}
-      />
-    </AntApp>
-  );
-}
-
-interface ScrollMetrics {
-  scrollHeight: number;
-  clientHeight: number;
-  scrollTop: number;
-}
-
-function mockScrollContainer(scrollContainer: HTMLDivElement, metrics: ScrollMetrics) {
-  Object.defineProperties(scrollContainer, {
-    scrollHeight: { configurable: true, get: () => metrics.scrollHeight },
-    clientHeight: { configurable: true, get: () => metrics.clientHeight },
-    scrollTop: {
-      configurable: true,
-      get: () => metrics.scrollTop,
-      set: (value: number) => {
-        metrics.scrollTop = Math.max(0, Math.min(value, Math.max(0, metrics.scrollHeight - metrics.clientHeight)));
-      },
-    },
-  });
-  const scrollTo = vi.fn((options: ScrollToOptions) => {
-    if (typeof options.top === "number") scrollContainer.scrollTop = options.top;
-    fireEvent.scroll(scrollContainer);
-  });
-  Object.defineProperty(scrollContainer, "scrollTo", { configurable: true, value: scrollTo });
-  return scrollTo;
-}
-
-describe("ChatPage bottom anchoring", () => {
-  it("shows the return button only beyond the 24px bottom threshold and scrolls smoothly on click", () => {
-    render(<ScrollHarness messages={[scrollMessage("assistant-1", "assistant", "answer")]} />);
-    const scrollContainer = document.querySelector<HTMLDivElement>("[data-conversation-scroll]")!;
-    const metrics = { scrollHeight: 1000, clientHeight: 600, scrollTop: 376 };
-    const scrollTo = mockScrollContainer(scrollContainer, metrics);
-
-    fireEvent.scroll(scrollContainer);
-    expect(screen.queryByRole("button", { name: "滚动到底部" })).not.toBeInTheDocument();
-
-    metrics.scrollTop = 375;
-    fireEvent.scroll(scrollContainer);
-    const button = screen.getByRole("button", { name: "滚动到底部" });
-    expect(button).toBeVisible();
-
-    fireEvent.click(button);
-    expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: "smooth" });
-    expect(metrics.scrollTop).toBe(400);
-    expect(screen.queryByRole("button", { name: "滚动到底部" })).not.toBeInTheDocument();
-  });
-
-  it("follows message growth only while the reader remains at the bottom", () => {
-    const firstMessages = [scrollMessage("assistant-1", "assistant", "first")];
-    const view = render(<ScrollHarness messages={firstMessages} />);
-    const scrollContainer = document.querySelector<HTMLDivElement>("[data-conversation-scroll]")!;
-    const metrics = { scrollHeight: 1000, clientHeight: 600, scrollTop: 400 };
-    mockScrollContainer(scrollContainer, metrics);
-    fireEvent.scroll(scrollContainer);
-
-    metrics.scrollHeight = 1200;
-    view.rerender(<ScrollHarness messages={[...firstMessages, scrollMessage("assistant-2", "assistant", "streaming")]} />);
-    expect(metrics.scrollTop).toBe(600);
-
-    metrics.scrollTop = 300;
-    fireEvent.scroll(scrollContainer);
-    expect(screen.getByRole("button", { name: "滚动到底部" })).toBeVisible();
-
-    metrics.scrollHeight = 1400;
-    view.rerender(<ScrollHarness messages={[
-      ...firstMessages,
-      scrollMessage("assistant-2", "assistant", "streaming update"),
-      scrollMessage("user-2", "user", "sent while reading above"),
-    ]} />);
-    expect(metrics.scrollTop).toBe(300);
-    expect(screen.getByRole("button", { name: "滚动到底部" })).toBeVisible();
-  });
-
-  it("keeps pinned content at the bottom when its rendered height changes", () => {
-    const originalResizeObserver = window.ResizeObserver;
-    let contentResizeCallback: ResizeObserverCallback | undefined;
-    class MockResizeObserver {
-      constructor(private readonly callback: ResizeObserverCallback) {}
-      observe = (target: Element) => {
-        if (target.matches(".chat-scroll-content")) contentResizeCallback = this.callback;
-      };
-      unobserve() {}
-      disconnect() {}
-    }
-    window.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
-    const view = render(<ScrollHarness messages={[scrollMessage("assistant-1", "assistant", "streaming")]} />);
-    try {
-      const scrollContainer = document.querySelector<HTMLDivElement>("[data-conversation-scroll]")!;
-      const metrics = { scrollHeight: 1000, clientHeight: 600, scrollTop: 400 };
-      mockScrollContainer(scrollContainer, metrics);
-      fireEvent.scroll(scrollContainer);
-
-      metrics.scrollHeight = 1250;
-      act(() => contentResizeCallback?.([], {} as ResizeObserver));
-      expect(metrics.scrollTop).toBe(650);
-      expect(screen.queryByRole("button", { name: "滚动到底部" })).not.toBeInTheDocument();
-    } finally {
-      view.unmount();
-      window.ResizeObserver = originalResizeObserver;
-    }
-  });
-
-  it("resets the scroll anchor when switching conversations", () => {
-    const view = render(<ScrollHarness conversationId="session-a" messages={[scrollMessage("a", "assistant", "a")]} />);
-    const scrollContainer = document.querySelector<HTMLDivElement>("[data-conversation-scroll]")!;
-    const metrics = { scrollHeight: 1000, clientHeight: 600, scrollTop: 200 };
-    mockScrollContainer(scrollContainer, metrics);
-    fireEvent.scroll(scrollContainer);
-    expect(screen.getByRole("button", { name: "滚动到底部" })).toBeVisible();
-
-    metrics.scrollHeight = 1200;
-    view.rerender(<ScrollHarness conversationId="session-b" messages={[scrollMessage("b", "assistant", "b")]} />);
-    expect(metrics.scrollTop).toBe(600);
-    expect(screen.queryByRole("button", { name: "滚动到底部" })).not.toBeInTheDocument();
-  });
-});
-
-describe("ChatPage Todo panel lifecycle", () => {
-  it("keeps an incomplete running Todo expanded without a close action", () => {
-    render(<TodoHarness status="in_progress" running />);
-
-    expect(screen.getByText("任务清单")).toBeVisible();
-    expect(screen.getByText("完成 Todo 面板")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "关闭任务清单" })).not.toBeInTheDocument();
-    expect(document.querySelector(".composer")).toHaveClass("has-todo");
-  });
-
-  it("removes the panel and layout space as soon as every Todo completes", () => {
-    const view = render(<TodoHarness status="in_progress" running />);
-    expect(screen.getByText("任务清单")).toBeVisible();
-
-    view.rerender(<TodoHarness status="completed" running />);
-
-    expect(screen.queryByText("任务清单")).not.toBeInTheDocument();
-    expect(document.querySelector(".composer")).not.toHaveClass("has-todo");
-  });
-
-  it("resets a user-open panel to collapsed when its incomplete Turn ends", () => {
-    const view = render(<TodoHarness status="in_progress" running />);
-    const header = screen.getByText("任务清单").closest(".ant-collapse-header");
-    expect(header).not.toBeNull();
-    fireEvent.click(header!);
-    fireEvent.click(header!);
-    expect(screen.getByText("完成 Todo 面板")).toBeVisible();
-
-    view.rerender(<TodoHarness status="in_progress" running={false} />);
-
-    expect(screen.queryByText("完成 Todo 面板")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "关闭任务清单" })).toBeVisible();
-  });
-
-  it("offers manual cleanup only after an incomplete Turn ends", () => {
-    render(<TodoHarness status="pending" running={false} />);
-
-    expect(screen.getByText("任务清单")).toBeVisible();
-    expect(screen.queryByText("完成 Todo 面板")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "关闭任务清单" }));
-
-    expect(screen.queryByText("任务清单")).not.toBeInTheDocument();
-    expect(document.querySelector(".composer")).not.toHaveClass("has-todo");
-  });
-});
-
 describe("ChatPage rewind projection", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.mocked(compactTurn).mockReset();
+    vi.mocked(initProjectAgents).mockReset();
     vi.mocked(patchRuntimeConfig).mockReset();
-  });
-
-  it("keeps the default title while the backend generates the first-message title", async () => {
-    const onRun = vi.fn();
-    render(<NewConversationTitleHarness onRun={onRun} />);
-
-    await userEvent.type(screen.getByLabelText("聊天输入"), "这是一个超过十八字符的首条用户消息内容");
-    await userEvent.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
-    expect(screen.getByTestId("conversation-title")).toHaveTextContent("新对话");
   });
 
   it("prunes descendants only when the edited message is submitted for rewind", async () => {
@@ -628,6 +322,40 @@ describe("ChatPage rewind projection", () => {
 
     await waitFor(() => expect(screen.queryByText("正在执行compaction操作中")).toBeNull());
     expect(screen.getByText("⚠️ 压缩失败：summary provider failed", { selector: "p" })).toBeVisible();
+  });
+
+  it("creates project AGENTS.md through /init without starting a model run", async () => {
+    const user = userEvent.setup();
+    const onRun = vi.fn();
+    vi.mocked(initProjectAgents).mockResolvedValue({
+      created: true,
+      path: "AGENTS.md",
+      content: "# Demo",
+      byte_count: 256,
+    });
+    render(<Harness onRun={onRun} onRewind={vi.fn()} projectId="project-demo" />);
+
+    await user.type(screen.getByLabelText("聊天输入"), "/init");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => expect(initProjectAgents).toHaveBeenCalledWith("project-demo"));
+    expect(onRun).not.toHaveBeenCalled();
+    const success = screen.getByText(/已在当前项目根目录创建/, { selector: "p" });
+    expect(success).toHaveTextContent("AGENTS.md");
+    expect(success).toHaveTextContent("256 字节");
+  });
+
+  it("rejects /init in a conversation that is not attached to a project", async () => {
+    const user = userEvent.setup();
+    const onRun = vi.fn();
+    render(<Harness onRun={onRun} onRewind={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("聊天输入"), "/init");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText(/当前会话未关联项目/, { selector: "p" })).toBeVisible();
+    expect(initProjectAgents).not.toHaveBeenCalled();
+    expect(onRun).not.toHaveBeenCalled();
   });
 });
 
@@ -729,25 +457,6 @@ describe("ChatPage running Turn configuration", () => {
 });
 
 describe("ChatPage queued message flushing", () => {
-  it("blocks Agent controls and shows a temporary non-persisted failure bubble", async () => {
-    const onRun = vi.fn();
-    render(
-      <QueueHarness
-        terminalStatus="success"
-        onRun={onRun}
-        sandboxHealth={{ phase: "unhealthy", detail: "Broker service stopped" }}
-      />,
-    );
-
-    expect(document.querySelector(".sandbox-health-failure")).toHaveTextContent("沙箱 Broker 不可用：Broker service stopped");
-    expect(screen.getByLabelText("聊天输入")).toHaveAttribute("contenteditable", "false");
-    expect(screen.getByRole("combobox", { name: "运行模式" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "发送第 1 条待发送消息" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "暂停" })).toBeDisabled();
-    expect(screen.queryByText("沙箱 Broker 不可用：Broker service stopped", { selector: ".message.user *" })).toBeNull();
-    expect(onRun).not.toHaveBeenCalled();
-  });
-
   it.each(["success", "failed"] as const)(
     "merges the persisted queue after a %s terminal",
     async (terminalStatus) => {
@@ -758,13 +467,13 @@ describe("ChatPage queued message flushing", () => {
       await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
 
       expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
-        prompt: null,
+        prompt: "第一条\n\n第二条",
         sourceNodeId: "turn-running",
         waitForActiveRun: true,
-        queuedDelivery: {
-          deliveryId: expect.any(String),
-          messageIds: ["queued-1", "queued-2"],
-        },
+        references: [
+          { source: "project", path: "README.md" },
+          { source: "upload", path: "notes.txt" },
+        ],
       }));
       await waitFor(() => expect(screen.getByTestId("queued-count")).toHaveTextContent("0"));
     },
@@ -786,8 +495,9 @@ describe("ChatPage queued message flushing", () => {
     fireEvent.click(screen.getByRole("button", { name: "发送第 1 条待发送消息" }));
     await waitFor(() => expect(vi.mocked(steerTurn)).toHaveBeenCalledWith(
       "turn-running",
-      expect.any(String),
-      ["queued-1"],
+      "queued-1",
+      "第一条",
+      [{ source: "project", path: "README.md" }],
     ));
     expect(screen.getByTestId("queued-count")).toHaveTextContent("2");
     expect(screen.getByRole("button", { name: "发送第 1 条待发送消息" })).toBeDisabled();
@@ -804,7 +514,11 @@ describe("ChatPage queued message flushing", () => {
     await waitFor(() => expect(vi.mocked(steerTurn)).toHaveBeenCalledWith(
       "turn-running",
       expect.any(String),
-      ["queued-1", "queued-2"],
+      "第一条\n\n第二条",
+      [
+        { source: "project", path: "README.md" },
+        { source: "upload", path: "notes.txt" },
+      ],
     ));
     expect(screen.getAllByText(/发送中/)).toHaveLength(2);
   });
@@ -827,7 +541,7 @@ describe("ChatPage queued message flushing", () => {
 
     await user.click(screen.getByRole("button", { name: "编辑第 1 条待发送消息" }));
     expect(screen.getByLabelText("聊天输入")).toHaveTextContent("第一条");
-    expect(screen.getByTestId("queued-count")).toHaveTextContent("2");
+    expect(screen.getByTestId("queued-count")).toHaveTextContent("1");
     expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
   });
 
@@ -866,152 +580,9 @@ describe("ChatPage queued message flushing", () => {
     await act(async () => releaseRun());
     await waitFor(() => expect(onRun).toHaveBeenCalledTimes(2));
     expect(onRun.mock.calls[1][0]).toEqual(expect.objectContaining({
-      prompt: null,
+      prompt: "提交期间新增",
       waitForActiveRun: true,
-      queuedDelivery: expect.objectContaining({ messageIds: ["queued-during-submit"] }),
     }));
-  });
-});
-
-describe("ChatPage Trace navigation", () => {
-  function renderConversation(conversation: Conversation) {
-    return (
-      <AntApp>
-        <ChatPage
-          conversation={conversation}
-          onUpdate={() => undefined}
-          onNew={async () => conversation.id}
-          onNavigate={() => undefined}
-          onEnsureSession={async () => conversation.sessionId!}
-          onRun={async () => undefined}
-        />
-      </AntApp>
-    );
-  }
-
-  it("hides the toolbar until the current Thread has an ordinary Turn", () => {
-    const empty: Conversation = {
-      id: "session-empty",
-      sessionId: "session-empty",
-      threadId: "session-empty",
-      title: "新对话",
-      runtimeNodes: [],
-      messagesLoaded: true,
-      messages: [],
-    };
-    const syntheticRoot: RuntimeRootNode = {
-      session_id: "session-empty",
-      thread_id: "session-empty",
-      id: "turn-synthetic-root",
-    };
-    const { rerender } = render(renderConversation(empty));
-
-    expect(screen.queryByRole("navigation", { name: "主内容视图" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("聊天输入")).toBeInTheDocument();
-
-    rerender(renderConversation({ ...empty, runtimeNodes: [syntheticRoot] }));
-    expect(screen.queryByRole("navigation", { name: "主内容视图" })).not.toBeInTheDocument();
-
-    const node = turn("turn-first", "first");
-    const populated = {
-      ...empty,
-      id: node.session_id,
-      sessionId: node.session_id,
-      threadId: node.thread_id,
-      runtimeNodes: [node],
-      activeTurnId: node.id,
-      lastNodeId: node.id,
-      messages: projectTurnPath(new Map([[`${node.session_id}:${node.id}`, node]]), node.id),
-    };
-    rerender(renderConversation(populated));
-
-    expect(screen.getByRole("navigation", { name: "主内容视图" })).toBeInTheDocument();
-    expect(screen.getByTitle(node.thread_id)).toHaveClass("trace-toolbar-thread-id");
-  });
-
-  it("returns to Chat when switching from Trace to an empty conversation", async () => {
-    const populatedNode = turn("turn-populated", "populated");
-    const populated: Conversation = {
-      id: populatedNode.session_id,
-      sessionId: populatedNode.session_id,
-      threadId: populatedNode.thread_id,
-      title: "populated",
-      runtimeNodes: [populatedNode],
-      activeTurnId: populatedNode.id,
-      lastNodeId: populatedNode.id,
-      messagesLoaded: true,
-      messages: projectTurnPath(
-        new Map([[`${populatedNode.session_id}:${populatedNode.id}`, populatedNode]]),
-        populatedNode.id,
-      ),
-    };
-    const empty: Conversation = {
-      id: "session-empty",
-      sessionId: "session-empty",
-      threadId: "session-empty",
-      title: "新对话",
-      runtimeNodes: [],
-      messagesLoaded: true,
-      messages: [],
-    };
-    const { rerender } = render(renderConversation(populated));
-    fireEvent.click(screen.getByRole("button", { name: "Trace" }));
-    expect(screen.queryByLabelText("聊天输入")).not.toBeInTheDocument();
-
-    rerender(renderConversation(empty));
-    expect(screen.queryByRole("navigation", { name: "主内容视图" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("聊天输入")).toBeInTheDocument();
-
-    const firstNode = {
-      ...turn("turn-empty-first", "first"),
-      session_id: empty.sessionId!,
-      thread_id: empty.threadId!,
-    };
-    rerender(renderConversation({
-      ...empty,
-      runtimeNodes: [firstNode],
-      activeTurnId: firstNode.id,
-      lastNodeId: firstNode.id,
-      messages: projectTurnPath(new Map([[`${firstNode.session_id}:${firstNode.id}`, firstNode]]), firstNode.id),
-    }));
-
-    await waitFor(() => expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("aria-pressed", "true"));
-    expect(screen.getByLabelText("聊天输入")).toBeInTheDocument();
-  });
-
-  it("shows the text toolbar and hides the Composer in Trace view", async () => {
-    render(<Harness onRun={vi.fn()} onRewind={vi.fn()} />);
-
-    expect(screen.getByRole("button", { name: "Thread" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Chat" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Trace" }));
-
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
-    expect(screen.getByRole("textbox")).toBeInTheDocument();
-  });
-
-  it("opens Trace through /trace without dispatching a chat run", async () => {
-    const user = userEvent.setup();
-    const onRun = vi.fn();
-    render(<Harness onRun={onRun} onRewind={vi.fn()} />);
-
-    await user.type(screen.getByLabelText("聊天输入"), "/trace");
-    await user.click(screen.getByRole("button", { name: "发送" }));
-
-    expect(onRun).not.toHaveBeenCalled();
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Trace" })).toHaveAttribute("aria-pressed", "true");
-  });
-
-  it("keeps the Thread dropdown scoped to the current thread", async () => {
-    const user = userEvent.setup();
-    render(<Harness onRun={vi.fn()} onRewind={vi.fn()} />);
-
-    await user.click(screen.getByRole("button", { name: "Thread" }));
-
-    expect(await screen.findByRole("menuitem", { name: "session-rewind" })).toBeInTheDocument();
-    expect(screen.getAllByRole("menuitem")).toHaveLength(1);
   });
 });
 

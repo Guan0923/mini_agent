@@ -42,15 +42,12 @@ class Tool:
     parameters: dict[str, Any] = field(default_factory=dict)
     requires_confirmation: bool = False
     read_only: bool = True
-    workspace_confined: bool = False
     retryable: bool = False
     context_handler: ToolHandler | None = None
-    trace_origin: dict[str, str] = field(default_factory=dict)
 
     @property
     def spec(self) -> ToolSpec:
-        options = {"mini_agent": {"trace_origin": dict(self.trace_origin)}} if self.trace_origin else {}
-        return ToolSpec(self.name, self.description, self.parameters, options)
+        return ToolSpec(self.name, self.description, self.parameters)
 
 
 class ToolExecutor(Protocol):
@@ -67,8 +64,6 @@ class ToolExecutor(Protocol):
     def is_read_only(self, name: str) -> bool: ...
 
     def requires_confirmation(self, name: str) -> bool: ...
-
-    def is_workspace_confined(self, name: str) -> bool: ...
 
     def is_retryable(self, name: str) -> bool: ...
 

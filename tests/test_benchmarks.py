@@ -158,11 +158,7 @@ def test_runner_returns_a_redacted_failure_trace_with_phase() -> None:
     assert "Traceback" not in encoded
 
 
-def test_rule_planner_smoke_uses_a_temporary_unregistered_task(
-    tmp_path: Path,
-    monkeypatch,
-    local_sandbox_runtime: None,
-) -> None:
+def test_rule_planner_smoke_uses_a_temporary_unregistered_task(tmp_path: Path, monkeypatch) -> None:
     sandbox = Sandbox(tmp_path / "sandbox")
     sandbox.prepare()
     import backend.runtime.application.factory as factory

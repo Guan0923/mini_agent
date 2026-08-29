@@ -139,18 +139,17 @@ def test_plan_question_answer_is_saved_once_then_plan_review_starts(tmp_path: Pa
     planner = QuestionThenPlanPlanner()
     service = build_service(tmp_path, planner)
     request_kinds: list[str] = []
-    events = []
 
     def interrupt(request):
         request_kinds.append(request.kind)
         if request.kind == "question":
             assert request.questions[0].id == "storage"
             return InterruptDecision("answer", answers={"storage": ["PostgreSQL"]})
-        return InterruptDecision("stay_in_plan_mode")
+        return InterruptDecision("cancel")
 
-    result = service.run_task("Plan the change", mode="plan", interrupt=interrupt, on_event=events.append)
+    result = service.run_task("Plan the change", mode="plan", interrupt=interrupt)
 
-    assert result.status == "completed"
+    assert result.status == "cancelled"
     assert request_kinds == ["question", "plan"]
     assert service.runtime is not None
     assert service.runtime.state.messages[0] == UserMessage(content="Plan the change")
@@ -163,13 +162,13 @@ def test_plan_question_answer_is_saved_once_then_plan_review_starts(tmp_path: Pa
     }
     review_message = service.runtime.state.messages[2]
     assert isinstance(review_message, AssistantMessage)
-    assert result.final_answer == PLAN
+    assert "aborted at the user's request" in (review_message.content or "")
     assert review_message.tool_messages[0].name == REQUEST_PLAN_REVIEW_NAME
     assert review_message.tool_messages[0].arguments == {"plan": PLAN}
     assert review_message.tool_messages[0].status == "succeeded"
     assert len([message for message in service.runtime.state.messages if message is question_message]) == 1
-    assert [event.kind for event in events].count("user_input_requested") == 1
-    assert [event.kind for event in events].count("user_input_received") == 1
+    assert [event.kind for event in result.events].count("user_input_requested") == 1
+    assert [event.kind for event in result.events].count("user_input_received") == 1
 
 
 def test_plan_question_cancellation_persists_failed_call_without_plan_review(tmp_path: Path) -> None:
@@ -203,11 +202,11 @@ def test_invalid_question_answers_are_returned_to_model_for_recovery(tmp_path: P
     def interrupt(request):
         if request.kind == "question":
             return InterruptDecision("answer", answers={})
-        return InterruptDecision("stay_in_plan_mode")
+        return InterruptDecision("cancel")
 
     result = service.run_task("Plan the change", mode="plan", interrupt=interrupt)
 
-    assert result.status == "completed"
+    assert result.status == "cancelled"
     assert service.runtime is not None
     failed = service.runtime.state.messages[1].tool_messages[0]
     assert failed.status == "failed"
@@ -238,10 +237,10 @@ def test_request_user_input_must_not_be_mixed_with_execution_tools(tmp_path: Pat
     result = service.run_task(
         "Plan the change",
         mode="plan",
-        interrupt=lambda request: request_kinds.append(request.kind) or InterruptDecision("stay_in_plan_mode"),
+        interrupt=lambda request: request_kinds.append(request.kind) or InterruptDecision("cancel"),
     )
 
-    assert result.status == "completed"
+    assert result.status == "cancelled"
     assert request_kinds == ["plan"]
     assert service.runtime is not None
     rejected = service.runtime.state.messages[1]

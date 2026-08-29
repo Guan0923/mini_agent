@@ -11,10 +11,9 @@ from .formats import FormatMixin
 from .repairs import RepairMixin
 from .requests import RequestMixin
 from .selection import SelectionMixin
-from .titles import TitleMixin
 
 
-class LLMPlanner(DecisionMixin, SelectionMixin, RepairMixin, RequestMixin, FormatMixin, TitleMixin):
+class LLMPlanner(DecisionMixin, SelectionMixin, RepairMixin, RequestMixin, FormatMixin):
     name = "llm"
     _MAX_INVALID_OUTPUT_PREVIEW_CHARS = 2_000
     _UNTRUSTED_TOOL_RESULT_POLICY = (
@@ -29,12 +28,16 @@ class LLMPlanner(DecisionMixin, SelectionMixin, RepairMixin, RequestMixin, Forma
         read_only_tool_specs: list[ToolSpec] | list[str],
         *,
         user_preferences: str = "",
+        agent_instructions: str = "",
+        memory_prompt_injector: object | None = None,
     ) -> None:
         self.client = client
         self._model_requests = ModelRequestExecutor(client)
         self.tool_specs = self._coerce_specs(tool_specs)
         self.read_only_tool_specs = self._coerce_specs(read_only_tool_specs)
         self.user_preferences = user_preferences.strip()
+        self.agent_instructions = agent_instructions.strip()
+        self.memory_prompt_injector = memory_prompt_injector
         self._output_repairs: list[dict[str, str | int]] = []
         context_size = getattr(client, "context_size", None)
         estimate_tokens = getattr(client, "estimate_tokens", None)

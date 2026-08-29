@@ -8,55 +8,44 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.api import turns as turn_routes
 from backend.api.active_turn_stream import ActiveTurnStream
 from backend.api.app import create_app
 from backend.api.chat import routes as chat_routes
-from backend.api.chat.routes import _auto_title_main_thread, _startup_failure_message, _terminal_type_for_status
-from backend.api.pause_control import TurnPauseController
-from backend.api.routes import turns as turn_routes
+from backend.api.chat.routes import _startup_failure_message, _terminal_type_for_status
 from backend.api.session_store import session_store
 from backend.api.state import WebAppState
 from backend.configuration import ClientPaths
-from backend.domain import (
-    CHECKPOINT_PREAMBLE,
-    AssistantMessage,
-    PlanningError,
-    SystemMessage,
-    ToolMessage,
-    UserMessage,
-)
+from backend.domain import CHECKPOINT_PREAMBLE, AssistantMessage, PlanningError, ToolMessage
 from backend.domain.runtime_state import (
     APP_VERSION,
     InMemoryNodeStore,
     NodeFrame,
     NodeWriter,
-    RuntimeRootState,
     RuntimeState,
     RuntimeStateTree,
     RuntimeStateValidationError,
 )
 from backend.planning.context_management import ContextCompactionResult
 from backend.planning.llm import LLMPlanner
-from backend.planning.prompts import load_title_prompt
 from backend.planning.rule_based import RuleBasedPlanner
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime import AgentApplication, AgentRunner, ConversationService, build_application
-from backend.runtime.core.context import AgentRuntime, PreparedResponse, _chat_messages_from_nodes
+from backend.runtime.core.context import AgentRuntime, PreparedResponse
 from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from backend.sandbox import SandboxInitializationError
+from backend.storage.auth import LocalAuthStore
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.storage.sqlite_schema import SCHEMA, SQLiteSchemaMixin
 from backend.tools import ToolRegistry
+from tui.runtime_nodes import RuntimeNodeReducer
 
 
 def make_turn(
-    *,
-    turn_id: str = "turn_1",
-    thread_id: str = "session_1",
-    parent: RuntimeState | RuntimeRootState | None = None,
+    *, turn_id: str = "turn_1", thread_id: str = "session_1", parent: RuntimeState | None = None
 ) -> RuntimeState:
     return RuntimeState.create(
         session_id="session_1",
@@ -68,10 +57,8 @@ def make_turn(
     )
 
 
-def test_first_main_turn_persistence_leaves_sidebar_title_for_post_run_model_request(
-    tmp_path: Path, monkeypatch
-) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
+def test_first_main_turn_atomically_auto_titles_its_sidebar_thread(tmp_path: Path, monkeypatch) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
     session = store.create_session("新对话")
     store.create_sidebar_thread(
         session_id=session.session_id,
@@ -79,39 +66,42 @@ def test_first_main_turn_persistence_leaves_sidebar_title_for_post_run_model_req
         title="新对话",
     )
     prompt = f"  第一条   用户消息 {'字' * 90}  "
-    root = store.ensure_root_node(session.session_id, id="turn_auto_title_root")
     turn = RuntimeState.create(
         session_id=session.session_id,
         thread_id=session.session_id,
         id="turn_auto_title",
-        parent=root,
         user_content=[{"type": "text", "text": prompt}],
     )
 
-    original_put_json_object = store._put_json_object
+    original_append_event = store._append_event
 
-    def fail_turn_object(connection, session_id, namespace, object_id, payload, updated_at):
-        if namespace == "runtime_node" and object_id == turn.id:
-            raise RuntimeError("turn object failed")
-        return original_put_json_object(connection, session_id, namespace, object_id, payload, updated_at)
+    def fail_turn_event(connection, session_id, *, kind, payload):
+        if kind == "turn_upserted":
+            raise RuntimeError("turn event failed")
+        return original_append_event(connection, session_id, kind=kind, payload=payload)
 
-    monkeypatch.setattr(store, "_put_json_object", fail_turn_object)
-    with pytest.raises(RuntimeError, match="turn object failed"):
+    monkeypatch.setattr(store, "_append_event", fail_turn_event)
+    with pytest.raises(RuntimeError, match="turn event failed"):
         store.create_node(turn)
 
     assert store.get_sidebar_thread(session.session_id).title == "新对话"
-    assert store.load_nodes(session.session_id) == [root]
+    assert store.load_nodes(session.session_id) == []
 
-    monkeypatch.setattr(store, "_put_json_object", original_put_json_object)
+    monkeypatch.setattr(store, "_append_event", original_append_event)
     store.create_node(turn)
     sidebar = store.get_sidebar_thread(session.session_id)
     assert sidebar is not None
-    assert sidebar.title == "新对话"
+    assert sidebar.title == (f"第一条 用户消息 {'字' * 90}")[:80]
     assert sidebar.title_is_custom is False
+    with sqlite3.connect(store.paths.session_db(session.session_id)) as connection:
+        events = connection.execute(
+            "SELECT kind,payload_json FROM json_events ORDER BY local_sequence DESC LIMIT 2"
+        ).fetchall()
+    assert [kind for kind, _payload in reversed(events)] == ["sidebar_thread_upserted", "turn_upserted"]
 
 
-def test_turn_persistence_never_owns_sidebar_auto_titles(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
+def test_auto_title_never_overwrites_manual_or_established_sidebar_titles(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
 
     manual = store.create_session("手工标题")
     store.create_sidebar_thread(
@@ -124,7 +114,6 @@ def test_turn_persistence_never_owns_sidebar_auto_titles(tmp_path: Path) -> None
         session_id=manual.session_id,
         thread_id=manual.session_id,
         id="turn_manual",
-        parent=store.ensure_root_node(manual.session_id, id="turn_manual_root"),
         user_content=[{"type": "text", "text": "不能覆盖"}],
     )
     NodeWriter(store).create(manual_turn)
@@ -142,7 +131,6 @@ def test_turn_persistence_never_owns_sidebar_auto_titles(tmp_path: Path) -> None
             session_id=automatic.session_id,
             thread_id=automatic.session_id,
             id="turn_first",
-            parent=store.ensure_root_node(automatic.session_id, id="turn_automatic_root"),
             user_content=[{"type": "text", "text": "第一条消息"}],
         )
     )
@@ -162,223 +150,13 @@ def test_turn_persistence_never_owns_sidebar_auto_titles(tmp_path: Path) -> None
     )
     writer.finalize(second, "failed")
     store.append_turn_version(first.id, {"type": "text", "text": "回退消息"})
-    assert store.get_sidebar_thread(automatic.session_id).title == "新对话"
+    assert store.get_sidebar_thread(automatic.session_id).title == "第一条消息"
 
 
-def test_post_run_auto_title_falls_back_once_and_skips_reference_only_or_custom_threads(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
-
-    class FailingConversation:
-        def __init__(self) -> None:
-            self.calls: list[str] = []
-
-        def generate_title(self, text: str) -> str:
-            self.calls.append(text)
-            raise PlanningError("title provider unavailable")
-
-    failing = FailingConversation()
-    fallback_session = store.create_session("新对话")
-    store.create_sidebar_thread(
-        session_id=fallback_session.session_id,
-        thread_id=fallback_session.session_id,
-        title="新对话",
-    )
-    writer = NodeWriter(store)
-    first = writer.create(
-        RuntimeState.create(
-            session_id=fallback_session.session_id,
-            thread_id=fallback_session.session_id,
-            parent=store.ensure_root_node(fallback_session.session_id, id="turn_fallback_root"),
-            user_content=[{"type": "text", "text": "  第一条   消息超过十个字符  "}],
-        )
-    )
-    first = writer.finalize(first, "success")
-
-    _auto_title_main_thread(
-        failing,
-        store,
-        session_id=fallback_session.session_id,
-        thread_id=fallback_session.session_id,
-        turn_id=first.id,
-    )
-
-    assert failing.calls == ["  第一条   消息超过十个字符  "]
-    assert store.get_sidebar_thread(fallback_session.session_id).title == "第一条 消息超过十个"
-    second = writer.create(
-        RuntimeState.create(
-            session_id=fallback_session.session_id,
-            thread_id=fallback_session.session_id,
-            parent=first,
-            user_content=[{"type": "text", "text": "第二条消息"}],
-        )
-    )
-    second = writer.finalize(second, "success")
-    _auto_title_main_thread(
-        failing,
-        store,
-        session_id=fallback_session.session_id,
-        thread_id=fallback_session.session_id,
-        turn_id=second.id,
-    )
-    assert len(failing.calls) == 1
-
-    reference_session = store.create_session("新对话")
-    store.create_sidebar_thread(
-        session_id=reference_session.session_id,
-        thread_id=reference_session.session_id,
-        title="新对话",
-    )
-    reference = writer.create(
-        RuntimeState.create(
-            session_id=reference_session.session_id,
-            thread_id=reference_session.session_id,
-            parent=store.ensure_root_node(reference_session.session_id, id="turn_reference_root"),
-            user_content=[
-                {
-                    "type": "text",
-                    "text": "",
-                    "references": [{"path": "README.md", "source": "project"}],
-                }
-            ],
-        )
-    )
-    reference = writer.finalize(reference, "success")
-    _auto_title_main_thread(
-        failing,
-        store,
-        session_id=reference_session.session_id,
-        thread_id=reference_session.session_id,
-        turn_id=reference.id,
-    )
-    assert store.get_sidebar_thread(reference_session.session_id).title == "新对话"
-    assert len(failing.calls) == 1
-
-    custom_session = store.create_session("手工标题")
-    store.create_sidebar_thread(
-        session_id=custom_session.session_id,
-        thread_id=custom_session.session_id,
-        title="手工标题",
-        title_is_custom=True,
-    )
-    custom = writer.create(
-        RuntimeState.create(
-            session_id=custom_session.session_id,
-            thread_id=custom_session.session_id,
-            parent=store.ensure_root_node(custom_session.session_id, id="turn_custom_root"),
-            user_content=[{"type": "text", "text": "不能覆盖"}],
-        )
-    )
-    custom = writer.finalize(custom, "success")
-    _auto_title_main_thread(
-        failing,
-        store,
-        session_id=custom_session.session_id,
-        thread_id=custom_session.session_id,
-        turn_id=custom.id,
-    )
-    assert store.get_sidebar_thread(custom_session.session_id).title == "手工标题"
-    assert len(failing.calls) == 1
-
-
-def test_post_run_auto_title_preserves_manual_rename_during_model_request(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
-    session = store.create_session("新对话")
-    store.create_sidebar_thread(session_id=session.session_id, thread_id=session.session_id, title="新对话")
-    writer = NodeWriter(store)
-    node = writer.create(
-        RuntimeState.create(
-            session_id=session.session_id,
-            thread_id=session.session_id,
-            parent=store.ensure_root_node(session.session_id, id="turn_rename_root"),
-            user_content=[{"type": "text", "text": "模型正在命名"}],
-        )
-    )
-    node = writer.finalize(node, "success")
-
-    class RenamingConversation:
-        def generate_title(self, _text: str) -> str:
-            store.update_sidebar_thread(session.session_id, title="运行中手工改名", title_is_custom=True)
-            return "模型标题"
-
-    _auto_title_main_thread(
-        RenamingConversation(),
-        store,
-        session_id=session.session_id,
-        thread_id=session.session_id,
-        turn_id=node.id,
-    )
-
-    sidebar = store.get_sidebar_thread(session.session_id)
-    assert sidebar is not None
-    assert sidebar.title == "运行中手工改名"
-    assert sidebar.title_is_custom is True
-
-
-def test_post_run_auto_title_does_not_retry_after_the_root_turn(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
-    session = store.create_session("新对话")
-    store.create_sidebar_thread(session_id=session.session_id, thread_id=session.session_id, title="新对话")
-    writer = NodeWriter(store)
-    root = writer.create(
-        RuntimeState.create(
-            session_id=session.session_id,
-            thread_id=session.session_id,
-            parent=store.ensure_root_node(session.session_id, id="turn_default_title_root"),
-            user_content=[{"type": "text", "text": "第一条消息"}],
-        )
-    )
-    root = writer.finalize(root, "success")
-
-    class DefaultTitleConversation:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def generate_title(self, _text: str) -> str:
-            self.calls += 1
-            return "新对话"
-
-    conversation = DefaultTitleConversation()
-    _auto_title_main_thread(
-        conversation,
-        store,
-        session_id=session.session_id,
-        thread_id=session.session_id,
-        turn_id=root.id,
-    )
-    assert conversation.calls == 1
-
-    second = writer.create(
-        RuntimeState.create(
-            session_id=session.session_id,
-            thread_id=session.session_id,
-            parent=root,
-            user_content=[{"type": "text", "text": "第二条消息"}],
-        )
-    )
-    second = writer.finalize(second, "success")
-    _auto_title_main_thread(
-        conversation,
-        store,
-        session_id=session.session_id,
-        thread_id=session.session_id,
-        turn_id=second.id,
-    )
-
-    assert conversation.calls == 1
-    assert store.get_sidebar_thread(session.session_id).title == "新对话"
-
-
-def test_root_and_turn_shapes_are_strict() -> None:
-    root = RuntimeRootState.create("session_1", id="turn_root")
-    assert root.to_dict() == {"session_id": "session_1", "thread_id": "session_1", "id": "turn_root"}
-    with pytest.raises(RuntimeStateValidationError, match="must contain only"):
-        RuntimeRootState.from_dict({**root.to_dict(), "status": "success"})
-
-    turn = make_turn(parent=root)
+def test_turn_shape_is_strict_and_has_no_synthetic_root() -> None:
+    turn = make_turn()
     assert turn.version == APP_VERSION == "0.0.1"
-    assert turn.parent_id == root.id
-    assert turn.parent_session_id == turn.parent_thread_id == root.session_id
-    assert turn.compaction_id == turn.id
+    assert turn.parent_id == turn.parent_session_id == turn.parent_thread_id == ""
     assert turn.first_kept_item_size == 8
     assert turn.selected_messages[0]["role"] == "user"
     assert turn.selected_messages[1]["role"] == "assistant"
@@ -387,51 +165,25 @@ def test_root_and_turn_shapes_are_strict() -> None:
     with pytest.raises(RuntimeStateValidationError, match="missing required fields"):
         RuntimeState.from_dict(payload)
 
-    missing_status = turn.to_dict()
-    missing_status["data"][0][1]["content"].append({"type": "text", "text": "partial"})
-    with pytest.raises(RuntimeStateValidationError, match="Item status"):
-        RuntimeState.from_dict(missing_status)
-
-    legacy_tool_status = turn.to_dict()
-    legacy_tool_status["data"][0][1]["content"].append(
-        {"type": "tool_result", "call_id": "legacy", "content": "done", "status": "succeeded"}
-    )
-    with pytest.raises(RuntimeStateValidationError, match="Item status"):
-        RuntimeState.from_dict(legacy_tool_status)
-
 
 def test_writer_emits_one_baseline_then_exact_incremental_operations() -> None:
     frames: list[NodeFrame] = []
     store = InMemoryNodeStore()
     writer = NodeWriter(store, emit=frames.append)
-    turn = writer.create(make_turn(parent=store.ensure_root_node("session_1", id="turn_root")))
+    turn = writer.create(make_turn())
     turn = writer.append_item(
-        turn,
-        {
-            "type": "tool_call",
-            "call_id": "call_1",
-            "name": "read_file",
-            "arguments": {},
-            "replay_safe": True,
-            "status": "running",
-        },
+        turn, {"type": "tool_call", "call_id": "call_1", "name": "read_file", "arguments": {}, "replay_safe": True}
     )
-    turn = writer.set_item_status(turn, data_idx=0, message_idx=1, item_idx=0, status="success")
     turn = writer.append_item(
-        turn,
-        {"type": "tool_result", "call_id": "call_1", "content": "ok", "status": "success", "replay_safe": True},
+        turn, {"type": "tool_result", "call_id": "call_1", "content": "ok", "status": "succeeded", "replay_safe": True}
     )
-    turn = writer.append_item(turn, {"type": "text", "text": "answer ", "status": "running"}, persist=False)
+    turn = writer.append_item(turn, {"type": "text", "text": "answer "}, persist=False)
     turn = writer.append_text(turn, data_idx=0, item_idx=2, delta="done", persist=True)
-    turn = writer.set_item_status(turn, data_idx=0, message_idx=1, item_idx=2, status="success")
     turn = writer.finalize(turn, "success")
-    assert [frame.type for frame in frames] == ["turn.snapshot", *["turn.delta"] * 7]
-    assert [frame.revision for frame in frames] == list(range(8))
-    assert frames[5].operations == (
+    assert [frame.type for frame in frames] == ["turn.snapshot", *["turn.delta"] * 5]
+    assert [frame.revision for frame in frames] == list(range(6))
+    assert frames[4].operations == (
         {"op": "append_text", "data_idx": 0, "message_idx": 1, "item_idx": 2, "delta": "done"},
-    )
-    assert frames[6].operations == (
-        {"op": "set_item_status", "data_idx": 0, "message_idx": 1, "item_idx": 2, "status": "success"},
     )
     assert frames[-1].patch == {"status": "success"}
     assert all("turn" not in frame.to_dict() and "data" not in frame.to_dict() for frame in frames[1:])
@@ -447,243 +199,6 @@ def test_writer_emits_one_baseline_then_exact_incremental_operations() -> None:
     assert child.parent_id == turn.id
 
 
-def test_model_context_projects_success_items_and_complete_failed_tool_pairs() -> None:
-    node = RuntimeState.create(
-        session_id="session_context",
-        thread_id="session_context",
-        user_content="inspect",
-        data=[
-            [
-                {"role": "user", "content": [{"type": "text", "text": "inspect", "status": "success"}]},
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "kept", "status": "success"},
-                        {"type": "text", "text": "partial", "status": "failed"},
-                        {"type": "reasoning", "text": "unfinished", "status": "running"},
-                        {
-                            "type": "tool_call",
-                            "call_id": "call_ok",
-                            "name": "read_file",
-                            "arguments": {},
-                            "status": "success",
-                        },
-                        {
-                            "type": "tool_result",
-                            "call_id": "call_ok",
-                            "content": "done",
-                            "status": "success",
-                        },
-                        {
-                            "type": "tool_call",
-                            "call_id": "call_failed",
-                            "name": "write_file",
-                            "arguments": {},
-                            "status": "failed",
-                        },
-                        {
-                            "type": "tool_result",
-                            "call_id": "call_failed",
-                            "tool": "write_file",
-                            "content": "denied",
-                            "status": "failed",
-                            "retryable": False,
-                            "failure_code": "user_denied",
-                        },
-                        {
-                            "type": "tool_call",
-                            "call_id": "call_orphan",
-                            "name": "glob",
-                            "arguments": {},
-                            "status": "success",
-                        },
-                        {
-                            "type": "tool_result",
-                            "call_id": "result_orphan",
-                            "content": "ignored",
-                            "status": "success",
-                        },
-                    ],
-                },
-            ]
-        ],
-    )
-    runtime = AgentRunner(RuleBasedPlanner(), ToolRegistry()).empty_runtime(session_id="session_context")
-    runtime.services.runtime_node_context = lambda: [node]
-
-    projected = runtime.model_messages()
-
-    assert isinstance(projected[0], UserMessage) and projected[0].content == "inspect"
-    assert isinstance(projected[1], AssistantMessage)
-    assert projected[1].content == "kept"
-    assert projected[1].reasoning is None
-    assert [
-        (tool.call_id, tool.content, tool.status, tool.retryable, tool.failure_code)
-        for tool in projected[1].tool_messages
-    ] == [
-        ("call_ok", "done", "succeeded", None, None),
-        ("call_failed", "denied", "failed", False, "user_denied"),
-    ]
-
-
-def test_model_context_omits_malformed_tool_pairs() -> None:
-    tool_items = [
-        {
-            "type": "tool_call",
-            "call_id": "orphan",
-            "name": "glob",
-            "arguments": {},
-            "status": "success",
-        },
-        {
-            "type": "tool_call",
-            "call_id": "duplicate",
-            "name": "read_file",
-            "arguments": {},
-            "status": "success",
-        },
-        {
-            "type": "tool_result",
-            "call_id": "duplicate",
-            "content": "first",
-            "status": "success",
-        },
-        {
-            "type": "tool_result",
-            "call_id": "duplicate",
-            "content": "second",
-            "status": "success",
-        },
-        {
-            "type": "tool_result",
-            "call_id": "reversed",
-            "content": "too early",
-            "status": "success",
-        },
-        {
-            "type": "tool_call",
-            "call_id": "reversed",
-            "name": "grep",
-            "arguments": {},
-            "status": "success",
-        },
-        {
-            "type": "tool_call",
-            "call_id": "wrong_name",
-            "name": "write_file",
-            "arguments": {},
-            "status": "failed",
-        },
-        {
-            "type": "tool_result",
-            "call_id": "wrong_name",
-            "tool": "edit_file",
-            "content": "failed",
-            "status": "failed",
-        },
-        {
-            "type": "tool_call",
-            "call_id": "wrong_status",
-            "name": "write_file",
-            "arguments": {},
-            "status": "success",
-        },
-        {
-            "type": "tool_result",
-            "call_id": "wrong_status",
-            "tool": "write_file",
-            "content": "failed",
-            "status": "failed",
-        },
-    ]
-    node = RuntimeState.create(
-        session_id="session_malformed_tools",
-        thread_id="session_malformed_tools",
-        user_content="inspect",
-        data=[
-            [
-                {"role": "user", "content": [{"type": "text", "text": "inspect", "status": "success"}]},
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": "kept", "status": "success"}, *tool_items],
-                },
-            ]
-        ],
-    )
-
-    projected = _chat_messages_from_nodes([node])
-
-    assert isinstance(projected[1], AssistantMessage)
-    assert projected[1].content == "kept"
-    assert projected[1].tool_messages == []
-
-
-def test_late_tool_failure_after_steering_settles_the_previous_assistant_call() -> None:
-    frames: list[NodeFrame] = []
-    store = InMemoryNodeStore()
-    bridge = RuntimeEventNodeBridge(
-        store,
-        session_id="session_steering_status",
-        thread_id="session_steering_status",
-        turn_id="turn_steering_status",
-        prompt="start",
-        emit=frames.append,
-    )
-    bridge.start()
-    bridge.handle(
-        RuntimeEvent(
-            "assistant_message",
-            "",
-            {
-                "message": {
-                    "role": "assistant",
-                    "tool_messages": [
-                        {
-                            "name": "read_file",
-                            "call_id": "call_stale",
-                            "arguments": {"path": "README.md"},
-                        }
-                    ],
-                }
-            },
-        )
-    )
-    bridge.handle(
-        RuntimeEvent(
-            "steering_applied",
-            "In-run user input applied",
-            {"content": "redirect", "delivery_id": "delivery_1"},
-        )
-    )
-    bridge.handle(
-        RuntimeEvent(
-            "tool_failed",
-            "Not executed because the user supplied new instructions.",
-            {
-                "tool": "read_file",
-                "call_id": "call_stale",
-                "error": "Not executed because the user supplied new instructions.",
-            },
-        )
-    )
-    bridge.handle(
-        RuntimeEvent(
-            "assistant_message",
-            "",
-            {"message": {"role": "assistant", "content": "redirected answer"}},
-        )
-    )
-
-    completed = bridge.finish("success", "redirected answer")
-
-    assert completed is not None and completed.status == "success"
-    messages = completed.data[completed.current_data_idx]
-    assert [message["role"] for message in messages] == ["user", "assistant", "user", "assistant"]
-    first_call = next(item for item in messages[1]["content"] if item.get("call_id") == "call_stale")
-    assert first_call["type"] == "tool_call" and first_call["status"] == "failed"
-    assert not any(item["status"] == "running" for message in messages for item in message["content"])
-
-
 def test_active_turn_stream_rebases_late_subscribers_and_broadcasts_terminal() -> None:
     stream = ActiveTurnStream("turn_1")
     original = stream.subscribe("turn_1")
@@ -692,7 +207,7 @@ def test_active_turn_stream_rebases_late_subscribers_and_broadcasts_terminal() -
     assert original.next_event()["revision"] == 0
 
     with_text = turn.clone()
-    with_text.data[0][1]["content"].append({"type": "text", "text": "first", "status": "success"})
+    with_text.data[0][1]["content"].append({"type": "text", "text": "first"})
     first_delta = NodeFrame.delta(turn, with_text, revision=1)
     assert first_delta is not None
     stream.publish_frame(first_delta, with_text)
@@ -730,18 +245,18 @@ def test_active_turn_stream_unsubscribe_does_not_close_other_subscribers() -> No
 
 
 def test_turn_stream_endpoint_returns_terminal_snapshot_and_rejects_missing_turn(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web")
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
     with TestClient(create_app(state)) as client:
-        assert client.get("/api/turns/anything/stream").status_code == 404
+        assert client.get("/api/turns/anything/stream").status_code == 401
+        identity = client.post("/api/auth/guest").json()["user"]
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        store = session_store(state)
+        store = session_store(state, identity["id"])
         writer = NodeWriter(store)
         turn = writer.create(
             RuntimeState.create(
                 session_id=sidebar["session_id"],
                 thread_id=sidebar["thread_id"],
                 id="turn_completed_stream",
-                parent=store.ensure_root_node(sidebar["session_id"], id="turn_completed_root"),
                 user_content=[{"type": "text", "text": "hello"}],
             )
         )
@@ -754,43 +269,9 @@ def test_turn_stream_endpoint_returns_terminal_snapshot_and_rejects_missing_turn
         assert client.get("/api/turns/missing/stream").status_code == 404
 
 
-def test_root_turn_is_listed_but_rejects_every_turn_operation(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web")
-    with TestClient(create_app(state)) as client:
-        sidebar = client.post("/api/sidebar-threads", json={}).json()
-        store = session_store(state)
-        assert store.load_nodes(sidebar["session_id"]) == []
-        root = store.ensure_root_node(sidebar["session_id"], id="turn_root_operations")
-        assert store.ensure_root_node(sidebar["session_id"], id="turn_ignored") == root
-
-        requests = [
-            ("get", f"/api/turns/{root.id}/stream", None),
-            (
-                "post",
-                f"/api/turns/{root.id}/rewind",
-                {"message": {"role": "user", "content": [{"type": "text", "text": "x"}]}},
-            ),
-            ("post", f"/api/turns/{root.id}/resume", {}),
-            ("post", f"/api/turns/{root.id}/pause", None),
-            (
-                "post",
-                f"/api/turns/{root.id}/steer",
-                {"delivery_id": "s1", "message_ids": ["message-1"]},
-            ),
-            ("post", f"/api/turns/{root.id}/fork", {}),
-            ("post", f"/api/turns/{root.id}/compact", None),
-            ("patch", f"/api/turns/{root.id}/current-data", {"current_data_idx": 0}),
-            ("patch", f"/api/turns/{root.id}/config", {}),
-        ]
-        for method, url, body in requests:
-            response = client.request(method, url, json=body)
-            assert response.status_code == 409, (method, url, response.text)
-            assert "根 Turn" in response.json()["detail"]
-
-
 def test_writer_rejects_a_delta_for_an_existing_turn_without_a_stream_baseline() -> None:
     store = InMemoryNodeStore()
-    existing = make_turn(parent=store.ensure_root_node("session_1", id="turn_root"))
+    existing = make_turn()
     store.create_node(existing)
     writer = NodeWriter(store, emit=lambda _frame: None)
     changed = existing.clone()
@@ -805,11 +286,10 @@ def test_writer_rejects_a_delta_for_an_existing_turn_without_a_stream_baseline()
 def test_long_text_delta_frames_grow_linearly_without_repeating_accumulated_text() -> None:
     def stream_size(chunk_count: int) -> int:
         frames: list[NodeFrame] = []
-        store = InMemoryNodeStore()
-        writer = NodeWriter(store, emit=frames.append)
-        turn = writer.create(make_turn(parent=store.ensure_root_node("session_1", id="turn_root")))
+        writer = NodeWriter(InMemoryNodeStore(), emit=frames.append)
+        turn = writer.create(make_turn())
         chunk = "abcdefghij"
-        turn = writer.append_item(turn, {"type": "text", "text": chunk, "status": "running"}, persist=False)
+        turn = writer.append_item(turn, {"type": "text", "text": chunk}, persist=False)
         for _ in range(chunk_count - 1):
             turn = writer.append_text(turn, data_idx=0, item_idx=0, delta=chunk)
         writer.persist(turn)
@@ -825,6 +305,41 @@ def test_long_text_delta_frames_grow_linearly_without_repeating_accumulated_text
     size_64 = stream_size(64)
     size_128 = stream_size(128)
     assert size_128 < size_64 * 2.1
+
+
+def test_legacy_tui_reducer_applies_the_incremental_turn_contract() -> None:
+    reducer = RuntimeNodeReducer()
+    baseline = make_turn().to_dict()
+    node = reducer.apply({"type": "turn.snapshot", "revision": 0, "turn": baseline})
+    assert node is not None
+    updated = reducer.apply(
+        {
+            "type": "turn.delta",
+            "session_id": "session_1",
+            "turn_id": "turn_1",
+            "revision": 1,
+            "operations": [
+                {
+                    "op": "append_item",
+                    "data_idx": 0,
+                    "message_idx": 1,
+                    "item_idx": 0,
+                    "item": {"type": "text", "text": "a"},
+                },
+                {"op": "append_text", "data_idx": 0, "message_idx": 1, "item_idx": 0, "delta": "b"},
+            ],
+        }
+    )
+    assert updated is not None and updated.data[0][1]["content"] == [{"type": "text", "text": "ab"}]
+    with pytest.raises(ValueError, match="not consecutive"):
+        reducer.apply(
+            {
+                "type": "turn.delta",
+                "session_id": "session_1",
+                "turn_id": "turn_1",
+                "revision": 3,
+            }
+        )
 
 
 def test_streamed_items_keep_canonical_order_across_model_and_tool_rounds() -> None:
@@ -961,7 +476,6 @@ def test_tool_approval_persists_only_the_interactive_decision_item() -> None:
         "event": "decision_requested",
         "decision_id": "dec_search",
         "kind": "tool",
-        "status": "success",
         **approval_data,
         "text": "Call tool web_search?",
     }
@@ -991,33 +505,30 @@ def test_failed_tool_item_preserves_failure_metadata() -> None:
 
 
 def test_one_running_turn_per_thread_but_parallel_threads_are_allowed() -> None:
-    root = RuntimeRootState.create("session_1", id="turn_root")
-    store = InMemoryNodeStore([root, make_turn(parent=root)])
+    store = InMemoryNodeStore([make_turn()])
     with pytest.raises(ValueError, match="one running Turn"):
-        store.create_node(make_turn(turn_id="turn_2", parent=root))
-    fork_payload = make_turn(turn_id="turn_fork", parent=root).to_dict()
+        store.create_node(make_turn(turn_id="turn_2"))
+    fork_payload = make_turn(turn_id="turn_fork").to_dict()
     fork_payload["thread_id"] = "thread_fork"
     fork_payload["parent_thread_id"] = "session_1"
     store.create_node(RuntimeState.from_dict(fork_payload))
 
 
 def test_sqlite_rewind_fork_and_compact_are_atomic(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
     session = store.create_session("main")
     store.create_sidebar_thread(session_id=session.session_id, thread_id=session.session_id, title="main")
     writer = NodeWriter(store)
-    root = store.ensure_root_node(session.session_id, id="turn_root")
     original = writer.create(
         RuntimeState.create(
             session_id=session.session_id,
             thread_id=session.session_id,
             id="turn_original",
-            parent=root,
             user_content=[{"type": "text", "text": "v1"}],
         )
     )
     for index in range(10):
-        original = writer.append_item(original, {"type": "text", "text": f"item-{index}", "status": "success"})
+        original = writer.append_item(original, {"type": "text", "text": f"item-{index}"})
     writer.finalize(original, "success")
 
     rewound = store.append_turn_version("turn_original", {"type": "text", "text": "v2"})
@@ -1027,32 +538,24 @@ def test_sqlite_rewind_fork_and_compact_are_atomic(tmp_path: Path) -> None:
     assert selected.current_data_idx == 0
 
     forked = store.fork_turn_node("turn_original", new_turn_id="turn_fork", thread_id="thread_fork")
-    assert forked.parent_id == root.id
+    assert forked.parent_id == ""
     assert forked.parent_thread_id == session.session_id
     assert forked.data == selected.data
     assert forked.compaction_id == forked.id
-    tree = RuntimeStateTree(store.load_nodes(session.session_id))
-    assert [node.id for node in tree.ancestors(selected)] == [root.id, selected.id]
-    assert [node.id for node in tree.ancestors(forked)] == [root.id, forked.id]
-    nested_fork = store.fork_turn_node("turn_fork", new_turn_id="turn_nested_fork", thread_id="thread_nested")
-    tree = RuntimeStateTree(store.load_nodes(session.session_id))
-    assert nested_fork.parent_thread_id == root.thread_id
-    assert [node.id for node in tree.ancestors(nested_fork)] == [root.id, nested_fork.id]
 
     compacted = store.create_compact_turn("turn_original", "summary", new_turn_id="turn_compact")
     items = compacted.assistant_items
     assert compacted.compaction_id == compacted.id
-    assert items[0] == {"type": "compaction", "summary": "summary", "kept_item_count": 8, "status": "success"}
+    assert items[0] == {"type": "compaction", "summary": "summary", "kept_item_count": 8}
     assert len(items[1:]) == 8
 
 
 def test_missing_ancestor_and_bad_version_index_are_rejected() -> None:
-    root = RuntimeRootState.create("session_1", id="turn_root")
-    first = make_turn(parent=root)
-    child = make_turn(turn_id="turn_2", parent=first)
+    root = make_turn()
+    child = make_turn(turn_id="turn_2", parent=root)
     with pytest.raises(RuntimeStateValidationError, match="parent is missing"):
         RuntimeStateTree([child]).ancestors(child)
-    payload = first.to_dict()
+    payload = root.to_dict()
     payload["current_data_idx"] = 5
     with pytest.raises(RuntimeStateValidationError, match="out of range"):
         RuntimeState.from_dict(payload)
@@ -1060,45 +563,43 @@ def test_missing_ancestor_and_bad_version_index_are_rejected() -> None:
     bad_thread = child.to_dict()
     bad_thread["parent_thread_id"] = "thread_wrong"
     with pytest.raises(RuntimeStateValidationError, match="parent_thread_id"):
-        RuntimeStateTree([root, first, RuntimeState.from_dict(bad_thread)]).ancestors(("session_1", "turn_2"))
+        RuntimeStateTree([root, RuntimeState.from_dict(bad_thread)]).ancestors(("session_1", "turn_2"))
 
     cross_session = child.to_dict()
     cross_session["session_id"] = "session_2"
     cross_session["thread_id"] = "session_2"
     with pytest.raises(RuntimeStateValidationError, match="across Sessions"):
-        RuntimeStateTree([root, first, RuntimeState.from_dict(cross_session)]).ancestors(("session_2", "turn_2"))
+        RuntimeStateTree([root, RuntimeState.from_dict(cross_session)]).ancestors(("session_2", "turn_2"))
 
 
-@pytest.mark.parametrize("schema_version", [9, 10, 11])
-def test_pre_v12_database_is_rejected_without_migration_or_deletion(tmp_path: Path, schema_version: int) -> None:
-    path = tmp_path / f"v{schema_version}.db"
+def test_v9_database_is_rejected_without_migration_or_deletion(tmp_path: Path) -> None:
+    path = tmp_path / "v9.db"
     connection = sqlite3.connect(path)
     connection.executescript(SCHEMA)
     connection.execute("PRAGMA ignore_check_constraints=ON")
     connection.execute(
-        "INSERT INTO store_metadata(session_id,schema_version,created_at,updated_at) VALUES ('s',?,'x','x')",
-        (schema_version,),
+        "INSERT INTO store_metadata(session_id,schema_version,created_at,updated_at) VALUES ('s',9,'x','x')"
     )
     connection.commit()
-    with pytest.raises(RuntimeError, match="requires v12"):
+    with pytest.raises(RuntimeError, match="schema v9"):
         SQLiteSchemaMixin._assert_supported_schema(connection)
     assert path.exists()
     connection.close()
 
 
 def test_pause_targets_only_the_requested_turn_in_parallel_threads(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web")
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
     with TestClient(create_app(state)) as client:
+        assert client.post("/api/auth/guest").status_code == 200
+        identity = client.get("/api/auth/me").json()
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        assert client.get("/api/turns", params={"session_id": sidebar["session_id"]}).json() == []
-        store = session_store(state)
+        store = session_store(state, identity["id"])
         writer = NodeWriter(store)
         original = writer.create(
             RuntimeState.create(
                 session_id=sidebar["session_id"],
                 thread_id=sidebar["thread_id"],
                 id="turn_main",
-                parent=store.ensure_root_node(sidebar["session_id"], id="turn_main_root"),
                 user_content=[{"type": "text", "text": "main"}],
             )
         )
@@ -1112,60 +613,48 @@ def test_pause_targets_only_the_requested_turn_in_parallel_threads(tmp_path: Pat
         store.append_turn_version("turn_main", {"type": "text", "text": "main again"})
         store.append_turn_version("turn_fork", {"type": "text", "text": "fork again"})
 
-        main_pause = TurnPauseController()
-        fork_pause = TurnPauseController()
+        cancelled: list[str] = []
         state.active_turn_cancellations = {
-            "turn_main": main_pause,
-            "turn_fork": fork_pause,
+            (identity["id"], "turn_main"): lambda: cancelled.append("turn_main"),
+            (identity["id"], "turn_fork"): lambda: cancelled.append("turn_fork"),
         }
         response = client.post("/api/turns/turn_main/pause")
         assert response.status_code == 200
-        assert main_pause.is_requested() is True
-        assert fork_pause.is_requested() is False
+        assert cancelled == ["turn_main"]
         assert store.find_node("turn_main").status == "running"
         assert store.find_node("turn_fork").status == "running"
 
 
-def test_fork_sidebar_title_always_appends_branch_suffix(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web")
+def test_fork_sidebar_title_is_copied_once_unless_explicitly_named(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
     with TestClient(create_app(state)) as client:
+        assert client.post("/api/auth/guest").status_code == 200
+        identity = client.get("/api/auth/me").json()
         source_sidebar = client.post("/api/sidebar-threads", json={}).json()
-        store = session_store(state)
+        store = session_store(state, identity["id"])
         writer = NodeWriter(store)
         source = writer.create(
             RuntimeState.create(
                 session_id=source_sidebar["session_id"],
                 thread_id=source_sidebar["thread_id"],
                 id="turn_fork_source",
-                parent=store.ensure_root_node(source_sidebar["session_id"], id="turn_fork_root"),
                 user_content=[{"type": "text", "text": "源对话标题"}],
             )
         )
         writer.finalize(source, "success")
-        store.update_sidebar_thread(source_sidebar["thread_id"], title="源对话标题", title_is_custom=False)
 
         inherited_response = client.post("/api/turns/turn_fork_source/fork", json={})
         assert inherited_response.status_code == 201
-        inherited_payload = inherited_response.json()
-        inherited = inherited_payload["sidebar_thread"]
-        assert inherited["title"] == "源对话标题（分支）"
+        inherited = inherited_response.json()["sidebar_thread"]
+        assert inherited["title"] == "源对话标题"
         assert inherited["title_is_custom"] is False
-
-        nested_response = client.post(
-            f"/api/turns/{inherited_payload['turn']['id']}/fork",
-            json={"title": "这个旧字段必须被忽略"},
-        )
-        assert nested_response.status_code == 201
-        nested = nested_response.json()["sidebar_thread"]
-        assert nested["title"] == "源对话标题（分支）（分支）"
-        assert nested["title_is_custom"] is False
 
         renamed = client.patch(
             f"/api/sidebar-threads/{source_sidebar['thread_id']}",
             json={"title": "源对话已改名"},
         )
         assert renamed.status_code == 200
-        assert store.get_sidebar_thread(inherited["thread_id"]).title == "源对话标题（分支）"
+        assert store.get_sidebar_thread(inherited["thread_id"]).title == "源对话标题"
 
         explicit_response = client.post(
             "/api/turns/turn_fork_source/fork",
@@ -1173,11 +662,11 @@ def test_fork_sidebar_title_always_appends_branch_suffix(tmp_path: Path) -> None
         )
         assert explicit_response.status_code == 201
         explicit = explicit_response.json()["sidebar_thread"]
-        assert explicit["title"] == "源对话已改名（分支）"
-        assert explicit["title_is_custom"] is False
+        assert explicit["title"] == "手工分支标题"
+        assert explicit["title_is_custom"] is True
 
 
-def test_plan_handoff_creates_agent_child_with_approved_plan_message(tmp_path: Path) -> None:
+def test_plan_handoff_creates_agent_child_with_raw_plan_message(tmp_path: Path) -> None:
     class PlanHandoffPlanner:
         name = "plan-handoff"
 
@@ -1194,7 +683,7 @@ def test_plan_handoff_creates_agent_child_with_approved_plan_message(tmp_path: P
                 )
             return AssistantMessage(content="Implemented from the reviewed plan.")
 
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
     service = ConversationService(
         AgentRunner(PlanHandoffPlanner(), ToolRegistry()),
         store,
@@ -1208,27 +697,15 @@ def test_plan_handoff_creates_agent_child_with_approved_plan_message(tmp_path: P
 
     assert result.status == "completed"
     assert service.active_session is not None
-    nodes = store.load_nodes(service.active_session.session_id)
-    assert isinstance(nodes[0], RuntimeRootState)
-    turns = [node for node in nodes if isinstance(node, RuntimeState)]
+    turns = store.load_nodes(service.active_session.session_id)
     assert len(turns) == 2
     plan, agent = turns
     assert plan.status == agent.status == "success"
     assert plan.running_mode == "plan"
     assert agent.running_mode == "agent"
     assert agent.parent_id == plan.id
-    assert plan.selected_messages[0]["content"] == [{"type": "text", "text": "plan the change", "status": "success"}]
-    assert any(
-        item.get("event") == "handoff_created" and item.get("text") == "Implement the reviewed change."
-        for item in plan.assistant_items
-    )
-    assert agent.selected_messages[0]["content"] == [
-        {
-            "type": "text",
-            "text": "<approved_plan>\nImplement the reviewed change.\n</approved_plan>",
-            "status": "success",
-        }
-    ]
+    assert plan.selected_messages[0]["content"] == [{"type": "text", "text": "plan the change"}]
+    assert agent.selected_messages[0]["content"] == [{"type": "text", "text": "Implement the reviewed change."}]
     assert any(
         item.get("type") == "text" and item.get("text") == "Implemented from the reviewed plan."
         for item in agent.assistant_items
@@ -1264,7 +741,7 @@ def test_plan_compaction_handoff_emits_plan_compact_agent_nodes_in_one_stream(tm
             return ContextCompactionResult(True, 2, 1, "deterministic compact summary")
 
     frames: list[NodeFrame] = []
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
     service = ConversationService(AgentRunner(CompactingPlanPlanner(), ToolRegistry()), store)
     session = service.new_session("Plan compaction")
     bridge = RuntimeEventNodeBridge(
@@ -1293,18 +770,8 @@ def test_plan_compaction_handoff_emits_plan_compact_agent_nodes_in_one_stream(tm
     assert [node.running_mode for node in (plan, compact, agent)] == ["plan", "plan", "agent"]
     assert compact.assistant_items[0]["type"] == "compaction"
     assert compact.assistant_items[0]["summary"] == "deterministic compact summary"
-    assert agent.selected_messages[0]["content"] == [
-        {
-            "type": "text",
-            "text": "<approved_plan>\nImplement after a real compaction.\n</approved_plan>",
-            "status": "success",
-        }
-    ]
-    assert [node.status for node in store.load_nodes(session.session_id) if isinstance(node, RuntimeState)] == [
-        "success",
-        "success",
-        "success",
-    ]
+    assert agent.selected_messages[0]["content"] == [{"type": "text", "text": "Implement after a real compaction."}]
+    assert [node.status for node in store.load_nodes(session.session_id)] == ["success", "success", "success"]
 
 
 def test_plan_compaction_failure_keeps_successful_plan_and_records_redacted_reason(tmp_path: Path) -> None:
@@ -1333,7 +800,7 @@ def test_plan_compaction_failure_keeps_successful_plan_and_records_redacted_reas
             )
             raise PlanningError("summary provider unavailable; api_key=super-secret")
 
-    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"))
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), "device")
     service = ConversationService(AgentRunner(FailingCompactionPlanner(), ToolRegistry()), store)
 
     result = service.run_task(
@@ -1345,7 +812,7 @@ def test_plan_compaction_failure_keeps_successful_plan_and_records_redacted_reas
     assert result.status == "completed"
     assert result.mode == "plan"
     assert service.active_session is not None
-    turns = [node for node in store.load_nodes(service.active_session.session_id) if isinstance(node, RuntimeState)]
+    turns = store.load_nodes(service.active_session.session_id)
     assert len(turns) == 1
     assert turns[0].status == "success" and turns[0].running_mode == "plan"
     error = next(item for item in turns[0].assistant_items if item["type"] == "error")
@@ -1368,17 +835,16 @@ def test_sandbox_startup_failure_message_explains_fail_closed_behavior() -> None
 
 
 def test_http_sse_surfaces_sandbox_failure_before_turn_baseline(tmp_path: Path, monkeypatch) -> None:
-    state = WebAppState(tmp_path / "web")
-    monkeypatch.setattr(
-        state, "model_config", lambda *_args, **_kwargs: ModelConfig("test", "https://example.test/v1", "test")
-    )
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    state.model_config_for_user = lambda _user_id: None
 
     def fail_sandbox_startup(*_args, **_kwargs):
         raise SandboxInitializationError("Windows Sandbox Broker 已安装，但健康检查未通过。")
 
-    monkeypatch.setattr(chat_routes, "build_local_application", fail_sandbox_startup)
+    monkeypatch.setattr(chat_routes, "build_user_application", fail_sandbox_startup)
 
     with TestClient(create_app(state)) as client:
+        assert client.post("/api/auth/guest").status_code == 200
         sidebar = client.post("/api/sidebar-threads", json={}).json()
         turn_id = "turn_sandbox_startup_failure"
         response = client.post(
@@ -1426,15 +892,16 @@ class HttpCompactionClient:
 
 
 def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_path: Path, monkeypatch) -> None:
-    state = WebAppState(tmp_path / "web")
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
     model_config = ModelConfig("secret", "https://example.test/v1", "checkpoint-model")
     resolved_provider_names: list[str | None] = []
 
-    def resolve_provider(provider_name: str | None = None):
+    def resolve_provider(_user_id: str, provider_name: str | None):
         resolved_provider_names.append(provider_name)
         return model_config
 
-    state.model_config = resolve_provider
+    state.model_config_for_user = lambda _user_id: model_config
+    state.model_config_for_provider_name = resolve_provider
     summary = """## Primary Request and Intent
 - Preserve the HTTP request.
 
@@ -1461,10 +928,14 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
     llm_client = HttpCompactionClient(summary)
 
     with TestClient(create_app(state)) as client:
+        assert client.post("/api/auth/guest").status_code == 200
+        identity = client.get("/api/auth/me").json()
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        store = session_store(state)
+        store = session_store(state, identity["id"])
         seed_service = ConversationService(
-            AgentRunner(RuleBasedPlanner(), ToolRegistry(state.session_workspace(sidebar["session_id"]))),
+            AgentRunner(
+                RuleBasedPlanner(), ToolRegistry(state.session_workspace(identity["id"], sidebar["session_id"]))
+            ),
             store,
             session_id=sidebar["session_id"],
         )
@@ -1475,14 +946,16 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
         newer = seed_service.run_task("newer branch must not replace the requested source", mode="agent")
         assert newer.status == "completed"
 
-        def compact_application(_state, **_kwargs):
+        def compact_application(_state, user_id: str, **_kwargs):
             return AgentApplication(
-                AgentRunner(LLMPlanner(llm_client, [], []), ToolRegistry(state.session_workspace(source.session_id))),
-                session_store(state),
+                AgentRunner(
+                    LLMPlanner(llm_client, [], []), ToolRegistry(state.session_workspace(user_id, source.session_id))
+                ),
+                session_store(state, user_id),
                 None,
             )
 
-        monkeypatch.setattr(turn_routes, "build_local_application", compact_application)
+        monkeypatch.setattr(turn_routes, "build_user_application", compact_application)
         compact_operation = client.get("/openapi.json").json()["paths"]["/api/turns/{turn_id}/compact"]["post"]
         assert "requestBody" not in compact_operation
         response = client.post(
@@ -1506,17 +979,17 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
         node_count = len(store.load_nodes(source.session_id))
         failing_client = HttpCompactionClient("", failure="summary provider failed")
 
-        def failing_application(_state, **_kwargs):
+        def failing_application(_state, user_id: str, **_kwargs):
             return AgentApplication(
                 AgentRunner(
                     LLMPlanner(failing_client, [], []),
-                    ToolRegistry(state.session_workspace(source.session_id)),
+                    ToolRegistry(state.session_workspace(user_id, source.session_id)),
                 ),
-                session_store(state),
+                session_store(state, user_id),
                 None,
             )
 
-        monkeypatch.setattr(turn_routes, "build_local_application", failing_application)
+        monkeypatch.setattr(turn_routes, "build_user_application", failing_application)
         failed = client.post(f"/api/turns/{compacted['id']}/compact")
         assert failed.status_code == 502
         assert failed.json()["detail"] == "上下文压缩失败，请稍后重试。"
@@ -1524,7 +997,7 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
 
         state.active_runtime_stream_locks = {
             "__lock__": threading.RLock(),
-            "keys": {source.thread_id},
+            "keys": {(identity["id"], source.thread_id)},
         }
         conflict = client.post(f"/api/turns/{source.id}/compact")
         assert conflict.status_code == 409
@@ -1533,21 +1006,23 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
         state.active_runtime_stream_locks["keys"].clear()
         node_count = len(store.load_nodes(source.session_id))
 
-        def missing_model(_provider_name: str | None = None):
+        def missing_model(_user_id: str):
             raise ModelConfigurationError("model is missing")
 
-        state.model_config = missing_model
+        state.model_config_for_user = missing_model
+        state.model_config_for_provider_name = lambda _user_id, _provider_name: missing_model(_user_id)
         missing = client.post(f"/api/turns/{source.id}/compact")
         assert missing.status_code == 422
         assert missing.json()["detail"] == "模型未配置：model is missing"
         assert len(store.load_nodes(source.session_id)) == node_count
 
-        state.model_config = resolve_provider
+        state.model_config_for_user = lambda _user_id: model_config
+        state.model_config_for_provider_name = resolve_provider
 
         def sandbox_failure(*_args, **_kwargs):
             raise SandboxInitializationError("Broker unavailable")
 
-        monkeypatch.setattr(turn_routes, "build_local_application", sandbox_failure)
+        monkeypatch.setattr(turn_routes, "build_user_application", sandbox_failure)
         unavailable = client.post(f"/api/turns/{source.id}/compact")
         assert unavailable.status_code == 503
         assert unavailable.json()["detail"] == ("Sandbox 初始化失败：Broker unavailable Agent 已停止，未降级执行。")
@@ -1555,27 +1030,23 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
 
 
 def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_deltas(
-    tmp_path: Path,
-    monkeypatch,
-    local_sandbox_runtime: None,
+    tmp_path: Path, monkeypatch
 ) -> None:
-    state = WebAppState(tmp_path / "web")
-    monkeypatch.setattr(
-        state, "model_config", lambda *_args, **_kwargs: ModelConfig("test", "https://example.test/v1", "test")
-    )
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
+    state.model_config_for_user = lambda _user_id: None
 
-    def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
+    def local_application(_state, user_id: str, *, session_id: str, workspace=None, **_kwargs):
         return build_application(
-            workspace or state.session_workspace(session_id),
+            workspace or state.session_workspace(user_id, session_id),
             planner_name="rule",
-            paths=state.paths,
+            paths=state.user_paths(user_id),
         )
 
-    monkeypatch.setattr(chat_routes, "build_local_application", local_application)
+    monkeypatch.setattr(chat_routes, "build_user_application", local_application)
 
     with TestClient(create_app(state)) as client:
+        assert client.post("/api/auth/guest").status_code == 200
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        assert client.get("/api/turns", params={"session_id": sidebar["session_id"]}).json() == []
         turn_id = "turn_http_sse"
         response = client.post(
             "/api/turns",
@@ -1616,117 +1087,18 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
                 if operation["op"] == "append_item":
                     assert operation["item_idx"] == len(items)
                     items.append(operation["item"])
-                elif operation["op"] == "append_text":
-                    items[operation["item_idx"]]["text"] += operation["delta"]
                 else:
-                    items[operation["item_idx"]]["status"] = operation["status"]
+                    items[operation["item_idx"]]["text"] += operation["delta"]
 
         turns = client.get("/api/turns", params={"session_id": sidebar["session_id"]}).json()
-        assert len(turns) == 2
-        root, persisted = turns
-        assert root == {
-            "session_id": sidebar["session_id"],
-            "thread_id": sidebar["session_id"],
-            "id": root["id"],
-        }
-        assert root["id"].startswith("turn_")
-        assert reconstructed == persisted
-        assert persisted["id"] == turn_id
-        assert persisted["parent_id"] == root["id"]
-        assert persisted["compactionId"] == turn_id
-        assert persisted["data"][0][0]["content"] == [{"type": "text", "text": "hello   sidebar", "status": "success"}]
-        assert persisted["data"][0][1]["content"][-1]["type"] == "text"
+        assert len(turns) == 1
+        assert reconstructed == turns[0]
+        assert turns[0]["id"] == turn_id
+        assert turns[0]["data"][0][0]["content"] == [{"type": "text", "text": "hello   sidebar"}]
+        assert turns[0]["data"][0][1]["content"][-1]["type"] == "text"
         refreshed_sidebar = next(
             item for item in client.get("/api/sidebar-threads").json() if item["thread_id"] == sidebar["thread_id"]
         )
-        assert refreshed_sidebar["title"] == "hello side"
+        assert refreshed_sidebar["title"] == "hello sidebar"
         assert refreshed_sidebar["title_is_custom"] is False
         assert state.active_turn_streams == {}
-
-
-def test_real_http_sse_generates_title_with_isolated_model_request(
-    tmp_path: Path,
-    monkeypatch,
-    local_sandbox_runtime: None,
-) -> None:
-    state = WebAppState(tmp_path / "web")
-    monkeypatch.setattr(
-        state, "model_config", lambda *_args, **_kwargs: ModelConfig("test", "https://example.test/v1", "test")
-    )
-
-    class DedicatedTitleClient:
-        def __init__(self) -> None:
-            self.requests: list[dict[str, object]] = []
-
-        def run(self, runtime: AgentRuntime) -> PreparedResponse:
-            self.requests.append(
-                {
-                    "operation": runtime.exchange.operation,
-                    "messages": list(runtime.exchange.messages),
-                    "stream": runtime.exchange.stream,
-                    "tools": list(runtime.exchange.allowed_tools),
-                    "parameters": dict(runtime.exchange.context.get("request_parameters") or {}),
-                }
-            )
-            if runtime.exchange.operation == "title":
-                return PreparedResponse(AssistantMessage(content="“模型生成的对话标题很长”"), {"total_tokens": 2})
-            return PreparedResponse(AssistantMessage(content="主回答完成。"), {"total_tokens": 5})
-
-    title_client = DedicatedTitleClient()
-
-    def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
-        application = build_application(
-            workspace or state.session_workspace(session_id),
-            planner_name="rule",
-            paths=state.paths,
-        )
-        application.runner.planner = LLMPlanner(
-            title_client,
-            [],
-            [],
-            user_preferences="这项偏好不能进入标题系统提示词",
-        )
-        return application
-
-    monkeypatch.setattr(chat_routes, "build_local_application", local_application)
-
-    with TestClient(create_app(state)) as client:
-        sidebar = client.post("/api/sidebar-threads", json={}).json()
-        response = client.post(
-            "/api/turns",
-            json={
-                "id": "turn_model_title",
-                "session_id": sidebar["session_id"],
-                "thread_id": sidebar["thread_id"],
-                "parent_id": "",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "请分析这个复杂错误"}],
-                },
-                "permission_mode": "read_only",
-                "running_mode": "agent",
-            },
-        )
-
-        assert response.status_code == 200
-        payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
-        assert payloads[-1] == '<SSE id="turn_model_title" type="success"></SSE>'
-        refreshed = next(
-            item for item in client.get("/api/sidebar-threads").json() if item["thread_id"] == sidebar["thread_id"]
-        )
-        assert refreshed["title"] == "模型生成的对话标题很"
-        assert refreshed["title_is_custom"] is False
-
-    assert [request["operation"] for request in title_client.requests] == ["decision", "title"]
-    title_request = title_client.requests[-1]
-    assert title_request["messages"] == [
-        SystemMessage(content=load_title_prompt()),
-        UserMessage(content="请分析这个复杂错误"),
-    ]
-    assert title_request["stream"] is False
-    assert title_request["tools"] == []
-    assert title_request["parameters"] == {
-        "thinking": {"type": "disabled"},
-        "max_tokens": 32,
-        "temperature": 1.0,
-    }

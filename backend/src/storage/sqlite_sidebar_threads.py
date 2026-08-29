@@ -26,6 +26,9 @@ class SQLiteSidebarThreadMixin:
             if self._json_object(connection, session_id, "sidebar_thread", thread_id) is not None:
                 raise ValueError("SidebarThread already exists.")
             self._put_json_object(connection, session_id, "sidebar_thread", thread_id, item.to_dict(), now)
+            self._append_event(
+                connection, session_id, kind="sidebar_thread_upserted", payload={"sidebar_thread": item.to_dict()}
+            )
         return item
 
     def get_sidebar_thread(self, thread_id: str) -> SidebarThread | None:
@@ -62,6 +65,12 @@ class SQLiteSidebarThreadMixin:
             self._assert_writable(connection)
             self._put_json_object(
                 connection, item.session_id, "sidebar_thread", item.thread_id, next_item.to_dict(), next_item.updated_at
+            )
+            self._append_event(
+                connection,
+                item.session_id,
+                kind="sidebar_thread_upserted",
+                payload={"sidebar_thread": next_item.to_dict()},
             )
         return next_item
 

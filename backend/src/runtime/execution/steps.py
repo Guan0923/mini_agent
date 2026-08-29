@@ -57,7 +57,6 @@ class ToolStepExecutor:
                 return self._failure(runtime, tool, f"Read-only Plan mode blocked tool: {tool}")
             requires_confirmation = tools.requires_confirmation(tool)
             read_only = tools.is_read_only(tool)
-            workspace_confined = tools.is_workspace_confined(tool)
             retryable = tools.is_retryable(tool)
             validate = getattr(tools, "validate_arguments", None)
             if callable(validate):
@@ -74,12 +73,11 @@ class ToolStepExecutor:
             permission_mode=runtime.state.permission_mode,
             requires_confirmation=requires_confirmation,
             read_only=read_only,
-            workspace_confined=workspace_confined,
             sandbox_launcher=runtime.services.sandbox_launcher,
             sandbox_config=runtime.services.sandbox_config or {},
             sandbox_user_id=runtime.services.sandbox_user_id,
             interrupt=runtime.services.interrupt,
-            record_event=lambda _kind, _message, _data: None,
+            record_event=lambda kind, message, data: run.add_event(kind, message, **dict(data)),
             publish=publish,
         )
         before = before_tool_hook_manager.execute(context, publish)
@@ -117,7 +115,9 @@ class ToolStepExecutor:
         tools = runtime.services.tools
         publish = runtime.services.publish or (lambda _event: None)
         started_at = perf_counter()
-        started_at_timestamp = runtime.services.clock()
+        run.add_event(
+            "tool_call", f"Calling {tool}", call_id=tool_message.call_id, arguments=dict(tool_message.arguments)
+        )
         publish(
             RuntimeEvent(
                 "tool_call",
@@ -126,7 +126,7 @@ class ToolStepExecutor:
                     "call_id": tool_message.call_id,
                     "arguments": tool_message.arguments,
                     "attempt": 1,
-                    "started_at": started_at_timestamp,
+                    "started_at": run.events[-1].timestamp,
                 },
             )
         )
@@ -145,20 +145,26 @@ class ToolStepExecutor:
                             timezone=runtime.state.timezone,
                             clock=runtime.services.clock,
                             job_scope=runtime.services.job_scope,
-                            cancel_requested=runtime.stop_requested,
+                            cancel_requested=runtime.services.cancel_requested,
                             sandbox_decision=sandbox_decision,
                         ),
                         confirmed=True,
                     )
                 else:
                     result = tools.invoke(tool, tool_message.arguments, confirmed=True)
-            if runtime.stop_requested():
-                raise ToolError("Tool invocation cancelled.")
             tool_message.status = "succeeded"
             tool_message.content = result
             tool_message.retryable = retryable
             run.completed_steps.append(len(run.actions))
             duration_ms = round((perf_counter() - started_at) * 1000, 3)
+            run.add_event(
+                "tool_result",
+                f"{tool} succeeded",
+                call_id=tool_message.call_id,
+                result=result,
+                duration_ms=duration_ms,
+                attempts=1,
+            )
             publish(
                 RuntimeEvent(
                     "tool_result",
@@ -220,6 +226,7 @@ class ToolStepExecutor:
             "error": error,
             "failure_code": USER_DENIED_FAILURE_CODE,
         }
+        runtime.run.add_event("tool_failed", f"{tool} denied", **data)
         publish = runtime.services.publish or (lambda _event: None)
         publish(RuntimeEvent("tool_failed", error, data))
         runtime.save()
@@ -239,6 +246,7 @@ class ToolStepExecutor:
         retryable: bool | None = None,
         duration_ms: float | None = None,
     ) -> ToolStepResult:
+        run = runtime.run
         message = runtime.state.active_message
         index = runtime.state.active_tool_index
         call_id = ""
@@ -251,6 +259,7 @@ class ToolStepExecutor:
         data: dict[str, object] = {"call_id": call_id, "error": error}
         if duration_ms is not None:
             data["duration_ms"] = duration_ms
+        run.add_event("tool_failed", f"{tool} failed", **data)
         publish = runtime.services.publish or (lambda _event: None)
         publish(RuntimeEvent("tool_failed", error, {"tool": tool, **data}))
         runtime.save()

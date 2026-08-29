@@ -134,7 +134,6 @@ def test_normal_start_reaches_healthy_with_driver_handle() -> None:
     assert job.info().started_at is not None
     assert driver.started == ["h1"]
     assert driver.stopped == []
-    job.close(timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +158,6 @@ def test_probe_failure_streak_degrades_then_recovers_health_only() -> None:
     assert driver.stopped == []
     # reason sequence observed through the state-change channel.
     assert listener.reasons == ["started", "service_degraded", "service_recovered"]
-    job.close(timeout=5)
 
 
 def test_health_changes_never_alter_job_main_state() -> None:
@@ -171,7 +169,6 @@ def test_health_changes_never_alter_job_main_state() -> None:
     wait_until(lambda: job.health is ServiceHealth.HEALTHY)
     # Every notification carried RUNNING as its job state.
     assert all(state is JobState.RUNNING for state in listener.states)
-    job.close(timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +189,6 @@ def test_consecutive_failures_rebuild_stops_old_and_starts_new() -> None:
     assert driver.stopped == ["h1"]
     assert job.info().state is JobState.RUNNING
     assert listener.reasons[-2:] == ["service_degraded", "service_recovered"]
-    job.close(timeout=5)
 
 
 # ---------------------------------------------------------------------------

@@ -1,21 +1,9 @@
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from types import SimpleNamespace
-
 import pytest
 import requests
 
-from backend.api.pause_control import TurnPauseController
 from backend.domain import AssistantMessage, ToolMessage, ToolSpec, UserMessage
 from backend.planning import LLMPlanner, RuleBasedPlanner
-from backend.providers import (
-    ChatCompletions,
-    JsonHttpTransport,
-    LLMClient,
-    ModelConfig,
-    ModelRequestError,
-    ModelTransportError,
-)
+from backend.providers import ChatCompletions, LLMClient, ModelConfig, ModelRequestError
 from backend.providers.chat_completions.messages import _wire_messages_from
 from backend.runtime import AgentRunner, PreparedResponse
 from backend.tools import ToolRegistry
@@ -69,7 +57,7 @@ class RecordingTransport:
     def __init__(self) -> None:
         self.call: tuple[object, ...] | None = None
 
-    def post_json(self, endpoint, headers, payload, timeout_seconds, **_kwargs):
+    def post_json(self, endpoint, headers, payload, timeout_seconds):
         self.call = (endpoint, headers, payload, timeout_seconds)
         return {"answer": "custom response"}
 
@@ -79,7 +67,7 @@ class SequencedTransport:
         self.results = list(results)
         self.calls = 0
 
-    def post_json(self, endpoint, headers, payload, timeout_seconds, **_kwargs):
+    def post_json(self, endpoint, headers, payload, timeout_seconds):
         self.calls += 1
         result = self.results.pop(0)
         if isinstance(result, Exception):
@@ -127,90 +115,6 @@ class SequencedStreamSession:
     def post(self, url: str, **kwargs: object) -> FakeStreamResponse:
         self.calls += 1
         return self.responses.pop(0)
-
-
-def test_real_stream_pause_closes_the_provider_response() -> None:
-    first_chunk_sent = threading.Event()
-    first_event_received = threading.Event()
-    release_server = threading.Event()
-
-    class BlockingStreamHandler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def log_message(self, _format: str, *_args: object) -> None:
-            return
-
-        def _write_chunk(self, payload: bytes) -> None:
-            self.wfile.write(f"{len(payload):X}\r\n".encode("ascii") + payload + b"\r\n")
-            self.wfile.flush()
-
-        def do_POST(self) -> None:  # noqa: N802
-            content_length = int(self.headers.get("Content-Length") or 0)
-            if content_length:
-                self.rfile.read(content_length)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Transfer-Encoding", "chunked")
-            self.end_headers()
-            self._write_chunk(b'data: {"delta":"partial"}\n\n')
-            first_chunk_sent.set()
-            release_server.wait(5.0)
-            try:
-                self._write_chunk(b'data: {"delta":"late"}\n\n')
-                self._write_chunk(b"data: [DONE]\n\n")
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
-            except OSError:
-                pass
-
-    class QuietThreadingHTTPServer(ThreadingHTTPServer):
-        def handle_error(self, _request: object, _client_address: object) -> None:
-            return
-
-    server = QuietThreadingHTTPServer(("127.0.0.1", 0), BlockingStreamHandler)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-    controller = TurnPauseController()
-    transport = JsonHttpTransport()
-    received: list[dict[str, object]] = []
-    failure: list[BaseException] = []
-    finished = threading.Event()
-
-    def consume() -> None:
-        try:
-            for event in transport.stream_json(
-                f"http://127.0.0.1:{server.server_port}/stream",
-                {},
-                {},
-                10,
-                cancel_requested=controller.is_requested,
-                register_abort=controller.register_abort,
-            ):
-                received.append(event)
-                first_event_received.set()
-        except BaseException as exc:
-            failure.append(exc)
-        finally:
-            finished.set()
-
-    worker = threading.Thread(target=consume, daemon=True)
-    worker.start()
-    try:
-        assert first_chunk_sent.wait(3.0)
-        assert first_event_received.wait(3.0)
-        assert controller.request_pause() is True
-        assert finished.wait(3.0), "closing the response must unblock the provider stream"
-    finally:
-        release_server.set()
-        server.shutdown()
-        server.server_close()
-        worker.join(3.0)
-        server_thread.join(3.0)
-
-    assert [event.get("delta") for event in received] == ["partial"]
-    assert len(failure) == 1
-    assert isinstance(failure[0], ModelTransportError)
-    assert str(failure[0]) == "Model request paused by user."
 
 
 def runtime_for_custom(*, max_transport_retries: int = 2):
@@ -529,7 +433,7 @@ def test_transient_http_status_retries_with_retry_after(monkeypatch, status_code
     events = []
     runtime.services.publish = events.append
     delays = []
-    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=delays.append))
+    monkeypatch.setattr("backend.providers.client.time.sleep", delays.append)
 
     response = client.run(runtime)
 
@@ -560,7 +464,7 @@ def test_non_retryable_http_status_fails_immediately(monkeypatch) -> None:
         adapter=CustomAdapter(),
     )
     runtime = runtime_for_custom()
-    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
+    monkeypatch.setattr("backend.providers.client.time.sleep", lambda _delay: None)
 
     with pytest.raises(ModelRequestError, match="HTTPError"):
         client.run(runtime)
@@ -581,7 +485,7 @@ def test_invalid_json_http_body_retries(monkeypatch) -> None:
         adapter=CustomAdapter(),
     )
     runtime = runtime_for_custom()
-    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
+    monkeypatch.setattr("backend.providers.client.time.sleep", lambda _delay: None)
 
     response = client.run(runtime)
 
@@ -600,7 +504,7 @@ def test_stream_retries_only_before_the_first_event(monkeypatch) -> None:
     session = SequencedStreamSession([first, second])
     client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
     runtime = runtime_for_stream()
-    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
+    monkeypatch.setattr("backend.providers.client.time.sleep", lambda _delay: None)
 
     response = client.run(runtime)
 
@@ -681,7 +585,7 @@ def test_connection_timeout_retries(monkeypatch) -> None:
     )
     runtime = runtime_for_custom()
     delays = []
-    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=delays.append))
+    monkeypatch.setattr("backend.providers.client.time.sleep", delays.append)
 
     response = client.run(runtime)
 

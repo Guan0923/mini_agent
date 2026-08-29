@@ -1,29 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import App, { countUnreadArchived, loadArchiveReadState, loadConversations, markArchivedAsRead } from "./App";
+import { beforeEach, describe, expect, it } from "vitest";
+import { countUnreadArchived, loadArchiveReadState, loadConversations, markArchivedAsRead } from "./App";
 import { BROWSER_STATE_VERSION, BROWSER_STATE_VERSION_KEY, resetLegacyBrowserState } from "./app/storage";
 import type { Conversation } from "./types";
 
 beforeEach(() => localStorage.clear());
-
-vi.mock("./app/AgentApp", () => ({
-  default: () => <main data-testid="chat-page">Chat</main>,
-}));
-
-describe("local-only routes", () => {
-  it("renders Chat directly at root and redirects removed account pages without auth requests", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
-    window.history.replaceState({}, "", "/login");
-
-    render(<App />);
-
-    expect(screen.getByTestId("chat-page")).toBeInTheDocument();
-    await waitFor(() => expect(window.location.pathname).toBe("/"));
-    expect(screen.queryByText(/登录|注册|退出|云同步/)).not.toBeInTheDocument();
-    expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("/api/auth/"))).toBe(false);
-    fetchSpy.mockRestore();
-  });
-});
 
 describe("conversation recovery", () => {
   it("does not restore a stale running animation from localStorage", () => {
@@ -56,8 +36,8 @@ describe("conversation recovery", () => {
     expect(countUnreadArchived(archived, read)).toBe(0);
     expect(markArchivedAsRead(read, archived)).toBe(read);
 
-    localStorage.setItem("mini-agent-archive-read", JSON.stringify(read));
-    expect(loadArchiveReadState()).toEqual(read);
+    localStorage.setItem("mini-agent-archive-read:user-1", JSON.stringify(read));
+    expect(loadArchiveReadState("user-1")).toEqual(read);
     expect(countUnreadArchived([...archived, { ...archived[0], id: "archived-2" }], read)).toBe(1);
   });
 

@@ -1,5 +1,8 @@
 """Windows-native sandbox subsystem."""
 
+from .admission import AggregateLimits, ResourceRequest, SandboxAdmission, SandboxAdmissionTimeout
+from .approvals import ApprovalDecision, ApprovalGrant, ApprovalStore, authorization_hash
+from .broker import BrokerManagedProcess, BrokerStatus, WindowsBrokerClient
 from .broker_service import (
     BROKER_VERSION,
     AccountLease,
@@ -12,9 +15,7 @@ from .broker_service import (
     WindowsNamedPipeServer,
     WindowsServiceInstaller,
 )
-from .control.approvals import ApprovalDecision, ApprovalGrant, ApprovalStore, authorization_hash
-from .control.broker import BrokerManagedProcess, BrokerStatus, WindowsBrokerClient
-from .control.decision import SandboxExecutionDecision
+from .decision import SandboxExecutionDecision
 from .errors import (
     BrokerInstallationError,
     BrokerInstallFailureCode,
@@ -25,6 +26,8 @@ from .errors import (
     SandboxPolicyError,
     SandboxResourceExceeded,
 )
+from .launcher import SandboxLauncher
+from .manifest import ResourceManifest, ResourceRecord
 from .native_broker_adapter import WfpController, WindowsNativeBrokerAdapter
 from .native_windows import (
     WindowsAccountManager,
@@ -50,11 +53,8 @@ from .policy import (
     normalize_permission_mode,
     resolve_network_rules,
 )
-from .runtime.admission import AggregateLimits, ResourceRequest, SandboxAdmission, SandboxAdmissionTimeout
-from .runtime.launcher import SandboxLauncher
-from .runtime.manifest import ResourceManifest, ResourceRecord
-from .runtime.reclaimer import SandboxResourceReclaimer
-from .runtime.resources import NullResourceProvider, ResourceMonitor, ResourceUsage
+from .reclaimer import SandboxResourceReclaimer
+from .resources import NullResourceProvider, ResourceMonitor, ResourceUsage
 
 __all__ = [
     "ApprovalDecision",

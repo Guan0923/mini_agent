@@ -61,6 +61,7 @@ class PlanModeWorkflow:
                 "call_id": call_id,
             },
         )
+        runtime.run.add_event("approval_requested", "Plan implementation decision requested", **request.data)
         publish = runtime.services.publish or (lambda _event: None)
         publish(RuntimeEvent("approval_requested", request.message, request.data))
         if runtime.services.interrupt is None:
@@ -73,6 +74,7 @@ class PlanModeWorkflow:
         if decision.choice == "stay_in_plan_mode":
             runtime.state.running_mode = "plan"
             runtime.run.mode = "plan"
+            runtime.run.add_event("approval_granted", "Plan mode retained", **request.data)
             publish(RuntimeEvent("approval_granted", request.message, {**request.data, "stay_in_plan_mode": True}))
             complete_run(
                 runtime,
@@ -93,7 +95,19 @@ class PlanModeWorkflow:
             compact_before=compact_before,
             active_skills=tuple(runtime.run.active_skills),
         )
+        runtime.run.add_event(
+            "approval_granted",
+            "Plan implementation requested",
+            compact_before=compact_before,
+            **request.data,
+        )
         publish(RuntimeEvent("approval_granted", request.message, {**request.data, "compact_before": compact_before}))
+        runtime.run.add_event(
+            "handoff_created",
+            "Agent implementation handoff created",
+            task=runtime.run.handoff.task,
+            compact_before=compact_before,
+        )
         publish(
             RuntimeEvent(
                 "handoff_created",

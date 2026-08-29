@@ -16,15 +16,12 @@ from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from backend.tools import ToolRegistry
 
 
-def test_runner_refuses_command_when_strict_sandbox_is_unhealthy(tmp_path: Path) -> None:
+def test_runner_executes_command(tmp_path: Path) -> None:
     events = []
-    state = AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)).run(
-        "run command echo 96", lambda _: True, on_event=events.append
-    )
+    state = AgentRunner(RuleBasedPlanner(), ToolRegistry(tmp_path)).run("run command echo 96", lambda _: True, on_event=events.append)
 
-    assert state.status == "cancelled"
-    assert state.tool_calls == 0
-    assert any(event.kind == "hook_completed" and event.data.get("decision") == "reject" for event in events)
+    assert state.status == "completed"
+    assert state.final_answer is not None and "96" in state.final_answer
 
 
 class ProviderFailurePlanner:
@@ -202,7 +199,8 @@ def test_tool_errors_feed_back_to_the_planner(tmp_path: Path) -> None:
     assert state.status == "completed"
     assert state.final_answer == "recovered"
     assert "[Tool error]" in planner.histories[1][-1]["content"]
-    assert state.tool_calls == 2
+    recoveries = [event for event in state.events if event.kind == "tool_recovery"]
+    assert [event.data["attempt"] for event in recoveries] == [1]
 
 
 class ConsecutiveFailurePlanner:
@@ -224,7 +222,8 @@ def test_tool_recovery_continues_until_tool_budget(tmp_path: Path) -> None:
 
     assert state.status == "failed"
     assert len(state.actions) == 3
-    assert state.tool_calls == 0
+    recoveries = [event for event in state.events if event.kind == "tool_recovery"]
+    assert [event.data["attempt"] for event in recoveries] == [1, 2, 3]
     assert not any(event.kind in {"tool_failed", "tool_recovery"} for event in events)
 
 

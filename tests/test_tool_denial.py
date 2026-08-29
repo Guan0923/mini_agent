@@ -71,8 +71,14 @@ def test_denied_write_file_is_returned_to_the_model_without_ending_the_run() -> 
     assert denied.retryable is False
     assert denied.failure_code == "user_denied"
     assert denied.content == "The user denied this write_file tool call."
-    assert state.stop_reason is None
-    assert state.tool_calls == 0
+    assert not any(event.kind == "cancelled" for event in state.events)
+    failure = next(event for event in state.events if event.kind == "tool_failed")
+    assert failure.data == {
+        "tool": "write_file",
+        "call_id": "call_0",
+        "error": "The user denied this write_file tool call.",
+        "failure_code": "user_denied",
+    }
     persisted = type(runtime.state).from_dict(runtime.state.to_dict())
     persisted_denial = next(
         message.tool_messages[0]
@@ -174,11 +180,6 @@ def test_denial_stops_the_tool_batch_and_all_provider_pairs_remain_valid() -> No
     assert [item["call_id"] for item in response_results] == ["call_0", "call_1"]
     assert [call["id"] for call in message_calls] == ["call_0", "call_1"]
     assert [item["tool_use_id"] for item in message_results] == ["call_0", "call_1"]
-    expected_errors = [
-        "The user denied this write_file tool call.",
-        "Not executed because tool execution was interrupted.",
-    ]
-    assert [item["content"] for item in chat_results] == expected_errors
-    assert [item["output"] for item in response_results] == expected_errors
-    assert [item["content"] for item in message_results] == expected_errors
-    assert [item.get("is_error") for item in message_results] == [True, True]
+    assert chat_results[0]["content"] == "The user denied this write_file tool call."
+    assert response_results[0]["output"] == "The user denied this write_file tool call."
+    assert message_results[0]["content"] == "The user denied this write_file tool call."

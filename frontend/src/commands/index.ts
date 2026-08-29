@@ -6,13 +6,13 @@ export interface CommandDefinition {
   argument?: string;
 }
 
-/** Commands supported by the browser client. */
+/** Browser equivalents of the TUI command catalog. */
 export const COMMANDS: CommandDefinition[] = [
   { name: "/new", label: "新建", description: "创建新的服务端会话", argument: "title" },
+  { name: "/init", label: "初始化", description: "在当前项目根目录创建 AGENTS.md" },
   { name: "/help", label: "帮助", description: "查看使用说明" },
   { name: "/skills", label: "技能", description: "列出已发现的技能" },
   { name: "/compact", label: "压缩", description: "压缩当前会话上下文" },
-  { name: "/trace", label: "审计", description: "打开当前 Thread 的 Turn Trace" },
 ];
 
 

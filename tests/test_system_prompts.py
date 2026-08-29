@@ -1,17 +1,19 @@
 import pytest
 
-from backend.domain import AssistantMessage, SkillSnapshot, SystemMessage, UserMessage
+from backend.configuration import ClientPaths
+from backend.domain import AssistantMessage, SkillSnapshot, SystemMessage
 from backend.planning import LLMPlanner
 from backend.planning import prompts as prompt_module
-from backend.planning.llm.titles import normalize_conversation_title
 from backend.planning.prompts import (
     PromptConfigurationError,
     PromptTemplates,
     _read_prompt,
     compose_system_prompt,
-    load_title_prompt,
 )
 from backend.runtime import AgentRunner, PreparedResponse
+from backend.runtime.application import factory as application_factory
+from backend.runtime.capability_settings import SkillSettings
+from backend.runtime.core.config import RunnerSettings
 from backend.tools import ToolRegistry
 
 
@@ -19,11 +21,9 @@ class RecordingClient:
     def __init__(self, response: AssistantMessage | None = None) -> None:
         self.response = response or AssistantMessage(content="Done.")
         self.message_requests = []
-        self.request_parameters = []
 
     def run(self, runtime):
         self.message_requests.append(list(runtime.exchange.messages))
-        self.request_parameters.append(dict(runtime.exchange.context.get("request_parameters") or {}))
         return PreparedResponse(self.response)
 
 
@@ -31,7 +31,7 @@ def test_composes_agent_prompt_from_instruction_shared_and_agent_templates() -> 
     prompt = compose_system_prompt("agent")
 
     assert prompt.count("# Mini-Agent") == 1
-    assert prompt.count("# Working Rules") == 1
+    assert prompt.count("# Shared Working Rules") == 1
     assert prompt.count("# Agent Mode") == 1
     assert "# Plan Mode" not in prompt
     assert "{{MODE_PROMPT}}" not in prompt
@@ -41,11 +41,11 @@ def test_composes_plan_prompt_without_agent_only_capabilities() -> None:
     prompt = compose_system_prompt("plan")
 
     assert prompt.count("# Mini-Agent") == 1
-    assert prompt.count("# Working Rules") == 1
+    assert prompt.count("# Shared Working Rules") == 1
     assert prompt.count("# Plan Mode") == 1
     assert "# Agent Mode" not in prompt
     assert "does not require every response" in prompt
-    assert "Do not implement the submitted plan" in prompt
+    assert "Do not attempt commands, tests, builds" in prompt
 
 
 @pytest.mark.parametrize(
@@ -128,44 +128,74 @@ def test_empty_user_agent_preferences_are_not_injected() -> None:
     assert "User Agent Preferences" not in (system.content or "")
 
 
-def test_title_request_uses_only_its_dedicated_system_prompt_and_first_user_text() -> None:
-    client = RecordingClient(AssistantMessage(content="```模型生成的对话标题很长```"))
-    planner = LLMPlanner(client, [], [], user_preferences="不要影响标题请求")
-    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="主对话历史")
-    runtime.state.request_parameters = {
-        "required_tool_name": "read_file",
-        "response_format": {"type": "json_object"},
-    }
+def test_agent_instruction_is_injected_before_active_skills() -> None:
+    client = RecordingClient()
+    instructions = "### Project instructions: AGENTS.md\n<agents-md>Run focused tests.</agents-md>"
+    planner = LLMPlanner(
+        client,
+        [],
+        [],
+        user_preferences="回答简洁",
+        agent_instructions=instructions,
+    )
+    skill = SkillSnapshot("demo", "Demo", "Follow the demo.", ".mini_agent/skills/demo", "abc")
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(
+        task="Implement the change",
+        active_skills=[skill],
+    )
 
-    title = planner.generate_title(runtime, "请分析这个错误")
+    planner.decide(runtime)
 
-    assert title == "模型生成的对话标题很"
-    assert len(client.message_requests) == 1
-    assert client.message_requests[0] == [
-        SystemMessage(content=load_title_prompt()),
-        UserMessage(content="请分析这个错误"),
-    ]
-    assert runtime.exchange.operation == "title"
-    assert runtime.exchange.stream is False
-    assert runtime.exchange.allowed_tools == runtime.exchange.operation_tools == []
-    assert client.request_parameters == [{"thinking": {"type": "disabled"}, "max_tokens": 32}]
-    assert runtime.state.request_parameters == {
-        "required_tool_name": "read_file",
-        "response_format": {"type": "json_object"},
-    }
+    system = client.message_requests[0][0]
+    content = system.content or ""
+    assert "## Applicable AGENTS.md Instructions" in content
+    assert "### Project instructions: AGENTS.md" in content
+    assert content.index("## User Agent Preferences") < content.index("## Applicable AGENTS.md Instructions")
+    assert content.index("## Applicable AGENTS.md Instructions") < content.index("## Active project Skills")
+    assert "project-root AGENTS.md replaces the global AGENTS.md" in content
+    assert "cannot expand permissions" in content
 
 
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("  第一条   用户消息  ", "第一条 用户消息"),
-        ("“十个字符以内”", "十个字符以内"),
-        ("```一二三四五六七八九十十一```", "一二三四五六七八九十"),
-        ("\n\t", ""),
-    ],
-)
-def test_normalizes_generated_and_fallback_titles(raw: str, expected: str) -> None:
-    assert normalize_conversation_title(raw) == expected
+def test_empty_agent_instructions_are_not_injected() -> None:
+    client = RecordingClient()
+    planner = LLMPlanner(client, [], [], agent_instructions="  ")
+    runtime = AgentRunner(planner, ToolRegistry()).new_runtime(task="Implement the change")
+
+    planner.decide(runtime)
+
+    system = client.message_requests[0][0]
+    assert "Applicable AGENTS.md Instructions" not in (system.content or "")
+
+
+def test_application_factory_prefers_project_agents_over_global_agents(tmp_path, monkeypatch) -> None:
+    agents_home = tmp_path / ".mini_agent"
+    workspace = tmp_path / "project"
+    agents_home.mkdir()
+    workspace.mkdir()
+    (agents_home / "AGENTS.md").write_text("global factory guidance", encoding="utf-8")
+    (workspace / "AGENTS.md").write_text("project factory guidance", encoding="utf-8")
+    client = RecordingClient()
+    monkeypatch.setattr(application_factory, "LLMClient", lambda _config: client)
+
+    runner = application_factory._build_runner(
+        workspace,
+        "llm",
+        RunnerSettings(),
+        ToolRegistry(),
+        None,
+        ClientPaths(tmp_path / "user"),
+        SkillSettings(),
+        agents_home=agents_home,
+        model_config=object(),  # type: ignore[arg-type]
+    )
+    try:
+        planner = runner.planner
+        assert isinstance(planner, LLMPlanner)
+        assert "project factory guidance" in planner.agent_instructions
+        assert "global factory guidance" not in planner.agent_instructions
+        assert str(tmp_path) not in planner.agent_instructions
+    finally:
+        runner.close()
 
 
 def test_plan_decision_uses_composed_prompt_and_control_tools() -> None:

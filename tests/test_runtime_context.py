@@ -100,7 +100,7 @@ def test_runtime_state_round_trips_tool_failure_code() -> None:
     assert restored_assistant.tool_messages[0] == denied
 
 
-def test_sqlite_persists_and_reloads_runtime_snapshot(tmp_path: Path) -> None:
+def test_postgres_persists_and_reloads_runtime_snapshot(tmp_path: Path) -> None:
     store = session_store(tmp_path / "store")
     session = store.create_session("Runtime")
     tools = ToolRegistry(

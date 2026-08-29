@@ -1,7 +1,8 @@
 """Local-only project and conversation cwd metadata.
 
-Projects use their own small transactional database so the Web UI can list
-workspaces without opening every session database.
+Projects deliberately live outside ``user.db`` and the snapshot-owned runtime
+tree.  This keeps local filesystem paths and project conversation membership
+out of cloud sync while retaining a small, transactional store for the Web UI.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,7 +62,7 @@ class Project:
 
 
 class ProjectStore:
-    """Thread-safe project index for the local Mini-Agent installation."""
+    """Thread-safe local project index for one authenticated user."""
 
     def __init__(self, path: Path) -> None:
         path = Path(path)
@@ -72,6 +74,10 @@ class ProjectStore:
         self.path = path
         self._lock = threading.RLock()
         with self._connection() as connection:
+            # Older development builds used a partial unique index. Drop it
+            # before schema creation so restoring a removed project can never
+            # fail merely because a newer project now owns the same cwd.
+            connection.execute("DROP INDEX IF EXISTS projects_active_cwd_idx")
             connection.executescript(PROJECTS_SCHEMA)
 
     @contextmanager
@@ -241,6 +247,74 @@ class ProjectStore:
 
         with self._connection() as connection:
             connection.execute("DELETE FROM projects WHERE project_id=?", (project_id,))
+
+    def import_project(self, project: Project, session_ids: Iterable[str] = ()) -> str:
+        """Import one local project record, preserving its id when possible.
+
+        Guest-to-account migration must also retain removed projects whose cwd
+        may no longer exist, so this intentionally does not call
+        :meth:`normalize_cwd`.  The source database already contains the
+        normalized path; availability is checked whenever the project is used.
+        If an active cwd conflicts with an existing account project, the
+        existing project is reused instead of creating a duplicate.
+        """
+
+        requested_id = project.project_id
+        cwd_key = os.path.normcase(str(Path(project.cwd)))
+        with self._connection() as connection:
+            existing = connection.execute(
+                "SELECT project_id FROM projects WHERE project_id=?", (requested_id,)
+            ).fetchone()
+            if existing is not None:
+                target_id = str(existing[0])
+            else:
+                target_id = requested_id
+                conflict = connection.execute(
+                    "SELECT project_id FROM projects WHERE cwd_key=? AND removed_at IS NULL LIMIT 1",
+                    (cwd_key,),
+                ).fetchone()
+                if conflict is not None:
+                    if project.removed_at is not None:
+                        # A removed project and a newer active project are
+                        # allowed to share a cwd. Keep the imported record as
+                        # a distinct local project id.
+                        target_id = f"{requested_id}_import_{uuid4().hex[:8]}"
+                        connection.execute(
+                            "INSERT INTO projects(project_id,name,cwd,cwd_key,created_at,updated_at,removed_at) "
+                            "VALUES (?,?,?,?,?,?,?)",
+                            (
+                                target_id,
+                                project.name[:120] or Path(project.cwd).name or "项目",
+                                project.cwd,
+                                cwd_key,
+                                project.created_at,
+                                project.updated_at,
+                                project.removed_at,
+                            ),
+                        )
+                    else:
+                        target_id = str(conflict[0])
+                else:
+                    connection.execute(
+                        "INSERT INTO projects(project_id,name,cwd,cwd_key,created_at,updated_at,removed_at) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (
+                            target_id,
+                            project.name[:120] or Path(project.cwd).name or "项目",
+                            project.cwd,
+                            cwd_key,
+                            project.created_at,
+                            project.updated_at,
+                            project.removed_at,
+                        ),
+                    )
+            for session_id in session_ids:
+                connection.execute(
+                    "INSERT OR IGNORE INTO project_sessions(project_id,session_id,created_at) VALUES (?,?,?)",
+                    (target_id, str(session_id), project.created_at),
+                )
+            connection.execute("UPDATE projects SET updated_at=? WHERE project_id=?", (utc_now(), target_id))
+        return target_id
 
     def remove(self, project_id: str) -> Project:
         project = self.get(project_id, include_removed=False)

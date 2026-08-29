@@ -1,84 +1,75 @@
 # Mini-Agent Web
 
-`mini-agent-web` 是 Mini-Agent 的 React 18、Vite 5、TypeScript 本地客户端。它只通过 HTTP/SSE 调用本机 backend，不直接访问 Python 实现或本地数据库。
+一个仿照通义千问（qianwen.com）的网页界面，包含两个部分：
 
-应用包含 Chat、Turn 运行状态、项目与对话管理、本地设置、文件引用和 Benchmark 页面；访问 `/` 直接进入 Chat，不包含登录、注册、设备授权或云同步页面。
+- **对话**：和 mini-agent 聊天，实时看它的工具调用（读文件、跑命令、Web 搜索等）和流式回答
+- **Benchmark 成绩单**：在网页上跑 benchmark 任务，看每道题的分数、耗时、token 和判卷明细
 
-## 环境与启动
+后端是 FastAPI（`backend/src/api/`），通过 SSE 把 agent 的运行事件实时推给前端。未登录用户看到 Three.js 粒子海洋首页；登录后进入隔离的聊天与 Benchmark 空间。
 
-先在仓库根目录启动 Redis 与 backend：
+## 本地启动
+
+前端只访问本机 backend。账户、验证码和 PostgreSQL 由独立 cloud 服务负责；backend 不需要 `DATABASE_URL`，没有 cloud 时仍可使用游客模式和本地 Agent。
 
 ```powershell
-conda activate dev
+docker compose up -d postgres cloud
+$env:CLOUD_URL = "http://127.0.0.1:8100" # 仅本机开发允许 HTTP
 uv sync
-docker compose up -d redis
+```
+
+然后启动两个进程：
+
+**1. 后端**（FastAPI，端口 8000）
+
+```bash
 uv run python -m backend.api
 ```
 
-再启动前端开发服务器：
+**2. 前端**（Vite，端口 5173）
 
-```powershell
+```bash
 cd frontend
-npm ci
+npm install     # 首次需要
 npm run dev
 ```
 
-打开 <http://127.0.0.1:5173>。Vite 默认把 `/api` 和 `/benchmark` 代理到 <http://127.0.0.1:8000>；需要其他本地 backend 时设置 `MINI_AGENT_BACKEND_URL`。
+然后浏览器打开 http://localhost:5173 。Vite 会把 `/api` 和 `/benchmark` 代理到本机 backend 的 8000 端口。浏览器不会直连 cloud；模型 Provider 配置和 API Key 由登录用户在 Web 设置页填写；服务端不会从遗留 TUI 的 `~/.mini_agent-cache/tui/config.toml` 导入模型密钥。
 
-## 可用脚本
+注册及密码重置由 cloud 的 SMTP 配置发送；本地 backend 不读取 SMTP 或 PostgreSQL 环境变量。
 
-| 命令 | 用途 |
-| --- | --- |
-| `npm run dev` | 启动 Vite 开发服务器 |
-| `npm run build` | 生成 `dist/` 生产构建 |
-| `npm run preview` | 本地预览构建产物 |
-| `npm run typecheck` | 运行 TypeScript `--noEmit` 检查 |
-| `npm test` | 运行 Vitest 单元/组件测试 |
-| `npm run test:e2e` | 运行 Playwright 真实 backend + Vite + 假模型流程 |
+## 生产本地 backend 配置
 
-生产本地模式由 backend 托管构建产物：
+生产模式由本机 backend 提供 `frontend/dist`，浏览器和 backend 使用同一 loopback origin。backend 通过部署环境变量配置精确来源并启用 Secure Cookie：
 
-```powershell
-cd frontend
-npm run build
-cd ..
-uv run python -m backend.api
+```toml
+[web]
+public_url = "https://app.example.com"
+allowed_origins = ["https://app.example.com"]
+cookie_secure = true
 ```
 
-## 源码结构
+浏览器请求（包括 SSE 和 Benchmark）始终携带凭据。会话 Cookie 是本机 backend 的 host-only Cookie，并使用 `HttpOnly`、`SameSite=Lax` 和 `Secure`；不要配置宽泛的 Cookie Domain。`GET /api/ready` 会检查认证和设置数据库，正常返回 `200`，数据库故障返回 `503`。
 
-```text
-src/
-├─ App.tsx                  Ant Design 应用入口
-├─ app/                     应用装配、路由、主题、Turn 控制与状态投影
-├─ api/                     HTTP/SSE 客户端与请求类型
-├─ commands/                Composer 命令及补全
-├─ components/              Sidebar、设置、Markdown 和共享组件
-├─ pages/chat/              Chat、时间线、Composer、文件引用与待发送消息
-├─ pages/BenchmarkPage.tsx  Benchmark 界面
-├─ math/                    数学公式支持
-└─ styles/                  样式资源
+## 存储迁移检查
 
-e2e/                        Playwright Turn 端到端测试
+本地用户目录、正式账户、云端密钥封装和快照表会原地复用。升级前后可运行 `python scripts/reset_storage_architecture.py` 生成只读兼容性报告；脚本不会删除任何本地或云端数据，cloud 启动时只执行增量 schema migration。
+
+## 配置说明
+
+- cloud 从环境读取 `DATABASE_URL`、`MINI_AGENT_SECRET_KEY` 和 SMTP 配置；backend 从 `CLOUD_URL`（或 `MINI_AGENT_CLOUD_URL`）读取 cloud HTTPS 地址。
+- PostgreSQL 保存账户、密码哈希、验证码、登录/设备会话、限流、用户数据密钥封装和加密快照；backend 的 `~/.mini_agent-cache/auth/client.db` 只保存本地会话哈希和身份缓存，每个用户的 `~/.mini_agent/<user_id>/user.db` 保存提供商集合、加密 API Key、加密 cloud token 与同步事务状态。
+- 每个用户的对话工作区、会话库和上传文件都在 `~/.mini_agent/<user_id>/runtime/<session_id>/` 下隔离保存，benchmark 沙箱位于用户树之外。
+- 聊天历史、工具结果和 RuntimeState 保存在用户电脑上的本地 SQLite；cloud 永远只接收本地打包后的加密快照。
+
+## 结构
+
 ```
-
-请求、错误分类和持久化逻辑应留在现有 API/应用层，不在页面组件中重复实现。Runtime 事件由 backend 发布，展示与折叠逻辑留在前端。
-
-## 请求与数据安全
-
-- 前端不发送登录 Cookie 或 Bearer 凭据。
-- 带 `Origin` 的写请求必须来自 backend 配置的 loopback 来源。
-- 开发默认允许 `http://localhost:5173` 与 `http://127.0.0.1:5173`，CORS 不启用 credentials。
-- Provider API Key 不写入浏览器存储、不在响应中回显；backend 加密后保存到 `~/.mini_agent/runtime/state.db`。
-- 待发送消息不写入 localStorage；前端通过 queued-message API 读取 Redis 权威状态，POST 成功后才清空 Composer。
-
-## 验证
-
-```powershell
-npm run typecheck
-npm test
-npm run build
-npm run test:e2e
+backend/src/api/                FastAPI 后端（认证 / app / chat / benchmark）
+frontend/                React + Vite + TypeScript 前端
+  src/components/OceanScene.tsx  GPU 粒子海洋与鼠标波浪
+  src/pages/HomePage.tsx         未登录首页
+  src/pages/auth/                登录、注册、重置密码、CLI 授权
+  src/pages/ChatPage.tsx        对话页（千问风格）
+  src/pages/BenchmarkPage.tsx   Benchmark 成绩单页
+webapp-data/             运行时数据（已 gitignore）
 ```
-
-前三项是前端静态、单元/组件和生产构建验证；`test:e2e` 会启动真实本地 backend 与 Vite，但模型响应来自本地假服务，不产生模型 API 费用。

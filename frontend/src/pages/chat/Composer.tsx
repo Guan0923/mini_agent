@@ -4,7 +4,7 @@ import { useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import type { ChatMode, PermissionMode, ReasoningEffort, TodoItem } from "../../types";
 import IconAction from "../../components/IconAction";
 import type { FileCandidate } from "../../commands/fileCompletion";
-import { sessionFileContentUrl } from "../../api/projects/files";
+import { sessionFileContentUrl } from "../../api/files";
 import { SessionTodoPanel } from "./todoPanel";
 import FileMentionEditor, { type FileMentionChange, type FileMentionEditorHandle } from "./FileMentionEditor";
 import QueuedMessageList from "./QueuedMessageList";
@@ -31,8 +31,6 @@ export interface ComposerProps {
   permissionPending?: boolean;
   reasoningPending?: boolean;
   todos: TodoItem[] | null;
-  todoClosable?: boolean;
-  onTodoClose?: () => void;
   usagePercent?: number;
   usageTotalTokens?: number | null;
   usageContextLength?: number;
@@ -156,7 +154,6 @@ export default function Composer(props: ComposerProps) {
       <div className="composer-box-anchor">
         <QueuedMessageList
           items={props.queuedMessages ?? []}
-          disabled={props.disabled}
           onSend={(item) => props.onQueueSend?.(item)}
           onEdit={(item) => props.onQueueEdit?.(item)}
           onDelete={(item) => props.onQueueDelete?.(item)}
@@ -179,13 +176,7 @@ export default function Composer(props: ComposerProps) {
         ) : null}
         {props.todos && props.todos.length > 0 ? (
           <div className="composer-todo-anchor composer-reveal-item" data-reveal-index="1">
-            <SessionTodoPanel
-              key={props.todoClosable ? "closable" : "active"}
-              todos={props.todos}
-              busy={props.busy && !props.todoClosable}
-              closable={props.todoClosable}
-              onClose={props.onTodoClose}
-            />
+            <SessionTodoPanel todos={props.todos} busy={props.busy} />
           </div>
         ) : null}
         <div className={`composer-box composer-reveal-item${dragOver ? " is-dragging" : ""}`} data-reveal-index="2" onDragOver={(event) => { if (!props.disabled) { event.preventDefault(); setDragOver(true); } }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}>

@@ -117,11 +117,12 @@ def estimate_total_tokens(runtime: AgentRuntime, message: AssistantMessage) -> i
     if isinstance(model_snapshot, Mapping):
         model = str(model_snapshot.get("current_model") or "")
     model = model or str(getattr(runtime.state, "model", "") or "") or "unknown"
-    request = [getattr(item, "__dict__", str(item)) for item in (runtime.exchange.messages or runtime.state.messages)]
+    request = [
+        getattr(item, "__dict__", str(item))
+        for item in (runtime.exchange.messages or runtime.state.messages)
+    ]
     request_text = json.dumps(request, ensure_ascii=False, default=str, separators=(",", ":"))
-    response_text = json.dumps(
-        getattr(message, "__dict__", str(message)), ensure_ascii=False, default=str, separators=(",", ":")
-    )
+    response_text = json.dumps(getattr(message, "__dict__", str(message)), ensure_ascii=False, default=str, separators=(",", ":"))
     return _encode_length(request_text, model) + _encode_length(response_text, model)
 
 

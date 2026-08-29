@@ -12,26 +12,22 @@ if TYPE_CHECKING:
     from .state import RunState
 
 
-def run_state_to_dict(state: RunState) -> dict[str, Any]:
+def run_state_to_dict(state: RunState, *, include_runtime_messages: bool = True) -> dict[str, Any]:
     """Encode a run without coupling its model to a storage adapter."""
 
     return {
         "task": state.task,
         "mode": state.mode,
         "run_id": state.run_id,
-        "thread_id": state.thread_id,
-        "turn_id": state.turn_id,
-        "data_idx": state.data_idx,
         "turn_start_index": state.turn_start_index,
         "history": [message_to_dict(message) for message in state.history],
         "actions": [tool_message_to_dict(action) for action in state.actions],
+        "events": [asdict(event) for event in state.events],
+        "runtime_messages": [asdict(message) for message in state.runtime_messages] if include_runtime_messages else [],
         "completed_steps": state.completed_steps,
         "final_answer": state.final_answer,
         "model_turns": state.model_turns,
         "skill_selection_calls": state.skill_selection_calls,
-        "model_calls": state.model_calls,
-        "tool_calls": state.tool_calls,
-        "retries": state.retries,
         "status": state.status,
         "stop_reason": state.stop_reason,
         "handoff": asdict(state.handoff) if state.handoff else None,
@@ -45,7 +41,7 @@ def run_state_to_dict(state: RunState) -> dict[str, Any]:
 def run_state_from_dict(data: dict[str, Any]) -> RunState:
     """Decode current and legacy payloads into a normalized run model."""
 
-    from .state import RecoveryCheckpoint, RunHandoff, RunProvenance, RunState, utc_now
+    from .state import RecoveryCheckpoint, RunHandoff, RunProvenance, RunState, RuntimeMessage, TraceEvent, utc_now
 
     def tool(value: dict[str, Any], fallback_call_id: str) -> ToolMessage:
         if "type" in value:
@@ -122,21 +118,27 @@ def run_state_from_dict(data: dict[str, Any]) -> RunState:
         task=data["task"],
         mode=data["mode"],
         run_id=data["run_id"],
-        thread_id=str(data.get("thread_id") or ""),
-        turn_id=str(data.get("turn_id") or ""),
-        data_idx=max(0, int(data.get("data_idx", 0))),
         turn_start_index=int(data.get("turn_start_index", 0)),
         history=messages_from_dicts([dict(item) for item in data.get("history", [])]),
         actions=[
             tool(dict(item), f"call_legacy_action_{index}") for index, item in enumerate(data.get("actions", []), 1)
         ],
+        events=[TraceEvent(**item) for item in data.get("events", [])],
+        runtime_messages=[
+            RuntimeMessage(
+                sequence=int(item.get("sequence", index)),
+                kind=str(item.get("kind") or "unknown"),
+                message=str(item.get("message") or ""),
+                timestamp=str(item.get("timestamp") or utc_now()),
+                data=dict(item.get("data") or {}),
+            )
+            for index, item in enumerate(data.get("runtime_messages", []), start=1)
+            if isinstance(item, dict)
+        ],
         completed_steps=list(data.get("completed_steps", [])),
         final_answer=data.get("final_answer"),
         model_turns=int(data.get("model_turns", 0)),
         skill_selection_calls=int(data.get("skill_selection_calls", 0)),
-        model_calls=max(0, int(data.get("model_calls", 0))),
-        tool_calls=max(0, int(data.get("tool_calls", 0))),
-        retries=max(0, int(data.get("retries", 0))),
         status=status,  # type: ignore[arg-type]
         stop_reason=stop_reason,  # type: ignore[arg-type]
         active_skills=[

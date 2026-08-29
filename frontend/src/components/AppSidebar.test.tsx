@@ -36,7 +36,7 @@ function renderSidebar(archivedCount = 0, conversations: Conversation[] = [conve
   const onProfileUpdate = vi.fn().mockResolvedValue(undefined);
   const view = render(
     <AppSidebar
-      profile={{ display_name: "账户名称", agent_preferences: "" }}
+      user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
       conversations={conversations}
       archivedCount={archivedCount}
       currentId={conversation.id}
@@ -47,6 +47,7 @@ function renderSidebar(archivedCount = 0, conversations: Conversation[] = [conve
       onRename={vi.fn().mockResolvedValue(undefined)}
       onArchive={vi.fn().mockResolvedValue(undefined)}
       onDelete={vi.fn()}
+      onSignOut={vi.fn()}
       onProfileUpdate={onProfileUpdate}
     />,
   );
@@ -59,7 +60,7 @@ describe("AppSidebar utility navigation", () => {
     const onToggleCollapse = vi.fn();
     render(
       <AppSidebar
-        profile={{ display_name: "账户名称", agent_preferences: "" }}
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
         conversations={[conversation]}
         archivedCount={0}
         currentId={conversation.id}
@@ -70,6 +71,7 @@ describe("AppSidebar utility navigation", () => {
         onRename={vi.fn().mockResolvedValue(undefined)}
         onArchive={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
+        onSignOut={vi.fn()}
         collapsed={false}
         onToggleCollapse={onToggleCollapse}
         revealKey={4}
@@ -88,7 +90,7 @@ describe("AppSidebar utility navigation", () => {
   it("uses expand semantics when the sidebar is collapsed", () => {
     render(
       <AppSidebar
-        profile={{ display_name: "账户名称", agent_preferences: "" }}
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
         conversations={[conversation]}
         archivedCount={0}
         currentId={conversation.id}
@@ -99,6 +101,7 @@ describe("AppSidebar utility navigation", () => {
         onRename={vi.fn().mockResolvedValue(undefined)}
         onArchive={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
+        onSignOut={vi.fn()}
         collapsed
         onToggleCollapse={vi.fn()}
       />,
@@ -114,7 +117,7 @@ describe("AppSidebar utility navigation", () => {
 
     render(
       <AppSidebar
-        profile={{ display_name: "账户名称", agent_preferences: "" }}
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
         conversations={[conversation]}
         archivedCount={0}
         currentId={conversation.id}
@@ -126,6 +129,7 @@ describe("AppSidebar utility navigation", () => {
         onRename={vi.fn().mockResolvedValue(undefined)}
         onArchive={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
+        onSignOut={vi.fn()}
       />,
     );
 
@@ -159,7 +163,7 @@ describe("AppSidebar utility navigation", () => {
     const user = userEvent.setup();
     render(
       <AppSidebar
-        profile={{ display_name: "账户名称", agent_preferences: "" }}
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
         conversations={[conversation, projectConversation]}
         projects={[project]}
         archivedCount={0}
@@ -171,6 +175,7 @@ describe("AppSidebar utility navigation", () => {
         onRename={vi.fn().mockResolvedValue(undefined)}
         onArchive={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
+        onSignOut={vi.fn()}
       />,
     );
 
@@ -192,7 +197,7 @@ describe("AppSidebar utility navigation", () => {
     const onRemoveProject = vi.fn().mockResolvedValue(undefined);
     render(
       <AppSidebar
-        profile={{ display_name: "账户名称", agent_preferences: "" }}
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "账户名称" }}
         conversations={[projectConversation]}
         projects={[project]}
         archivedCount={0}
@@ -204,6 +209,7 @@ describe("AppSidebar utility navigation", () => {
         onRename={vi.fn().mockResolvedValue(undefined)}
         onArchive={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
+        onSignOut={vi.fn()}
         onRenameProject={onRenameProject}
         onChangeProjectPath={onChangeProjectPath}
         onRemoveProject={onRemoveProject}
@@ -266,7 +272,7 @@ describe("AppSidebar utility navigation", () => {
   it("uses the guest username instead of an email fallback", () => {
     render(
       <AppSidebar
-        profile={{ display_name: "本地用户", agent_preferences: "" }}
+        user={{ id: "guest", email: null, kind: "guest", display_name: "游客用户" }}
         conversations={[conversation]}
         archivedCount={0}
         currentId={conversation.id}
@@ -277,16 +283,17 @@ describe("AppSidebar utility navigation", () => {
         onRename={vi.fn().mockResolvedValue(undefined)}
         onArchive={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
+        onSignOut={vi.fn()}
         onProfileUpdate={vi.fn().mockResolvedValue(undefined)}
       />,
     );
-    expect(screen.getByRole("button", { name: "个人简介：本地用户" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "个人简介：游客用户" })).toBeInTheDocument();
   });
 
   it("shows the guest username when settings are opened from the chat sidebar", () => {
     render(
       <AppSidebar
-        profile={{ display_name: "本地用户", agent_preferences: "" }}
+        user={{ id: "guest", email: null, kind: "guest", display_name: "游客用户" }}
         conversations={[conversation]}
         archivedCount={0}
         currentId={conversation.id}
@@ -297,18 +304,19 @@ describe("AppSidebar utility navigation", () => {
         onRename={vi.fn().mockResolvedValue(undefined)}
         onArchive={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
+        onSignOut={vi.fn()}
         onOpenSettings={vi.fn()}
       />,
     );
-    const trigger = screen.getByRole("button", { name: "个人简介：本地用户" });
-    expect(trigger).toHaveTextContent("本地用户");
-    expect(trigger.querySelector(".profile-trigger-label-text")).toHaveTextContent("本地用户");
+    const trigger = screen.getByRole("button", { name: "个人简介：游客用户" });
+    expect(trigger).toHaveTextContent("游客用户");
+    expect(trigger.querySelector(".profile-trigger-label-text")).toHaveTextContent("游客用户");
   });
 
   it("truncates long names and scrolls them only while hovered", () => {
     render(
       <AppSidebar
-        profile={{ display_name: "这是一个很长的用户名称用于测试悬浮循环滚动", agent_preferences: "" }}
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "这是一个很长的用户名称用于测试悬浮循环滚动" }}
         conversations={[conversation]}
         archivedCount={0}
         currentId={conversation.id}
@@ -319,6 +327,7 @@ describe("AppSidebar utility navigation", () => {
         onRename={vi.fn().mockResolvedValue(undefined)}
         onArchive={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
+        onSignOut={vi.fn()}
         onOpenSettings={vi.fn()}
       />,
     );
@@ -337,7 +346,7 @@ describe("AppSidebar utility navigation", () => {
   it("does not start marquee scrolling for a short name", () => {
     render(
       <AppSidebar
-        profile={{ display_name: "小明", agent_preferences: "" }}
+        user={{ id: "u1", email: "user@example.com", kind: "account", display_name: "小明" }}
         conversations={[conversation]}
         archivedCount={0}
         currentId={conversation.id}
@@ -348,6 +357,7 @@ describe("AppSidebar utility navigation", () => {
         onRename={vi.fn().mockResolvedValue(undefined)}
         onArchive={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
+        onSignOut={vi.fn()}
         onOpenSettings={vi.fn()}
       />,
     );

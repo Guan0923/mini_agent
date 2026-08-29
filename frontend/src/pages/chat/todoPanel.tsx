@@ -1,7 +1,6 @@
 import { Collapse } from "antd";
-import { CheckCircleTwoTone, ClockCircleTwoTone, CloseOutlined, LoadingOutlined } from "@ant-design/icons";
+import { CheckCircleTwoTone, ClockCircleTwoTone, LoadingOutlined } from "@ant-design/icons";
 import { useState } from "react";
-import IconAction from "../../components/IconAction";
 import type { ChatMessage, TodoItem, TodoStatus, ToolEvent } from "../../types";
 
 const TODO_STATUSES: readonly TodoStatus[] = ["pending", "in_progress", "completed"];
@@ -40,17 +39,7 @@ export function latestTodoList(messages: ChatMessage[]): TodoItem[] | null {
   return null;
 }
 
-export function SessionTodoPanel({
-  todos,
-  busy,
-  closable = false,
-  onClose,
-}: {
-  todos: TodoItem[];
-  busy: boolean;
-  closable?: boolean;
-  onClose?: () => void;
-}) {
+export function SessionTodoPanel({ todos, busy }: { todos: TodoItem[]; busy: boolean }) {
   // null means "follow the default rule": expanded while running, collapsed when idle.
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const completed = todos.filter((item) => item.status === "completed").length;
@@ -71,17 +60,6 @@ export function SessionTodoPanel({
               </span>
             </span>
           ),
-          extra: closable && onClose ? (
-            <IconAction
-              className="todo-panel-close"
-              label="关闭任务清单"
-              icon={<CloseOutlined />}
-              onClick={(event) => {
-                event.stopPropagation();
-                onClose();
-              }}
-            />
-          ) : null,
           children: (
             <div className="todo-body">
               <ul className="todo-list">

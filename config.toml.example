@@ -1,17 +1,17 @@
-# Copy this file to ~/.mini_agent/config.toml.
-# Provider metadata and encrypted API keys live in runtime/state.db, not TOML.
-[profile]
-display_name = "本地用户"
-agent_preferences = ""
-
-[agent]
-tone = "balanced"
-verbosity = "balanced"
-initiative = "balanced"
-custom_instructions = ""
-display_mode = "medium"
-timezone = "Asia/Shanghai"
-location_enabled = false
+# Copy this file to ~/.mini_agent/config.toml for standalone offline TUI use.
+# The client reads only this TOML file; it does not apply process-environment overrides.
+[model]
+provider = "chat_completions"
+provider_name = "default"
+protocol = "chat_completions"
+api_key = "replace-with-your-key"
+# Accepted forms: service root, /v1 URL, or the complete protocol endpoint.
+base_url = "https://api.example.com/v1"
+model = "replace-with-your-model"
+max_tokens = 8192
+context_size = 1024000
+# Leave empty to use the protocol-neutral JSON length estimate.
+tokenizer_model = ""
 
 [runtime]
 # true stores complete recursively redacted bodies; false stores summaries.
@@ -19,6 +19,22 @@ log_full_messages = true
 # Maximum number of model-requested tool calls in one Agent workflow.
 # Successful, failed, and repeated calls all consume one slot.
 max_tool_calls = 32
+
+[web]
+# Browser URL and CORS origins used by the FastAPI web client.
+public_url = "http://localhost:5173"
+allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# Set true when the web app is served over HTTPS.
+cookie_secure = false
+# Account registration, password reset, SMTP, PostgreSQL and the cloud master
+# key belong to the independent cloud process. They are never read from this
+# local client TOML file; see cloud/.env.example or compose.yml.
+
+[sync]
+# device_id is generated automatically and remains stable on this client.
+# Synchronization is optional. Configure both values to enable lifecycle-triggered HTTPS sync.
+# url = "https://sync.example.com"
+# token = "replace-with-a-sync-bearer-token"
 
 [mcp]
 initialization_timeout_seconds = 15

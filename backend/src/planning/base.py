@@ -39,8 +39,3 @@ class OutputRepairReporter(Protocol):
 @runtime_checkable
 class ContextCompactor(Protocol):
     def compact_context(self, runtime: AgentRuntime) -> ContextCompactionResult: ...
-
-
-@runtime_checkable
-class TitleGenerator(Protocol):
-    def generate_title(self, runtime: AgentRuntime, first_user_text: str) -> str: ...

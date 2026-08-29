@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from backend.domain import RunProvenance, RunStatus, Session, SessionSummary
+from backend.domain import RunProvenance, RunStatus, RuntimeMessage, Session, SessionSummary
 
 from ..core.context import RuntimeState
 from ..core.ports import RuntimeStore
@@ -50,6 +50,8 @@ class SessionStore(RuntimeStore, Protocol):
 
     def resume_runtime(self, source: RuntimeState, resumed: RuntimeState) -> None: ...
 
+    def load_runtime_messages(self, session_id: str, run_id: str | None = None) -> list[RuntimeMessage]: ...
+
     def start_turn(
         self,
         session_id: str,
@@ -58,11 +60,8 @@ class SessionStore(RuntimeStore, Protocol):
         provenance: RunProvenance | None = None,
         *,
         append_user_message: bool = True,
-        delivery_id: str | None = None,
     ) -> None: ...
 
-    def append_turn_input(
-        self, session_id: str, run_id: str, content: str, *, delivery_id: str | None = None
-    ) -> None: ...
+    def append_turn_input(self, session_id: str, run_id: str, content: str) -> None: ...
 
     def finish_turn(self, session_id: str, run_id: str, status: RunStatus, answer: str | None) -> None: ...

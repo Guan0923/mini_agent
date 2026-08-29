@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.tools import ConfirmationRequired, ToolError, WorkspaceFiles, build_tool_registry
+from backend.tools import ToolError, WorkspaceFiles
 from backend.tools.filesystem import io as filesystem_io
 
 
@@ -94,71 +94,8 @@ def test_write_file_creates_and_requires_explicit_overwrite(tmp_path: Path) -> N
 
     assert files.write_file("note.txt", "second", overwrite=True) == "Replaced note.txt with 6 characters."
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "second"
-    assert files.write_file("missing/note.txt", "content") == "Created missing/note.txt with 7 characters."
-    assert (tmp_path / "missing" / "note.txt").read_text(encoding="utf-8") == "content"
-
-
-def test_create_directory_is_recursive_idempotent_and_registered_as_approved_write(tmp_path: Path) -> None:
-    files = WorkspaceFiles(tmp_path)
-
-    assert files.create_directory("one/two/three") == "Created directory one/two/three."
-    assert files.create_directory("one/two/three") == "Directory already exists: one/two/three."
-    assert (tmp_path / "one" / "two" / "three").is_dir()
-
-    registry = build_tool_registry(tmp_path)
-    assert "create_directory" in registry.names()
-    assert "create_directory" not in registry.read_only_names()
-    assert registry.requires_confirmation("create_directory") is True
-    assert {name for name in registry.names() if registry.is_workspace_confined(name)} == {
-        "create_directory",
-        "write_file",
-        "edit_file",
-    }
-    with pytest.raises(ConfirmationRequired):
-        registry.invoke("create_directory", {"path": "approved"})
-    with pytest.raises(ToolError, match="Invalid arguments"):
-        registry.invoke("create_directory", {}, confirmed=True)
-
-
-def test_create_directory_rejects_files_traversal_absolute_paths_and_links(tmp_path: Path) -> None:
-    files = WorkspaceFiles(tmp_path)
-    (tmp_path / "blocked").write_text("file", encoding="utf-8")
-
-    with pytest.raises(ToolError, match="Not a directory"):
-        files.create_directory("blocked/child")
-    with pytest.raises(ToolError, match="workspace"):
-        files.create_directory("../outside")
-    with pytest.raises(ToolError, match="relative"):
-        files.create_directory(str(tmp_path / "absolute"))
-
-    target = tmp_path / "target"
-    target.mkdir()
-    link = tmp_path / "link"
-    try:
-        link.symlink_to(target, target_is_directory=True)
-    except OSError:
-        pytest.skip("Creating symbolic links is not permitted on this system.")
-    with pytest.raises(ToolError, match="Symbolic links"):
-        files.create_directory("link/child")
-
-
-def test_write_file_keeps_created_parents_when_file_creation_fails(tmp_path: Path, monkeypatch) -> None:
-    files = WorkspaceFiles(tmp_path)
-    registry = build_tool_registry(tmp_path, workspace_files=files)
-
-    def fail_create(_path: Path, _content: str) -> None:
-        raise OSError("simulated file creation failure")
-
-    monkeypatch.setattr(files, "_exclusive_create", fail_create)
-    with pytest.raises(ToolError, match="simulated file creation failure"):
-        registry.invoke(
-            "write_file",
-            {"path": "created/before/failure.txt", "content": "content"},
-            confirmed=True,
-        )
-
-    assert (tmp_path / "created" / "before").is_dir()
-    assert not (tmp_path / "created" / "before" / "failure.txt").exists()
+    with pytest.raises(ToolError, match="Parent directory"):
+        files.write_file("missing/note.txt", "content")
 
 
 def test_edit_file_replaces_one_match_and_preserves_crlf(tmp_path: Path) -> None:

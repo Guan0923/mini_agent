@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 import types
 from pathlib import Path
@@ -9,9 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi import Request
 
-from backend.api.routes.sandbox import install as install_broker
-from backend.api.routes.sandbox import repair as repair_broker
-from backend.sandbox import WindowsBrokerClient
+from backend.api.sandbox_routes import install as install_broker
+from backend.api.sandbox_routes import repair as repair_broker
 from backend.sandbox.broker_service import WindowsServiceInstaller
 from backend.sandbox.errors import BrokerInstallationError, BrokerInstallFailureCode
 from backend.sandbox.install_helper import (
@@ -32,14 +30,6 @@ class _Result:
         self.returncode = returncode
 
 
-def test_broker_status_preserves_safe_initialization_detail() -> None:
-    status = WindowsBrokerClient(is_windows=True).status()
-
-    assert status.installed is False
-    assert status.healthy is False
-    assert status.detail == "Broker installation key is missing"
-
-
 def test_injected_runner_executes_one_local_transaction() -> None:
     calls: list[list[str]] = []
 
@@ -56,9 +46,9 @@ def test_injected_runner_executes_one_local_transaction() -> None:
 
     assert [call[:2] for call in calls] == [["sc.exe", "create"], ["sc.exe", "sidtype"], ["sc.exe", "start"]]
     assert calls[0][calls[0].index("obj=") + 1] == r"NT SERVICE\MiniAgentSandboxBroker"
+    assert calls[0][calls[0].index("start=") + 1] == "auto"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows service ACL test")
 def test_injected_runner_uses_prefixed_sid_for_acl(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
@@ -80,6 +70,10 @@ def test_injected_runner_uses_prefixed_sid_for_acl(monkeypatch: pytest.MonkeyPat
         program_data_path=Path("C:/ProgramData/Mini-Agent/SandboxBroker"),
         service_code_path=Path("C:/workspace/mini_agent/backend/src"),
         service_code_boundary_path=Path("C:/workspace/mini_agent"),
+        service_runtime_path=Path("C:/workspace/mini_agent/.venv"),
+        service_runtime_boundary_path=Path("C:/workspace/mini_agent"),
+        service_base_runtime_path=Path("C:/Users/example/AppData/Local/Programs/Python/Python311"),
+        service_base_runtime_boundary_path=Path("C:/Users/example/AppData/Local/Programs/Python"),
     )
     installer._run_local_transaction("repair", "S-1-5-21-1-2-3-500")
 
@@ -89,6 +83,10 @@ def test_injected_runner_uses_prefixed_sid_for_acl(monkeypatch: pytest.MonkeyPat
     takeown_call = next(call for call in calls if call[:3] == ["takeown.exe", "/F", str(key_path)])
     key_acl_call = next(call for call in calls if call[:2] == ["icacls.exe", str(key_path)])
     source_call = next(call for call in calls if call[:2] == ["win32-acl", str(installer.service_code_path)])
+    runtime_call = next(call for call in calls if call[:2] == ["win32-acl", str(installer.service_runtime_path)])
+    base_runtime_call = next(
+        call for call in calls if call[:2] == ["win32-acl", str(installer.service_base_runtime_path)]
+    )
     service_sid = _service_sid("MiniAgentSandboxBroker")
 
     assert "*S-1-5-21-1-2-3-500:(OI)(CI)(M)" in program_data_call
@@ -99,7 +97,9 @@ def test_injected_runner_uses_prefixed_sid_for_acl(monkeypatch: pytest.MonkeyPat
     assert "*S-1-5-21-1-2-3-500:(R)" in key_acl_call
     assert f"*{service_sid}:(M)" in key_acl_call
     assert source_call[2:] == [service_sid, "RX", "inherit"]
-    assert [call for call in calls if call[0] == "win32-acl"] == [source_call]
+    assert runtime_call[2:] == [service_sid, "RX", "inherit"]
+    assert base_runtime_call[2:] == [service_sid, "RX", "inherit"]
+    assert [call for call in calls if call[0] == "win32-acl"] == [source_call, runtime_call, base_runtime_call]
 
 
 def test_injected_repair_installs_when_service_is_missing() -> None:
@@ -134,6 +134,7 @@ def test_injected_repair_reconfigures_service_and_accepts_already_running() -> N
     config = calls[2]
     assert config[:2] == ["sc.exe", "config"]
     assert config[config.index("obj=") + 1] == r"NT SERVICE\MiniAgentSandboxBroker"
+    assert config[config.index("start=") + 1] == "auto"
     assert config[config.index("binPath=") + 1] == "python.exe -m broker"
     assert ["sc.exe", "sidtype", "MiniAgentSandboxBroker", "unrestricted"] in calls
 
@@ -296,46 +297,6 @@ def test_repair_route_returns_safe_stop_category_and_code() -> None:
     }
 
 
-def test_repair_route_installs_when_broker_is_missing() -> None:
-    calls: list[str] = []
-
-    class Broker:
-        def status(self):
-            return {"installed": False, "healthy": False}
-
-        def install(self):
-            calls.append("install")
-            return {"installed": True, "healthy": True}
-
-        def repair(self):
-            calls.append("repair")
-            return {"installed": True, "healthy": True}
-
-    app = types.SimpleNamespace(
-        state=types.SimpleNamespace(
-            web=types.SimpleNamespace(
-                sandbox_broker=Broker(),
-                auth_service=types.SimpleNamespace(origin_allowed=lambda request: True),
-            )
-        )
-    )
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/api/sandbox/repair",
-            "headers": [],
-            "client": ("127.0.0.1", 1),
-            "server": ("127.0.0.1", 8000),
-            "scheme": "http",
-            "app": app,
-        }
-    )
-
-    assert repair_broker(request) == {"installed": True, "healthy": True}
-    assert calls == ["install"]
-
-
 @pytest.mark.parametrize("stop_returncode", [0, 1])
 def test_repair_waits_for_stopped_after_any_stop_result(stop_returncode: int) -> None:
     calls: list[list[str]] = []
@@ -396,7 +357,6 @@ def test_repair_state_query_failure_aborts_before_config(monkeypatch: pytest.Mon
     assert calls == [["sc.exe", "stop", "MiniAgentSandboxBroker"]]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows icacls test")
 def test_numeric_sid_is_prefixed_for_icacls(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _icacls_sid("S-1-5-21-1-2-3-500") == "*S-1-5-21-1-2-3-500"
     with pytest.raises(ValueError):
@@ -446,7 +406,6 @@ def test_invalid_sid_is_rejected_before_replacing_existing_file(tmp_path: Path) 
     assert sid_path.read_text(encoding="ascii") == "existing"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows source ACL test")
 def test_source_acl_is_confined_to_rx_on_source_tree() -> None:
     source = Path("C:/workspace/mini_agent/backend/src")
     boundary = Path("C:/workspace/mini_agent")
@@ -494,6 +453,10 @@ def test_helper_transaction_orders_sid_service_acl_source_and_start(
                 "program_data_path": str(program_data),
                 "service_code_path": str(source),
                 "service_code_boundary_path": str(tmp_path / "repo"),
+                "service_runtime_path": str(tmp_path / "repo" / ".venv"),
+                "service_runtime_boundary_path": str(tmp_path / "repo"),
+                "service_base_runtime_path": str(tmp_path / "python" / "Python311"),
+                "service_base_runtime_boundary_path": str(tmp_path / "python"),
             }
         )
         == 0
@@ -508,5 +471,17 @@ def test_helper_transaction_orders_sid_service_acl_source_and_start(
     assert calls[4][:2] == ["icacls.exe", str(program_data)]
     assert calls[5][:2] == ["icacls.exe", str(sid_path)]
     assert f"{service_sid}:(R)" in calls[5]
-    assert calls[-2] == ["win32-acl-batch", str(source), str(tmp_path / "repo"), "MiniAgentSandboxBroker"]
+    assert calls[-4] == ["win32-acl-batch", str(source), str(tmp_path / "repo"), "MiniAgentSandboxBroker"]
+    assert calls[-3] == [
+        "win32-acl-batch",
+        str(tmp_path / "repo" / ".venv"),
+        str(tmp_path / "repo"),
+        "MiniAgentSandboxBroker",
+    ]
+    assert calls[-2] == [
+        "win32-acl-batch",
+        str(tmp_path / "python" / "Python311"),
+        str(tmp_path / "python"),
+        "MiniAgentSandboxBroker",
+    ]
     assert calls[-1] == ["sc.exe", "start", "MiniAgentSandboxBroker"]

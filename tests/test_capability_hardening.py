@@ -14,6 +14,7 @@ from backend.mcp import client as mcp_client
 from backend.mcp.config import McpSettings, McpTrustStore, prepare_mcp_plan
 from backend.runtime import AgentRunner
 from backend.runtime.application import factory as app_factory
+from backend.runtime.application.services import AgentApplication
 from backend.runtime.capability_settings import SubagentSettings
 from backend.runtime.core.context import AgentRuntime
 from backend.runtime.subagent_bridge import ParentRuntimeBridge
@@ -86,7 +87,7 @@ def test_user_mcp_servers_are_started_and_project_file_is_ignored(tmp_path: Path
         paths,
         {},
         sandbox_launcher=SandboxLauncher(is_windows=False, allow_local_backend=True),
-        sandbox_config={},
+        sandbox_config={"enabled": True},
     )
     assert len(started) == 2
     assert len(started[1]) == 1
@@ -108,7 +109,7 @@ def test_external_mcp_server_cannot_start_without_sandbox(tmp_path: Path, monkey
         app_factory._external_resources(workspace, paths, {})
 
 
-def test_sandbox_runtime_requires_healthy_broker_and_drops_obsolete_enabled_config(monkeypatch) -> None:
+def test_sandbox_runtime_requires_healthy_broker_and_migrates_disabled_config(monkeypatch) -> None:
     class Broker:
         def __init__(self, status: BrokerStatus) -> None:
             self._status = status
@@ -131,7 +132,7 @@ def test_sandbox_runtime_requires_healthy_broker_and_drops_obsolete_enabled_conf
     launcher, config = app_factory._sandbox_runtime({"sandbox_config": {"policy_version": 2, "enabled": False}})
 
     assert isinstance(launcher, SandboxLauncher)
-    assert "enabled" not in config
+    assert config["enabled"] is True
 
 
 def test_mcp_trust_store_is_compat_noop(tmp_path: Path) -> None:
@@ -216,8 +217,7 @@ def test_mcp_shutdown_timeout_stops_loop_and_has_stable_error(monkeypatch) -> No
     manager._stack = SimpleNamespace(aclose=lambda: object())
     manager._thread = SimpleNamespace(join=lambda **_kwargs: None, is_alive=lambda: False)
 
-    def timeout(awaitable, **_kwargs):
-        awaitable.close()
+    def timeout(*_args, **_kwargs):
         raise mcp_client.FutureTimeoutError
 
     monkeypatch.setattr(manager, "_submit", timeout)
@@ -258,6 +258,47 @@ def test_runner_closes_only_its_own_resources() -> None:
     assert second.closed == 0
     runner_two.close()
     assert second.closed == 1
+
+
+def test_application_closes_runner_when_sync_close_fails() -> None:
+    resource = SimpleNamespace(closed=0)
+    resource.close = lambda: setattr(resource, "closed", resource.closed + 1)
+    runner = AgentRunner(object(), ToolRegistry(), resources=(resource,))
+    sync = SimpleNamespace(close=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("sync failed")))
+    application = AgentApplication(runner, object(), object(), sync)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="sync failed"):
+        application.close()
+
+    assert resource.closed == 1
+
+
+def test_build_application_closes_runner_when_sync_setup_fails(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    paths = ClientPaths(tmp_path / "home")
+    runner = SimpleNamespace(closed=0)
+    runner.close = lambda: setattr(runner, "closed", runner.closed + 1)
+
+    monkeypatch.setattr(app_factory, "client_paths", lambda: paths)
+    monkeypatch.setattr(
+        app_factory,
+        "initialize_config",
+        lambda _paths, _workspace: {"sync": {"device_id": "device-one"}},
+    )
+    monkeypatch.setattr(app_factory, "_settings_for", lambda *_args: object())
+    monkeypatch.setattr(app_factory, "SQLiteSessionStore", lambda *_args: object())
+    monkeypatch.setattr(app_factory, "_build_subagent_runner", lambda *_args: runner)
+
+    def fail_sync(*_args):
+        raise RuntimeError("cannot start sync")
+
+    monkeypatch.setattr(app_factory, "_build_sync_coordinator", fail_sync)
+
+    with pytest.raises(RuntimeError, match="cannot start sync"):
+        app_factory.build_application(workspace, planner_name="rule")
+
+    assert runner.closed == 1
 
 
 def test_closed_parent_bridge_rejects_new_worker_messages() -> None:
@@ -496,13 +537,8 @@ def test_subagent_does_not_swallow_base_exceptions() -> None:
 
 
 def test_subagent_limits_and_cooperative_timeout() -> None:
-    class SlowChild(_Child):
-        def run(self, _runtime):
-            sleep(0.05)
-            return SimpleNamespace(status="completed", final_answer=self.task)
-
     settings = SubagentSettings(1, 1, 0.01, 0.05)
-    coordinator = SubagentCoordinator(SlowChild, settings=settings)
+    coordinator = SubagentCoordinator(_Child, settings=settings)
 
     with pytest.raises(ToolError, match="at most 1"):
         coordinator.invoke(

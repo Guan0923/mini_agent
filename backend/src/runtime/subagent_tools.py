@@ -73,9 +73,6 @@ class LockedToolExecutor:
     def requires_confirmation(self, name: str) -> bool:
         return self._tools.requires_confirmation(name)
 
-    def is_workspace_confined(self, name: str) -> bool:
-        return self._tools.is_workspace_confined(name)
-
     def is_retryable(self, name: str) -> bool:
         return self._tools.is_retryable(name)
 
@@ -113,7 +110,7 @@ class LockedToolExecutor:
                 raise ToolError("Workspace mutation requires a path.")
             with self._locks.file(normalized_workspace_path(self._workspace, path)):
                 return call()
-        if name in {"create_directory", "run_command"}:
+        if name == "run_command":
             with self._locks.command():
                 return call()
         return call()

@@ -10,22 +10,22 @@ from backend.domain.runtime_state import NodeWriter, RuntimeState
 from backend.planning import RuleBasedPlanner
 from backend.runtime import AgentRunner
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
+from backend.storage.auth import LocalAuthStore
 from backend.tools import ToolRegistry
 
 
 def test_running_turn_config_patch_merges_partial_model_and_rejects_completed_turn(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web")
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
     with TestClient(create_app(state)) as client:
+        identity = client.post("/api/auth/guest").json()["user"]
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        store = session_store(state)
+        store = session_store(state, identity["id"])
         writer = NodeWriter(store)
-        root = store.ensure_root_node(sidebar["session_id"])
         node = writer.create(
             RuntimeState.create(
                 session_id=sidebar["session_id"],
                 thread_id=sidebar["thread_id"],
                 id="turn_config",
-                parent=root,
                 user_content=[{"type": "text", "text": "configure me"}],
                 provider_name="local",
             )
@@ -58,10 +58,11 @@ def test_running_turn_config_patch_merges_partial_model_and_rejects_completed_tu
 
 
 def test_running_turn_config_patch_updates_active_runtime_pending_config(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web")
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
     with TestClient(create_app(state)) as client:
+        identity = client.post("/api/auth/guest").json()["user"]
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        store = session_store(state)
+        store = session_store(state, identity["id"])
         bridge = RuntimeEventNodeBridge(
             store,
             session_id=sidebar["session_id"],
@@ -73,7 +74,7 @@ def test_running_turn_config_patch_updates_active_runtime_pending_config(tmp_pat
         node = bridge.start()
         runtime = AgentRunner(RuleBasedPlanner(), ToolRegistry()).new_runtime(task="configure active runtime")
         bridge.bind_runtime(runtime)
-        state.active_runtime_bridges[sidebar["thread_id"]] = bridge
+        state.active_runtime_bridges[(identity["id"], sidebar["thread_id"])] = bridge
 
         assert client.patch(f"/api/turns/{node.id}/config", json={"running_mode": "plan"}).status_code == 200
         response = client.patch(
@@ -97,11 +98,12 @@ def test_running_turn_config_patch_updates_active_runtime_pending_config(tmp_pat
 
 
 def test_plan_decision_endpoint_rejects_old_choices(tmp_path: Path) -> None:
-    state = WebAppState(tmp_path / "web")
+    state = WebAppState(tmp_path / "web", auth_repository=LocalAuthStore(tmp_path / "client.db"))
     with TestClient(create_app(state)) as client:
+        identity = client.post("/api/auth/guest").json()["user"]
         for choice in ("implement_clear_session", "cancel"):
             decision_id = f"decision_{choice}"
-            registry.register(decision_id, request_kind="plan")
+            registry.register(decision_id, identity["id"], request_kind="plan")
             response = client.post("/api/decisions", json={"decision_id": decision_id, "choice": choice})
             assert response.status_code == 422
             registry.discard(decision_id)
