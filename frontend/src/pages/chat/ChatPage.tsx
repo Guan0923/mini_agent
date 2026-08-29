@@ -687,7 +687,7 @@ export default function ChatPage({
         <Button type="text" aria-pressed={visibleMainView === "chat"} onClick={() => setMainView("chat")}>Chat</Button>
         <Button type="text" aria-pressed={visibleMainView === "trace"} onClick={() => setMainView("trace")}>Trace</Button>
       </div> : null}
-      {visibleMainView === "trace" ? <TracePage turns={traceTurns} /> : <>
+      {visibleMainView === "trace" ? <TracePage key={currentThreadId} turns={traceTurns} /> : <>
       <div className="chat-content">
         <ChatMessageList
           messages={messages}

@@ -49,28 +49,6 @@
   background: #fafbfc;
 }
 
-.trace-controls {
-  position: sticky;
-  z-index: 5;
-  top: -1px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  max-width: 1100px;
-  margin: 0 auto 12px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(8px);
-}
-
-.trace-controls .ant-select {
-  flex: 1;
-  min-width: 0;
-}
-
 .trace-version-controls,
 .trace-turn-label,
 .trace-collapse-label {
@@ -86,10 +64,29 @@
   color: var(--muted);
 }
 
+.trace-version-controls .ant-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.trace-version-label {
+  white-space: nowrap;
+}
+
 .trace-turn-collapse {
   max-width: 1100px;
   margin: 0 auto;
   background: #ffffff;
+}
+
+.trace-turn-collapse > .ant-collapse-item > .ant-collapse-header {
+  min-width: 0;
+}
+
+.trace-turn-collapse > .ant-collapse-item > .ant-collapse-header > .ant-collapse-extra {
+  flex: 0 0 auto;
+  min-width: 0;
 }
 
 .trace-turn-label,
@@ -150,6 +147,14 @@
   background: transparent;
 }
 
+.trace-turn-content {
+  min-width: 0;
+}
+
+.trace-turn-content > .ant-alert {
+  margin-bottom: 12px;
+}
+
 .trace-loading {
   display: flex;
   justify-content: center;
@@ -161,9 +166,8 @@
     padding: 10px 10px 20px;
   }
 
-  .trace-controls {
-    align-items: stretch;
-    flex-direction: column;
+  .trace-version-prefix {
+    display: none;
   }
 
   .trace-turn-label time,

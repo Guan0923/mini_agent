@@ -62,7 +62,8 @@ sandbox_broker = SwitchableTestBroker()
 
 class TestBrokerFactory:
     @classmethod
-    def from_system(cls):
+    def from_system(cls, *, expected_proxy_port: int = 17831):
+        _ = expected_proxy_port
         return sandbox_broker
 
 
