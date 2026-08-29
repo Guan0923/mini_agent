@@ -10,6 +10,7 @@ interface RuntimeTurnResponse extends RuntimeRootResponse {
   parent_id: string;
   running_mode: "agent" | "plan";
   status: string;
+  timestamp: string;
   current_data_idx: number;
   data: Array<Array<{
     role: string;
@@ -57,7 +58,7 @@ function tracePanel(page: import("@playwright/test").Page, label: string, index 
   );
 }
 
-test("Trace audit keeps one context while two real HTTP model calls append Turn Items", async ({ page }) => {
+test("Trace audit lists two real Turns oldest first and loads them independently", async ({ page }) => {
   const resetResponse = await page.request.post("/api/test/trace-model-reset");
   expect(resetResponse.ok(), `${resetResponse.status()} ${await resetResponse.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Trace Audit E2E" } });
@@ -78,16 +79,39 @@ test("Trace audit keeps one context while two real HTTP model calls append Turn 
     "Trace response from HTTP.", { timeout: 15_000 },
   );
 
+  const secondTraceTask = "$trace-audit trace audit e2e second turn";
+  await page.getByLabel("聊天输入").fill(secondTraceTask);
+  const createSecondTraceResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await createSecondTraceResponse).ok()).toBeTruthy();
+  await expect(page.locator(".message.user").last()).toContainText(secondTraceTask, { timeout: 15_000 });
+  await expect(page.locator(".message.assistant").last()).toContainText(
+    "Trace response from HTTP.", { timeout: 15_000 },
+  );
+
+  const nodes = (await fetchRuntimeNodes(page, (await sidebarResponse.json() as { session_id: string }).session_id))
+    .filter(isRuntimeTurnResponse)
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
+  expect(nodes).toHaveLength(2);
+
   await page.setViewportSize({ width: 480, height: 800 });
   await page.getByRole("button", { name: "Trace", exact: true }).click();
   await expect(page.getByLabel("聊天输入")).toHaveCount(0);
   await expect(page.getByText("System", { exact: true })).toHaveCount(1);
-  await expect(page.getByText("Skill", { exact: true })).toHaveCount(1);
   await expect(page.getByText("MCP", { exact: true })).toHaveCount(1);
   await expect(page.getByText("User Message", { exact: true })).toHaveCount(1);
 
   const traceCollapse = page.locator(".trace-turn-collapse");
-  const outerHeader = traceCollapse.locator(":scope > .ant-collapse-item > .ant-collapse-header");
+  const turnPanels = traceCollapse.locator(":scope > .ant-collapse-item");
+  await expect(turnPanels).toHaveCount(2);
+  await expect(turnPanels.nth(0)).not.toHaveClass(/ant-collapse-item-active/);
+  await expect(turnPanels.nth(1)).toHaveClass(/ant-collapse-item-active/);
+  const renderedTurnIds = await traceCollapse.locator(".trace-turn-id").allTextContents();
+  expect(renderedTurnIds).toEqual(nodes.map((node) => node.id));
+
+  const outerHeader = turnPanels.nth(1).locator(":scope > .ant-collapse-header");
   const outerTitle = outerHeader.locator(".trace-collapse-title");
   const system = tracePanel(page, "System");
   const innerHeader = system.locator(".ant-collapse-header");
@@ -108,10 +132,14 @@ test("Trace audit keeps one context while two real HTTP model calls append Turn 
     }).toBe(true);
   }
   await expect.poll(() => traceCollapse.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  const skill = tracePanel(page, "Skill");
-  await skill.locator(".ant-collapse-header").click();
-  await expect(skill.locator(".trace-value")).toContainText("complete local Skill instructions");
-  await expect(skill.locator(".trace-value")).toContainText('"source": "user"');
+
+  await turnPanels.nth(0).locator(":scope > .ant-collapse-header").click();
+  await expect(turnPanels.nth(0)).toHaveClass(/ant-collapse-item-active/);
+  await expect(turnPanels.nth(1)).toHaveClass(/ant-collapse-item-active/);
+  await expect(page.getByText("System", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("MCP", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("User Message", { exact: true })).toHaveCount(2);
+  await expect.poll(() => traceCollapse.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 
   const mcp = tracePanel(page, "MCP");
   await mcp.locator(".ant-collapse-header").click();
@@ -121,7 +149,6 @@ test("Trace audit keeps one context while two real HTTP model calls append Turn 
   await system.locator(".ant-collapse-header").click();
   await expect(system.locator(".trace-value")).toContainText("User Agent Preferences");
   await expect(system.locator(".trace-value")).toContainText("Trace E2E preference: concise local audit.");
-  await expect(system.locator(".trace-value")).not.toContainText("complete local Skill instructions");
   await expect(system.locator(".trace-value")).toContainText(fullSystemPreview!);
 
   const reasoning = page.getByText("Assistant Reasoning", { exact: true }).last().locator(
@@ -138,20 +165,16 @@ test("Trace audit keeps one context while two real HTTP model calls append Turn 
 
   const modelCalls = await page.request.get("/api/test/trace-model-calls");
   expect(modelCalls.ok()).toBeTruthy();
-  expect((await modelCalls.json() as { calls: number }).calls).toBeGreaterThanOrEqual(2);
+  expect((await modelCalls.json() as { calls: number }).calls).toBeGreaterThanOrEqual(3);
 
-  const nodes = (await fetchRuntimeNodes(page, (await sidebarResponse.json() as { session_id: string }).session_id))
-    .filter(isRuntimeTurnResponse);
-  expect(nodes).toHaveLength(1);
   const traceResponse = await page.request.get(
     `/api/turns/${encodeURIComponent(nodes[0].id)}/trace?data_idx=${nodes[0].current_data_idx}`,
   );
   expect(traceResponse.ok(), `${traceResponse.status()} ${await traceResponse.text()}`).toBeTruthy();
   const trace = await traceResponse.json() as {
-    context: { system_message: string; active_skills: unknown[]; tools: unknown[] };
+    context: { system_message: string; tools: unknown[] };
     items: Array<{ item: { type: string } }>;
   };
-  expect(trace.context.active_skills).toHaveLength(1);
   expect(trace.context.tools).toHaveLength(1);
   expect(trace.items.filter((entry) => entry.item.type === "text")).toHaveLength(2);
   expect(trace.items.filter((entry) => entry.item.type === "reasoning")).toHaveLength(1);

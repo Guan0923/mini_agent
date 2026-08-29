@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Alert, Button, Collapse, Empty, Select, Spin, Tag, type CollapseProps } from "antd";
+import { Alert, Button, Collapse, Empty, Spin, Tag, type CollapseProps } from "antd";
 import { LeftOutlined, RightOutlined } from "@ant-design/icons";
 import { getTurnTrace } from "../../api";
 import type {
@@ -133,25 +133,20 @@ function mergeTrace(current: TurnTraceResponse | null, incoming: TurnTraceRespon
   };
 }
 
-export default function TracePage({ turns }: TracePageProps) {
-  const orderedTurns = useMemo(
-    () => [...turns].sort((left, right) => right.timestamp.localeCompare(left.timestamp) || right.id.localeCompare(left.id)),
-    [turns],
-  );
-  const [requestedTurnId, setRequestedTurnId] = useState<string | null>(null);
-  const selectedTurn = orderedTurns.find((turn) => turn.id === requestedTurnId) ?? orderedTurns[0];
-  const [versionByTurn, setVersionByTurn] = useState<Record<string, number>>({});
-  const requestedDataIdx = selectedTurn
-    ? versionByTurn[selectedTurn.id] ?? selectedTurn.current_data_idx
-    : 0;
-  const dataIdx = selectedTurn ? Math.min(Math.max(requestedDataIdx, 0), selectedTurn.data.length - 1) : 0;
+function TurnTraceContent({ turn, dataIdx, active }: {
+  turn: RuntimeStateNode;
+  dataIdx: number;
+  active: boolean;
+}) {
   const [trace, setTrace] = useState<TurnTraceResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!selectedTurn) {
+    if (!active) {
       setTrace(null);
+      setLoading(false);
+      setError(null);
       return;
     }
     let stopped = false;
@@ -159,7 +154,7 @@ export default function TracePage({ turns }: TracePageProps) {
     let timer: number | undefined;
     let cursor = 0;
     let hasContext = false;
-    let running = selectedTurn.status === "running";
+    let running = turn.status === "running";
     setTrace(null);
     setError(null);
 
@@ -171,7 +166,7 @@ export default function TracePage({ turns }: TracePageProps) {
       activeController = new AbortController();
       try {
         const value = await getTurnTrace(
-          selectedTurn.id,
+          turn.id,
           dataIdx,
           activeController.signal,
           hasContext ? cursor : undefined,
@@ -198,70 +193,105 @@ export default function TracePage({ turns }: TracePageProps) {
       activeController?.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [selectedTurn?.id, dataIdx]);
+  }, [active, turn.id, dataIdx]);
 
-  if (!selectedTurn) return <div className="trace-page"><Empty description="当前 Thread 还没有 Turn" /></div>;
-
-  const response = trace?.turn.id === selectedTurn.id && trace.data_idx === dataIdx ? trace : null;
-  const displayTurn = response?.turn ?? selectedTurn;
+  const response = trace?.turn.id === turn.id && trace.data_idx === dataIdx ? trace : null;
   const innerItems = [
     ...contextPanels(response?.context ?? null),
     ...traceItemPanels(response?.items ?? []),
   ];
-  const outerItems: CollapseProps["items"] = [{
-    key: selectedTurn.id,
-    label: (
-      <span className="trace-turn-label">
-        <Tag color={displayTurn.status === "failed" ? "red" : "blue"}>Turn</Tag>
-        <span className="trace-turn-id" title={displayTurn.id}>{displayTurn.id}</span>
-        <Tag color={displayTurn.status === "failed" ? "red" : undefined}>{displayTurn.status}</Tag>
-        <time>{displayTurn.timestamp}</time>
-      </span>
-    ),
-    children: innerItems.length > 0
-      ? <Collapse
-          className="trace-inner-collapse"
-          classNames={{ title: "trace-collapse-title" }}
-          items={innerItems}
+
+  return (
+    <div className="trace-turn-content">
+      {error ? <Alert type="error" showIcon title={`Trace 加载失败：${error}`} /> : null}
+      {loading && !response ? <div className="trace-loading"><Spin /></div> : null}
+      {response && innerItems.length > 0
+        ? <Collapse
+            className="trace-inner-collapse"
+            classNames={{ title: "trace-collapse-title" }}
+            items={innerItems}
+          />
+        : null}
+      {!loading && !error && innerItems.length === 0
+        ? <Empty description="该版本还没有 Trace 上下文或完成 Item" />
+        : null}
+    </div>
+  );
+}
+
+function clampDataIdx(turn: RuntimeStateNode, requestedDataIdx: number): number {
+  return Math.min(Math.max(requestedDataIdx, 0), Math.max(turn.data.length - 1, 0));
+}
+
+export default function TracePage({ turns }: TracePageProps) {
+  const orderedTurns = useMemo(
+    () => [...turns].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id)),
+    [turns],
+  );
+  const [activeTurnIds, setActiveTurnIds] = useState<string[]>(() => {
+    const latestTurn = orderedTurns[orderedTurns.length - 1];
+    return latestTurn ? [latestTurn.id] : [];
+  });
+  const activeTurnIdSet = useMemo(() => new Set(activeTurnIds), [activeTurnIds]);
+  const [versionByTurn, setVersionByTurn] = useState<Record<string, number>>({});
+
+  if (orderedTurns.length === 0) {
+    return <div className="trace-page"><Empty description="当前 Thread 还没有 Turn" /></div>;
+  }
+
+  const outerItems: CollapseProps["items"] = orderedTurns.map((turn) => {
+    const dataIdx = clampDataIdx(turn, versionByTurn[turn.id] ?? turn.current_data_idx);
+    const totalVersions = turn.data.length;
+    const versionControls = (
+      <span className="trace-version-controls" onClick={(event) => event.stopPropagation()}>
+        <Button
+          type="text"
+          aria-label={`${turn.id} 上一个 data 版本`}
+          icon={<LeftOutlined />}
+          disabled={dataIdx <= 0}
+          onClick={() => setVersionByTurn((current) => ({ ...current, [turn.id]: dataIdx - 1 }))}
         />
-      : <Empty description="该版本还没有 Trace 上下文或完成 Item" />,
-  }];
+        <span className="trace-version-label">
+          <span className="trace-version-prefix">data </span>{dataIdx + 1}/{totalVersions}
+        </span>
+        <Button
+          type="text"
+          aria-label={`${turn.id} 下一个 data 版本`}
+          icon={<RightOutlined />}
+          disabled={dataIdx >= totalVersions - 1}
+          onClick={() => setVersionByTurn((current) => ({ ...current, [turn.id]: dataIdx + 1 }))}
+        />
+      </span>
+    );
+
+    return {
+      key: turn.id,
+      label: (
+        <span className="trace-turn-label">
+          <Tag color={turn.status === "failed" ? "red" : "blue"}>Turn</Tag>
+          <span className="trace-turn-id" title={turn.id}>{turn.id}</span>
+          <Tag color={turn.status === "failed" ? "red" : undefined}>{turn.status}</Tag>
+          <time>{turn.timestamp}</time>
+        </span>
+      ),
+      extra: versionControls,
+      children: (
+        <TurnTraceContent
+          turn={turn}
+          dataIdx={dataIdx}
+          active={activeTurnIdSet.has(turn.id)}
+        />
+      ),
+    };
+  });
 
   return (
     <div className="trace-page">
-      <div className="trace-controls">
-        <Select
-          aria-label="选择 Turn"
-          variant="borderless"
-          value={selectedTurn.id}
-          options={orderedTurns.map((turn) => ({ label: `${turn.id} · ${turn.status}`, value: turn.id }))}
-          onChange={(turnId) => setRequestedTurnId(turnId)}
-        />
-        <span className="trace-version-controls">
-          <Button
-            type="text"
-            aria-label="上一个 data 版本"
-            icon={<LeftOutlined />}
-            disabled={dataIdx <= 0}
-            onClick={() => setVersionByTurn((current) => ({ ...current, [selectedTurn.id]: dataIdx - 1 }))}
-          />
-          <span>data {dataIdx + 1}/{selectedTurn.data.length}</span>
-          <Button
-            type="text"
-            aria-label="下一个 data 版本"
-            icon={<RightOutlined />}
-            disabled={dataIdx >= selectedTurn.data.length - 1}
-            onClick={() => setVersionByTurn((current) => ({ ...current, [selectedTurn.id]: dataIdx + 1 }))}
-          />
-        </span>
-      </div>
-      {error ? <Alert type="error" showIcon title={`Trace 加载失败：${error}`} /> : null}
-      {loading && !response ? <div className="trace-loading"><Spin /></div> : null}
       <Collapse
-        key={`${selectedTurn.id}:${dataIdx}`}
         className="trace-turn-collapse"
         classNames={{ title: "trace-collapse-title" }}
-        defaultActiveKey={[selectedTurn.id]}
+        activeKey={activeTurnIds}
+        onChange={(keys) => setActiveTurnIds(Array.isArray(keys) ? keys.map(String) : [String(keys)])}
         items={outerItems}
       />
     </div>
