@@ -115,6 +115,13 @@ describe("RightPanel tabs", () => {
     expect(screen.getByTestId("collapsed")).toHaveTextContent("false");
   });
 
+  it("applies full-height semantic styles to the Ant Design 6 tab body and content", () => {
+    const { container } = render(<StatefulPanel initial={payload([sideWindow("window-1", "侧聊 1")])} />);
+
+    expect(container.querySelector<HTMLElement>(".ant-tabs-body")).toHaveStyle({ height: "100%", minHeight: "0" });
+    expect(container.querySelector<HTMLElement>(".ant-tabs-content")).toHaveStyle({ height: "100%", minHeight: "0" });
+  });
+
   it("force-renders every tab and does not unmount inactive content", () => {
     const unmounted: string[] = [];
     function Pane({ id }: { id: string }) {

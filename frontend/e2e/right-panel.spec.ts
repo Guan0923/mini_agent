@@ -35,6 +35,74 @@ async function openRightPanel(page: Page): Promise<void> {
   await page.getByRole("button", { name: "打开右侧边栏" }).click();
 }
 
+async function expectEmptyHorizontallyCentered(shell: Locator): Promise<void> {
+  const layout = await shell.evaluate((element) => {
+    const empty = element.querySelector<HTMLElement>(".right-panel-empty");
+    const placeholder = element.querySelector<HTMLElement>(".right-panel-empty .ant-empty");
+    const shellBox = element.getBoundingClientRect();
+    const emptyBox = empty?.getBoundingClientRect();
+    const placeholderBox = placeholder?.getBoundingClientRect();
+    const center = (box: DOMRect) => box.left + box.width / 2;
+    const missingElementGap = Number.MAX_SAFE_INTEGER;
+    return {
+      emptyWidthGap: emptyBox ? Math.abs(shellBox.width - emptyBox.width) : missingElementGap,
+      emptyCenterGap: emptyBox ? Math.abs(center(shellBox) - center(emptyBox)) : missingElementGap,
+      placeholderCenterGap: placeholderBox ? Math.abs(center(shellBox) - center(placeholderBox)) : missingElementGap,
+    };
+  });
+  expect(layout.emptyWidthGap).toBeLessThanOrEqual(1);
+  expect(layout.emptyCenterGap).toBeLessThanOrEqual(1);
+  expect(layout.placeholderCenterGap).toBeLessThanOrEqual(1);
+}
+
+async function expectSideChatFillsPanel(shell: Locator): Promise<void> {
+  await expect(shell.locator(".right-panel-side-chat")).toBeVisible();
+  const readLayout = () => shell.evaluate((element) => {
+    const shellBox = element.getBoundingClientRect();
+    const boxFor = (selector: string) => element.querySelector<HTMLElement>(selector)?.getBoundingClientRect();
+    const bottomGap = (selector: string) => {
+      const box = boxFor(selector);
+      return box ? Math.abs(shellBox.bottom - box.bottom) : Number.MAX_SAFE_INTEGER;
+    };
+    const composerBox = boxFor("[data-composer-seat]");
+    const chatContentBox = boxFor(".chat-content");
+    const sideChat = element.querySelector<HTMLElement>(".right-panel-side-chat");
+    return {
+      bodyHolderBottomGap: bottomGap(".ant-tabs-body-holder"),
+      bodyBottomGap: bottomGap(".ant-tabs-body"),
+      tabContentBottomGap: bottomGap(".ant-tabs-content"),
+      sideChatBottomGap: bottomGap(".right-panel-side-chat"),
+      chatPageBottomGap: bottomGap(".right-panel-side-chat .chat-page"),
+      composerBottomGap: bottomGap("[data-composer-seat]"),
+      chatContentHeight: chatContentBox?.height ?? 0,
+      contentBeforeComposer: Boolean(chatContentBox && composerBox && chatContentBox.bottom <= composerBox.top + 1),
+      horizontalOverflow: sideChat ? sideChat.scrollWidth - sideChat.clientWidth : -1,
+    };
+  });
+
+  await expect.poll(async () => (await readLayout()).composerBottomGap).toBeLessThanOrEqual(1);
+  const layout = await readLayout();
+  expect(layout.bodyHolderBottomGap).toBeLessThanOrEqual(1);
+  expect(layout.bodyBottomGap).toBeLessThanOrEqual(1);
+  expect(layout.tabContentBottomGap).toBeLessThanOrEqual(1);
+  expect(layout.sideChatBottomGap).toBeLessThanOrEqual(1);
+  expect(layout.chatPageBottomGap).toBeLessThanOrEqual(1);
+  expect(layout.chatContentHeight).toBeGreaterThan(0);
+  expect(layout.contentBeforeComposer).toBeTruthy();
+  expect(layout.horizontalOverflow).toBeLessThanOrEqual(1);
+}
+
+async function dragSplitterBy(page: Page, dragger: Locator, deltaX: number): Promise<void> {
+  const box = await dragger.boundingBox();
+  expect(box).not.toBeNull();
+  const startX = box!.x + box!.width / 2;
+  const y = box!.y + box!.height / 2;
+  await page.mouse.move(startX, y);
+  await page.mouse.down();
+  await page.mouse.move(startX + deltaX, y, { steps: 8 });
+  await page.mouse.up();
+}
+
 test("side chat hides its anchor history, survives refresh, and leaves choices after its last tab closes", async ({ page }) => {
   const title = "Right Panel Side Chat E2E";
   const { session_id: sessionId } = await createConversation(page, title);
@@ -46,6 +114,8 @@ test("side chat hides its anchor history, survives refresh, and leaves choices a
 
   await openRightPanel(page);
   await expect(page.getByRole("menu")).toHaveCount(0);
+  const shell = page.locator(".right-panel-shell");
+  await expectEmptyHorizontallyCentered(shell);
   const createResponsePromise = page.waitForResponse((response) =>
     response.request().method() === "POST" && response.url().includes("/api/right-panel/")
       && response.url().endsWith("/side-chats"),
@@ -61,24 +131,7 @@ test("side chat hides its anchor history, survives refresh, and leaves choices a
   await expect(panel.getByRole("button", { name: /运行模式：Agent/ })).toBeVisible();
   await expect(panel.getByRole("button", { name: /权限模式：只读/ })).toBeVisible();
   await expect(panel.getByRole("button", { name: /思考等级：中/ })).toBeVisible();
-  const readLayout = () => panel.evaluate((element) => {
-    const composer = element.querySelector<HTMLElement>("[data-composer-seat]");
-    const content = element.querySelector<HTMLElement>(".chat-content");
-    const panelBox = element.getBoundingClientRect();
-    const composerBox = composer?.getBoundingClientRect();
-    const contentBox = content?.getBoundingClientRect();
-    return {
-      bottomGap: composerBox ? Math.abs(panelBox.bottom - composerBox.bottom) : -1,
-      contentHeight: contentBox?.height ?? 0,
-      contentBeforeComposer: Boolean(contentBox && composerBox && contentBox.bottom <= composerBox.top + 1),
-      horizontalOverflow: element.scrollWidth - element.clientWidth,
-    };
-  });
-  await expect.poll(async () => (await readLayout()).bottomGap).toBeLessThanOrEqual(1);
-  const layout = await readLayout();
-  expect(layout.contentHeight).toBeGreaterThan(0);
-  expect(layout.contentBeforeComposer).toBeTruthy();
-  expect(layout.horizontalOverflow).toBeLessThanOrEqual(1);
+  await expectSideChatFillsPanel(shell);
   await expect(panel.locator(".message")).toHaveCount(0);
   await expect(panel).not.toContainText("main history must stay hidden from side chat");
 
@@ -108,6 +161,7 @@ test("side chat hides its anchor history, survives refresh, and leaves choices a
   await expect(page.getByRole("button", { name: /创建侧边聊天/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /打开终端/ })).toBeVisible();
   await expect(page.locator(".right-panel-shell")).toBeVisible();
+  await expectEmptyHorizontallyCentered(shell);
 
   await page.reload();
   await expect(page.getByRole("button", { name: /创建侧边聊天/ })).toBeVisible();
@@ -115,7 +169,7 @@ test("side chat hides its anchor history, survives refresh, and leaves choices a
   await expect(page.locator(".right-panel-shell")).toBeVisible();
 });
 
-test("desktop resize clamps the preview at 280px, collapses below it, and restores the saved width", async ({ page }) => {
+test("desktop resize keeps a 280px side chat usable, collapses below it, and restores that width", async ({ page }) => {
   const title = "Right Panel Resize E2E";
   await createConversation(page, title);
 
@@ -127,21 +181,29 @@ test("desktop resize clamps the preview at 280px, collapses below it, and restor
   const shell = page.locator(".right-panel-shell");
   const dragger = page.locator(".ant-splitter-bar").first();
   await expect(shell).toBeVisible();
-  const savedWidth = (await shell.boundingBox())?.width ?? 0;
-  const draggerBox = await dragger.boundingBox();
-  expect(savedWidth).toBeGreaterThan(400);
-  expect(draggerBox).not.toBeNull();
+  const initialWidth = (await shell.boundingBox())?.width ?? 0;
+  expect(initialWidth).toBeGreaterThan(400);
 
-  await page.mouse.move(draggerBox!.x + draggerBox!.width / 2, draggerBox!.y + draggerBox!.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(draggerBox!.x + 220, draggerBox!.y + draggerBox!.height / 2, { steps: 8 });
+  const createResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().includes("/api/right-panel/")
+      && response.url().endsWith("/side-chats"),
+  );
+  await page.getByRole("button", { name: /创建侧边聊天/ }).click();
+  expect((await createResponsePromise).ok()).toBeTruthy();
+
+  await dragSplitterBy(page, dragger, initialWidth - 280);
   await expect.poll(async () => (await shell.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(279);
-  await page.mouse.up();
+  await expect.poll(async () => (await shell.boundingBox())?.width ?? 0).toBeLessThanOrEqual(281);
+  await expectSideChatFillsPanel(shell);
+
+  await dragSplitterBy(page, dragger, 40);
 
   await expect(page.getByRole("button", { name: "打开右侧边栏" })).toBeVisible();
   await openRightPanel(page);
   await expect(shell).toBeVisible();
-  await expect.poll(async () => (await shell.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(savedWidth - 1);
+  await expect.poll(async () => (await shell.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(279);
+  await expect.poll(async () => (await shell.boundingBox())?.width ?? 0).toBeLessThanOrEqual(281);
+  await expectSideChatFillsPanel(shell);
 });
 
 test("mobile right panel uses a full-width Drawer and keeps the empty creation state", async ({ page }) => {
@@ -162,6 +224,16 @@ test("mobile right panel uses a full-width Drawer and keeps the empty creation s
   await expect(page.getByRole("button", { name: /创建侧边聊天/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /打开终端/ })).toBeVisible();
   await expect.poll(async () => (await drawer.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(479);
+  const drawerShell = drawer.locator(".right-panel-shell");
+  await expectEmptyHorizontallyCentered(drawerShell);
+
+  const createResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().includes("/api/right-panel/")
+      && response.url().endsWith("/side-chats"),
+  );
+  await page.getByRole("button", { name: /创建侧边聊天/ }).click();
+  expect((await createResponsePromise).ok()).toBeTruthy();
+  await expectSideChatFillsPanel(drawerShell);
 
   await drawer.locator(".ant-drawer-close").click();
   await expect(drawer).toHaveCount(0);
