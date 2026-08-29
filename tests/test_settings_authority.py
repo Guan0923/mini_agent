@@ -69,6 +69,32 @@ def test_messages_adapter_preserves_system_and_tool_blocks() -> None:
     assert payload["tools"][0]["input_schema"] == {"type": "object"}
 
 
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses", "messages"])
+def test_provider_requests_preserve_tool_parameter_descriptions(protocol: str) -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The value to look up.",
+            }
+        },
+        "required": ["query"],
+    }
+    runtime = runtime_for(UserMessage(content="look it up"))
+    runtime.exchange.allowed_tools = [ToolSpec("lookup", "Looks up a value.", schema)]
+
+    payload = LLMClient(config(protocol)).llm.prepare_request(runtime)
+
+    if protocol == "chat_completions":
+        exposed_schema = payload["tools"][0]["function"]["parameters"]
+    elif protocol == "responses":
+        exposed_schema = payload["tools"][0]["parameters"]
+    else:
+        exposed_schema = payload["tools"][0]["input_schema"]
+    assert exposed_schema == schema
+
+
 def test_local_settings_encrypts_provider_key_and_reopens_without_identity(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MINI_AGENT_LOCAL_DEK_FALLBACK", "test-local-key-material-that-is-at-least-32-bytes")
     state_db = tmp_path / ".mini_agent" / "runtime" / "state.db"

@@ -22,23 +22,52 @@ _PARAMETERS: dict[str, Any] = {
         "questions": {
             "type": "array",
             "minItems": 1,
+            "description": "The questions to present to the user.",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["id", "header", "question", "options"],
                 "properties": {
-                    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
-                    "header": {"type": "string", "minLength": 1, "maxLength": 12},
-                    "question": {"type": "string", "minLength": 1},
+                    "id": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                        "description": (
+                            "The unique identifier used to associate the returned answer with this question."
+                        ),
+                    },
+                    "header": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 12,
+                        "description": "The short header displayed for the question.",
+                    },
+                    "question": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The question text displayed to the user.",
+                    },
                     "options": {
                         "type": "array",
+                        "description": (
+                            "The mutually exclusive choices for the question. The client adds a free-form Other choice."
+                        ),
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
                             "required": ["label", "description"],
                             "properties": {
-                                "label": {"type": "string", "minLength": 1},
-                                "description": {"type": "string", "minLength": 1},
+                                "label": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "The short label displayed for the choice.",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": (
+                                        "The explanation of the choice's impact or trade-off displayed to the user."
+                                    ),
+                                },
                             },
                         },
                     },
@@ -51,11 +80,8 @@ _PARAMETERS: dict[str, Any] = {
 REQUEST_USER_INPUT_SPEC = ToolSpec(
     name=REQUEST_USER_INPUT_NAME,
     description=(
-        "Pause the current Plan-mode run and ask the user one to three material clarification questions. "
-        "Use this only after read-only exploration cannot resolve an important product or implementation choice. "
-        "Each question must provide two or three mutually exclusive options with concise trade-off descriptions. "
-        "The client adds a separate free-form 'Other' option. Call this control tool by itself; do not "
-        "combine it with other tools in the same response."
+        "Pauses the current Plan-mode run to present multiple-choice questions to the user and returns the selected "
+        "or free-form answers."
     ),
     parameters=_PARAMETERS,
 )

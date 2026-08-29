@@ -11,12 +11,7 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
     return (
         Tool(
             "read_file",
-            (
-                "Reads a bounded line range from one UTF-8 text file. Paths are workspace-relative, or may be "
-                "absolute only when the runtime explicitly exposes a read-only user Skill directory. "
-                "Output uses LF line endings and includes the returned and total line ranges. "
-                "Use start_line and max_lines to continue through large files."
-            ),
+            "Reads a bounded range from a UTF-8 text file, returning normalized LF text and line-range metadata.",
             files.read_file,
             object_schema(
                 {
@@ -24,27 +19,29 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                         "type": "string",
                         "minLength": 1,
                         "description": (
-                            "Workspace-relative path, or an explicitly allowed absolute or ~/.mini_agent/skills path."
+                            "The path to the UTF-8 text file. Use a workspace-relative path, or an absolute."
                         ),
                     },
                     "start_line": {
                         "type": "integer",
                         "minimum": 1,
                         "default": 1,
-                        "description": "One-based first line to return.",
+                        "description": "The one-based line number at which reading starts. Defaults to 1.",
                     },
                     "start_column": {
                         "type": "integer",
                         "minimum": 1,
                         "default": 1,
-                        "description": "One-based column within start_line.",
+                        "description": (
+                            "The one-based column within start_line at which reading starts. Defaults to 1."
+                        ),
                     },
                     "max_lines": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 1_000,
                         "default": 200,
-                        "description": "Maximum number of lines to return.",
+                        "description": ("The maximum number of lines to return, from 1 to 1000. Defaults to 200."),
                     },
                 },
                 ["path"],
@@ -53,9 +50,8 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
         Tool(
             "glob",
             (
-                "Lists regular files inside the workspace whose relative paths match a case-sensitive glob. "
-                "Use forward slashes; *, ?, and character sets match one path segment, while ** matches "
-                "zero or more directories. Results are sorted and bounded."
+                "Lists regular files under a selected directory whose relative paths match a case-sensitive glob "
+                "pattern, returning sorted and bounded results."
             ),
             files.glob,
             object_schema(
@@ -64,20 +60,26 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 4_096,
-                        "description": "Workspace-relative glob pattern such as **/*.py.",
+                        "description": (
+                            "The case-sensitive glob pattern to match against relative file paths. Use forward "
+                            "slashes; *, ?, and character sets match within one path segment, while ** matches "
+                            "across directories."
+                        ),
                     },
                     "path": {
                         "type": "string",
                         "minLength": 1,
                         "default": ".",
-                        "description": "Workspace-relative directory to search.",
+                        "description": "The directory to search. Defaults to the workspace root.",
                     },
                     "max_results": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 1_000,
                         "default": 200,
-                        "description": "Maximum number of file paths to return.",
+                        "description": (
+                            "The maximum number of matching file paths to return, from 1 to 1000. Defaults to 200."
+                        ),
                     },
                 },
                 ["pattern"],
@@ -86,9 +88,8 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
         Tool(
             "grep",
             (
-                "Searches UTF-8 workspace files line by line and returns path:line:text matches. "
-                "Search is literal and case-sensitive by default; enable regex only when needed. "
-                "Use the glob argument to restrict file paths. Binary, oversized, and non-UTF-8 files are skipped."
+                "Searches UTF-8 text files line by line for literal text or a regular expression and returns each "
+                "match as path:line:text."
             ),
             files.grep,
             object_schema(
@@ -96,37 +97,41 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                     "pattern": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Literal text or regular expression to find.",
+                        "description": "The literal text or regular expression to find.",
                     },
                     "path": {
                         "type": "string",
                         "minLength": 1,
                         "default": ".",
-                        "description": "Workspace-relative file or directory to search.",
+                        "description": "The file or directory to search. Defaults to the workspace root.",
                     },
                     "glob": {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 4_096,
                         "default": "**/*",
-                        "description": "Case-sensitive glob applied below path.",
+                        "description": (
+                            "The case-sensitive glob pattern used to select files below path. Defaults to **/*."
+                        ),
                     },
                     "regex": {
                         "type": "boolean",
                         "default": False,
-                        "description": "Interpret pattern as a Python regular expression.",
+                        "description": "Whether to interpret pattern as a regular expression. Defaults to false.",
                     },
                     "case_sensitive": {
                         "type": "boolean",
                         "default": True,
-                        "description": "Match letter case.",
+                        "description": "Whether text matching is case-sensitive. Defaults to true.",
                     },
                     "max_results": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 1_000,
                         "default": 200,
-                        "description": "Maximum number of matching lines to return.",
+                        "description": (
+                            "The maximum number of matching lines to return, from 1 to 1000. Defaults to 200."
+                        ),
                     },
                 },
                 ["pattern"],
@@ -140,8 +145,8 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
         Tool(
             "create_directory",
             (
-                "Recursively creates a directory inside the workspace. Missing parent directories are created. "
-                "The operation succeeds when the directory already exists."
+                "Creates a directory and any missing parent directories. Succeeds without changes if the "
+                "directory already exists."
             ),
             files.create_directory,
             object_schema(
@@ -149,7 +154,7 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Workspace-relative directory path.",
+                        "description": "The directory path to create.",
                     },
                 },
                 ["path"],
@@ -161,10 +166,8 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
         Tool(
             "write_file",
             (
-                "Creates a UTF-8 text file inside the workspace, recursively creating missing parent "
-                "directories. Existing files are rejected unless overwrite=true. Use edit_file for targeted "
-                "changes; before replacing a complete existing file, read its current content and preserve "
-                "everything that should remain."
+                "Creates a UTF-8 text file and any missing parent directories, or replaces the complete file when "
+                "overwrite is true."
             ),
             files.write_file,
             object_schema(
@@ -172,13 +175,19 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Workspace-relative destination file.",
+                        "description": "The file path to write.",
                     },
-                    "content": {"type": "string", "description": "Complete UTF-8 file content."},
+                    "content": {
+                        "type": "string",
+                        "description": "The complete UTF-8 text to write to the file.",
+                    },
                     "overwrite": {
                         "type": "boolean",
                         "default": False,
-                        "description": "Explicitly replace an existing regular file.",
+                        "description": (
+                            "Whether to replace an existing file. Defaults to false; when false, an existing file "
+                            "is rejected."
+                        ),
                     },
                 },
                 ["path", "content"],
@@ -189,25 +198,24 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
         ),
         Tool(
             "edit_file",
-            (
-                "Edits an existing UTF-8 workspace file by replacing one exact text block. old_text must "
-                "occur exactly once; zero or multiple matches fail without changes. Include enough surrounding "
-                "context to make the match unique. Use an empty new_text to delete the matched block."
-            ),
+            "Edits an existing UTF-8 text file by replacing one uniquely matching text block with new text.",
             files.edit_file,
             object_schema(
                 {
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Workspace-relative existing file.",
+                        "description": "The path to the existing UTF-8 text file.",
                     },
                     "old_text": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Exact, uniquely matching text to replace.",
+                        "description": "The exact text to replace. It must occur exactly once in the file.",
                     },
-                    "new_text": {"type": "string", "description": "Replacement text; may be empty."},
+                    "new_text": {
+                        "type": "string",
+                        "description": "The replacement text. Use an empty string to delete old_text.",
+                    },
                 },
                 ["path", "old_text", "new_text"],
             ),
@@ -229,9 +237,8 @@ def upload_file_read_tool(files: WorkspaceFiles) -> Tool:
     return Tool(
         "read_upload_file",
         (
-            "Reads a bounded line range from one UTF-8 text file in the current session's uploaded "
-            "files. The path is relative to the session upload directory. Output uses LF line endings "
-            "and includes the returned and total line ranges."
+            "Reads a bounded range from a UTF-8 text file uploaded to the current session, returning normalized LF "
+            "text and line-range metadata."
         ),
         files.read_file,
         object_schema(
@@ -239,20 +246,22 @@ def upload_file_read_tool(files: WorkspaceFiles) -> Tool:
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Uploads-relative file path.",
+                    "description": (
+                        "The path to the UTF-8 text file relative to the current session's upload directory."
+                    ),
                 },
                 "start_line": {
                     "type": "integer",
                     "minimum": 1,
                     "default": 1,
-                    "description": "One-based first line to return.",
+                    "description": "The one-based line number at which reading starts. Defaults to 1.",
                 },
                 "max_lines": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1_000,
                     "default": 200,
-                    "description": "Maximum number of lines to return.",
+                    "description": ("The maximum number of lines to return, from 1 to 1000. Defaults to 200."),
                 },
             },
             ["path"],

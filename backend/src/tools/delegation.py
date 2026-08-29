@@ -13,35 +13,77 @@ def _runtime_only(**_arguments: object) -> str:
 def delegation_tools(max_tasks_per_batch: int = 8) -> tuple[Tool, Tool, Tool, Tool]:
     """Return persistent Agent-tree tools supplied by the runtime coordinator."""
 
-    optional_source = {"source_thread_id": {"type": "string", "minLength": 1, "maxLength": 128}}
+    optional_parent_source = {
+        "source_thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": (
+                "The parent Agent Thread ID. When omitted, it is automatically set to the current calling Agent "
+                "Thread ID."
+            ),
+        }
+    }
+    optional_sending_source = {
+        "source_thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": (
+                "The sending Agent Thread ID. When omitted, it is automatically set to the current calling Agent "
+                "Thread ID."
+            ),
+        }
+    }
     return (
         Tool(
             "delegate_tasks",
             (
-                "Creates persistent child Agent Threads in this Session and starts their initial tasks in the "
-                "background. Results are delivered back automatically."
+                "Creates persistent child Agent Threads under the current Agent Thread and starts their assigned "
+                "tasks in the background."
             ),
             _runtime_only,
             object_schema(
                 {
-                    **optional_source,
-                    "subagent_count": {"type": "integer", "minimum": 1, "maximum": max_tasks_per_batch},
+                    **optional_parent_source,
+                    "subagent_count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": max_tasks_per_batch,
+                        "description": (
+                            "The number of child Agent Threads to create and the required length of subagent_name, "
+                            "subagent_tasks, and context_transfer_strategy."
+                        ),
+                    },
                     "subagent_name": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": max_tasks_per_batch,
+                        "description": (
+                            "The unique name of each child Agent Thread, in the same order as subagent_tasks and "
+                            "context_transfer_strategy."
+                        ),
                         "items": {"type": "string", "minLength": 1, "maxLength": 128},
                     },
                     "subagent_tasks": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": max_tasks_per_batch,
+                        "description": (
+                            "The initial task assigned to each child Agent Thread, in the same order as "
+                            "subagent_name and context_transfer_strategy."
+                        ),
                         "items": {"type": "string", "minLength": 1, "maxLength": 20_000},
                     },
                     "context_transfer_strategy": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": max_tasks_per_batch,
+                        "description": (
+                            "The context transfer mode for each child Agent Thread, in matching order: share copies "
+                            "the current context, compaction_share provides a compacted summary, and independent "
+                            "provides no parent context."
+                        ),
                         "items": {
                             "type": "string",
                             "enum": ["share", "compaction_share", "independent"],
@@ -54,27 +96,49 @@ def delegation_tools(max_tasks_per_batch: int = 8) -> tuple[Tool, Tool, Tool, To
         ),
         Tool(
             "send_agent_message",
-            "Reliably sends one message to another opening node in the same Agent tree.",
+            "Queues a task message for another Agent Thread and starts the target thread if it is idle.",
             _runtime_only,
             object_schema(
                 {
-                    "source_thread_id": {"type": "string", "minLength": 1, "maxLength": 128},
-                    "target_thread_id": {"type": "string", "minLength": 1, "maxLength": 128},
-                    "subagent_tasks": {"type": "string", "minLength": 1, "maxLength": 20_000},
+                    **optional_sending_source,
+                    "target_thread_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "The ID of the Agent Thread receiving the message.",
+                    },
+                    "subagent_tasks": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20_000,
+                        "description": "The task message to deliver to the target Agent Thread.",
+                    },
                 },
-                ["source_thread_id", "target_thread_id", "subagent_tasks"],
+                ["target_thread_id", "subagent_tasks"],
             ),
             read_only=False,
         ),
         Tool(
             "set_thread_node_status",
-            "Opens or closes one direct child Agent Thread. Closing pauses it at the next safe boundary.",
+            (
+                "Changes a direct child Agent Thread between opening and closed. Opening wakes queued work; "
+                "closing pauses execution at the next safe boundary."
+            ),
             _runtime_only,
             object_schema(
                 {
-                    **optional_source,
-                    "target_thread_id": {"type": "string", "minLength": 1, "maxLength": 128},
-                    "thread_status": {"type": "string", "enum": ["opening", "closed"]},
+                    **optional_parent_source,
+                    "target_thread_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "The ID of the direct child Agent Thread whose status will be changed.",
+                    },
+                    "thread_status": {
+                        "type": "string",
+                        "enum": ["opening", "closed"],
+                        "description": "The status to set: opening or closed.",
+                    },
                 },
                 ["target_thread_id", "thread_status"],
             ),
@@ -82,9 +146,12 @@ def delegation_tools(max_tasks_per_batch: int = 8) -> tuple[Tool, Tool, Tool, To
         ),
         Tool(
             "list_current_node_sub_thread",
-            "Lists the direct child nodes of the current Agent Thread.",
+            (
+                "Lists the direct child Agent Threads of the current Agent Thread, returning each child's ID, "
+                "path, assigned task, and status."
+            ),
             _runtime_only,
-            object_schema(optional_source, []),
+            object_schema(optional_parent_source, []),
             read_only=True,
         ),
     )

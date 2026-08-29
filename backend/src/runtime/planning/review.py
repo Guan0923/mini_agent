@@ -15,17 +15,19 @@ _PARAMETERS: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["plan"],
     "properties": {
-        "plan": {"type": "string", "minLength": 1},
+        "plan": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The complete implementation plan in Markdown.",
+        },
     },
 }
 
 REQUEST_PLAN_REVIEW_SPEC = ToolSpec(
     name=REQUEST_PLAN_REVIEW_NAME,
     description=(
-        "Submit a complete implementation plan for explicit Plan Review. Use this only when a plan is useful, "
-        "the important unknowns are resolved, and the user should choose whether to implement it. Call this "
-        "control tool by itself. The plan must be non-empty Markdown. Prefer a plan title followed by Summary, "
-        "Key Changes, Test Plan, and Assumptions sections, but adapt the content to the task."
+        "Pauses the current Plan-mode run to present a complete implementation plan for user review and returns "
+        "the user's decision."
     ),
     parameters=_PARAMETERS,
 )

@@ -18,16 +18,8 @@ def todo_tools() -> tuple[Tool, ...]:
         Tool(
             "todo_write",
             (
-                "Create or update the task list for the current work. Call todo_write when "
-                "starting multi-step work to record the plan as concrete items, and call it again "
-                "whenever progress changes: set each item's status to pending, in_progress, or "
-                "completed, add new items, or drop obsolete ones. Each call replaces the entire "
-                "list, so always resubmit every item you want to keep with its content text "
-                "unchanged — content is the item's identity. Mark every item being actively "
-                "worked on in_progress — several at once when work genuinely runs in parallel; "
-                "while work remains, at least one task should be in_progress. Mark a todo "
-                "completed the moment it is done (do not batch completions). Skip the list for "
-                "trivial single-step tasks. Returns per-status counts."
+                "Creates or replaces the current task list, tracks each task as pending, in progress, or "
+                "completed, and returns the number of tasks in each status."
             ),
             _todo_write,
             object_schema(
@@ -36,12 +28,27 @@ def todo_tools() -> tuple[Tool, ...]:
                         "type": "array",
                         "minItems": 0,
                         "maxItems": 100,
+                        "description": (
+                            "The complete task list that replaces the existing list. Use an empty array to clear "
+                            "the list."
+                        ),
                         "items": {
                             "type": "object",
                             "required": ["content", "status"],
                             "properties": {
-                                "content": {"type": "string", "minLength": 1, "maxLength": 500},
-                                "status": {"enum": list(TODO_STATUSES)},
+                                "content": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 500,
+                                    "description": (
+                                        "The task text. It uniquely identifies the task and must be unique within "
+                                        "the list."
+                                    ),
+                                },
+                                "status": {
+                                    "enum": list(TODO_STATUSES),
+                                    "description": ("The task's current status: pending, in_progress, or completed."),
+                                },
                             },
                         },
                     }

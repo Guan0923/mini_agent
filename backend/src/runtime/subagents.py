@@ -326,7 +326,7 @@ class SubagentCoordinator:
         return str(getattr(result, "summary", "") or "").strip()
 
     def _send(self, runtime: AgentRuntime, arguments: dict[str, Any]) -> str:
-        source_id = self._actual_source(runtime, arguments.get("source_thread_id"), optional=False)
+        source_id = self._actual_source(runtime, arguments.get("source_thread_id"), optional=True)
         target_id = arguments.get("target_thread_id")
         content = arguments.get("subagent_tasks")
         if not isinstance(target_id, str) or not target_id:

@@ -380,12 +380,21 @@ def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_pat
         "set_thread_node_status",
         {"target_thread_id": first_child.thread_id, "thread_status": "opening"},
     )
+    with pytest.raises(ToolError, match="does not match"):
+        coordinator.invoke(
+            runtime,
+            "send_agent_message",
+            {
+                "source_thread_id": "another-thread",
+                "target_thread_id": first_child.thread_id,
+                "subagent_tasks": "rejected for the wrong source",
+            },
+        )
     follow_up = json.loads(
         coordinator.invoke(
             runtime,
             "send_agent_message",
             {
-                "source_thread_id": session.session_id,
                 "target_thread_id": first_child.thread_id,
                 "subagent_tasks": "follow-up",
             },

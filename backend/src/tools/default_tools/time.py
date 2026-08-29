@@ -16,8 +16,8 @@ def time_tools() -> tuple[Tool, ...]:
         Tool(
             "get_current_time",
             (
-                "Returns the current date and time in the session-selected time zone. "
-                "Call this tool whenever a task depends on the real current time, date, or time zone."
+                "Gets the current date and time in the session-configured time zone, including the time-zone "
+                "name and UTC offset."
             ),
             _default_current_time,
             object_schema({}),

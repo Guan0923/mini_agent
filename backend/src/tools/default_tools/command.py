@@ -10,27 +10,22 @@ from .schema import object_schema
 def command_tool(commands: WorkspaceCommand) -> Tool:
     return Tool(
         "run_command",
-        (
-            "Executes a general Bash command on Unix-like systems or PowerShell command on Windows from "
-            "the workspace. Use read_file, glob, grep, create_directory, write_file, or edit_file for ordinary "
-            "file work. "
-            "Use this fallback for tests, builds, Git, scripts, computation, and operations without a "
-            "dedicated tool. Commands may modify files or access paths outside the workspace and therefore "
-            "require approval. Output is limited to 20,000 characters; timeout_seconds is at most 120."
-        ),
+        "Executes a shell command from the workspace using the configured terminal and returns its output.",
         commands.run,
         object_schema(
             {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute. Use platform-appropriate syntax.",
+                    "description": ("The shell command to execute using syntax supported by the configured terminal."),
                 },
                 "timeout_seconds": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 120,
                     "default": 30,
-                    "description": "Maximum seconds before the command is forcibly terminated.",
+                    "description": (
+                        "The maximum number of seconds the command may run, from 1 to 120. Defaults to 30."
+                    ),
                 },
             },
             ["command"],

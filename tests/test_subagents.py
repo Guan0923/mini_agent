@@ -5,8 +5,10 @@ from pathlib import Path
 from threading import Lock
 from time import sleep
 
+import pytest
+
 from backend.runtime.subagents import LockedToolExecutor, WorkspaceWriteLock
-from backend.tools import ToolError, build_tool_registry, delegation_tools
+from backend.tools import ToolError, ToolRegistry, build_tool_registry, delegation_tools
 
 
 class _IdleTools:
@@ -57,6 +59,18 @@ def test_persistent_subagent_tool_contract_exposes_only_the_read_query_in_plan_m
         "independent",
     ]
     assert delegate["properties"]["subagent_count"]["maximum"] == 3
+    send = tools[1].spec.parameters
+    assert send["required"] == ["target_thread_id", "subagent_tasks"]
+    registry = ToolRegistry(tools)
+    registry.validate_arguments(
+        "send_agent_message",
+        {"target_thread_id": "target", "subagent_tasks": "follow up"},
+    )
+    with pytest.raises(ToolError, match="non-empty"):
+        registry.validate_arguments(
+            "send_agent_message",
+            {"source_thread_id": "", "target_thread_id": "target", "subagent_tasks": "follow up"},
+        )
 
 
 def test_locked_executor_serializes_same_path_writes() -> None:
