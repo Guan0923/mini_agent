@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createSession,
   getSettings,
@@ -31,6 +31,7 @@ import type {
   DisplayMode,
   RuntimeStateNode,
   RuntimeTreeNode,
+  RightPanelWindow,
   LocalProfile,
 } from "../types";
 
@@ -56,6 +57,7 @@ function AgentApp() {
   const pausedForSandboxOutageRef = useRef(new Set<string>());
   const sandboxHealth = useSandboxHealth();
   const [queuedMessages, setQueuedMessages] = useState<Map<string, QueuedMessage[]>>(() => new Map());
+  const [panelConversations, setPanelConversations] = useState<Record<string, Conversation>>({});
 
   useEffect(() => {
     let active = true;
@@ -259,6 +261,10 @@ function AgentApp() {
 
   function updateConversation(id: string, updater: (conversation: Conversation) => Conversation) {
     setConversations((previous) => previous.map((conversation) => (conversation.id === id ? updater(conversation) : conversation)));
+    setPanelConversations((previous) => {
+      const conversation = previous[id];
+      return conversation ? { ...previous, [id]: updater(conversation) } : previous;
+    });
   }
 
   function updateQueuedMessages(conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) {
@@ -272,7 +278,7 @@ function AgentApp() {
   }
 
   async function refreshQueuedMessages(conversationId: string): Promise<void> {
-    const target = conversations.find((item) => item.id === conversationId);
+    const target = conversations.find((item) => item.id === conversationId) ?? panelConversations[conversationId];
     if (!target?.threadId) return;
     const items = await listQueuedMessages(target.threadId);
     setQueuedMessages((previous) => {
@@ -293,6 +299,7 @@ function AgentApp() {
   }
 
   async function rebindRunSession(conversationId: string, sessionId: string): Promise<void> {
+    if (panelConversations[conversationId]) return;
     try {
       const summaries = await listSessions("active");
       const summary = summaries.find((item) => item.session_id === sessionId);
@@ -312,6 +319,69 @@ function AgentApp() {
       await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 50));
     }
     updateConversation(conversationId, (conversation) => withLoadedTurns(conversation, nodes));
+  }
+
+  const hydratePanelConversation = useCallback(async (window: RightPanelWindow): Promise<void> => {
+    if (window.kind !== "side_chat" || !window.thread_id || !window.anchor_turn_id) return;
+    const nodes = await getSessionNodes(window.session_id);
+    setPanelConversations((previous) => {
+      const existing = previous[window.id];
+      const base: Conversation = existing ?? {
+        id: window.id,
+        title: window.title,
+        sessionId: window.session_id,
+        threadId: window.thread_id!,
+        hiddenBeforeTurnId: window.anchor_turn_id!,
+        messages: [],
+        messagesLoaded: false,
+      };
+      return {
+        ...previous,
+        [window.id]: withLoadedTurns({
+          ...base,
+          title: window.title,
+          hiddenBeforeTurnId: window.anchor_turn_id!,
+        }, nodes),
+      };
+    });
+    const items = await listQueuedMessages(window.thread_id).catch(() => []);
+    setQueuedMessages((previous) => new Map(previous).set(window.id, items));
+  }, []);
+
+  const forgetPanelConversation = useCallback((windowId: string) => {
+    setPanelConversations((previous) => {
+      if (!previous[windowId]) return previous;
+      const next = { ...previous };
+      delete next[windowId];
+      return next;
+    });
+    setQueuedMessages((previous) => {
+      if (!previous.has(windowId)) return previous;
+      const next = new Map(previous);
+      next.delete(windowId);
+      return next;
+    });
+  }, []);
+
+  async function rewindPanelConversation(id: string, messageId: string) {
+    const source = panelConversations[id];
+    if (!source?.sessionId) return undefined;
+    const message = source.messages.find((item) => item.id === messageId);
+    if (!message || message.role !== "user" || !message.nodeId) return undefined;
+    return {
+      content: message.content,
+      sessionId: source.sessionId,
+      threadId: source.threadId,
+      sourceNodeId: message.nodeId,
+      rewindTurnId: message.nodeId,
+    };
+  }
+
+  async function reloadPanelConversation(id: string, preferredActiveTurnId?: string): Promise<void> {
+    const source = panelConversations[id];
+    if (!source?.sessionId) throw new Error("侧聊不存在");
+    const nodes = await getSessionNodes(source.sessionId);
+    updateConversation(id, (conversation) => withLoadedTurns(conversation, nodes, preferredActiveTurnId));
   }
 
   const { runConversation, stopConversation } = createRunController({
@@ -334,7 +404,7 @@ function AgentApp() {
     for (const active of activeRunsRef.current.values()) {
       if (active.turnId) runningTurnIds.add(active.turnId);
     }
-    for (const conversation of conversations) {
+    for (const conversation of [...conversations, ...Object.values(panelConversations)]) {
       for (const node of conversation.runtimeNodes ?? []) {
         if (isRuntimeTurnNode(node) && node.status === "running") {
           runningTurnIds.add(node.id);
@@ -352,6 +422,13 @@ function AgentApp() {
           isRuntimeTurnNode(node) && runningTurnIds.has(node.id) ? { ...node, status: "paused" } : node
         )));
       }));
+      setPanelConversations((previous) => Object.fromEntries(Object.entries(previous).map(([id, conversation]) => {
+        const nodes = conversation.runtimeNodes;
+        if (!nodes?.some((node) => runningTurnIds.has(node.id))) return [id, conversation];
+        return [id, withLoadedTurns(conversation, nodes.map((node) => (
+          isRuntimeTurnNode(node) && runningTurnIds.has(node.id) ? { ...node, status: "paused" } : node
+        )))];
+      })));
     }
     for (const turnId of runningTurnIds) {
       if (pausedForSandboxOutageRef.current.has(turnId)) continue;
@@ -368,7 +445,7 @@ function AgentApp() {
         }
       });
     }
-  }, [conversations, sandboxHealth.phase]);
+  }, [conversations, panelConversations, sandboxHealth.phase]);
 
   useEffect(() => {
     if (
@@ -399,6 +476,35 @@ function AgentApp() {
       sourceNodeId: activeTurn.id,
     });
   }, [current?.id, current?.sessionId, current?.activeTurnId, current?.runtimeNodes, sandboxHealth.phase]);
+
+  useEffect(() => {
+    if (sandboxHealth.phase !== "healthy") return;
+    for (const conversation of Object.values(panelConversations)) {
+      if (!conversation.sessionId || activeRunsRef.current.has(conversation.id)) continue;
+      const activeTurn = conversation.runtimeNodes?.find(
+        (node): node is RuntimeStateNode => isRuntimeTurnNode(node)
+          && node.id === conversation.activeTurnId
+          && node.thread_id === conversation.threadId
+          && node.status === "running",
+      );
+      if (!activeTurn) continue;
+      void runConversation({
+        conversationId: conversation.id,
+        sessionId: conversation.sessionId,
+        threadId: activeTurn.thread_id,
+        turnId: activeTurn.id,
+        prompt: null,
+        resume: false,
+        attach: true,
+        mode: activeTurn.running_mode,
+        permissionMode: activeTurn.permission_mode,
+        reasoningEffort: activeTurn.model.reasoning_effort,
+        providerName: activeTurn.provider_name,
+        model: activeTurn.model,
+        sourceNodeId: activeTurn.id,
+      });
+    }
+  }, [panelConversations, sandboxHealth.phase]);
 
   async function runConversationWithSandbox(request: import("./types").ChatRunRequest): Promise<void> {
     if (sandboxHealth.phase !== "healthy") {
@@ -516,7 +622,7 @@ function AgentApp() {
       setDraftMode(mode);
       return;
     }
-    const key = conversation.sessionId ?? conversation.id;
+    const key = conversation.threadId ?? conversation.sessionId ?? conversation.id;
     setModeBySession((currentModes) => ({ ...currentModes, [key]: mode }));
   }
 
@@ -525,6 +631,7 @@ function AgentApp() {
       profile={profile}
       page={page}
       current={current}
+      panelConversations={panelConversations}
       activeConversations={activeConversations}
       projects={projects}
       projectsLoaded={projectsLoaded}
@@ -560,11 +667,16 @@ function AgentApp() {
       }}
       onUpdate={updateConversation}
       onModeChange={(mode) => setConversationMode(current, mode)}
+      onPanelModeChange={(id, mode) => setConversationMode(panelConversations[id] ?? null, mode)}
+      onHydratePanelConversation={hydratePanelConversation}
+      onForgetPanelConversation={forgetPanelConversation}
       onEnsureSession={ensureSession}
       onFork={forkConversation}
       onRewind={rewindConversation}
+      onRewindPanel={rewindPanelConversation}
       onSelectSession={useSession}
       onReload={reloadConversation}
+      onReloadPanel={reloadPanelConversation}
       onRefresh={refreshSessions}
       onRun={runConversationWithSandbox}
       onStopRun={stopConversation}

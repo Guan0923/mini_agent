@@ -44,8 +44,11 @@ def _is_loopback_origin(origin: str) -> bool:
 
 
 def origin_allowed(request: Request, settings: LocalWebSettings) -> bool:
-    origin = request.headers.get("origin")
+    return browser_origin_allowed(request.headers.get("origin"), settings)
+
+
+def browser_origin_allowed(origin: str | None, settings: LocalWebSettings) -> bool:
     return origin is None or origin.rstrip("/") in settings.allowed_origins
 
 
-__all__ = ["LocalWebSettings", "origin_allowed"]
+__all__ = ["LocalWebSettings", "browser_origin_allowed", "origin_allowed"]

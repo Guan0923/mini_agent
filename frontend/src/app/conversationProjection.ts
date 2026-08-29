@@ -17,12 +17,23 @@ export function withLoadedTurns(
   const fallback = leaves[leaves.length - 1];
   const activeTurnId = selected?.id ?? fallback?.id;
   const map = new Map(nodes.map((node) => [`${node.session_id}:${node.id}`, node] as const));
+  const projected = activeTurnId ? projectTurnPath(map, activeTurnId) : [];
+  const hiddenPrefix = conversation.hiddenBeforeTurnId ? `${conversation.hiddenBeforeTurnId}:message:` : null;
+  let hiddenIndex = -1;
+  if (hiddenPrefix) {
+    for (let index = projected.length - 1; index >= 0; index -= 1) {
+      if (projected[index].id.startsWith(hiddenPrefix)) {
+        hiddenIndex = index;
+        break;
+      }
+    }
+  }
   return {
     ...conversation,
     runtimeNodes: nodes,
     activeTurnId,
     lastNodeId: activeTurnId,
-    messages: activeTurnId ? projectTurnPath(map, activeTurnId) : [],
+    messages: hiddenIndex >= 0 ? projected.slice(hiddenIndex + 1) : projected,
     messagesLoaded: true,
   };
 }

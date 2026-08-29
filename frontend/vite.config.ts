@@ -31,7 +31,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": backendUrl,
+      "/api": { target: backendUrl, ws: true },
       "/benchmark": backendUrl,
     },
   },

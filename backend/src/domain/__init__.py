@@ -29,6 +29,7 @@ from .messages import (
     normalize_provider_options,
 )
 from .plans import AgentAction
+from .right_panel import RightPanelState, RightPanelWindow, RightPanelWindowKind
 from .runtime_state import (
     APP_VERSION,
     CONTENT_BLOCK_TYPES,
@@ -169,6 +170,9 @@ __all__ = [
     "Session",
     "SessionSummary",
     "SidebarThread",
+    "RightPanelState",
+    "RightPanelWindow",
+    "RightPanelWindowKind",
     "SkillSnapshot",
     "SkillSelection",
     "SystemMessage",

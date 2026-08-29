@@ -309,6 +309,17 @@ export function integrateRuntimeNodeUpdates(
   }
   if (forcePathProjection || assistantIndex < 0) {
     messages = projectTurnPath(current, activeTurnId);
+    if (conversation.hiddenBeforeTurnId) {
+      const prefix = `${conversation.hiddenBeforeTurnId}:message:`;
+      let hiddenIndex = -1;
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        if (messages[index].id.startsWith(prefix)) {
+          hiddenIndex = index;
+          break;
+        }
+      }
+      if (hiddenIndex >= 0) messages = messages.slice(hiddenIndex + 1);
+    }
   } else {
     const projection = projectRuntimeNode(activeTurn);
     messages = [...conversation.messages];
