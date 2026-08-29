@@ -76,6 +76,7 @@ const localProfile = { display_name: "旧名字", agent_preferences: "" };
 const sandboxHealth = {
   phase: "healthy" as const,
   installed: true,
+  code: null,
   detail: null,
   checking: false,
   repairing: false,

@@ -73,6 +73,7 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     sandboxHealth: {
       phase: "healthy",
       installed: true,
+      code: null,
       detail: null,
       checking: false,
       repairing: false,

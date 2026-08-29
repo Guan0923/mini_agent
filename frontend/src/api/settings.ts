@@ -123,6 +123,7 @@ export function updateSandboxConfig(config: SandboxConfig): Promise<SandboxConfi
 export interface SandboxBrokerStatus {
   installed: boolean;
   healthy: boolean;
+  code?: string | null;
   version?: string | null;
   installation_id?: string | null;
   detail?: string | null;

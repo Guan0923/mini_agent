@@ -15,6 +15,7 @@ from .control.decision import SandboxExecutionDecision
 from .errors import (
     BrokerInstallationError,
     BrokerInstallFailureCode,
+    BrokerStatusFailureCode,
     SandboxCleanupPending,
     SandboxError,
     SandboxFailureCode,
@@ -57,6 +58,7 @@ __all__ = [
     "ApprovalStore",
     "BrokerInstallFailureCode",
     "BrokerInstallationError",
+    "BrokerStatusFailureCode",
     "AggregateLimits",
     "BrokerStatus",
     "BROKER_VERSION",

@@ -1,6 +1,6 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getSandboxStatus, repairSandboxBroker, type SandboxBrokerStatus } from "../api";
+import { ApiError, getSandboxStatus, repairSandboxBroker, type SandboxBrokerStatus } from "../api";
 import { useSandboxHealth, type SandboxHealthState } from "./useSandboxHealth";
 
 vi.mock("../api", async (importOriginal) => ({
@@ -85,6 +85,46 @@ describe("useSandboxHealth", () => {
     expect(repairSandboxBroker).toHaveBeenCalledTimes(1);
     expect(getSandboxStatus).toHaveBeenCalledTimes(2);
     expect(current.phase).toBe("healthy");
+    expect(current.repairing).toBe(false);
+  });
+
+  it("preserves the status code and complete raw detail", async () => {
+    const detail = "  Broker service configuration requires repair\nSCM detail\n";
+    vi.mocked(getSandboxStatus).mockResolvedValue({
+      installed: true,
+      healthy: false,
+      code: "broker_service_configuration_invalid",
+      detail,
+    });
+
+    render(<Harness />);
+    await act(async () => Promise.resolve());
+
+    expect(current.phase).toBe("unhealthy");
+    expect(current.installed).toBe(true);
+    expect(current.code).toBe("broker_service_configuration_invalid");
+    expect(current.detail).toBe(detail);
+  });
+
+  it("preserves the repair failure code and complete raw detail", async () => {
+    const detail = "  Broker Windows 服务启动失败。\nSCM 7000\n";
+    vi.mocked(getSandboxStatus).mockResolvedValue({
+      installed: true,
+      healthy: false,
+      code: "broker_pipe_unavailable",
+      detail: "Windows Broker pipe is unavailable",
+    });
+    vi.mocked(repairSandboxBroker).mockRejectedValue(
+      new ApiError(503, detail, "broker_service_start_failed"),
+    );
+    render(<Harness />);
+    await act(async () => Promise.resolve());
+
+    await act(async () => current.repair());
+
+    expect(current.phase).toBe("unhealthy");
+    expect(current.code).toBe("broker_service_start_failed");
+    expect(current.detail).toBe(detail);
     expect(current.repairing).toBe(false);
   });
 });

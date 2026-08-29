@@ -132,6 +132,41 @@ class WindowsServiceInstaller:
                 except Exception:
                     pass
 
+    def service_installed(self) -> bool:
+        """Return whether SCM contains this service, preserving other query failures."""
+
+        if not self.is_windows:
+            return False
+        manager = None
+        service = None
+        win32service = None
+        try:
+            import win32service as win32service_module  # type: ignore[import-not-found]
+
+            win32service = win32service_module
+            manager = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+            service = win32service.OpenService(manager, self.service_name, win32service.SERVICE_QUERY_STATUS)
+            return True
+        except Exception as exc:
+            winerror = getattr(exc, "winerror", None)
+            if winerror is None and getattr(exc, "args", None):
+                first = exc.args[0]
+                winerror = first if isinstance(first, int) else None
+            if winerror == 1060:
+                return False
+            raise
+        finally:
+            if win32service is not None and service is not None:
+                try:
+                    win32service.CloseServiceHandle(service)
+                except Exception:
+                    pass
+            if win32service is not None and manager is not None:
+                try:
+                    win32service.CloseServiceHandle(manager)
+                except Exception:
+                    pass
+
     def _run_transaction(self, operation: str) -> None:
         backend_sid = self._current_user_sid()
         if self._runner_injected:

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getSandboxStatus, repairSandboxBroker, type SandboxBrokerStatus } from "../api";
+import { ApiError, getSandboxStatus, repairSandboxBroker, type SandboxBrokerStatus } from "../api";
 
 export type SandboxHealthPhase = "checking" | "healthy" | "unhealthy";
 
 export interface SandboxHealthState {
   phase: SandboxHealthPhase;
   installed: boolean;
+  code: string | null;
   detail: string | null;
   checking: boolean;
   repairing: boolean;
@@ -19,6 +20,7 @@ function failedStatus(cause: unknown): SandboxBrokerStatus {
   return {
     installed: false,
     healthy: false,
+    code: cause instanceof ApiError ? cause.code ?? "broker_status_failed" : "broker_status_failed",
     detail: cause instanceof Error ? cause.message : "无法连接沙箱 Broker。",
   };
 }
@@ -26,6 +28,7 @@ function failedStatus(cause: unknown): SandboxBrokerStatus {
 export function useSandboxHealth(): SandboxHealthState {
   const [phase, setPhase] = useState<SandboxHealthPhase>("checking");
   const [installed, setInstalled] = useState(false);
+  const [code, setCode] = useState<string | null>(null);
   const [detail, setDetail] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
   const [repairing, setRepairing] = useState(false);
@@ -60,7 +63,10 @@ export function useSandboxHealth(): SandboxHealthState {
         if (mountedRef.current) {
           const healthy = status.installed && status.healthy;
           setInstalled(status.installed);
-          setDetail(healthy ? null : status.detail?.trim() || (
+          setCode(healthy ? null : status.code?.trim() || (
+            status.installed ? "broker_unhealthy" : "broker_not_installed"
+          ));
+          setDetail(healthy ? null : status.detail || (
             status.installed ? "沙箱 Broker 健康检查未通过。" : "沙箱 Broker 未安装。"
           ));
           setPhase(healthy ? "healthy" : "unhealthy");
@@ -94,6 +100,7 @@ export function useSandboxHealth(): SandboxHealthState {
         await check();
       } catch (cause) {
         if (!mountedRef.current) return;
+        setCode(cause instanceof ApiError ? cause.code ?? "broker_install_failed" : "broker_install_failed");
         setDetail(cause instanceof Error ? cause.message : "沙箱 Broker 修复失败。");
         setPhase("unhealthy");
         scheduleNext();
@@ -116,5 +123,5 @@ export function useSandboxHealth(): SandboxHealthState {
     };
   }, [check]);
 
-  return { phase, installed, detail, checking, repairing, check, repair };
+  return { phase, installed, code, detail, checking, repairing, check, repair };
 }
