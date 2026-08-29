@@ -1,8 +1,11 @@
-"""Native Broker adapter coordinating accounts, ACLs, WFP, and Job Objects."""
+"""Native Broker adapter for fixed credentials, tokens, processes and Jobs."""
 
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
+import os
 import threading
 import time
 import uuid
@@ -12,20 +15,36 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..broker_service.accounts import AccountLease, AccountPool
+from ..broker_service.credentials import BrokerCredentialPackage
 from ..errors import SandboxInitializationError, SandboxResourceExceeded
 from ..native_windows import (
-    WindowsAccountManager,
-    WindowsAclManager,
     WindowsJobObject,
+    WindowsPrivateDesktop,
     WindowsRestrictedTokenFactory,
     WindowsSandboxAccount,
 )
 from ..native_windows.api import _modules
-from ..policy import FileAccessMode, NetworkMode, ResourceLimits, remove_temp_dir
+from ..policy import FileAccessMode, NetworkMode, ResourceLimits
 from ..runtime.resources import ResourceMonitor, ResourceUsage
 from .process import _NativeWindowsProcess
-from .protocol import WfpController
+
+
+@dataclass(slots=True)
+class _Reservation:
+    reservation_id: str
+    backend_instance_id: str
+    user_id: str
+    job_id: str
+    policy_hash: str
+    policy: dict[str, Any]
+    token: Any
+    logon_sid: str
+    account_sid: str
+    workspace_cap_sid: str
+    temp_cap_sid: str
+    capability_digest: str
+    desktop: WindowsPrivateDesktop
+    expires_at: float
 
 
 @dataclass(slots=True)
@@ -35,13 +54,7 @@ class _NativeLease:
     user_id: str
     job_id: str
     process: _NativeWindowsProcess
-    pool: AccountPool
-    account_lease: AccountLease
-    workspace: Path
-    acl_snapshot: str
-    temp_acl_snapshot: str
-    wfp_rules: tuple[str, ...]
-    temp_dir: Path
+    desktop: WindowsPrivateDesktop
     resource_monitor: ResourceMonitor | None = None
     failure_code: str | None = None
 
@@ -65,176 +78,223 @@ class _NativeResourceProvider:
 
 
 class WindowsNativeBrokerAdapter:
-    """Broker adapter that owns accounts, ACLs, WFP rules and Job Objects."""
+    """Own only reservation tokens, child processes, Job Objects and cleanup."""
 
     def __init__(
         self,
         *,
-        account_manager: WindowsAccountManager | None = None,
-        acl_manager: WindowsAclManager | None = None,
+        credentials: BrokerCredentialPackage,
+        service_sid: str,
         token_factory: WindowsRestrictedTokenFactory | None = None,
-        wfp: WfpController | None = None,
+        desktop_factory=None,
+        clock=None,
+        reservation_ttl_seconds: int = 30,
     ) -> None:
-        self.account_manager = account_manager or WindowsAccountManager()
-        self.acl_manager = acl_manager or WindowsAclManager()
-        self.token_factory = token_factory or WindowsRestrictedTokenFactory()
-        self.wfp = wfp
-        self._pools: dict[tuple[str, str], AccountPool] = {}
-        self._accounts: dict[str, WindowsSandboxAccount] = {}
+        if not 1 <= reservation_ttl_seconds <= 60:
+            raise ValueError("reservation TTL must be between 1 and 60 seconds")
+        self.credentials = credentials
+        self.service_sid = service_sid
+        self.token_factory = token_factory or WindowsRestrictedTokenFactory(service_sid)
+        self.desktop_factory = desktop_factory or WindowsPrivateDesktop.create
+        self._clock = clock or time.monotonic
+        self._reservation_ttl_seconds = reservation_ttl_seconds
+        self._reservations: dict[str, _Reservation] = {}
         self._processes: dict[str, _NativeLease] = {}
         self._jobs: dict[tuple[str, str, str], str] = {}
         self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._expiry_thread = threading.Thread(target=self._expire_loop, name="sandbox-reservations", daemon=True)
+        self._expiry_thread.start()
 
-    def install(self) -> None:
-        _modules()
+    def close(self) -> None:
+        self._stop.set()
+        self._expiry_thread.join(timeout=2.0)
+        with self._lock:
+            reservations = tuple(self._reservations.values())
+            leases = tuple(self._processes.values())
+            self._reservations.clear()
+            self._processes.clear()
+            self._jobs.clear()
+        for reservation in reservations:
+            self._close_reservation(reservation)
+        for lease in leases:
+            lease.process.close()
+            lease.desktop.close()
 
-    def repair(self) -> None:
-        _modules()
-
-    def launch(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+    def reserve(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         policy = request.get("policy")
         if not isinstance(policy, Mapping):
-            raise SandboxInitializationError("Broker launch policy is invalid")
+            raise SandboxInitializationError("Broker reserve policy is invalid")
+        policy_value = dict(policy)
+        policy_hash = _required_text(request, "policy_hash")
+        if not hmac.compare_digest(policy_hash, _policy_hash(policy_value)):
+            raise SandboxInitializationError("Broker reserve policy hash is invalid")
         backend_id = _required_text(request, "backend_instance_id")
         user_id = _required_text(request, "user_id")
-        job_id = _required_text(policy, "job_id")
-        job_kind = str(request.get("job_kind") or "command")
-        if job_kind not in {"command", "mcp"}:
-            raise SandboxInitializationError("Broker launch kind is invalid")
+        job_id = _required_text(policy_value, "job_id")
+        file_mode = FileAccessMode(str(policy_value.get("file_mode") or FileAccessMode.READ_ONLY.value))
+        network_mode = NetworkMode(str(policy_value.get("network_mode") or NetworkMode.NO_NETWORK.value))
+        account = self._account(network_mode)
+        reserved = self.token_factory.reserve(account, file_mode)
+        reservation_id = f"reservation-{uuid.uuid4().hex}"
+        workspace = _canonical_absolute_path(_required_text(policy_value, "workspace"))
+        temp_dir = _canonical_absolute_path(_required_text(policy_value, "temp_dir"))
+        cwd = _canonical_absolute_path(_required_text(policy_value, "cwd"))
+        if not cwd.is_relative_to(workspace):
+            _close_handle(reserved.token)
+            raise SandboxInitializationError("Broker reserve cwd is outside the workspace")
+        expires_at = self._clock() + self._reservation_ttl_seconds
+        capability_digest = _capability_digest(
+            reservation_id=reservation_id,
+            policy_hash=policy_hash,
+            workspace=workspace,
+            temp_dir=temp_dir,
+            account_sid=reserved.account_sid,
+            workspace_cap_sid=reserved.workspace_cap_sid,
+            temp_cap_sid=reserved.temp_cap_sid,
+            expires_at=expires_at,
+        )
+        try:
+            desktop = self.desktop_factory(reserved.logon_sid, self.service_sid)
+        except Exception:
+            _close_handle(reserved.token)
+            raise
+        reservation = _Reservation(
+            reservation_id,
+            backend_id,
+            user_id,
+            job_id,
+            policy_hash,
+            policy_value,
+            reserved.token,
+            reserved.logon_sid,
+            reserved.account_sid,
+            reserved.workspace_cap_sid,
+            reserved.temp_cap_sid,
+            capability_digest,
+            desktop,
+            expires_at,
+        )
+        with self._lock:
+            self._purge_expired_locked()
+            identity = (backend_id, user_id, job_id)
+            if identity in self._jobs or any(
+                (item.backend_instance_id, item.user_id, item.job_id) == identity
+                for item in self._reservations.values()
+            ):
+                self._close_reservation(reservation)
+                raise SandboxInitializationError("Broker job already exists")
+            self._reservations[reservation_id] = reservation
+        return {
+            "reserved": True,
+            "reservation_id": reservation_id,
+            "logon_sid": reserved.logon_sid,
+            "account_sid": reserved.account_sid,
+            "service_sid": self.service_sid,
+            "capability_sids": {
+                "workspace": reserved.workspace_cap_sid,
+                "temp": reserved.temp_cap_sid,
+            },
+            "capability_digest": capability_digest,
+            "expires_in": self._reservation_ttl_seconds,
+        }
+
+    def launch(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        reservation_id = _required_text(request, "reservation_id")
+        backend_id = _required_text(request, "backend_instance_id")
+        user_id = _required_text(request, "user_id")
+        policy_hash = _required_text(request, "policy_hash")
+        capability_digest = _required_text(request, "capability_digest")
+        with self._lock:
+            self._purge_expired_locked()
+            reservation = self._reservations.pop(reservation_id, None)
+        if reservation is None:
+            raise SandboxInitializationError("Broker reservation is unavailable")
+        if (
+            reservation.backend_instance_id != backend_id
+            or reservation.user_id != user_id
+            or not hmac.compare_digest(reservation.policy_hash, policy_hash)
+            or not hmac.compare_digest(reservation.capability_digest, capability_digest)
+        ):
+            self._close_reservation(reservation)
+            raise SandboxInitializationError("Broker reservation ownership is invalid")
         argv = request.get("argv")
         environment = request.get("environment")
         if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+            self._close_reservation(reservation)
             raise SandboxInitializationError("Broker launch argv is invalid")
         if not isinstance(environment, Mapping):
+            self._close_reservation(reservation)
             raise SandboxInitializationError("Broker launch environment is invalid")
-        workspace = Path(_required_text(policy, "workspace")).resolve(strict=True)
-        cwd = Path(_required_text(request, "cwd")).resolve(strict=True)
-        if not cwd.is_relative_to(workspace):
-            raise SandboxInitializationError("Broker launch cwd is outside the workspace")
-        limits = ResourceLimits.from_mapping(
-            policy.get("limits") if isinstance(policy.get("limits"), Mapping) else None
-        )
-        file_mode = FileAccessMode(str(policy.get("file_mode") or FileAccessMode.READ_ONLY.value))
-        network_mode = NetworkMode(str(policy.get("network_mode") or NetworkMode.NO_NETWORK.value))
-        if file_mode is FileAccessMode.FULL_ACCESS:
-            raise SandboxInitializationError("full_access must use the backend user token path")
-        resolved = policy.get("resolved_network")
-        endpoints = (
-            tuple(
-                (str(item.get("address")), int(item.get("port")))
-                for item in resolved
-                if isinstance(item, Mapping) and item.get("address") and item.get("port")
-            )
-            if isinstance(resolved, list)
-            else ()
-        )
-        if network_mode is NetworkMode.RESTRICTED_NETWORK and not endpoints:
-            raise SandboxInitializationError("restricted network endpoints are missing")
-        if self.wfp is None:
-            raise SandboxInitializationError("Broker WFP provider is unavailable")
-        pool = self._pool(user_id, job_kind)
-        account_lease = pool.acquire(job_id)
-        account = self._accounts[account_lease.account]
-        acl_snapshot = ""
-        temp_acl_snapshot = ""
-        wfp_rules: tuple[str, ...] = ()
-        process: _NativeWindowsProcess | None = None
-        temp_dir: Path | None = None
+        policy = reservation.policy
+        workspace = _canonical_absolute_path(_required_text(policy, "workspace"))
+        cwd = _canonical_absolute_path(_required_text(request, "cwd"))
+        expected_cwd = _canonical_absolute_path(_required_text(policy, "cwd"))
+        expected_temp = _canonical_absolute_path(_required_text(policy, "temp_dir"))
+        if cwd != expected_cwd or not cwd.is_relative_to(workspace):
+            self._close_reservation(reservation)
+            raise SandboxInitializationError("Broker launch cwd does not match the reservation")
+        for name in ("TEMP", "TMP"):
+            value = environment.get(name)
+            if not isinstance(value, str) or _canonical_absolute_path(value) != expected_temp:
+                self._close_reservation(reservation)
+                raise SandboxInitializationError("Broker launch TEMP does not match the reservation")
         try:
-            acl_snapshot = self.acl_manager.protect(workspace, account.sid, file_mode)
-            temp_dir = Path(str(environment.get("TEMP") or "")).resolve(strict=True)
-            temp_acl_snapshot = self.acl_manager.protect(
-                temp_dir,
-                account.sid,
-                FileAccessMode.WORKSPACE_WRITE,
+            limits = ResourceLimits.from_mapping(
+                policy.get("limits") if isinstance(policy.get("limits"), Mapping) else None
             )
-            rule_id = f"mini-agent-{hashlib.sha256(f'{backend_id}:{user_id}:{job_id}'.encode()).hexdigest()[:24]}"
-            wfp_rules = self.wfp.apply(
-                rule_id=rule_id,
-                account_sid=account.sid,
-                mode=network_mode,
-                endpoints=endpoints,
-            )
-            job = WindowsJobObject(rule_id, limits)
-            token = self.token_factory.create(account)
-            try:
-                process = _NativeWindowsProcess.launch(
-                    token,
-                    list(argv),
-                    str(cwd),
-                    {str(key): str(value) for key, value in environment.items()},
-                    job,
-                )
-            finally:
-                try:
-                    token.Close()
-                except Exception:
-                    pass
-            process_id = f"process-{uuid.uuid4().hex}"
-            lease = _NativeLease(
-                process_id,
-                backend_id,
-                user_id,
-                job_id,
-                process,
-                pool,
-                account_lease,
-                workspace,
-                acl_snapshot,
-                temp_acl_snapshot,
-                wfp_rules,
-                temp_dir,
-            )
-            monitor = ResourceMonitor(
-                process.pid,
-                limits,
-                provider=_NativeResourceProvider(process),
-                on_exceeded=lambda error: self._resource_exceeded(process_id, error),
-            )
-            lease.resource_monitor = monitor
-            with self._lock:
-                self._processes[process_id] = lease
-                self._jobs[(backend_id, user_id, job_id)] = process_id
-            monitor.start()
-            return {
-                "accepted": True,
-                "process_id": process_id,
-                "pid": process.pid,
-                "stdin": policy.get("stdin"),
-                "stdout": policy.get("stdout"),
-                "stderr": policy.get("stderr"),
-                "resources": {
-                    "process_id": process_id,
-                    "pid": process.pid,
-                    "account": account.name,
-                    "sid": account.sid,
-                    "wfp_rules": list(wfp_rules),
-                    "temp_dir": str(temp_dir),
-                    "workspace": str(workspace),
-                    "acl_snapshot": acl_snapshot,
-                    "temp_acl_snapshot": temp_acl_snapshot,
-                },
-            }
+            job = WindowsJobObject(f"mini-agent-{reservation.job_id}", limits)
         except Exception:
-            if process is not None:
-                process.close()
-            if wfp_rules:
-                self.wfp.remove(wfp_rules)
-            if acl_snapshot:
-                self.acl_manager.restore(workspace, acl_snapshot)
-            if temp_acl_snapshot and temp_dir is not None:
-                self.acl_manager.restore(temp_dir, temp_acl_snapshot)
-            try:
-                pool.release(job_id, lambda _lease: True)
-            except Exception:
-                pass
+            self._close_reservation(reservation)
             raise
+        try:
+            process = _NativeWindowsProcess.launch(
+                reservation.token,
+                list(argv),
+                str(cwd),
+                {str(key): str(value) for key, value in environment.items()},
+                job,
+                logon_sid=reservation.logon_sid,
+                service_sid=self.service_sid,
+                desktop_name=reservation.desktop.startup_name,
+            )
+        except Exception:
+            reservation.desktop.close()
+            raise
+        finally:
+            _close_handle(reservation.token)
+        process_id = f"process-{uuid.uuid4().hex}"
+        lease = _NativeLease(process_id, backend_id, user_id, reservation.job_id, process, reservation.desktop)
+        monitor = ResourceMonitor(
+            process.pid,
+            limits,
+            provider=_NativeResourceProvider(process),
+            on_exceeded=lambda error: self._resource_exceeded(process_id, error),
+        )
+        lease.resource_monitor = monitor
+        with self._lock:
+            self._processes[process_id] = lease
+            self._jobs[(backend_id, user_id, reservation.job_id)] = process_id
+        monitor.start()
+        return {
+            "accepted": True,
+            "process_id": process_id,
+            "pid": process.pid,
+            "backend_instance_id": backend_id,
+            "user_id": user_id,
+            "job_id": reservation.job_id,
+            "stdin": policy.get("stdin"),
+            "stdout": policy.get("stdout"),
+            "stderr": policy.get("stderr"),
+            "resources": {"process_id": process_id, "pid": process.pid},
+        }
 
     def control(self, operation: str, request: Mapping[str, Any]) -> Mapping[str, Any]:
         process_id = _required_text(request, "process_id")
+        backend_id = _required_text(request, "backend_instance_id")
         with self._lock:
             lease = self._processes.get(process_id)
-        if lease is None:
+        if lease is None or lease.backend_instance_id != backend_id:
             raise SandboxInitializationError("Broker process is unavailable")
         process = lease.process
         if lease.failure_code is not None:
@@ -273,83 +333,61 @@ class WindowsNativeBrokerAdapter:
         raise SandboxInitializationError("Broker process operation is unsupported")
 
     def release(self, request: Mapping[str, Any]) -> bool:
-        key = (
-            _required_text(request, "backend_instance_id"),
-            _required_text(request, "user_id"),
-            _required_text(request, "job_id"),
-        )
+        backend_id = _required_text(request, "backend_instance_id")
+        user_id = _required_text(request, "user_id")
+        job_id = _required_text(request, "job_id")
+        key = (backend_id, user_id, job_id)
         with self._lock:
-            process_id = self._jobs.get(key)
-            lease = self._processes.get(process_id or "")
+            reservation_ids = [
+                reservation_id
+                for reservation_id, reservation in self._reservations.items()
+                if (reservation.backend_instance_id, reservation.user_id, reservation.job_id) == key
+            ]
+            for reservation_id in reservation_ids:
+                self._close_reservation(self._reservations.pop(reservation_id))
+            process_id = self._jobs.pop(key, None)
+            lease = self._processes.pop(process_id, None) if process_id else None
         if lease is None:
             return True
-        complete = True
         if lease.resource_monitor is not None:
             lease.resource_monitor.stop()
         lease.process.close()
-        complete = self.acl_manager.restore(lease.workspace, lease.acl_snapshot) and complete
-        complete = self.wfp is not None and self.wfp.remove(lease.wfp_rules) and complete
-        complete = self.acl_manager.restore(lease.temp_dir, lease.temp_acl_snapshot) and complete
-        complete = remove_temp_dir(lease.temp_dir) and complete
-        if not complete:
-            return False
-        lease.pool.release(lease.job_id, lambda _lease: True)
-        with self._lock:
-            self._jobs.pop(key, None)
-            self._processes.pop(lease.process_id, None)
+        lease.desktop.close()
         return True
 
-    def recover(self, record) -> bool:
-        resources = record.resources
-        complete = True
-        pid = resources.get("pid")
-        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-            complete = self._terminate_pid(pid) and complete
-        raw_rules = resources.get("wfp_rules")
-        rule_ids = tuple(str(value) for value in raw_rules) if isinstance(raw_rules, list) else ()
-        complete = self.wfp is not None and self.wfp.remove(rule_ids) and complete
-        workspace = resources.get("workspace")
-        acl_snapshot = resources.get("acl_snapshot")
-        if isinstance(workspace, str) and workspace and isinstance(acl_snapshot, str) and acl_snapshot:
-            complete = self.acl_manager.restore(Path(workspace), acl_snapshot) and complete
-        else:
-            complete = False
-        temp_dir = resources.get("temp_dir")
-        if isinstance(temp_dir, str) and temp_dir:
-            temp_acl_snapshot = resources.get("temp_acl_snapshot")
-            if isinstance(temp_acl_snapshot, str) and temp_acl_snapshot:
-                complete = self.acl_manager.restore(Path(temp_dir), temp_acl_snapshot) and complete
-            else:
-                complete = False
-            complete = remove_temp_dir(Path(temp_dir)) and complete
-        else:
-            complete = False
-        account = resources.get("account")
-        if isinstance(account, str) and account:
-            complete = self.account_manager.delete(account) and complete
-        else:
-            complete = False
-        return complete
+    def reclaim(self, request: Mapping[str, Any]) -> tuple[str, ...]:
+        current_backend = _required_text(request, "backend_instance_id")
+        with self._lock:
+            stale = [lease for lease in self._processes.values() if lease.backend_instance_id != current_backend]
+            stale_reservations = [
+                item for item in self._reservations.values() if item.backend_instance_id != current_backend
+            ]
+        for item in (*stale_reservations, *stale):
+            self.release(
+                {
+                    "backend_instance_id": item.backend_instance_id,
+                    "user_id": item.user_id,
+                    "job_id": item.job_id,
+                }
+            )
+        return tuple(lease.job_id for lease in stale)
 
-    @staticmethod
-    def _terminate_pid(pid: int) -> bool:
-        modules = _modules()
-        try:
-            handle = modules["api"].OpenProcess(0x0001 | 0x00100000, False, pid)
-        except Exception as exc:
-            if getattr(exc, "winerror", None) in {87, 1168}:
-                return True
-            return False
-        try:
-            modules["process"].TerminateProcess(handle, 1)
-            return True
-        except Exception as exc:
-            return getattr(exc, "winerror", None) in {87, 1168}
-        finally:
-            try:
-                modules["api"].CloseHandle(handle)
-            except Exception:
-                pass
+    def recover(self, record) -> bool:
+        pid = record.resources.get("pid")
+        return not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or self._terminate_pid(pid)
+
+    def _account(self, network_mode: NetworkMode) -> WindowsSandboxAccount:
+        if network_mode is NetworkMode.FULL_NETWORK:
+            return WindowsSandboxAccount(
+                self.credentials.online_name,
+                self.credentials.online_sid,
+                self.credentials.online_password,
+            )
+        return WindowsSandboxAccount(
+            self.credentials.offline_name,
+            self.credentials.offline_sid,
+            self.credentials.offline_password,
+        )
 
     def _resource_exceeded(self, process_id: str, _error: Exception) -> None:
         with self._lock:
@@ -359,27 +397,36 @@ class WindowsNativeBrokerAdapter:
             lease.failure_code = "resource_exceeded"
         lease.process.terminate()
 
-    def _pool(self, user_id: str, kind: str) -> AccountPool:
-        key = (user_id, kind)
-        with self._lock:
-            existing = self._pools.get(key)
-            if existing is not None:
-                return existing
-            prefix = hashlib.sha256(user_id.encode("utf-8", errors="replace")).hexdigest()[:10]
-            created: list[WindowsSandboxAccount] = []
-            try:
-                for index in range(4):
-                    created.append(self.account_manager.create(f"ma{kind[0]}{prefix}{index}"))
-            except Exception:
-                for account in created:
-                    self.account_manager.delete(account.name)
-                raise
-            accounts = tuple(created)
-            pool = AccountPool(user_id, kind, tuple((account.name, account.sid) for account in accounts))
-            for account in accounts:
-                self._accounts[account.name] = account
-            self._pools[key] = pool
-            return pool
+    def _expire_loop(self) -> None:
+        while not self._stop.wait(1.0):
+            with self._lock:
+                self._purge_expired_locked()
+
+    def _purge_expired_locked(self) -> None:
+        now = self._clock()
+        expired = [key for key, value in self._reservations.items() if value.expires_at <= now]
+        for key in expired:
+            self._close_reservation(self._reservations.pop(key))
+
+    @staticmethod
+    def _close_reservation(reservation: _Reservation) -> None:
+        _close_handle(reservation.token)
+        reservation.desktop.close()
+
+    @staticmethod
+    def _terminate_pid(pid: int) -> bool:
+        modules = _modules()
+        try:
+            handle = modules["api"].OpenProcess(0x0001 | 0x00100000, False, pid)
+        except Exception as exc:
+            return getattr(exc, "winerror", None) in {87, 1168}
+        try:
+            modules["process"].TerminateProcess(handle, 1)
+            return True
+        except Exception as exc:
+            return getattr(exc, "winerror", None) in {87, 1168}
+        finally:
+            _close_handle(handle)
 
 
 def _required_text(values: Mapping[str, Any], name: str) -> str:
@@ -395,3 +442,57 @@ def _timeout(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or value > 300:
         raise SandboxInitializationError("Broker process timeout is invalid")
     return float(value)
+
+
+def _canonical_absolute_path(value: str) -> Path:
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        raise SandboxInitializationError("Broker launch path must be absolute")
+    # The backend owns reparse-point and existence validation before it grants
+    # the per-logon SID lease.  The service intentionally does not open user
+    # workspaces under its own SID; it only repeats a lexical containment check
+    # over the policy-hashed absolute paths.
+    return Path(os.path.normcase(os.path.abspath(os.path.normpath(value))))
+
+
+def _capability_digest(
+    *,
+    reservation_id: str,
+    policy_hash: str,
+    workspace: Path,
+    temp_dir: Path,
+    account_sid: str,
+    workspace_cap_sid: str,
+    temp_cap_sid: str,
+    expires_at: float,
+) -> str:
+    value = {
+        "reservation_id": reservation_id,
+        "policy_hash": policy_hash,
+        "workspace": str(workspace),
+        "temp_dir": str(temp_dir),
+        "account_sid": account_sid,
+        "capability_sids": {"workspace": workspace_cap_sid, "temp": temp_cap_sid},
+        "expires_at": f"{expires_at:.9f}",
+    }
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    ).hexdigest()
+
+
+def _policy_hash(policy: Mapping[str, Any]) -> str:
+    payload = json.dumps(policy, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _close_handle(handle: Any) -> None:
+    try:
+        handle.Close()
+    except Exception:
+        try:
+            _modules()["api"].CloseHandle(handle)
+        except Exception:
+            pass
+
+
+__all__ = ["WindowsNativeBrokerAdapter"]

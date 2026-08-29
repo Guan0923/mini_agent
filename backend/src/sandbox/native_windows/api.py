@@ -28,6 +28,7 @@ def _modules() -> dict[str, Any]:
         import win32pipe  # type: ignore[import-not-found]
         import win32process  # type: ignore[import-not-found]
         import win32security  # type: ignore[import-not-found]
+        import win32service  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - platform dependency
         raise SandboxInitializationError("pywin32 is required by the Windows Sandbox Broker") from exc
     return {
@@ -41,6 +42,7 @@ def _modules() -> dict[str, Any]:
         "pipe": win32pipe,
         "process": win32process,
         "security": win32security,
+        "service": win32service,
         "ntsecuritycon": ntsecuritycon,
         "types": pywintypes,
     }

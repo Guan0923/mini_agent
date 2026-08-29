@@ -54,7 +54,10 @@ class WebAppState:
         self.benchmark_root = self.data_root.parent / ".mini_agent-cache" / "benchmark"
         self.project_picker = project_picker
         self.job_registry = job_registry or JobRegistry()
-        self.sandbox_broker = sandbox_broker or WindowsBrokerClient.from_system()
+        sandbox_config = self.settings.sandbox_config()
+        self.sandbox_broker = sandbox_broker or WindowsBrokerClient.from_system(
+            expected_proxy_port=int(sandbox_config["proxy_port"])
+        )
         self.system_job_scope = self.job_registry.root_scope()
         self.message_queue = message_queue or RedisMessageQueue.from_url()
         self.redis_pool = getattr(getattr(self.message_queue, "client", None), "connection_pool", None)

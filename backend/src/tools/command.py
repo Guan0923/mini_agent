@@ -112,6 +112,8 @@ class WorkspaceCommand:
             effective_timeout = timeout_seconds
             decision = context.sandbox_decision
             if isinstance(decision, SandboxExecutionDecision):
+                if self._terminal_type == "wsl":
+                    raise ToolError("WSL is disabled for sandboxed run_command execution.")
                 policy = decision.command_policy(job_id, TerminalKind(self._terminal_type))
                 job_options["max_output_chars"] = decision.limits.output_chars
                 effective_timeout = min(timeout_seconds, decision.limits.wall_seconds)

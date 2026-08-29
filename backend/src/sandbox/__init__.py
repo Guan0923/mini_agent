@@ -2,11 +2,8 @@
 
 from .broker_service import (
     BROKER_VERSION,
-    AccountLease,
-    AccountPool,
     BrokerConfiguration,
     DpapiKeyStore,
-    UserAccountPools,
     WindowsBrokerService,
     WindowsDpapiProvider,
     WindowsNamedPipeServer,
@@ -25,12 +22,10 @@ from .errors import (
     SandboxPolicyError,
     SandboxResourceExceeded,
 )
-from .native_broker_adapter import WfpController, WindowsNativeBrokerAdapter
+from .native_broker_adapter import WindowsNativeBrokerAdapter
 from .native_windows import (
-    WindowsAccountManager,
     WindowsAclManager,
     WindowsJobObject,
-    WindowsPowerShellWfpController,
     WindowsRestrictedTokenFactory,
     WindowsSandboxAccount,
     windows_pipe_security_attributes,
@@ -62,8 +57,6 @@ __all__ = [
     "ApprovalStore",
     "BrokerInstallFailureCode",
     "BrokerInstallationError",
-    "AccountLease",
-    "AccountPool",
     "AggregateLimits",
     "BrokerStatus",
     "BROKER_VERSION",
@@ -101,17 +94,13 @@ __all__ = [
     "WindowsDpapiProvider",
     "WindowsNamedPipeServer",
     "WindowsServiceInstaller",
-    "WindowsAccountManager",
     "WindowsAclManager",
     "WindowsJobObject",
     "WindowsNativeBrokerAdapter",
-    "WindowsPowerShellWfpController",
     "WindowsRestrictedTokenFactory",
     "WindowsSandboxAccount",
     "windows_pipe_security_attributes",
     "windows_service_sid",
-    "WfpController",
-    "UserAccountPools",
     "authorization_hash",
     "normalize_permission_mode",
     "resolve_network_rules",

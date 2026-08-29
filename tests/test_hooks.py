@@ -294,9 +294,12 @@ def test_workspace_file_mutation_approval_matrix_executes_real_handler(
         assert (tmp_path / "edited.txt").read_text(encoding="utf-8") == "after"
 
 
-@pytest.mark.parametrize("permission_mode", ["read_only", "workspace_write"])
+@pytest.mark.parametrize(
+    ("permission_mode", "expected_approvals"),
+    [("read_only", 1), ("workspace_write", 1), ("full_access", 0)],
+)
 def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(
-    tmp_path: Path, permission_mode: str
+    tmp_path: Path, permission_mode: str, expected_approvals: int
 ) -> None:
     class RecordingLauncher(SandboxLauncher):
         def __init__(self) -> None:
@@ -310,8 +313,14 @@ def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(
     launcher = RecordingLauncher()
     requests = []
     planner = _OneToolPlanner()
-    planner.decide = lambda _runtime: (
-        AssistantMessage(
+    decisions = 0
+
+    def decide(_runtime):
+        nonlocal decisions
+        decisions += 1
+        if decisions > 1:
+            return AssistantMessage(content="done")
+        return AssistantMessage(
             tool_messages=[
                 ToolMessage(
                     name="run_command",
@@ -326,9 +335,8 @@ def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(
                 )
             ]
         )
-        if not requests
-        else AssistantMessage(content="done")
-    )
+
+    planner.decide = decide
     tools = ToolRegistry(tmp_path)
     runner = AgentRunner(
         planner,
@@ -350,10 +358,12 @@ def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(
     )
     assert command_message.tool_messages[0].status == "succeeded"
     assert "hook-sandbox" in (command_message.tool_messages[0].content or "")
-    assert requests[0].data["permission_target"] == "full_access"
-    assert launcher.policies[0].file_mode is PermissionMode.FULL_ACCESS
-    assert launcher.policies[0].network_mode is NetworkMode.FULL_NETWORK
-    assert launcher.policies[0].enforced is False
+    assert len(requests) == expected_approvals
+    if requests:
+        assert requests[0].data["permission_target"] == permission_mode
+        assert requests[0].data["network_target"]["mode"] == "no_network"
+    assert launcher.policies[0].file_mode is PermissionMode(permission_mode)
+    assert launcher.policies[0].network_mode is NetworkMode.NO_NETWORK
     assert launcher._temp_dirs == {}
 
 
@@ -409,6 +419,10 @@ def test_real_sandbox_command_timeout_cleans_process_resources(tmp_path: Path) -
         workspace=tmp_path,
         session_id="session-timeout",
         user_id="local",
+        file_mode=PermissionMode.READ_ONLY,
+        network_mode=NetworkMode.NO_NETWORK,
+        network_allowlist=(),
+        proxy_port=17831,
         limits=SandboxLimits(wall_seconds=5),
     )
     command = WorkspaceCommand(tmp_path)

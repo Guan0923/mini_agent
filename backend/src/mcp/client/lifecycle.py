@@ -34,9 +34,6 @@ def load_external_tools(
     settings: McpSettings | None = None,
     job_registry: JobRegistry | None = None,
     job_scope: JobScope | None = None,
-    sandbox_launcher=None,
-    sandbox_policy_factory=None,
-    sandbox_user_id: str | None = None,
 ) -> ExternalMcpResources:
     del project_file
     return start_external_tools(
@@ -44,9 +41,6 @@ def load_external_tools(
         settings,
         job_registry=job_registry,
         job_scope=job_scope,
-        sandbox_launcher=sandbox_launcher,
-        sandbox_policy_factory=sandbox_policy_factory,
-        sandbox_user_id=sandbox_user_id,
     )
 
 
@@ -56,9 +50,6 @@ def start_external_tools(
     *,
     job_registry: JobRegistry | None = None,
     job_scope: JobScope | None = None,
-    sandbox_launcher=None,
-    sandbox_policy_factory=None,
-    sandbox_user_id: str | None = None,
 ) -> ExternalMcpResources:
     if not configs:
         return ExternalMcpResources()
@@ -66,9 +57,6 @@ def start_external_tools(
         manager_kwargs = {
             "job_registry": job_registry,
             "job_scope": job_scope,
-            "sandbox_launcher": sandbox_launcher,
-            "sandbox_policy_factory": sandbox_policy_factory,
-            "sandbox_user_id": sandbox_user_id,
         }
         manager_kwargs = {name: value for name, value in manager_kwargs.items() if value is not None}
         manager_type = _manager_type()

@@ -60,6 +60,14 @@ class BrokerConfiguration:
         return self.program_data / "backend.sid"
 
     @property
+    def credential_path(self) -> Path:
+        return self.program_data / "accounts.dpapi"
+
+    @property
+    def ready_path(self) -> Path:
+        return self.program_data / "ready.json"
+
+    @property
     def audit_path(self) -> Path:
         return self.program_data / "control-plane.jsonl"
 

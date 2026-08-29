@@ -38,7 +38,6 @@ export interface RuntimeConfig {
   terminal_type: TerminalType;
 }
 
-export type SandboxFileMode = "read_only" | "workspace_write" | "full_access";
 export type SandboxNetworkMode = "no_network" | "restricted_network" | "full_network";
 
 export interface SandboxLimits {
@@ -53,15 +52,14 @@ export interface SandboxLimits {
 
 export interface SandboxNetworkRule {
   host: string;
-  port: number;
+  port?: number;
 }
 
 export interface SandboxConfig {
-  file_mode: SandboxFileMode;
   network_mode: SandboxNetworkMode;
   network_allowlist: SandboxNetworkRule[];
+  readonly proxy_port: number;
   limits: SandboxLimits;
-  full_access_acknowledged?: boolean;
 }
 
 export interface TerminalOption {

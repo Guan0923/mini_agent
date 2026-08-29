@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import threading
 from collections.abc import Mapping
+from pathlib import PureWindowsPath
 from typing import Any
 
 from ..errors import SandboxInitializationError
@@ -47,14 +48,20 @@ class _NativeWindowsProcess:
         cwd: str,
         environment: Mapping[str, str],
         job: WindowsJobObject,
+        *,
+        logon_sid: str,
+        service_sid: str,
+        desktop_name: str,
     ) -> _NativeWindowsProcess:
         modules = _modules()
         pipe = modules["pipe"]
         api = modules["api"]
         process = modules["process"]
-        child_stdin, parent_stdin = pipe.CreatePipe(None, 0)
-        parent_stdout, child_stdout = pipe.CreatePipe(None, 0)
-        parent_stderr, child_stderr = pipe.CreatePipe(None, 0)
+        pipe_attributes = _object_security_attributes(logon_sid, service_sid)
+        pipe_attributes.bInheritHandle = True
+        child_stdin, parent_stdin = pipe.CreatePipe(pipe_attributes, 0)
+        parent_stdout, child_stdout = pipe.CreatePipe(pipe_attributes, 0)
+        parent_stderr, child_stderr = pipe.CreatePipe(pipe_attributes, 0)
         for handle in (parent_stdin, parent_stdout, parent_stderr):
             api.SetHandleInformation(handle, modules["con"].HANDLE_FLAG_INHERIT, 0)
         startup = process.STARTUPINFO()
@@ -62,30 +69,46 @@ class _NativeWindowsProcess:
         startup.hStdInput = child_stdin
         startup.hStdOutput = child_stdout
         startup.hStdError = child_stderr
-        flags = (
-            modules["con"].CREATE_SUSPENDED
-            | modules["con"].CREATE_NO_WINDOW
-            | modules["con"].CREATE_UNICODE_ENVIRONMENT
-        )
+        startup.lpDesktop = desktop_name
+        flags = _process_creation_flags(modules["con"])
+        process_attributes = _object_security_attributes(logon_sid, service_sid)
+        thread_attributes = _object_security_attributes(logon_sid, service_sid)
+        process_handle = None
+        thread_handle = None
         try:
-            process_handle, thread_handle, pid, _ = process.CreateProcessAsUser(
-                token,
-                None,
-                subprocess.list2cmdline(argv),
-                None,
-                None,
-                True,
-                flags,
-                dict(environment),
-                cwd,
-                startup,
-            )
-            job.assign(process_handle)
-            process.ResumeThread(thread_handle)
-        except Exception as exc:  # pragma: no cover - requires UAC
+            try:
+                process_handle, thread_handle, pid, _ = process.CreateProcessAsUser(
+                    token,
+                    None,
+                    _windows_command_line(argv),
+                    process_attributes,
+                    thread_attributes,
+                    True,
+                    flags,
+                    dict(environment),
+                    cwd,
+                    startup,
+                )
+            except Exception as exc:  # pragma: no cover - requires service token
+                raise SandboxInitializationError("Broker restricted process creation failed") from exc
+            try:
+                job.assign(process_handle)
+            except Exception as exc:  # pragma: no cover - requires Job Object
+                raise SandboxInitializationError("Broker restricted process Job assignment failed") from exc
+            try:
+                process.ResumeThread(thread_handle)
+            except Exception as exc:  # pragma: no cover - requires service token
+                raise SandboxInitializationError("Broker restricted process resume failed") from exc
+        except Exception:
             job.terminate()
             job.close()
-            raise SandboxInitializationError("Broker could not launch the restricted process") from exc
+            for handle in (thread_handle, process_handle):
+                if handle is not None:
+                    try:
+                        api.CloseHandle(handle)
+                    except Exception:
+                        pass
+            raise
         finally:
             for handle in (child_stdin, child_stdout, child_stderr):
                 try:
@@ -203,3 +226,40 @@ class _NativeWindowsProcess:
             except Exception:
                 pass
         self.job.close()
+
+
+def _object_security_attributes(logon_sid: str, service_sid: str) -> Any:
+    modules = _modules()
+    security = modules["security"]
+    attributes = modules["types"].SECURITY_ATTRIBUTES()
+    descriptor = modules["types"].SECURITY_DESCRIPTOR()
+    acl = security.ACL()
+    full = modules["con"].GENERIC_ALL
+    for sid in (
+        security.ConvertStringSidToSid(logon_sid),
+        security.CreateWellKnownSid(security.WinLocalSystemSid, None),
+        security.ConvertStringSidToSid(service_sid),
+    ):
+        acl.AddAccessAllowedAce(security.ACL_REVISION, full, sid)
+    descriptor.SetSecurityDescriptorDacl(1, acl, 0)
+    attributes.SECURITY_DESCRIPTOR = descriptor
+    return attributes
+
+
+def _windows_command_line(argv: list[str]) -> str:
+    """Encode argv while preserving cmd.exe's non-CRT /c quoting rules."""
+
+    executable = PureWindowsPath(argv[0]).name.casefold()
+    if executable in {"cmd", "cmd.exe"} and len(argv) >= 3 and argv[-2].casefold() in {"/c", "/k"}:
+        command = argv[-1]
+        if "\x00" in command:
+            raise SandboxInitializationError("Broker command contains an invalid character")
+        return f'{subprocess.list2cmdline(argv[:-1])} "{command}"'
+    return subprocess.list2cmdline(argv)
+
+
+def _process_creation_flags(constants: Any) -> int:
+    # CREATE_NO_WINDOW is intentionally absent. Restricted PowerShell and CLR
+    # processes fail during DLL initialization in that mode; the Broker's
+    # private non-interactive desktop already prevents visible UI.
+    return int(constants.CREATE_SUSPENDED | constants.CREATE_UNICODE_ENVIRONMENT)

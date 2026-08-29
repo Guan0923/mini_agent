@@ -65,29 +65,10 @@ export function SandboxSettingsSection({ state }: SectionProps) {
         />
       ) : null}
 
-      <Form.Item label="文件权限">
-        <Select
-          aria-label="沙箱文件权限"
-          value={config.file_mode}
-          options={[
-            { value: "read_only", label: "只读" },
-            { value: "workspace_write", label: "工作区读写" },
-            { value: "full_access", label: "Full access" },
-          ]}
-          onChange={(file_mode) => state.updateSettings({
-            sandbox_config: {
-              ...config,
-              file_mode,
-              network_mode: file_mode === "full_access" ? "full_network" : config.network_mode,
-            },
-          })}
-        />
-      </Form.Item>
       <Form.Item label="网络权限">
         <Select
           aria-label="沙箱网络权限"
           value={config.network_mode}
-          disabled={config.file_mode === "full_access"}
           options={[
             { value: "no_network", label: "禁止网络" },
             { value: "restricted_network", label: "仅白名单" },
@@ -118,9 +99,11 @@ export function SandboxSettingsSection({ state }: SectionProps) {
                 min={1}
                 max={65535}
                 precision={0}
-                value={rule.port}
+                value={rule.port ?? null}
+                placeholder="全部端口"
                 onChange={(port) => {
-                  if (typeof port === "number" && Number.isInteger(port)) updateAllowlist(index, { port });
+                  if (port === null) updateAllowlist(index, { port: undefined });
+                  else if (typeof port === "number" && Number.isInteger(port)) updateAllowlist(index, { port });
                 }}
               />
               <Button
@@ -145,7 +128,7 @@ export function SandboxSettingsSection({ state }: SectionProps) {
         onClick={() => state.updateSettings({
           sandbox_config: {
             ...config,
-            network_allowlist: [...config.network_allowlist, { host: "", port: 443 }],
+            network_allowlist: [...config.network_allowlist, { host: "" }],
           },
         })}
       >

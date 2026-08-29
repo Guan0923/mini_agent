@@ -46,9 +46,6 @@ class ExternalMcpManager:
         *,
         job_registry: JobRegistry | None = None,
         job_scope: JobScope | None = None,
-        sandbox_launcher=None,
-        sandbox_policy_factory=None,
-        sandbox_user_id: str | None = None,
     ) -> None:
         self._configs = configs
         self._settings = settings or McpSettings()
@@ -62,9 +59,6 @@ class ExternalMcpManager:
         self.service_jobs: dict[str, ServiceJob] = {}
         self._job_registry = job_registry
         self._job_scope = job_scope
-        self._sandbox_launcher = sandbox_launcher
-        self._sandbox_policy_factory = sandbox_policy_factory
-        self._sandbox_user_id = sandbox_user_id
         self._closed = False
         self._thread.start()
         try:
@@ -107,15 +101,7 @@ class ExternalMcpManager:
         stack = AsyncExitStack()
         await stack.__aenter__()
         try:
-            policy = self._sandbox_policy_factory(server) if self._sandbox_policy_factory is not None else None
-            read, write = await stack.enter_async_context(
-                controlled_stdio_client(
-                    _parameters(server),
-                    sandbox_launcher=self._sandbox_launcher,
-                    sandbox_policy=policy,
-                    sandbox_user_id=self._sandbox_user_id,
-                )
-            )
+            read, write = await stack.enter_async_context(controlled_stdio_client(_parameters(server)))
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
             definitions = list((await session.list_tools()).tools)
@@ -238,22 +224,6 @@ class ExternalMcpManager:
                 max_failures=self._settings.health_failure_threshold,
                 max_restarts=self._settings.rebuild_failure_threshold,
             )
-            if self._sandbox_policy_factory is not None:
-                policy = self._sandbox_policy_factory(self._server_config(server_name))
-                job.sandbox_policy = policy
-                setter = getattr(job, "_set_sandbox_info", None)
-                if callable(setter):
-                    raw = policy.to_dict()
-                    setter(
-                        {
-                            "enforced": bool(raw.get("enforced", True)),
-                            "file_mode": raw.get("file_mode", "read_only"),
-                            "network_mode": raw.get("network_mode", "no_network"),
-                            "limits": raw.get("limits", {}),
-                            "failure_code": None,
-                            "cleanup_pending": False,
-                        }
-                    )
             self._job_registry.submit(
                 job,
                 scope=scope,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
-from uuid import uuid4
 
 from backend.configuration import ClientPaths, LocalConfigStore, initialize_config, load_config, section
 from backend.domain import DEFAULT_TIME_ZONE
@@ -15,14 +14,8 @@ from backend.mcp.config import McpSettings, prepare_mcp_plan
 from backend.planning import LLMPlanner, RuleBasedPlanner
 from backend.providers import LLMClient, ModelConfig
 from backend.sandbox import (
-    NetworkMode,
-    NetworkRule,
-    PermissionMode,
     SandboxAdmission,
-    SandboxInitializationError,
     SandboxLauncher,
-    SandboxLimits,
-    SandboxPolicy,
     WindowsBrokerClient,
 )
 from backend.skills import ProjectSkillGate, ProjectSkillTrustStore, SkillCatalog
@@ -170,7 +163,7 @@ def _build_subagent_runner(
     resolved_paths = paths or client_paths()
     skill_settings = SkillSettings.from_config(config)
     subagent_settings = SubagentSettings.from_config(config)
-    sandbox_launcher, sandbox_config = _sandbox_runtime(config)
+    sandbox_launcher, sandbox_config = _sandbox_runtime(config, paths=resolved_paths)
     read_file_roots = (resolved_paths.skills_dir,) if skill_settings.enabled else ()
     workspace_files = files or WorkspaceFiles(workspace, read_file_roots=read_file_roots)
 
@@ -210,14 +203,10 @@ def _build_subagent_runner(
     if job_registry is not None:
         mcp_scope = job_registry.root_scope().child(JobScopeKind.SESSION, session_id=sandbox_session_id)
     external = _external_resources(
-        workspace,
         resolved_paths,
         config,
         job_registry=job_registry,
         job_scope=mcp_scope,
-        session_id=sandbox_session_id,
-        sandbox_launcher=sandbox_launcher,
-        sandbox_config=sandbox_config,
     )
     try:
         tools = build_tool_registry(
@@ -320,81 +309,44 @@ def _build_runner(
 
 
 def _external_resources(
-    workspace: Path,
     paths: ClientPaths,
     config: dict[str, object],
     *,
     job_registry: JobRegistry | None = None,
     job_scope: JobScope | None = None,
-    session_id: str | None = None,
-    sandbox_launcher: SandboxLauncher | None = None,
-    sandbox_config: dict[str, object] | None = None,
 ) -> ExternalMcpResources:
     plan = prepare_mcp_plan(paths)
     servers = plan.effective_servers()
-    if servers and (sandbox_launcher is None or sandbox_config is None):
-        raise SandboxInitializationError("External MCP tools require a healthy Sandbox runtime.")
     kwargs = {}
     if job_registry is not None:
         kwargs["job_registry"] = job_registry
     if job_scope is not None:
         kwargs["job_scope"] = job_scope
-    if sandbox_launcher is not None and sandbox_config is not None:
-        kwargs["sandbox_launcher"] = sandbox_launcher
-        kwargs["sandbox_policy_factory"] = _sandbox_policy_factory(
-            workspace,
-            session_id=session_id or "mcp",
-            config=sandbox_config,
-        )
     return start_external_tools(servers, McpSettings.from_config(config), **kwargs)
 
 
-def _sandbox_runtime(config: dict[str, object]) -> tuple[SandboxLauncher, dict[str, object]]:
-    """Build the mandatory process launcher or fail before a Runner can be used."""
+def _sandbox_runtime(
+    config: dict[str, object],
+    *,
+    paths: ClientPaths | None = None,
+) -> tuple[SandboxLauncher | None, dict[str, object]]:
+    """Build the run_command launcher when the Broker control plane is healthy."""
 
     raw = config.get("sandbox_config")
     if not isinstance(raw, dict):
         raw = config.get("sandbox") if isinstance(config.get("sandbox"), dict) else None
     normalized = normalize_sandbox_config(raw) if isinstance(raw, dict) else normalize_sandbox_config()
-    broker = WindowsBrokerClient.from_system()
+    proxy_port = int(normalized["proxy_port"])
+    broker = WindowsBrokerClient.from_system(expected_proxy_port=proxy_port)
     status = broker.status()
-    if not status.installed:
-        raise SandboxInitializationError("Windows Sandbox Broker 未安装或当前不可用。")
-    if not status.healthy:
-        raise SandboxInitializationError("Windows Sandbox Broker 已安装，但健康检查未通过。")
-    return SandboxLauncher(broker=broker, admission=SandboxAdmission()), normalized
-
-
-def _sandbox_policy_factory(workspace: Path, *, session_id: str, config: dict[str, object]):
-    def make_policy(server) -> SandboxPolicy:
-        raw_rules = config.get("network_allowlist")
-        rules = (
-            tuple(
-                NetworkRule(str(item.get("host") or ""), int(item.get("port")))
-                for item in raw_rules
-                if isinstance(item, dict)
-            )
-            if isinstance(raw_rules, (list, tuple))
-            else ()
-        )
-        file_mode = PermissionMode(str(config.get("file_mode", PermissionMode.READ_ONLY.value)))
-        network_mode = NetworkMode(str(config.get("network_mode", NetworkMode.NO_NETWORK.value)))
-        if file_mode is PermissionMode.FULL_ACCESS:
-            network_mode = NetworkMode.FULL_NETWORK
-        limits = SandboxLimits.from_mapping(config.get("limits") if isinstance(config.get("limits"), dict) else None)
-        return SandboxPolicy(
-            workspace=workspace,
-            session_id=session_id,
-            job_id=f"mcp-{server.name}-{uuid4().hex}",
-            file_mode=file_mode,
-            network_mode=network_mode,
-            network_allowlist=rules,
-            limits=limits,
-            enforced=file_mode is not PermissionMode.FULL_ACCESS,
-            full_access_acknowledged=file_mode is PermissionMode.FULL_ACCESS,
-        )
-
-    return make_policy
+    if not status.installed or not status.healthy:
+        return None, normalized
+    lease_store_path = paths.runtime_dir / "sandbox-leases.json" if paths is not None else None
+    return SandboxLauncher(
+        broker=broker,
+        admission=SandboxAdmission(),
+        lease_store_path=lease_store_path,
+    ), normalized
 
 
 def _settings_for(
