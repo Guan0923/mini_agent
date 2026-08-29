@@ -249,6 +249,34 @@ class WindowsBrokerClient:
             self._ensure_installation_key()
         return self._status_command("repair")
 
+    def reinstall(self) -> BrokerStatus:
+        """Force a full elevated Broker replacement even when status is healthy."""
+
+        if self._installer is None or not callable(getattr(self._installer, "reinstall", None)):
+            raise SandboxInitializationError("Windows Broker reinstall is unavailable")
+        self._installer.reinstall()
+        self._key = None
+        deadline = time.monotonic() + 10.0
+        last_error: Exception | None = None
+        while True:
+            try:
+                if self._key_store is None:
+                    raise SandboxInitializationError("Broker installation key is unavailable")
+                self._key = self._key_store.load()
+                status = self.status()
+                if status.healthy:
+                    return status
+                raise SandboxInitializationError(status.detail or "Broker is not healthy")
+            except Exception as exc:
+                last_error = exc
+                self._key = None
+                if time.monotonic() >= deadline:
+                    raise BrokerInstallationError(
+                        BrokerInstallFailureCode.NOT_READY,
+                        "Broker 服务已重装但未能在限定时间内就绪。",
+                    ) from last_error
+                time.sleep(0.1)
+
     def _ensure_installation_key(self) -> None:
         if self._key is not None:
             return

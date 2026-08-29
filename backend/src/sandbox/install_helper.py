@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -39,6 +40,11 @@ _SERVICE_STOPPED = 1
 _SERVICE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVICE_STOP_POLL_SECONDS = 0.1
 _BROKER_SERVICE_CLASS = "sandbox_service_bootstrap.MiniAgentSandboxBrokerService"
+_OFFLINE_ACCOUNT = "MiniSbxOffline"
+_ONLINE_ACCOUNT = "MiniSbxOnline"
+_ACCOUNT_GROUP = "MiniAgentSandboxUsers"
+_ACCOUNT_COMMENT = "Mini-Agent sandbox account (managed)"
+_GROUP_COMMENT = "Mini-Agent sandbox users (managed)"
 
 
 class _TransactionFailure(RuntimeError):
@@ -108,7 +114,7 @@ def _validate_payload(
     service_code_boundary_path = payload.get("service_code_boundary_path")
     service_runtime_paths = payload.get("service_runtime_paths", [])
     proxy_port = payload.get("proxy_port", 17831)
-    if operation not in {"install", "repair"} or not isinstance(service_name, str) or not service_name:
+    if operation not in {"install", "repair", "reinstall"} or not isinstance(service_name, str) or not service_name:
         raise ValueError("invalid Broker installation operation")
     if (
         not isinstance(service_command, list)
@@ -143,6 +149,10 @@ def _validate_payload(
         raise ValueError("Broker SID path must be absolute")
     if data_path is not None and not data_path.is_absolute():
         raise ValueError("Broker ProgramData path must be absolute")
+    if data_path is not None and (
+        data_path.name.casefold() != "sandboxbroker" or data_path.parent.name.casefold() != "mini-agent"
+    ):
+        raise ValueError("Broker ProgramData path is outside the managed directory")
     if code_path is not None and not code_path.is_absolute():
         raise ValueError("Broker source path must be absolute")
     if code_boundary_path is not None and not code_boundary_path.is_absolute():
@@ -259,6 +269,36 @@ def _stop_service_for_repair(
     ):
         return
     raise _TransactionFailure(EXIT_SERVICE_STOP_FAILED, "Broker service did not stop")
+
+
+def _service_exists(service_name: str) -> bool:
+    try:
+        result = subprocess.run(["sc.exe", "query", service_name], check=False, capture_output=True)
+    except OSError as exc:
+        raise OSError("Broker service state is unavailable") from exc
+    return int(result.returncode) == 0
+
+
+def _wait_for_service_deleted(
+    service_name: str,
+    *,
+    exists: Callable[[str], bool] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], Any] = time.sleep,
+) -> bool:
+    checker = exists or _service_exists
+    deadline = clock() + _SERVICE_STOP_TIMEOUT_SECONDS
+    while True:
+        try:
+            present = bool(checker(service_name))
+        except Exception:
+            return False
+        if not present:
+            return True
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return False
+        sleeper(min(_SERVICE_STOP_POLL_SECONDS, remaining))
 
 
 def _persist_sid(path: Path | None, value: str | None) -> None:
@@ -413,12 +453,18 @@ def _provision_fixed_accounts(data_path: Path, service_name: str, proxy_port: in
     except ImportError as exc:
         raise OSError("Broker account dependencies are unavailable") from exc
 
-    group_name = "CodexSandboxUsers"
+    group_name = _ACCOUNT_GROUP
     try:
-        win32net.NetLocalGroupAdd(None, 1, {"name": group_name, "comment": "Mini-Agent sandbox users"})
+        win32net.NetLocalGroupAdd(None, 1, {"name": group_name, "comment": _GROUP_COMMENT})
     except Exception as exc:
         if getattr(exc, "winerror", None) not in {1379, 2223}:
             raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Broker sandbox group could not be created") from exc
+        try:
+            group_info = win32net.NetLocalGroupGetInfo(None, group_name, 1)
+        except Exception as read_exc:
+            raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Broker sandbox group is unavailable") from read_exc
+        if str(group_info.get("comment") or "") != _GROUP_COMMENT:
+            raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Conflicting sandbox group ownership")
 
     credential_store = DpapiCredentialStore(data_path / "accounts.dpapi")
     try:
@@ -427,8 +473,12 @@ def _provision_fixed_accounts(data_path: Path, service_name: str, proxy_port: in
         existing_package = None
 
     accounts: dict[str, tuple[str, str]] = {}
-    for role, name in (("offline", "CodexSandboxOffline"), ("online", "CodexSandboxOnline")):
-        password = getattr(existing_package, f"{role}_password", "") if existing_package is not None else ""
+    for role, name in (("offline", _OFFLINE_ACCOUNT), ("online", _ONLINE_ACCOUNT)):
+        password = (
+            getattr(existing_package, f"{role}_password", "")
+            if existing_package is not None and getattr(existing_package, f"{role}_name", "") == name
+            else ""
+        )
         try:
             info = win32net.NetUserGetInfo(None, name, 4)
             _validate_existing_sandbox_user(name, info, win32net)
@@ -445,12 +495,16 @@ def _provision_fixed_accounts(data_path: Path, service_name: str, proxy_port: in
                     {
                         "name": name,
                         "password": password,
+                        # NetUserAdd level 1 rejects USER_PRIV_GUEST.  Without
+                        # membership in the built-in Users group, Windows
+                        # reports the persisted account as USER_PRIV_GUEST.
                         "priv": win32netcon.USER_PRIV_USER,
                         "flags": (
                             win32netcon.UF_SCRIPT
                             | win32netcon.UF_DONT_EXPIRE_PASSWD
                             | win32netcon.UF_PASSWD_CANT_CHANGE
                         ),
+                        "comment": _ACCOUNT_COMMENT,
                     },
                 )
             except Exception as create_exc:
@@ -509,10 +563,10 @@ def _provision_fixed_accounts(data_path: Path, service_name: str, proxy_port: in
     )
     package = BrokerCredentialPackage(
         generation,
-        "CodexSandboxOffline",
+        _OFFLINE_ACCOUNT,
         accounts["offline"][0],
         accounts["offline"][1],
-        "CodexSandboxOnline",
+        _ONLINE_ACCOUNT,
         accounts["online"][0],
         accounts["online"][1],
     )
@@ -528,12 +582,14 @@ def _provision_fixed_accounts(data_path: Path, service_name: str, proxy_port: in
 
 
 def _validate_existing_sandbox_user(name: str, info: Mapping[str, Any], win32net: Any) -> None:
-    if int(info.get("priv", -1)) != 1:
+    if int(info.get("priv", -1)) != 0:
         raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Conflicting sandbox account privilege")
     forbidden = {"administrators", "backup operators", "power users", "remote desktop users"}
     groups = {str(value).casefold() for value in win32net.NetUserGetLocalGroups(None, name, 0)}
     if groups & forbidden:
         raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Conflicting sandbox account group membership")
+    if str(info.get("comment") or "") != _ACCOUNT_COMMENT:
+        raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Conflicting sandbox account ownership")
 
 
 def _credential_works(name: str, password: str, security: Any, win32con: Any) -> bool:
@@ -543,6 +599,113 @@ def _credential_works(name: str, password: str, security: Any, win32con: Any) ->
         return True
     except Exception:
         return False
+
+
+def _remove_owned_accounts(data_path: Path) -> None:
+    """Delete only accounts proven to belong to this Mini-Agent install."""
+
+    try:
+        import win32net  # type: ignore[import-not-found]
+        import win32security  # type: ignore[import-not-found]
+
+        from .broker_service.credentials import DpapiCredentialStore
+    except ImportError as exc:
+        raise OSError("Broker account dependencies are unavailable") from exc
+    try:
+        package = DpapiCredentialStore(data_path / "accounts.dpapi").load()
+    except Exception:
+        if _managed_identity_exists(win32net):
+            raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Broker sandbox account ownership is unverified")
+        return
+    expected = {
+        _OFFLINE_ACCOUNT: package.offline_sid if package.offline_name == _OFFLINE_ACCOUNT else None,
+        _ONLINE_ACCOUNT: package.online_sid if package.online_name == _ONLINE_ACCOUNT else None,
+    }
+    if any(value is None for value in expected.values()):
+        if _managed_identity_exists(win32net):
+            raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Broker sandbox account ownership is unverified")
+        return
+    try:
+        group_info = win32net.NetLocalGroupGetInfo(None, _ACCOUNT_GROUP, 1)
+        raw_members = win32net.NetLocalGroupGetMembers(None, _ACCOUNT_GROUP, 3)[0]
+        members = {
+            str(value.get("domainandname") or "").casefold() for value in raw_members if isinstance(value, Mapping)
+        }
+    except Exception as exc:
+        if getattr(exc, "winerror", None) in {1376, 2220}:
+            if _managed_identity_exists(win32net):
+                raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Broker sandbox account ownership is unverified")
+            return
+        raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Broker sandbox group could not be verified") from exc
+    if str(group_info.get("comment") or "") != _GROUP_COMMENT:
+        raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Conflicting sandbox group ownership")
+    expected_members = {f"{os.environ.get('COMPUTERNAME', '.')}\\{name}".casefold() for name in expected}
+    if members != expected_members and {member.rsplit("\\", 1)[-1] for member in members} != {
+        name.casefold() for name in expected
+    }:
+        raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Conflicting sandbox group membership")
+    policy_handle = None
+    try:
+        policy_handle = win32security.LsaOpenPolicy(None, win32security.POLICY_ALL_ACCESS)
+        group_sid, _, _ = win32security.LookupAccountName(None, _ACCOUNT_GROUP)
+        try:
+            win32security.LsaRemoveAccountRights(policy_handle, group_sid, True, ())
+        except Exception as exc:
+            if getattr(exc, "winerror", None) not in {2, 1332}:
+                raise
+        for name, expected_sid in expected.items():
+            info = win32net.NetUserGetInfo(None, name, 4)
+            _validate_existing_sandbox_user(name, info, win32net)
+            sid, _, _ = win32security.LookupAccountName(None, name)
+            sid_text = str(win32security.ConvertSidToStringSid(sid))
+            if str(info.get("comment") or "") != _ACCOUNT_COMMENT or sid_text != expected_sid:
+                raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Conflicting sandbox account ownership")
+        for name in expected:
+            win32net.NetUserDel(None, name)
+        win32net.NetLocalGroupDel(None, _ACCOUNT_GROUP)
+    except _TransactionFailure:
+        raise
+    except Exception as exc:
+        raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Broker sandbox accounts could not be removed") from exc
+
+
+def _managed_identity_exists(win32net: Any) -> bool:
+    for name in (_OFFLINE_ACCOUNT, _ONLINE_ACCOUNT):
+        try:
+            win32net.NetUserGetInfo(None, name, 0)
+            return True
+        except Exception as exc:
+            if getattr(exc, "winerror", None) != 2221:
+                raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Broker sandbox account could not be verified") from exc
+    try:
+        win32net.NetLocalGroupGetInfo(None, _ACCOUNT_GROUP, 0)
+        return True
+    except Exception as exc:
+        if getattr(exc, "winerror", None) != 2220:
+            raise _TransactionFailure(EXIT_ACCOUNT_FAILED, "Broker sandbox group could not be verified") from exc
+    return False
+
+
+def _remove_service_rights(service_name: str) -> None:
+    try:
+        import win32security  # type: ignore[import-not-found]
+
+        policy_handle = win32security.LsaOpenPolicy(None, win32security.POLICY_ALL_ACCESS)
+        service_sid = win32security.ConvertStringSidToSid(_service_sid(service_name))
+        win32security.LsaRemoveAccountRights(policy_handle, service_sid, True, ())
+    except Exception as exc:
+        winerror = getattr(exc, "winerror", None)
+        if winerror not in {2, 1332}:
+            raise _TransactionFailure(EXIT_RIGHTS_FAILED, "Broker service rights could not be removed") from exc
+
+
+def _remove_static_network() -> None:
+    try:
+        from .native_windows.wfp import remove_static_wfp
+
+        remove_static_wfp()
+    except Exception as exc:
+        raise _TransactionFailure(EXIT_NETWORK_FAILED, "Broker network policy could not be removed") from exc
 
 
 def secrets_token() -> str:
@@ -659,6 +822,109 @@ def _secure_source_code(path: Path | None, boundary: Path | None, service_name: 
         _apply_source_acl_grant(grant)
 
 
+def _remove_source_acl_grant(path: Path, sid_text: str) -> None:
+    if not path.exists():
+        return
+    try:
+        import win32security  # type: ignore[import-not-found]
+
+        sid = win32security.ConvertStringSidToSid(sid_text)
+        descriptor = win32security.GetNamedSecurityInfo(
+            str(path),
+            win32security.SE_FILE_OBJECT,
+            win32security.DACL_SECURITY_INFORMATION,
+        )
+        dacl = descriptor.GetSecurityDescriptorDacl()
+        if dacl is None:
+            return
+        matching = [index for index in range(dacl.GetAceCount()) if dacl.GetAce(index)[2] == sid]
+        for index in reversed(matching):
+            dacl.DeleteAce(index)
+        if matching:
+            win32security.SetNamedSecurityInfo(
+                str(path),
+                win32security.SE_FILE_OBJECT,
+                win32security.DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                dacl,
+                None,
+            )
+    except Exception as exc:
+        raise _TransactionFailure(EXIT_ACL_FAILED, "Broker source ACL could not be removed") from exc
+
+
+def _remove_service_acls(
+    code_path: Path | None,
+    code_boundary_path: Path | None,
+    runtime_paths: Sequence[Path],
+    service_executable: Path,
+    service_name: str,
+) -> None:
+    service_sid = _service_sid(service_name)
+    paths: list[Path] = []
+    if code_path is not None and code_boundary_path is not None:
+        paths.extend(grant.path for grant in _source_acl_grants(code_path, code_boundary_path, service_name))
+    paths.extend(grant.path for grant in _runtime_acl_grants(runtime_paths, service_executable, service_name))
+    for path in dict.fromkeys(paths):
+        _remove_source_acl_grant(path, service_sid)
+
+
+def _remove_program_data(path: Path) -> None:
+    resolved = path.resolve(strict=False)
+    if (
+        resolved.name.casefold() != "sandboxbroker"
+        or resolved.parent.name.casefold() != "mini-agent"
+        or len(resolved.parts) < 3
+    ):
+        raise ValueError("Broker ProgramData path is outside the managed directory")
+    try:
+        shutil.rmtree(resolved)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise OSError("Broker ProgramData could not be removed") from exc
+
+
+def _initialize_installation_key(data_path: Path) -> None:
+    try:
+        from .broker_service.credentials import DpapiKeyStore
+
+        DpapiKeyStore(data_path / "installation.key.dpapi").ensure()
+    except Exception as exc:
+        raise _TransactionFailure(EXIT_CREDENTIAL_FAILED, "Broker installation key could not be created") from exc
+
+
+def _uninstall_for_reinstall(
+    service_name: str,
+    service_command: Sequence[str],
+    data_path: Path | None,
+    code_path: Path | None,
+    code_boundary_path: Path | None,
+    runtime_paths: Sequence[Path],
+) -> None:
+    installed = _service_exists(service_name)
+    if installed:
+        _stop_service_for_repair(service_name)
+    _remove_static_network()
+    _remove_service_acls(
+        code_path,
+        code_boundary_path,
+        runtime_paths,
+        Path(service_command[0]),
+        service_name,
+    )
+    _remove_service_rights(service_name)
+    if data_path is not None:
+        _remove_owned_accounts(data_path)
+    if installed:
+        _run(["sc.exe", "delete", service_name], failure_code=EXIT_SERVICE_FAILED)
+        if not _wait_for_service_deleted(service_name):
+            raise _TransactionFailure(EXIT_SERVICE_FAILED, "Broker service was not deleted")
+    if data_path is not None:
+        _remove_program_data(data_path)
+
+
 def run_transaction(payload: Mapping[str, Any]) -> int:
     """Run one fully elevated Broker installation transaction."""
 
@@ -681,13 +947,24 @@ def run_transaction(payload: Mapping[str, Any]) -> int:
             ready_path.unlink()
         except FileNotFoundError:
             pass
+    if operation == "reinstall":
+        _uninstall_for_reinstall(
+            service_name,
+            service_command,
+            data_path,
+            code_path,
+            code_boundary_path,
+            runtime_paths,
+        )
     _persist_sid(sid_path, backend_sid)
+    if data_path is not None:
+        _initialize_installation_key(data_path)
     if sid_path is not None and backend_sid is not None:
         # Restore a usable descriptor before touching SCM.  The service ACE is
         # added after the service exists and its virtual account is resolvable.
         _run(_sid_acl_command(sid_path, backend_sid, None), failure_code=EXIT_ACL_FAILED)
     command = subprocess.list2cmdline(list(service_command))
-    if operation == "install":
+    if operation in {"install", "reinstall"}:
         _run(
             [
                 "sc.exe",

@@ -257,6 +257,10 @@ export function repairSandboxBroker(): Promise<SandboxBrokerStatus> {
   return requestJson<SandboxBrokerStatus>("/api/sandbox/repair", { method: "POST" });
 }
 
+export function reinstallSandboxBroker(): Promise<SandboxBrokerStatus> {
+  return requestJson<SandboxBrokerStatus>("/api/sandbox/reinstall", { method: "POST" });
+}
+
 type ProviderInput = Omit<ProviderConfig, "id" | "is_active" | "api_key_configured"> & { api_key?: string };
 
 export function updateProviderConfig(config: ProviderInput): Promise<ProviderConfig> {

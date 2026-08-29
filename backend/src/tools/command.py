@@ -28,6 +28,7 @@ from backend.jobs import (
 )
 from backend.sandbox import (
     SandboxExecutionDecision,
+    SandboxMaintenanceBusy,
     TerminalKind,
 )
 
@@ -95,6 +96,7 @@ class WorkspaceCommand:
 
         parent_scope, private_registry = self._resolve_scope(context)
         job: SubprocessJob | None = None
+        command_lease = None
         try:
             task_scope = parent_scope.child(
                 JobScopeKind.TASK,
@@ -112,6 +114,10 @@ class WorkspaceCommand:
             effective_timeout = timeout_seconds
             decision = context.sandbox_decision
             if isinstance(decision, SandboxExecutionDecision):
+                try:
+                    command_lease = decision.launcher.command_lease()
+                except SandboxMaintenanceBusy as exc:
+                    raise ToolError("Sandbox Broker maintenance is in progress.") from exc
                 if self._terminal_type == "wsl":
                     raise ToolError("WSL is disabled for sandboxed run_command execution.")
                 policy = decision.command_policy(job_id, TerminalKind(self._terminal_type))
@@ -151,6 +157,8 @@ class WorkspaceCommand:
         except (JobRegistrationError, JobScopeClosed, ValueError) as exc:
             raise ToolError("Command could not be registered with the process manager.") from exc
         finally:
+            if command_lease is not None:
+                command_lease.close()
             if private_registry is not None:
                 private_registry.close_all(reason="private command registry closed", timeout=5.0)
 

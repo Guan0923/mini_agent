@@ -12,6 +12,7 @@ from .broker_service import (
 from .control.approvals import ApprovalDecision, ApprovalGrant, ApprovalStore, authorization_hash
 from .control.broker import BrokerManagedProcess, BrokerStatus, WindowsBrokerClient
 from .control.decision import SandboxExecutionDecision
+from .control.maintenance import SandboxMaintenanceBusy, SandboxMaintenanceGate
 from .errors import (
     BrokerInstallationError,
     BrokerInstallFailureCode,
@@ -85,6 +86,8 @@ __all__ = [
     "SandboxLauncher",
     "SandboxJobContext",
     "SandboxLimits",
+    "SandboxMaintenanceBusy",
+    "SandboxMaintenanceGate",
     "SandboxPolicy",
     "SandboxPolicyError",
     "SandboxResourceExceeded",

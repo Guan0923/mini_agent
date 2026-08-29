@@ -12,6 +12,8 @@ _EXPORTS = {
     "BrokerStatus": ("broker", "BrokerStatus"),
     "WindowsBrokerClient": ("broker", "WindowsBrokerClient"),
     "SandboxExecutionDecision": ("decision", "SandboxExecutionDecision"),
+    "SandboxMaintenanceBusy": ("maintenance", "SandboxMaintenanceBusy"),
+    "SandboxMaintenanceGate": ("maintenance", "SandboxMaintenanceGate"),
 }
 
 

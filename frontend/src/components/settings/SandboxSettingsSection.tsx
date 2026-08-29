@@ -1,4 +1,4 @@
-import { Alert, Button, Col, Form, Input, InputNumber, Row, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Col, Form, Input, InputNumber, Popconfirm, Row, Select, Space, Tag, Typography } from "antd";
 import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import type { SandboxLimits, SandboxNetworkRule } from "../../api";
 import type { UserSettingsState } from "./useUserSettingsState";
@@ -34,6 +34,7 @@ const brokerErrorTitles: Record<string, string> = {
   broker_service_start_failed: "Broker Windows 服务启动失败",
   broker_not_ready: "Broker 修复后未就绪",
   broker_install_failed: "Broker 修复失败",
+  broker_jobs_active: "仍有沙箱命令运行",
 };
 
 export function brokerErrorTitle(code: string | null, installed: boolean): string {
@@ -75,7 +76,11 @@ export function SandboxSettingsSection({ state }: SectionProps) {
     <Form layout="vertical">
       <Typography.Title level={4}>沙箱</Typography.Title>
       <Space align="center" style={{ marginBottom: 16 }} wrap>
-        <Button loading={state.sandboxHealth.checking} onClick={() => void state.sandboxHealth.check()}>
+        <Button
+          loading={state.sandboxHealth.checking}
+          disabled={state.sandboxHealth.repairing || state.sandboxHealth.reinstalling}
+          onClick={() => void state.sandboxHealth.check()}
+        >
           检查
         </Button>
         {state.sandboxHealth.phase === "healthy" ? <Tag color="success">沙箱已就绪</Tag> : null}
@@ -84,12 +89,29 @@ export function SandboxSettingsSection({ state }: SectionProps) {
             type="primary"
             danger
             loading={state.sandboxHealth.repairing}
-            disabled={state.sandboxHealth.checking}
+            disabled={state.sandboxHealth.checking || state.sandboxHealth.reinstalling}
             onClick={() => void state.sandboxHealth.repair()}
           >
             修复
           </Button>
         ) : null}
+        <Popconfirm
+          title="卸载并重装 Sandbox Broker？"
+          description="需要 UAC 管理员授权；将删除 Mini-Agent 沙箱安装数据。仅在没有运行或等待启动的沙箱命令时执行。"
+          okText="卸载并重装"
+          cancelText="取消"
+          okType="danger"
+          disabled={state.sandboxHealth.checking || state.sandboxHealth.repairing || state.sandboxHealth.reinstalling}
+          onConfirm={() => state.sandboxHealth.reinstall()}
+        >
+          <Button
+            danger
+            loading={state.sandboxHealth.reinstalling}
+            disabled={state.sandboxHealth.checking || state.sandboxHealth.repairing}
+          >
+            卸载并重装
+          </Button>
+        </Popconfirm>
       </Space>
       {state.sandboxHealth.phase === "unhealthy" ? (
         <Alert

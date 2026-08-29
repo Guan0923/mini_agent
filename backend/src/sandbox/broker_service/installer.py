@@ -17,6 +17,24 @@ from ..errors import BrokerInstallationError, BrokerInstallFailureCode, SandboxI
 from ..runtime.manifest import ResourceRecord
 
 
+def _elevated_helper_argv(encoded_payload: str, source_root: Path | None) -> tuple[str, ...]:
+    if source_root is None:
+        return ("-m", "backend.sandbox.install_helper", encoded_payload)
+    source_literal = json.dumps(str(source_root))
+    bootstrap = (
+        "import importlib.util,os,sys;"
+        f"_p={source_literal};"
+        "_s=importlib.util.spec_from_file_location("
+        "'backend',os.path.join(_p,'__init__.py'),submodule_search_locations=[_p]);"
+        "_m=importlib.util.module_from_spec(_s);"
+        "sys.modules['backend']=_m;"
+        "_s.loader.exec_module(_m);"
+        "from backend.sandbox.install_helper import main;"
+        "raise SystemExit(main())"
+    )
+    return ("-c", bootstrap, encoded_payload)
+
+
 class BrokerProcessAdapter(Protocol):
     def reserve(self, request: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
@@ -84,6 +102,12 @@ class WindowsServiceInstaller:
             return
 
         self._run_transaction("repair")
+
+    def reinstall(self) -> None:
+        """Always replace the installed service and its managed identities."""
+
+        self._require_windows()
+        self._run_transaction("reinstall")
 
     def configuration_healthy(self) -> bool:
         """Verify the unprivileged, non-secret SCM configuration summary."""
@@ -238,7 +262,14 @@ class WindowsServiceInstaller:
         commands: list[list[str]] = []
         if self.backend_sid_path is not None and sid is not None:
             commands.append(_sid_acl_command(self.backend_sid_path, sid, None))
-        if operation == "install":
+        if operation in {"install", "reinstall"}:
+            if operation == "reinstall":
+                commands.extend(
+                    [
+                        ["sc.exe", "stop", self.service_name],
+                        ["sc.exe", "delete", self.service_name],
+                    ]
+                )
             commands.extend(
                 [
                     [
@@ -398,7 +429,7 @@ class WindowsServiceInstaller:
             "proxy_port": self.proxy_port,
         }
         encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii")
-        parameters = subprocess.list2cmdline(["-m", "backend.sandbox.install_helper", encoded])
+        parameters = subprocess.list2cmdline(list(_elevated_helper_argv(encoded, self.service_code_path)))
         handle: Any | None = None
         try:  # pragma: no cover - requires an interactive Windows desktop
             result = shell.ShellExecuteEx(
@@ -406,6 +437,7 @@ class WindowsServiceInstaller:
                 lpVerb="runas",
                 lpFile=sys.executable,
                 lpParameters=parameters,
+                lpDirectory=str(self.service_code_path) if self.service_code_path is not None else None,
                 nShow=getattr(win32con, "SW_HIDE", 0),
             )
             handle = result["hProcess"] if isinstance(result, Mapping) else result

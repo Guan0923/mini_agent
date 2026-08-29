@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -12,20 +13,29 @@ import pytest
 from fastapi import Request
 
 from backend.api.routes.sandbox import install as install_broker
+from backend.api.routes.sandbox import reinstall as reinstall_broker
 from backend.api.routes.sandbox import repair as repair_broker
 from backend.api.routes.sandbox import status as status_broker
-from backend.sandbox import BrokerStatusFailureCode, SandboxInitializationError, WindowsBrokerClient
+from backend.sandbox import (
+    BrokerStatusFailureCode,
+    SandboxInitializationError,
+    SandboxMaintenanceBusy,
+    SandboxMaintenanceGate,
+    WindowsBrokerClient,
+)
 from backend.sandbox.broker_service import (
     BrokerCredentialPackage,
     WindowsServiceInstaller,
     build_ready_marker,
 )
-from backend.sandbox.broker_service.installer import _write_python_service_path
+from backend.sandbox.broker_service.installer import _elevated_helper_argv, _write_python_service_path
 from backend.sandbox.errors import BrokerInstallationError, BrokerInstallFailureCode
 from backend.sandbox.install_helper import (
+    EXIT_ACCOUNT_FAILED,
     EXIT_SERVICE_STOP_FAILED,
     _icacls_sid,
     _persist_sid,
+    _remove_owned_accounts,
     _runtime_acl_grants,
     _secure_program_data,
     _service_sid,
@@ -83,6 +93,40 @@ def test_broker_status_reports_only_confirmed_missing_service_as_not_installed()
     assert status.healthy is False
     assert status.code is BrokerStatusFailureCode.NOT_INSTALLED
     assert status.detail == "Windows Broker is not installed"
+
+
+def test_reinstall_reloads_the_new_installation_key() -> None:
+    old_key = b"o" * 32
+    new_key = b"n" * 32
+    calls: list[str] = []
+
+    class Installer:
+        def reinstall(self) -> None:
+            calls.append("reinstall")
+
+        def service_installed(self) -> bool:
+            return True
+
+        def configuration_healthy(self) -> bool:
+            return True
+
+    class KeyStore:
+        def load(self) -> bytes:
+            calls.append("load")
+            return new_key
+
+    client = WindowsBrokerClient(
+        installation_key=old_key,
+        transport=_status_transport(new_key),
+        is_windows=True,
+        installer=Installer(),
+        key_store=KeyStore(),
+    )
+
+    status = client.reinstall()
+
+    assert status.healthy is True
+    assert calls == ["reinstall", "load"]
 
 
 def test_broker_status_preserves_safe_initialization_detail_for_installed_service() -> None:
@@ -512,21 +556,48 @@ def _install_fake_pywin32(monkeypatch: pytest.MonkeyPatch, shell_execute, *, exi
     monkeypatch.setitem(sys.modules, "win32api", types.SimpleNamespace(CloseHandle=lambda handle: None))
 
 
-def test_elevated_transaction_uses_win32com_shell_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_elevated_transaction_uses_current_source_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     calls: list[dict[str, object]] = []
+    source_root = tmp_path / "backend" / "src"
 
     def shell_execute(**kwargs):
         calls.append(kwargs)
         return {"hProcess": object()}
 
     _install_fake_pywin32(monkeypatch, shell_execute)
-    installer = WindowsServiceInstaller(("python.exe", "-m", "broker"), is_windows=True)
+    installer = WindowsServiceInstaller(
+        ("python.exe", "-m", "broker"),
+        is_windows=True,
+        service_code_path=source_root,
+        service_code_boundary_path=tmp_path,
+    )
     installer._run_elevated_transaction("install", None)
 
     assert len(calls) == 1
     assert calls[0]["lpVerb"] == "runas"
     assert calls[0]["lpFile"] == sys.executable
     assert "backend.sandbox.install_helper" in str(calls[0]["lpParameters"])
+    assert calls[0]["lpDirectory"] == str(source_root)
+
+
+def test_elevated_helper_bootstrap_executes_the_declared_source_root(tmp_path: Path) -> None:
+    source_root = tmp_path / "src"
+    sandbox_package = source_root / "sandbox"
+    sandbox_package.mkdir(parents=True)
+    (source_root / "__init__.py").write_text("", encoding="utf-8")
+    (sandbox_package / "__init__.py").write_text("", encoding="utf-8")
+    (sandbox_package / "install_helper.py").write_text("def main():\n    return 73\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, *_elevated_helper_argv("payload", source_root)],
+        check=False,
+        capture_output=True,
+    )
+
+    assert result.returncode == 73
 
 
 def test_elevated_transaction_classifies_uac_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -729,6 +800,412 @@ def test_repair_route_installs_when_broker_is_missing() -> None:
     assert calls == ["install"]
 
 
+def test_maintenance_gate_rejects_overlap_in_both_directions() -> None:
+    gate = SandboxMaintenanceGate()
+    command = gate.acquire_command()
+    with pytest.raises(SandboxMaintenanceBusy):
+        gate.acquire_maintenance()
+    command.close()
+
+    maintenance = gate.acquire_maintenance()
+    with pytest.raises(SandboxMaintenanceBusy):
+        gate.acquire_command()
+    maintenance.close()
+    assert gate.active_commands == 0
+    assert gate.maintenance_active is False
+
+
+def test_reinstall_route_forces_healthy_broker_replacement(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    class Broker:
+        def status(self):
+            return {"installed": True, "healthy": True}
+
+        def reclaim_stale(self):
+            calls.append("reclaim")
+            return ()
+
+        def reinstall(self):
+            calls.append("reinstall")
+            return {"installed": True, "healthy": True}
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / "sandbox-leases.json").write_text("{}", encoding="utf-8")
+    web = types.SimpleNamespace(
+        sandbox_broker=Broker(),
+        sandbox_maintenance=SandboxMaintenanceGate(),
+        sandbox_manifest_path=tmp_path / "resources.json",
+        paths=types.SimpleNamespace(runtime_dir=runtime_dir),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/sandbox/reinstall",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+            "app": types.SimpleNamespace(state=types.SimpleNamespace(web=web)),
+        }
+    )
+
+    assert reinstall_broker(request) == {"installed": True, "healthy": True}
+    assert calls == ["reinstall"]
+    assert not (runtime_dir / "sandbox-leases.json").exists()
+
+
+def test_reinstall_route_replaces_web_state_client_after_key_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    old_client = WindowsBrokerClient(is_windows=False)
+    replacement_status = types.SimpleNamespace(
+        healthy=True,
+        to_dict=lambda: {"installed": True, "healthy": True},
+    )
+    replacement = types.SimpleNamespace(status=lambda: replacement_status)
+    monkeypatch.setattr(old_client, "status", lambda: {"installed": True, "healthy": True})
+    monkeypatch.setattr(old_client, "reinstall", lambda: {"installed": True, "healthy": True})
+    monkeypatch.setattr(
+        WindowsBrokerClient,
+        "from_system",
+        classmethod(lambda _cls, **_kwargs: replacement),
+    )
+    web = types.SimpleNamespace(
+        sandbox_broker=old_client,
+        sandbox_maintenance=SandboxMaintenanceGate(),
+        sandbox_manifest_path=tmp_path / "resources.json",
+        paths=types.SimpleNamespace(runtime_dir=tmp_path),
+        settings=types.SimpleNamespace(sandbox_config=lambda: {"proxy_port": 17831}),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/sandbox/reinstall",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+            "app": types.SimpleNamespace(state=types.SimpleNamespace(web=web)),
+        }
+    )
+
+    assert reinstall_broker(request) == {"installed": True, "healthy": True}
+    assert web.sandbox_broker is replacement
+
+
+def test_reinstall_route_rejects_active_command_without_touching_broker(tmp_path: Path) -> None:
+    gate = SandboxMaintenanceGate()
+    command = gate.acquire_command()
+    web = types.SimpleNamespace(
+        sandbox_broker=types.SimpleNamespace(),
+        sandbox_maintenance=gate,
+        sandbox_manifest_path=tmp_path / "resources.json",
+        paths=types.SimpleNamespace(runtime_dir=tmp_path),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/sandbox/reinstall",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+            "app": types.SimpleNamespace(state=types.SimpleNamespace(web=web)),
+        }
+    )
+    try:
+        response = reinstall_broker(request)
+    finally:
+        command.close()
+
+    assert response.status_code == 409
+    assert json.loads(response.body)["code"] == "broker_jobs_active"
+
+
+@pytest.mark.parametrize(
+    ("manifest", "expected_status", "expected_code"),
+    [
+        ({"records": [{"job_id": "job-active"}]}, 409, "broker_jobs_active"),
+        ({"unexpected": []}, 503, "broker_install_failed"),
+    ],
+)
+def test_reinstall_route_rejects_unreclaimed_or_invalid_manifest(
+    tmp_path: Path,
+    manifest: dict[str, object],
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    calls: list[str] = []
+
+    class Broker:
+        def status(self):
+            return {"installed": True, "healthy": True}
+
+        def reclaim_stale(self):
+            calls.append("reclaim")
+            return ()
+
+        def reinstall(self):
+            calls.append("reinstall")
+            return {"installed": True, "healthy": True}
+
+    manifest_path = tmp_path / "resources.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    web = types.SimpleNamespace(
+        sandbox_broker=Broker(),
+        sandbox_maintenance=SandboxMaintenanceGate(),
+        sandbox_manifest_path=manifest_path,
+        paths=types.SimpleNamespace(runtime_dir=tmp_path),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/sandbox/reinstall",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+            "app": types.SimpleNamespace(state=types.SimpleNamespace(web=web)),
+        }
+    )
+
+    response = reinstall_broker(request)
+
+    assert response.status_code == expected_status
+    assert json.loads(response.body)["code"] == expected_code
+    assert calls == (["reclaim"] if expected_status == 409 else [])
+
+
+def test_reinstall_route_reclaims_confirmed_stale_manifest_before_replacement(tmp_path: Path) -> None:
+    calls: list[str] = []
+    manifest_path = tmp_path / "resources.json"
+    manifest_path.write_text(json.dumps({"records": [{"job_id": "stale"}]}), encoding="utf-8")
+
+    class Broker:
+        def status(self):
+            return {"installed": True, "healthy": True}
+
+        def reclaim_stale(self):
+            calls.append("reclaim")
+            manifest_path.write_text(json.dumps({"records": []}), encoding="utf-8")
+            return ("stale",)
+
+        def reinstall(self):
+            calls.append("reinstall")
+            return {"installed": True, "healthy": True}
+
+    web = types.SimpleNamespace(
+        sandbox_broker=Broker(),
+        sandbox_maintenance=SandboxMaintenanceGate(),
+        sandbox_manifest_path=manifest_path,
+        paths=types.SimpleNamespace(runtime_dir=tmp_path),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/sandbox/reinstall",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("127.0.0.1", 8000),
+            "scheme": "http",
+            "app": types.SimpleNamespace(state=types.SimpleNamespace(web=web)),
+        }
+    )
+
+    assert reinstall_broker(request) == {"installed": True, "healthy": True}
+    assert calls == ["reclaim", "reinstall"]
+
+
+def test_local_reinstall_transaction_deletes_then_recreates_service() -> None:
+    calls: list[list[str]] = []
+    installer = WindowsServiceInstaller(
+        ("C:/runtime/pythonservice.exe",),
+        service_class="sandbox_service_bootstrap.MiniAgentSandboxBrokerService",
+        runner=lambda command, **_kwargs: calls.append(list(command)) or _Result(),
+        is_windows=True,
+    )
+
+    installer._run_local_transaction("reinstall", None)
+
+    assert calls[0] == ["sc.exe", "stop", "MiniAgentSandboxBroker"]
+    assert calls[1] == ["sc.exe", "delete", "MiniAgentSandboxBroker"]
+    assert calls[2][:3] == ["sc.exe", "create", "MiniAgentSandboxBroker"]
+    assert calls[-1] == ["sc.exe", "start", "MiniAgentSandboxBroker"]
+
+
+def test_reinstall_removes_ready_marker_before_destructive_steps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_path = tmp_path / "Mini-Agent" / "SandboxBroker"
+    data_path.mkdir(parents=True)
+    ready_path = data_path / "ready.json"
+    ready_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "backend.sandbox.install_helper._uninstall_for_reinstall",
+        lambda *_args: (_ for _ in ()).throw(_TransactionFailure(EXIT_SERVICE_STOP_FAILED, "stop failed")),
+    )
+
+    with pytest.raises(_TransactionFailure):
+        run_transaction(
+            {
+                "operation": "reinstall",
+                "service_name": "MiniAgentSandboxBroker",
+                "service_command": ["python.exe"],
+                "program_data_path": str(data_path),
+            }
+        )
+
+    assert not ready_path.exists()
+
+
+def test_account_cleanup_preserves_codex_identities_when_package_is_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class MissingIdentityError(RuntimeError):
+        def __init__(self, winerror: int) -> None:
+            super().__init__(winerror)
+            self.winerror = winerror
+
+    deleted: list[str] = []
+    fake_net = types.SimpleNamespace(
+        NetUserGetInfo=lambda *_args: (_ for _ in ()).throw(MissingIdentityError(2221)),
+        NetLocalGroupGetInfo=lambda *_args: (_ for _ in ()).throw(MissingIdentityError(2220)),
+        NetUserDel=lambda _server, name: deleted.append(name),
+        NetLocalGroupDel=lambda _server, name: deleted.append(name),
+    )
+    monkeypatch.setitem(sys.modules, "win32net", fake_net)
+    monkeypatch.setitem(sys.modules, "win32security", types.SimpleNamespace())
+    monkeypatch.setattr(
+        "backend.sandbox.broker_service.credentials.DpapiCredentialStore.load",
+        lambda _self: BrokerCredentialPackage(
+            "legacy",
+            "CodexSandboxOffline",
+            "S-1-5-21-1-2-3-1001",
+            "offline",
+            "CodexSandboxOnline",
+            "S-1-5-21-1-2-3-1002",
+            "online",
+        ),
+    )
+
+    _remove_owned_accounts(tmp_path)
+
+    assert deleted == []
+
+
+def test_account_cleanup_fails_closed_when_credentials_are_missing_for_managed_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_net = types.SimpleNamespace(NetUserGetInfo=lambda *_args: {"name": "MiniSbxOffline"})
+    monkeypatch.setitem(sys.modules, "win32net", fake_net)
+    monkeypatch.setitem(sys.modules, "win32security", types.SimpleNamespace())
+    monkeypatch.setattr(
+        "backend.sandbox.broker_service.credentials.DpapiCredentialStore.load",
+        lambda _self: (_ for _ in ()).throw(SandboxInitializationError("missing")),
+    )
+
+    with pytest.raises(_TransactionFailure) as raised:
+        _remove_owned_accounts(tmp_path)
+
+    assert raised.value.exit_code == EXIT_ACCOUNT_FAILED
+
+
+@pytest.mark.parametrize("missing_account_rights", [False, True])
+def test_account_cleanup_deletes_only_fully_verified_mini_agent_identities(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    missing_account_rights: bool,
+) -> None:
+    offline_sid = "S-1-5-21-1-2-3-2001"
+    online_sid = "S-1-5-21-1-2-3-2002"
+    deleted: list[str] = []
+
+    class FakeNet:
+        @staticmethod
+        def NetLocalGroupGetInfo(_server, name, _level):
+            assert name == "MiniAgentSandboxUsers"
+            return {"comment": "Mini-Agent sandbox users (managed)"}
+
+        @staticmethod
+        def NetLocalGroupGetMembers(_server, name, _level):
+            assert name == "MiniAgentSandboxUsers"
+            return (
+                [
+                    {"domainandname": r"HOST\MiniSbxOffline"},
+                    {"domainandname": r"HOST\MiniSbxOnline"},
+                ],
+                2,
+                0,
+            )
+
+        @staticmethod
+        def NetUserGetInfo(_server, name, _level):
+            assert name in {"MiniSbxOffline", "MiniSbxOnline"}
+            return {"priv": 0, "comment": "Mini-Agent sandbox account (managed)"}
+
+        @staticmethod
+        def NetUserGetLocalGroups(_server, _name, _level):
+            return ["MiniAgentSandboxUsers"]
+
+        @staticmethod
+        def NetUserDel(_server, name):
+            deleted.append(name)
+
+        @staticmethod
+        def NetLocalGroupDel(_server, name):
+            deleted.append(name)
+
+    sid_by_name = {
+        "MiniAgentSandboxUsers": "group-sid",
+        "MiniSbxOffline": offline_sid,
+        "MiniSbxOnline": online_sid,
+    }
+
+    class MissingAccountRightsError(RuntimeError):
+        winerror = 2
+
+    def remove_account_rights(*_args):
+        if missing_account_rights:
+            raise MissingAccountRightsError("no account rights")
+
+    fake_security = types.SimpleNamespace(
+        POLICY_ALL_ACCESS=1,
+        LsaOpenPolicy=lambda *_args: "policy",
+        LookupAccountName=lambda _server, name: (sid_by_name[name], "HOST", 1),
+        ConvertSidToStringSid=lambda sid: sid,
+        LsaRemoveAccountRights=remove_account_rights,
+    )
+    monkeypatch.setitem(sys.modules, "win32net", FakeNet())
+    monkeypatch.setitem(sys.modules, "win32security", fake_security)
+    monkeypatch.setattr(
+        "backend.sandbox.broker_service.credentials.DpapiCredentialStore.load",
+        lambda _self: BrokerCredentialPackage(
+            "current",
+            "MiniSbxOffline",
+            offline_sid,
+            "offline",
+            "MiniSbxOnline",
+            online_sid,
+            "online",
+        ),
+    )
+
+    _remove_owned_accounts(tmp_path)
+
+    assert deleted == ["MiniSbxOffline", "MiniSbxOnline", "MiniAgentSandboxUsers"]
+
+
 @pytest.mark.parametrize("stop_returncode", [0, 1])
 def test_repair_waits_for_stopped_after_any_stop_result(stop_returncode: int) -> None:
     calls: list[list[str]] = []
@@ -874,7 +1351,7 @@ def test_helper_transaction_orders_sid_service_acl_source_and_start(
     tmp_path: Path,
 ) -> None:
     calls: list[list[str]] = []
-    program_data = tmp_path / "SandboxBroker"
+    program_data = tmp_path / "Mini-Agent" / "SandboxBroker"
     sid_path = program_data / "backend.sid"
     source = tmp_path / "repo" / "backend" / "src"
 
@@ -892,10 +1369,10 @@ def test_helper_transaction_orders_sid_service_acl_source_and_start(
     )
     package = BrokerCredentialPackage(
         "generation-test",
-        "CodexSandboxOffline",
+        "MiniSbxOffline",
         "S-1-5-21-1-2-3-1001",
         "offline-password",
-        "CodexSandboxOnline",
+        "MiniSbxOnline",
         "S-1-5-21-1-2-3-1002",
         "online-password",
     )

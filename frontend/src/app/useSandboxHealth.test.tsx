@@ -1,12 +1,19 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, getSandboxStatus, repairSandboxBroker, type SandboxBrokerStatus } from "../api";
+import {
+  ApiError,
+  getSandboxStatus,
+  reinstallSandboxBroker,
+  repairSandboxBroker,
+  type SandboxBrokerStatus,
+} from "../api";
 import { useSandboxHealth, type SandboxHealthState } from "./useSandboxHealth";
 
 vi.mock("../api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../api")>(),
   getSandboxStatus: vi.fn(),
   repairSandboxBroker: vi.fn(),
+  reinstallSandboxBroker: vi.fn(),
 }));
 
 let current: SandboxHealthState;
@@ -21,7 +28,9 @@ describe("useSandboxHealth", () => {
     vi.useFakeTimers();
     vi.mocked(getSandboxStatus).mockReset();
     vi.mocked(repairSandboxBroker).mockReset();
+    vi.mocked(reinstallSandboxBroker).mockReset();
     vi.mocked(repairSandboxBroker).mockResolvedValue({ installed: true, healthy: true });
+    vi.mocked(reinstallSandboxBroker).mockResolvedValue({ installed: true, healthy: true });
   });
 
   afterEach(() => {
@@ -126,5 +135,49 @@ describe("useSandboxHealth", () => {
     expect(current.code).toBe("broker_service_start_failed");
     expect(current.detail).toBe(detail);
     expect(current.repairing).toBe(false);
+  });
+
+  it("forces reinstall while healthy and immediately rechecks", async () => {
+    vi.mocked(getSandboxStatus).mockResolvedValue({ installed: true, healthy: true });
+    render(<Harness />);
+    await act(async () => Promise.resolve());
+
+    await act(async () => current.reinstall());
+
+    expect(reinstallSandboxBroker).toHaveBeenCalledTimes(1);
+    expect(getSandboxStatus).toHaveBeenCalledTimes(2);
+    expect(current.phase).toBe("healthy");
+    expect(current.reinstalling).toBe(false);
+  });
+
+  it("preserves an active-job reinstall conflict", async () => {
+    vi.mocked(getSandboxStatus).mockResolvedValue({ installed: true, healthy: true });
+    vi.mocked(reinstallSandboxBroker).mockRejectedValue(
+      new ApiError(409, "仍有沙箱命令正在运行。", "broker_jobs_active"),
+    );
+    render(<Harness />);
+    await act(async () => Promise.resolve());
+
+    await act(async () => current.reinstall());
+
+    expect(current.phase).toBe("unhealthy");
+    expect(current.code).toBe("broker_jobs_active");
+    expect(current.detail).toBe("仍有沙箱命令正在运行。");
+  });
+
+  it("preserves a categorized reinstall failure", async () => {
+    vi.mocked(getSandboxStatus).mockResolvedValue({ installed: true, healthy: true });
+    vi.mocked(reinstallSandboxBroker).mockRejectedValue(
+      new ApiError(503, "Broker Windows 服务启动失败。", "broker_service_start_failed"),
+    );
+    render(<Harness />);
+    await act(async () => Promise.resolve());
+
+    await act(async () => current.reinstall());
+
+    expect(current.phase).toBe("unhealthy");
+    expect(current.code).toBe("broker_service_start_failed");
+    expect(current.detail).toBe("Broker Windows 服务启动失败。");
+    expect(current.reinstalling).toBe(false);
   });
 });

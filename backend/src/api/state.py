@@ -20,7 +20,7 @@ from backend.jobs import JobRegistry
 from backend.runtime.agent_thread_index import AgentThreadIndex
 from backend.runtime.capability_settings import SubagentSettings
 from backend.runtime.subagents import SubagentCoordinator
-from backend.sandbox import WindowsBrokerClient
+from backend.sandbox import BrokerConfiguration, SandboxMaintenanceGate, WindowsBrokerClient
 from backend.storage.message_queue import MemoryMessageQueue, RedisMessageQueue
 from backend.storage.projects import ProjectStore
 from backend.storage.settings import LocalSettingsStore
@@ -60,6 +60,8 @@ class WebAppState:
         self.sandbox_broker = sandbox_broker or WindowsBrokerClient.from_system(
             expected_proxy_port=int(sandbox_config["proxy_port"])
         )
+        self.sandbox_maintenance = SandboxMaintenanceGate()
+        self.sandbox_manifest_path = BrokerConfiguration.create().manifest_path
         self.system_job_scope = self.job_registry.root_scope()
         self.message_queue = message_queue or RedisMessageQueue.from_url()
         self.redis_pool = getattr(getattr(self.message_queue, "client", None), "connection_pool", None)

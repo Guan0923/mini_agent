@@ -32,6 +32,8 @@ from backend.sandbox import (
     SandboxJobContext,
     SandboxLauncher,
     SandboxLimits,
+    SandboxMaintenanceBusy,
+    SandboxMaintenanceGate,
     SandboxPolicy,
     SandboxResourceExceeded,
     WindowsBrokerClient,
@@ -491,6 +493,55 @@ def test_windows_launcher_fails_closed_without_broker(tmp_path: Path) -> None:
     launcher = SandboxLauncher(is_windows=True)
     with pytest.raises(SandboxInitializationError):
         launcher.launch(["cmd.exe", "/c", "echo ok"], policy)
+
+
+def test_launcher_holds_maintenance_lease_until_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gate = SandboxMaintenanceGate()
+    process = types.SimpleNamespace(pid=4321)
+    monkeypatch.setattr("backend.sandbox.runtime.launcher.subprocess.Popen", lambda *_args, **_kwargs: process)
+    launcher = SandboxLauncher(
+        is_windows=True,
+        allow_local_backend=True,
+        lease_store_path=tmp_path / "leases.json",
+        maintenance_gate=gate,
+    )
+
+    launched = launcher.launch(["cmd.exe", "/c", "echo ok"], SandboxPolicy((tmp_path,), "session", "job"))
+
+    assert launched is process
+    assert gate.active_commands == 1
+    with pytest.raises(SandboxMaintenanceBusy):
+        gate.acquire_maintenance()
+    assert launcher.cleanup(process)
+    assert gate.active_commands == 0
+
+
+def test_launcher_holds_maintenance_lease_during_admission(tmp_path: Path) -> None:
+    gate = SandboxMaintenanceGate()
+
+    class RejectingAdmission:
+        def acquire(self, _user_id: str, _request: ResourceRequest) -> None:
+            assert gate.active_commands == 1
+            raise RuntimeError("rejected")
+
+        def release(self, _user_id: str, _request: ResourceRequest) -> None:
+            raise AssertionError("unadmitted request must not be released")
+
+    launcher = SandboxLauncher(
+        is_windows=True,
+        allow_local_backend=True,
+        admission=RejectingAdmission(),
+        lease_store_path=tmp_path / "leases.json",
+        maintenance_gate=gate,
+    )
+
+    with pytest.raises(RuntimeError, match="rejected"):
+        launcher.launch(["cmd.exe", "/c", "echo ok"], SandboxPolicy((tmp_path,), "session", "job"))
+
+    assert gate.active_commands == 0
 
 
 def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> None:

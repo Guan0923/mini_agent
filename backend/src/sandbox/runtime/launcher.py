@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..control.broker import WindowsBrokerClient
+from ..control.maintenance import SandboxCommandLease, SandboxMaintenanceGate
 from ..errors import SandboxError, SandboxInitializationError, SandboxPolicyError
 from ..native_windows import WindowsAclManager
 from ..policy import (
@@ -49,6 +50,7 @@ class SandboxLauncher:
         lease_store_path: Path | None = None,
         proxy_factory=None,
         path_auditor: WorldWritablePathAuditor | None = None,
+        maintenance_gate: SandboxMaintenanceGate | None = None,
     ) -> None:
         self.broker = broker
         self.is_windows = os.name == "nt" if is_windows is None else is_windows
@@ -60,11 +62,16 @@ class SandboxLauncher:
         self.lease_store = CommandLeaseStore(Path(lease_store_path or default_lease_path), self.acl_manager)
         self.proxy_factory = proxy_factory or RunCommandProxy.shared
         self.path_auditor = path_auditor or WorldWritablePathAuditor(self.acl_manager)
+        self.maintenance_gate = maintenance_gate or SandboxMaintenanceGate()
         self._temp_dirs: dict[int, Path] = {}
         self._admitted: dict[int, tuple[str, ResourceRequest]] = {}
         self._job_contexts: dict[int, SandboxJobContext] = {}
         self._leases: dict[int, CommandLease] = {}
         self._proxies: dict[int, RunCommandProxy] = {}
+        self._maintenance_leases: dict[int, SandboxCommandLease] = {}
+
+    def command_lease(self) -> SandboxCommandLease:
+        return self.maintenance_gate.acquire_command()
 
     def launch(
         self,
@@ -100,11 +107,17 @@ class SandboxLauncher:
             processes=policy.limits.processes,
             handles=policy.limits.handles,
         )
+        try:
+            maintenance_lease = self.command_lease()
+        except Exception:
+            remove_temp_dir(temp_dir)
+            raise
         admitted = False
         if self.admission is not None:
             try:
                 self.admission.acquire(job_context.user_id, request)
             except Exception:
+                maintenance_lease.close()
                 remove_temp_dir(temp_dir)
                 raise
             admitted = True
@@ -217,6 +230,7 @@ class SandboxLauncher:
                     start_new_session=not self.is_windows,
                 )
         except Exception as exc:
+            maintenance_lease.close()
             if self.broker is not None:
                 try:
                     self.broker.release(policy.job_id, user_id=job_context.user_id)
@@ -235,11 +249,13 @@ class SandboxLauncher:
             raise SandboxInitializationError("sandbox process launch failed") from exc
         pid = getattr(process, "pid", None)
         if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            maintenance_lease.close()
             remove_temp_dir(temp_dir)
             if admitted and self.admission is not None:
                 self.admission.release(job_context.user_id, request)
             raise SandboxInitializationError("sandbox process did not return a valid process id")
         self._temp_dirs[pid] = temp_dir
+        self._maintenance_leases[pid] = maintenance_lease
         self._job_contexts[pid] = job_context
         if lease is not None:
             self._leases[pid] = lease
@@ -257,6 +273,7 @@ class SandboxLauncher:
         job_context = self._job_contexts.pop(pid, None)
         lease = self._leases.pop(pid, None)
         proxy = self._proxies.pop(pid, None)
+        maintenance_lease = self._maintenance_leases.pop(pid, None)
         cleaned = True
         if job_context is not None and self.broker is not None and lease is not None:
             try:
@@ -272,6 +289,8 @@ class SandboxLauncher:
         admitted = self._admitted.pop(pid, None)
         if admitted is not None and self.admission is not None:
             self.admission.release(*admitted)
+        if maintenance_lease is not None:
+            maintenance_lease.close()
         return cleaned
 
     def popen_factory(self, policy: SandboxPolicy, *, user_id: str = "local", job_kind: str = "command"):

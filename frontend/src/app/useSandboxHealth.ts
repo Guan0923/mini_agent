@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, getSandboxStatus, repairSandboxBroker, type SandboxBrokerStatus } from "../api";
+import {
+  ApiError,
+  getSandboxStatus,
+  reinstallSandboxBroker,
+  repairSandboxBroker,
+  type SandboxBrokerStatus,
+} from "../api";
 
 export type SandboxHealthPhase = "checking" | "healthy" | "unhealthy";
 
@@ -10,8 +16,10 @@ export interface SandboxHealthState {
   detail: string | null;
   checking: boolean;
   repairing: boolean;
+  reinstalling: boolean;
   check: () => Promise<SandboxBrokerStatus>;
   repair: () => Promise<void>;
+  reinstall: () => Promise<void>;
 }
 
 const POLL_DELAY_MS = 30_000;
@@ -32,10 +40,12 @@ export function useSandboxHealth(): SandboxHealthState {
   const [detail, setDetail] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
   const [repairing, setRepairing] = useState(false);
+  const [reinstalling, setReinstalling] = useState(false);
   const mountedRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
   const checkInFlightRef = useRef<Promise<SandboxBrokerStatus> | null>(null);
   const repairInFlightRef = useRef<Promise<void> | null>(null);
+  const reinstallInFlightRef = useRef<Promise<void> | null>(null);
   const checkRef = useRef<() => Promise<SandboxBrokerStatus>>(() => Promise.resolve(failedStatus(null)));
 
   const scheduleNext = useCallback(() => {
@@ -114,6 +124,36 @@ export function useSandboxHealth(): SandboxHealthState {
     return request;
   }, [check, scheduleNext]);
 
+  const reinstall = useCallback((): Promise<void> => {
+    if (reinstallInFlightRef.current) return reinstallInFlightRef.current;
+    const request = (async () => {
+      if (repairInFlightRef.current) await repairInFlightRef.current;
+      if (checkInFlightRef.current) await checkInFlightRef.current;
+      if (!mountedRef.current) return;
+      setReinstalling(true);
+      if (timerRef.current !== null) {
+        globalThis.clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      try {
+        await reinstallSandboxBroker();
+        await check();
+      } catch (cause) {
+        if (!mountedRef.current) return;
+        setCode(cause instanceof ApiError ? cause.code ?? "broker_install_failed" : "broker_install_failed");
+        setDetail(cause instanceof Error ? cause.message : "沙箱 Broker 重装失败。");
+        setPhase("unhealthy");
+        scheduleNext();
+      } finally {
+        if (mountedRef.current) setReinstalling(false);
+      }
+    })().finally(() => {
+      reinstallInFlightRef.current = null;
+    });
+    reinstallInFlightRef.current = request;
+    return request;
+  }, [check, scheduleNext]);
+
   useEffect(() => {
     mountedRef.current = true;
     void check();
@@ -123,5 +163,5 @@ export function useSandboxHealth(): SandboxHealthState {
     };
   }, [check]);
 
-  return { phase, installed, code, detail, checking, repairing, check, repair };
+  return { phase, installed, code, detail, checking, repairing, reinstalling, check, repair, reinstall };
 }

@@ -16,6 +16,7 @@ from backend.providers import LLMClient, ModelConfig
 from backend.sandbox import (
     SandboxAdmission,
     SandboxLauncher,
+    SandboxMaintenanceGate,
     WindowsBrokerClient,
 )
 from backend.skills import ProjectSkillGate, ProjectSkillTrustStore, SkillCatalog
@@ -62,6 +63,7 @@ def build_application(
     sandbox_session_id: str | None = None,
     agent_thread_index: object | None = None,
     subagent_coordinator: SubagentCoordinator | None = None,
+    sandbox_maintenance_gate: SandboxMaintenanceGate | None = None,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     base_config = initialize_config(resolved_paths, workspace)
@@ -96,6 +98,7 @@ def build_application(
             **({"job_parent_id": job_parent_id} if job_parent_id is not None else {}),
             **({"sandbox_session_id": sandbox_session_id} if sandbox_session_id is not None else {}),
             **({"subagent_coordinator": subagent_coordinator} if subagent_coordinator is not None else {}),
+            **({"sandbox_maintenance_gate": sandbox_maintenance_gate} if sandbox_maintenance_gate is not None else {}),
         )
     else:
         runner = _build_subagent_runner(
@@ -107,6 +110,7 @@ def build_application(
             **({"job_parent_id": job_parent_id} if job_parent_id is not None else {}),
             **({"sandbox_session_id": sandbox_session_id} if sandbox_session_id is not None else {}),
             **({"subagent_coordinator": subagent_coordinator} if subagent_coordinator is not None else {}),
+            **({"sandbox_maintenance_gate": sandbox_maintenance_gate} if sandbox_maintenance_gate is not None else {}),
         )
     return AgentApplication(
         runner,
@@ -156,12 +160,17 @@ def _build_subagent_runner(
     terminal_type: str | None = None,
     sandbox_session_id: str | None = None,
     subagent_coordinator: SubagentCoordinator | None = None,
+    sandbox_maintenance_gate: SandboxMaintenanceGate | None = None,
 ) -> AgentRunner:
     terminal_type = terminal_type or _terminal_type_for_config(config)
     resolved_paths = paths or client_paths()
     skill_settings = SkillSettings.from_config(config)
     subagent_settings = SubagentSettings.from_config(config)
-    sandbox_launcher, sandbox_config = _sandbox_runtime(config, paths=resolved_paths)
+    sandbox_launcher, sandbox_config = _sandbox_runtime(
+        config,
+        paths=resolved_paths,
+        maintenance_gate=sandbox_maintenance_gate,
+    )
     read_file_roots = _user_skill_read_roots(resolved_paths, skill_settings)
     workspace_files = files or WorkspaceFiles(
         workspace,
@@ -354,6 +363,7 @@ def _sandbox_runtime(
     config: dict[str, object],
     *,
     paths: ClientPaths | None = None,
+    maintenance_gate: SandboxMaintenanceGate | None = None,
 ) -> tuple[SandboxLauncher | None, dict[str, object]]:
     """Build the run_command launcher when the Broker control plane is healthy."""
 
@@ -371,6 +381,7 @@ def _sandbox_runtime(
         broker=broker,
         admission=SandboxAdmission(),
         lease_store_path=lease_store_path,
+        maintenance_gate=maintenance_gate,
     ), normalized
 
 

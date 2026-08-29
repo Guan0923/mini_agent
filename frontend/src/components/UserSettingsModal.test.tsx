@@ -94,8 +94,10 @@ const sandboxHealth = {
   detail: null,
   checking: false,
   repairing: false,
+  reinstalling: false,
   check: vi.fn().mockResolvedValue({ installed: true, healthy: true }),
   repair: vi.fn().mockResolvedValue(undefined),
+  reinstall: vi.fn().mockResolvedValue(undefined),
 };
 
 function modalElement(
