@@ -1168,10 +1168,13 @@ describe("ChatPage Trace navigation", () => {
         ["权限模式：只读", "权限模式：只读"],
         ["思考等级：中", "思考等级：中"],
       ] as const) {
-        await user.hover(screen.getByRole("button", { name }));
-        expect(await screen.findByRole("tooltip")).toHaveTextContent(tooltip);
-        await user.unhover(screen.getByRole("button", { name }));
-        await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
+        const visibleTooltip = () => Array.from(document.querySelectorAll<HTMLElement>('[role="tooltip"]'))
+          .find((element) => !element.closest(".ant-tooltip")?.classList.contains("ant-tooltip-hidden"));
+        const button = screen.getByRole("button", { name });
+        await user.hover(button);
+        await waitFor(() => expect(visibleTooltip()).toHaveTextContent(tooltip));
+        await user.unhover(button);
+        await waitFor(() => expect(visibleTooltip()).toBeUndefined());
       }
 
       await user.click(screen.getByRole("button", { name: "运行模式：Agent" }));
