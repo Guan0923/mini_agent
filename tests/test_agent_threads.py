@@ -31,7 +31,15 @@ from backend.domain import (
     ThreadNode,
     ToolMessage,
 )
-from backend.domain.runtime_state import NodeWriter, RuntimeRootState, RuntimeState, new_node_id, new_thread_id, utc_iso
+from backend.domain.runtime_state import (
+    NodeFrame,
+    NodeWriter,
+    RuntimeRootState,
+    RuntimeState,
+    new_node_id,
+    new_thread_id,
+    utc_iso,
+)
 from backend.jobs import JobRegistry
 from backend.planning.context_management import ContextCompactionResult
 from backend.providers import ModelConfig
@@ -329,6 +337,105 @@ def test_agent_thread_event_hub_replays_latest_and_stays_open_across_turns(tmp_p
     assert first.closed is False
     hub.close()
     assert first.closed is True and late.closed is True
+
+
+def test_agent_thread_event_hub_rebases_each_subscriber_and_resets_for_new_turn(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "rebased-events"))
+    session = store.create_session("rebased-events")
+    source = _finished_source(store, session.session_id)
+    child = _agent_create(session.session_id, source, name="worker")
+    assert child.turn is not None
+    hub = AgentThreadEventHub()
+
+    early = hub.subscribe(session.session_id, child.node.thread_id)
+    assert early.next_event()["type"] == "thread.ready"
+    hub.start_turn(child.turn)
+    assert early.next_event()["revision"] == 0
+
+    current = child.turn.clone()
+    for source_revision in range(1, 6):
+        current.usage["output_tokens"] = source_revision
+        hub.publish_frame(
+            child.node.thread_id,
+            NodeFrame(
+                "turn.delta",
+                current.session_id,
+                current.id,
+                source_revision,
+                patch={"usage": dict(current.usage)},
+            ),
+            current,
+        )
+        assert early.next_event()["revision"] == source_revision
+
+    late = hub.subscribe(session.session_id, child.node.thread_id)
+    assert late.next_event()["type"] == "thread.ready"
+    late_snapshot = late.next_event()
+    assert late_snapshot["revision"] == 0
+    assert late_snapshot["turn"]["usage"]["output_tokens"] == 5
+
+    current.usage["output_tokens"] = 6
+    hub.publish_frame(
+        child.node.thread_id,
+        NodeFrame(
+            "turn.delta",
+            current.session_id,
+            current.id,
+            6,
+            patch={"usage": dict(current.usage)},
+        ),
+        current,
+    )
+    assert early.next_event()["revision"] == 6
+    assert late.next_event()["revision"] == 1
+
+    next_turn = RuntimeState.create(
+        session_id=session.session_id,
+        thread_id=child.node.thread_id,
+        parent=current,
+        user_content="next task",
+    )
+    hub.start_turn(next_turn)
+    assert early.next_event()["revision"] == 0
+    assert late.next_event()["revision"] == 0
+    hub.publish_frame(
+        child.node.thread_id,
+        NodeFrame(
+            "turn.delta",
+            next_turn.session_id,
+            next_turn.id,
+            1,
+            patch={"status": "success"},
+        ),
+        next_turn,
+    )
+    assert early.next_event()["revision"] == 1
+    assert late.next_event()["revision"] == 1
+
+
+def test_agent_thread_event_hub_snapshots_first_delta_for_unseeded_subscriber() -> None:
+    hub = AgentThreadEventHub()
+    subscription = hub.subscribe("session_1", "session_1")
+    assert subscription.next_event()["type"] == "thread.ready"
+    current = RuntimeState.create(
+        session_id="session_1",
+        thread_id="session_1",
+        id="turn_1",
+        user_content="task",
+    )
+
+    hub.publish_frame(
+        current.thread_id,
+        NodeFrame("turn.delta", current.session_id, current.id, 5, patch={"status": "running"}),
+        current,
+    )
+    assert subscription.next_event()["revision"] == 0
+    hub.publish_frame(
+        current.thread_id,
+        NodeFrame("turn.delta", current.session_id, current.id, 6, patch={"status": "success"}),
+        current,
+    )
+    assert subscription.next_event()["revision"] == 1
 
 
 def test_agent_thread_subscription_emits_heartbeat_without_closing(monkeypatch: pytest.MonkeyPatch) -> None:

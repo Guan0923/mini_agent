@@ -277,4 +277,55 @@ describe("useAgentThreadView", () => {
     await waitFor(() => expect(api.streamAgentThread).toHaveBeenCalledTimes(2), { timeout: 2_000 });
     expect(api.getSessionNodes.mock.calls.filter(([sessionId]) => sessionId === "session_a").length).toBeGreaterThanOrEqual(2);
   });
+
+  it("recovers from a revision gap when the reconnected stream starts from a rebased snapshot", async () => {
+    const running = turn("session_a", "thread_a_child", "turn_a_2", {
+      parentId: childA1.id,
+      status: "running",
+    });
+    api.streamAgentThread
+      .mockImplementationOnce(async (
+        sessionId: string,
+        threadId: string,
+        onEvent: (event: AgentThreadStreamEvent) => void,
+      ) => {
+        onEvent({ type: "thread.ready", session_id: sessionId, thread_id: threadId });
+        onEvent({ type: "turn.snapshot", revision: 0, turn: running });
+        onEvent({
+          type: "turn.delta",
+          session_id: sessionId,
+          turn_id: running.id,
+          revision: 2,
+          patch: { status: "success" },
+        });
+        return "ended";
+      })
+      .mockImplementationOnce((
+        sessionId: string,
+        threadId: string,
+        onEvent: (event: AgentThreadStreamEvent) => void,
+        signal: AbortSignal,
+      ) => {
+        onEvent({ type: "thread.ready", session_id: sessionId, thread_id: threadId });
+        onEvent({ type: "turn.snapshot", revision: 0, turn: running });
+        onEvent({
+          type: "turn.delta",
+          session_id: sessionId,
+          turn_id: running.id,
+          revision: 1,
+          patch: { status: "success" },
+        });
+        return new Promise<"aborted">((resolve) => {
+          signal.addEventListener("abort", () => resolve("aborted"), { once: true });
+        });
+      });
+
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "select child A" }));
+
+    await waitFor(() => expect(latestView?.streamError).toBe("Turn delta revision is not consecutive"));
+    await waitFor(() => expect(api.streamAgentThread).toHaveBeenCalledTimes(2), { timeout: 2_000 });
+    await waitFor(() => expect(latestView?.streamError).toBeNull());
+    expect(screen.getByTestId("view-messages")).toHaveTextContent("child answer");
+  });
 });

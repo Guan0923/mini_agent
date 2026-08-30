@@ -23,6 +23,7 @@ class AgentThreadSubscription:
     key: tuple[str, str]
     token: int
     events: queue.Queue[dict[str, object]] = field(default_factory=queue.Queue)
+    source_bases: dict[tuple[str, str], int] = field(default_factory=dict)
     closed: bool = False
 
     def next_event(self, timeout: float = 0.5) -> dict[str, object]:
@@ -50,6 +51,7 @@ class AgentThreadSubscription:
 class _ThreadChannel:
     next_token: int = 0
     latest: RuntimeState | None = None
+    latest_source_revision: int = 0
     subscribers: dict[int, AgentThreadSubscription] = field(default_factory=dict)
 
 
@@ -71,6 +73,7 @@ class AgentThreadEventHub:
             subscription.events.put({"type": "thread.ready", "session_id": session_id, "thread_id": thread_id})
             if channel.latest is not None:
                 subscription.events.put(NodeFrame.snapshot(channel.latest).to_dict())
+                subscription.source_bases[channel.latest.key] = channel.latest_source_revision
             return subscription
 
     def unsubscribe(self, key: tuple[str, str], token: int) -> None:
@@ -87,13 +90,35 @@ class AgentThreadEventHub:
         self._publish(thread_id, frame, current)
 
     def _publish(self, thread_id: str, frame: NodeFrame, current: RuntimeState) -> None:
-        key = (current.session_id, thread_id)
-        payload = frame.to_dict()
+        channel_key = (current.session_id, thread_id)
+        turn_key = (frame.session_id, frame.turn_id)
         with self._lock:
-            channel = self._channels.setdefault(key, _ThreadChannel())
+            channel = self._channels.setdefault(channel_key, _ThreadChannel())
             channel.latest = current.clone()
+            channel.latest_source_revision = frame.revision
             for subscription in channel.subscribers.values():
-                subscription.events.put(payload)
+                if frame.type == "turn.snapshot":
+                    subscription.events.put(NodeFrame.snapshot(current).to_dict())
+                    subscription.source_bases = {turn_key: frame.revision}
+                    continue
+                base = subscription.source_bases.get(turn_key)
+                if base is None:
+                    subscription.events.put(NodeFrame.snapshot(current).to_dict())
+                    subscription.source_bases = {turn_key: frame.revision}
+                    continue
+                local_revision = frame.revision - base
+                if local_revision <= 0:
+                    continue
+                subscription.events.put(
+                    NodeFrame(
+                        "turn.delta",
+                        frame.session_id,
+                        frame.turn_id,
+                        local_revision,
+                        patch=frame.patch,
+                        operations=frame.operations,
+                    ).to_dict()
+                )
 
     def finish_turn(self, thread_id: str, turn: RuntimeState) -> None:
         key = (turn.session_id, thread_id)
