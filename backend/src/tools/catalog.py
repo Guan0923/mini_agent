@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from pathlib import Path
 
 from backend.domain.terminal import DEFAULT_TERMINAL_TYPE, TerminalType
@@ -22,8 +22,6 @@ def _build_tools(
     workspace_files: WorkspaceFiles | None = None,
     project_workspace: Path | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
-    sandbox_config: Mapping[str, object] | None = None,
-    network_mode: str | None = None,
 ) -> tuple[Tool, ...]:
     """Create the standard tool set for one workspace."""
 
@@ -34,8 +32,6 @@ def _build_tools(
         fetcher=web_fetch,
         project_workspace=project_workspace,
         terminal_type=terminal_type,
-        sandbox_config=sandbox_config,
-        network_mode=network_mode,
     )
 
 
@@ -48,8 +44,6 @@ def build_tool_registry(
     project_workspace: Path | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
     extra_tools: Iterable[Tool] = (),
-    sandbox_config: Mapping[str, object] | None = None,
-    network_mode: str | None = None,
 ) -> ToolRegistry:
     """Build the standard workspace tool registry."""
 
@@ -62,8 +56,6 @@ def build_tool_registry(
                 workspace_files=workspace_files,
                 project_workspace=project_workspace,
                 terminal_type=terminal_type,
-                sandbox_config=sandbox_config,
-                network_mode=network_mode,
             ),
             *extra_tools,
         )

@@ -116,14 +116,10 @@ class SafeWebFetcher:
         resolver: HostResolver = socket.getaddrinfo,
         doh_resolver: Callable[[str], list[str]] | None = None,
         allow_private_network: bool = False,
-        network_mode: str | None = None,
-        network_allowlist: tuple[tuple[str, int], ...] = (),
     ) -> None:
         self._resolver = resolver
         self._doh_resolver = doh_resolver or self._resolve_with_doh
         self._allow_private_network = allow_private_network
-        self._network_mode = network_mode
-        self._network_allowlist = {(host.casefold(), port) for host, port in network_allowlist}
         self._transport = _PinnedHttpTransport()
         if session is None:
             self._session: HttpSession | None = None
@@ -231,12 +227,6 @@ class SafeWebFetcher:
         assert parsed.hostname is not None
         host = parsed.hostname
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        if self._network_mode == "no_network":
-            raise ToolError("Web fetch is disabled by the sandbox network policy.")
-        if self._network_mode == "restricted_network" and (host.casefold(), port) not in self._network_allowlist:
-            raise ToolError("Web host is not in the sandbox network allowlist.")
-        if self._network_mode == "restricted_network":
-            return self._resolve_all_addresses(host, port)
         if self._allow_private_network:
             return self._resolve_all_addresses(host, port, allow_non_public=True)
         try:

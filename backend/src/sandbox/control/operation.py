@@ -13,6 +13,8 @@ from ..policy import FileAccessMode, NetworkMode, NetworkRule, ResourceLimits
 from ..runtime.launcher import SandboxLauncher
 from .decision import SandboxExecutionDecision
 
+_WEB_NETWORK_TOOLS = frozenset({"web_search", "web_fetch"})
+
 
 def sandbox_operation(context: ToolHookContext) -> HookOperationResult:
     """Authorize a tool call and return its immutable Sandbox launch decision."""
@@ -20,10 +22,7 @@ def sandbox_operation(context: ToolHookContext) -> HookOperationResult:
     if context.outcome is not None:
         return HookOperationResult.continue_execution()
 
-    workspace_write_allowed = context.permission_mode == "workspace_write" and context.workspace_confined
-    requires_approval = (
-        context.requires_confirmation and context.permission_mode != "full_access" and not workspace_write_allowed
-    )
+    requires_approval = _requires_approval(context)
     if requires_approval:
         request = _approval_request(context)
         _record(context, "approval_requested", "Tool approval requested", request)
@@ -57,6 +56,14 @@ def sandbox_operation(context: ToolHookContext) -> HookOperationResult:
             )
         execution_data["sandbox_decision"] = _command_decision(context)
     return HookOperationResult.continue_execution(execution_data)
+
+
+def _requires_approval(context: ToolHookContext) -> bool:
+    if context.name in _WEB_NETWORK_TOOLS:
+        network_mode = str(context.sandbox_config.get("network_mode") or NetworkMode.NO_NETWORK.value)
+        return network_mode != NetworkMode.FULL_NETWORK.value
+    workspace_write_allowed = context.permission_mode == "workspace_write" and context.workspace_confined
+    return context.requires_confirmation and context.permission_mode != "full_access" and not workspace_write_allowed
 
 
 def _approval_request(context: ToolHookContext) -> InterruptRequest:

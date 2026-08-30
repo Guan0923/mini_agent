@@ -25,20 +25,17 @@ def build_default_tools(
     fetcher: SafeWebFetcher | None = None,
     project_workspace: Path | None = None,
     terminal_type: TerminalType | str = DEFAULT_TERMINAL_TYPE,
-    sandbox_config: object | None = None,
-    network_mode: str | None = None,
 ) -> tuple[Tool, ...]:
     """Build tools in the stable order exposed to planners."""
 
     workspace_files = files or WorkspaceFiles(workspace, project_workspace=project_workspace)
-    del sandbox_config
     tools = [
         *time_tools(),
         *todo_tools(),
         *filesystem_read_tools(workspace_files),
         *web_tools(
-            search or DdgrWebSearch(network_mode=network_mode),
-            fetcher or SafeWebFetcher(network_mode=network_mode),
+            search or DdgrWebSearch(),
+            fetcher or SafeWebFetcher(),
         ),
         *filesystem_mutation_tools(workspace_files),
         command_tool(

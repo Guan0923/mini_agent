@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import ipaddress
-import socket
-from collections.abc import Callable
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 import requests
 
 from ..base import ToolError
-from .fetch import _PinnedHttpTransport
 from .text import normalize_whitespace
 
 
@@ -97,15 +93,7 @@ class DuckDuckGoWebSearch:
         self,
         *,
         session: Any | None = None,
-        network_mode: str | None = None,
-        network_allowlist: tuple[tuple[str, int], ...] = (),
-        resolver: Callable[..., list[tuple[Any, ...]]] = socket.getaddrinfo,
     ) -> None:
-        self._network_mode = network_mode
-        self._network_allowlist = {(host.casefold(), port) for host, port in network_allowlist}
-        self._resolver = resolver
-        self._use_pinned_transport = session is None
-        self._transport = _PinnedHttpTransport()
         if session is None:
             requests_session = requests.Session()
             # The endpoint is fixed and not user-controlled.  Avoid inheriting
@@ -117,30 +105,16 @@ class DuckDuckGoWebSearch:
 
     def search(self, query: str, max_results: int = 5) -> str:
         self._validate(query, max_results)
-        pinned_address: str | None = None
-        if self._network_mode == "no_network":
-            raise ToolError("Web search is disabled by the sandbox network policy.")
-        if self._network_mode == "restricted_network":
-            endpoint = urlsplit(self._ENDPOINT)
-            port = endpoint.port or (443 if endpoint.scheme == "https" else 80)
-            host = str(endpoint.hostname or "")
-            if (host.casefold(), port) not in self._network_allowlist:
-                raise ToolError("Web search host is not in the sandbox network allowlist.")
-            pinned_address = self._resolve_public_address(host, port)
         try:
             headers = {"Accept": "text/html", "User-Agent": self._USER_AGENT}
-            if pinned_address is not None and self._use_pinned_transport:
-                url = f"{self._ENDPOINT}?{urlencode({'q': query.strip()})}"
-                response = self._transport.get(url, pinned_address, headers=headers, timeout=(5, 15))
-            else:
-                response = self._session.get(
-                    self._ENDPOINT,
-                    params={"q": query.strip()},
-                    headers=headers,
-                    allow_redirects=False,
-                    stream=True,
-                    timeout=(5, 15),
-                )
+            response = self._session.get(
+                self._ENDPOINT,
+                params={"q": query.strip()},
+                headers=headers,
+                allow_redirects=False,
+                stream=True,
+                timeout=(5, 15),
+            )
         except requests.RequestException as exc:
             raise ToolError(f"Unable to start web search: {exc}") from exc
         except OSError as exc:
@@ -184,26 +158,6 @@ class DuckDuckGoWebSearch:
             close = getattr(response, "close", None)
             if callable(close):
                 close()
-
-    def _resolve_public_address(self, host: str, port: int) -> str:
-        try:
-            answers = self._resolver(host, port, type=socket.SOCK_STREAM)
-        except (socket.gaierror, OSError) as exc:
-            raise ToolError(f"Unable to resolve web search host: {host}.") from exc
-        addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
-        for answer in answers or []:
-            try:
-                address = str(answer[4][0]).split("%", 1)[0]
-                parsed = ipaddress.ip_address(address)
-            except (IndexError, ValueError) as exc:
-                raise ToolError(f"Web search host resolved to an invalid address: {host}.") from exc
-            if not parsed.is_global:
-                raise ToolError("Restricted web search refuses loopback, private, link-local, or reserved addresses.")
-            if parsed not in addresses:
-                addresses.append(parsed)
-        if not addresses:
-            raise ToolError(f"Web search host resolved without addresses: {host}.")
-        return str(next((address for address in addresses if address.version == 4), addresses[0]))
 
     def _read_limited_body(self, response: Any) -> bytes:
         content_length = None

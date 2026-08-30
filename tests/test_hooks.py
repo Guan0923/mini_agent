@@ -189,8 +189,14 @@ def test_model_managers_receive_before_context_and_after_outcome(monkeypatch) ->
     assert observed == [("before", None), ("after", "succeeded")]
 
 
-@pytest.mark.parametrize("tool_name", ["web_search", "web_fetch", "mcp_demo_echo"])
-def test_external_tool_still_requires_approval_in_workspace_write(tool_name: str) -> None:
+@pytest.mark.parametrize("tool_name", ["web_search", "web_fetch"])
+@pytest.mark.parametrize("network_mode", list(NetworkMode))
+@pytest.mark.parametrize("permission_mode", ["read_only", "workspace_write", "full_access"])
+def test_web_tool_approval_depends_only_on_network_mode(
+    tool_name: str,
+    network_mode: NetworkMode,
+    permission_mode: str,
+) -> None:
     calls: list[str] = []
     approvals = []
 
@@ -223,7 +229,64 @@ def test_external_tool_still_requires_approval_in_workspace_write(tool_name: str
             )
         ]
     )
-    runner = AgentRunner(ExternalToolPlanner(), tools)
+    runner = AgentRunner(
+        ExternalToolPlanner(),
+        tools,
+        sandbox_config={"network_mode": network_mode.value},
+    )
+    runtime = runner.new_runtime(
+        task="call external tool",
+        interrupt=lambda request: approvals.append(request) or InterruptDecision("continue"),
+    )
+    runtime.state.permission_mode = permission_mode
+
+    result = runner.run(runtime)
+
+    assert result.status == "completed"
+    assert calls == ["ok"]
+    assert len(approvals) == (0 if network_mode is NetworkMode.FULL_NETWORK else 1)
+    if approvals:
+        assert approvals[0].data["tool"] == tool_name
+
+
+def test_external_mcp_tool_still_requires_approval_in_workspace_write() -> None:
+    calls: list[str] = []
+    approvals = []
+
+    class ExternalToolPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def decide(self, _runtime):
+            self.calls += 1
+            if self.calls == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="mcp_demo_echo",
+                            call_id="call_external",
+                            arguments={"value": "ok"},
+                        )
+                    ]
+                )
+            return AssistantMessage(content="done")
+
+    tools = ToolRegistry(
+        [
+            Tool(
+                "mcp_demo_echo",
+                "External tool",
+                lambda value: calls.append(value) or value,
+                requires_confirmation=True,
+                read_only=False,
+            )
+        ]
+    )
+    runner = AgentRunner(
+        ExternalToolPlanner(),
+        tools,
+        sandbox_config={"network_mode": NetworkMode.FULL_NETWORK.value},
+    )
     runtime = runner.new_runtime(
         task="call external tool",
         interrupt=lambda request: approvals.append(request) or InterruptDecision("continue"),
@@ -234,7 +297,107 @@ def test_external_tool_still_requires_approval_in_workspace_write(tool_name: str
 
     assert result.status == "completed"
     assert calls == ["ok"]
-    assert approvals[0].data["tool"] == tool_name
+    assert len(approvals) == 1
+    assert approvals[0].data["tool"] == "mcp_demo_echo"
+
+
+@pytest.mark.parametrize("interrupt", [None, lambda _request: InterruptDecision("deny")])
+def test_web_tool_without_network_approval_does_not_execute(interrupt) -> None:
+    calls: list[str] = []
+
+    class WebToolPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def decide(self, _runtime):
+            self.calls += 1
+            if self.calls == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="web_fetch",
+                            call_id="call_web",
+                            arguments={"value": "blocked"},
+                        )
+                    ]
+                )
+            return AssistantMessage(content="done")
+
+    tools = ToolRegistry(
+        [
+            Tool(
+                "web_fetch",
+                "External web tool",
+                lambda value: calls.append(value) or value,
+                requires_confirmation=True,
+            )
+        ]
+    )
+    runner = AgentRunner(
+        WebToolPlanner(),
+        tools,
+        sandbox_config={"network_mode": NetworkMode.NO_NETWORK.value},
+    )
+    runtime = runner.new_runtime(task="call web tool", interrupt=interrupt)
+
+    result = runner.run(runtime)
+
+    assert result.status == ("cancelled" if interrupt is None else "completed")
+    assert calls == []
+    if interrupt is None:
+        return
+    tool_message = next(
+        message.tool_messages[0]
+        for message in result.history
+        if isinstance(message, AssistantMessage) and message.tool_messages
+    )
+    assert tool_message.status == "failed"
+
+
+@pytest.mark.parametrize("sandbox_config", [{}, {"network_mode": "invalid"}])
+def test_web_tool_missing_or_invalid_network_mode_requires_approval(sandbox_config: dict[str, object]) -> None:
+    calls: list[str] = []
+    approvals = []
+
+    class WebToolPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def decide(self, _runtime):
+            self.calls += 1
+            if self.calls == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="web_search",
+                            call_id="call_web",
+                            arguments={"value": "ok"},
+                        )
+                    ]
+                )
+            return AssistantMessage(content="done")
+
+    tools = ToolRegistry(
+        [
+            Tool(
+                "web_search",
+                "External web tool",
+                lambda value: calls.append(value) or value,
+                requires_confirmation=True,
+            )
+        ]
+    )
+    runner = AgentRunner(WebToolPlanner(), tools, sandbox_config=sandbox_config)
+    runtime = runner.new_runtime(
+        task="call web tool",
+        interrupt=lambda request: approvals.append(request) or InterruptDecision("continue"),
+    )
+
+    result = runner.run(runtime)
+
+    assert result.status == "completed"
+    assert calls == ["ok"]
+    assert len(approvals) == 1
 
 
 @pytest.mark.parametrize("tool_name", ["create_directory", "write_file", "edit_file"])

@@ -198,7 +198,6 @@ def _build_subagent_runner(
                 ),
                 project_workspace=project_cwd,
                 terminal_type=terminal_type,
-                sandbox_config=sandbox_config,
                 extra_tools=delegation_tools(subagent_settings.max_tasks_per_batch),
             ),
             checkpoints,
@@ -230,7 +229,6 @@ def _build_subagent_runner(
             workspace_files=workspace_files,
             project_workspace=project_cwd,
             terminal_type=terminal_type,
-            sandbox_config=sandbox_config,
             extra_tools=(
                 *delegation_tools(subagent_settings.max_tasks_per_batch),
                 *external,

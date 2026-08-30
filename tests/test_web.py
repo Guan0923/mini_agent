@@ -145,66 +145,6 @@ def test_web_fetch_blocks_non_public_addresses_before_request() -> None:
     assert session.calls == []
 
 
-def test_restricted_web_fetch_rejects_private_resolution_before_request() -> None:
-    session = FakeSession([])
-
-    def private_resolver(host: str, port: int, **kwargs: Any) -> list[tuple[Any, ...]]:
-        del host, kwargs
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", port))]
-
-    fetcher = SafeWebFetcher(
-        session=session,
-        resolver=private_resolver,
-        network_mode="restricted_network",
-        network_allowlist=(("internal.example", 443),),
-    )
-    with pytest.raises(ToolError, match="Restricted web access"):
-        fetcher.fetch("https://internal.example/secret")
-    assert session.calls == []
-
-
-def test_restricted_web_search_pins_public_resolution() -> None:
-    calls: list[tuple[str, str]] = []
-
-    def public_search_resolver(host: str, port: int, **kwargs: Any) -> list[tuple[Any, ...]]:
-        del host, kwargs
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
-
-    class CapturingTransport:
-        def get(self, url: str, address: str, **kwargs: Any) -> FakeResponse:
-            del kwargs
-            calls.append((url, address))
-            return FakeResponse(
-                200,
-                {"Content-Type": "text/html"},
-                b'<a class="result__a" href="https://docs.python.org/">Python docs</a>',
-            )
-
-    search = DdgrWebSearch(
-        network_mode="restricted_network",
-        network_allowlist=(("html.duckduckgo.com", 443),),
-        resolver=public_search_resolver,
-    )
-    search._transport = CapturingTransport()  # type: ignore[assignment]
-    assert "Python docs" in search.search("Python")
-    assert calls == [("https://html.duckduckgo.com/html/?q=Python", "93.184.216.34")]
-
-
-def test_restricted_web_search_rejects_private_resolution_before_request() -> None:
-    def private_search_resolver(host: str, port: int, **kwargs: Any) -> list[tuple[Any, ...]]:
-        del host, kwargs
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
-
-    search = DdgrWebSearch(
-        session=FakeSession([]),
-        network_mode="restricted_network",
-        network_allowlist=(("html.duckduckgo.com", 443),),
-        resolver=private_search_resolver,
-    )
-    with pytest.raises(ToolError, match="Restricted web search"):
-        search.search("Python")
-
-
 def test_web_fetch_pins_a_verified_public_address_after_synthetic_dns() -> None:
     calls: list[tuple[str, str]] = []
 
