@@ -14,7 +14,7 @@ from .credentials import BrokerCredentialPackage
 from .protocol import BROKER_VERSION, _canonical
 
 READY_SCHEMA = 3
-TOKEN_MODEL = "capability_sid_v2"
+TOKEN_MODEL = "capability_sid_v3"
 
 
 def build_ready_marker(package: BrokerCredentialPackage, proxy_port: int) -> dict[str, object]:

@@ -65,6 +65,10 @@ class WindowsRestrictedTokenFactory:
             flags = security.DISABLE_MAX_PRIVILEGE | 0x4  # LUA_TOKEN
             restricting_sids: list[tuple[Any, int]] = []
             if file_mode is not FileAccessMode.FULL_ACCESS:
+                # Limit the restricting-SID access check to write access. Read
+                # and execute continue to use the low-privilege account's
+                # ordinary groups (for example BUILTIN\Users).
+                flags |= 0x8  # WRITE_RESTRICTED
                 account_sid_value = security.ConvertStringSidToSid(account.sid)
                 everyone_sid = security.CreateWellKnownSid(security.WinWorldSid, None)
                 restricting_sids.extend(

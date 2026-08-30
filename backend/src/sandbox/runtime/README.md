@@ -8,5 +8,8 @@
 - `monitor.py`：限制监控；`reclaimer.py`：终态回收。
 - `__init__.py`：惰性导出，避免 control/runtime 循环加载。
 
-Launcher 只消费明确决策；三种文件模式都经 Broker 和固定低权账户，且不启用
-`WRITE_RESTRICTED`。MCP、Web 和其他内置工具不使用这里的 Broker 生命周期。
+Launcher 只消费明确决策；三种文件模式都经 Broker 和固定低权账户；`read_only` 和
+`workspace_write` 使用 `WRITE_RESTRICTED` 将 RestrictedSids 检查限定为写访问。
+workspace、cwd 与 Job temp 的明确父目录链只获得 Account SID 的无继承遍历 lease，
+以便受限 PowerShell 建立真实工作目录；这些 ACE 与其他 Job ACL 一起精确回滚。
+MCP、Web 和其他内置工具不使用这里的 Broker 生命周期。

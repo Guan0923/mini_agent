@@ -73,7 +73,7 @@ def _status_transport(key: bytes, **overrides: object):
             "version": "3",
             "generation": "generation-1",
             "proxy_port": 17831,
-            "token_model": "capability_sid_v2",
+            "token_model": "capability_sid_v3",
             **overrides,
         }
         response["hmac"] = hmac.new(

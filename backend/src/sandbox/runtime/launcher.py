@@ -209,7 +209,12 @@ class SandboxLauncher:
             capability_digest = str(reservation["capability_digest"])
 
             explicit_paths = _unique_paths((*workspace_paths, launch_cwd_path))
-            identities = self._inspect_explicit_paths((*explicit_paths, temp_dir))
+            managed_paths = _unique_paths((*explicit_paths, temp_dir))
+            traverse_paths = _ancestor_paths(managed_paths)
+            identities = self._inspect_explicit_paths((*traverse_paths, *managed_paths))
+            for path in traverse_paths:
+                acl_entries.append(self._apply(lambda: self.acl_manager.grant_traverse_lease(path, account_sid), path))
+                acl_actions.append(rollback.push(lambda entry=acl_entries[-1]: self.acl_manager.revoke_entry(entry)))
             for path in explicit_paths:
                 acl_entries.append(
                     self._apply(lambda: self.acl_manager.grant_lease(path, account_sid, policy.file_mode), path)
@@ -488,6 +493,22 @@ def _unique_paths(paths: Sequence[Path]) -> tuple[Path, ...]:
             seen.add(key)
             result.append(path)
     return tuple(result)
+
+
+def _ancestor_paths(paths: Sequence[Path]) -> tuple[Path, ...]:
+    """Return only explicit parent chains, excluding volume roots and managed paths."""
+
+    managed = {os.path.normcase(str(path)) for path in paths}
+    candidates: list[Path] = []
+    for path in paths:
+        chain: list[Path] = []
+        current = path.parent
+        while current != current.parent:
+            if os.path.normcase(str(current)) not in managed:
+                chain.append(current)
+            current = current.parent
+        candidates.extend(reversed(chain))
+    return _unique_paths(candidates)
 
 
 def _mapping_hash(value: Mapping[str, object]) -> str:

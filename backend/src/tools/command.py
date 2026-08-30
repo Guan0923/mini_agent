@@ -203,7 +203,16 @@ class WorkspaceCommand:
         if self._terminal_type == "cmd":
             return [executable, "/d", "/s", "/c", command]
         if self._terminal_type in {"powershell", "pwsh"}:
-            return [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
+            return [
+                executable,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-WorkingDirectory",
+                str(self._workspace),
+                "-Command",
+                command,
+            ]
         if self._terminal_type == "git_bash":
             return [executable, "-lc", command]
         try:

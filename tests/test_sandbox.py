@@ -154,7 +154,7 @@ def test_broker_request_authenticates_nonce() -> None:
             "version": "3",
             "generation": "test-generation",
             "proxy_port": 17831,
-            "token_model": "capability_sid_v2",
+            "token_model": "capability_sid_v3",
         }
         response["hmac"] = hmac.new(
             key,
@@ -504,6 +504,9 @@ class _LauncherAcl:
         return AclLeaseEntry(str(resolved), str(resolved).casefold(), sid, ace_type, 1, 3, True)
 
     def grant_lease(self, path: Path, sid: str, _mode: FileAccessMode) -> AclLeaseEntry:
+        return self._entry(path, sid)
+
+    def grant_traverse_lease(self, path: Path, sid: str) -> AclLeaseEntry:
         return self._entry(path, sid)
 
     def grant_execute_lease(self, path: Path, sid: str) -> AclLeaseEntry:

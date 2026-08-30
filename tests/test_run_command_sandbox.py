@@ -56,6 +56,10 @@ class _Acl:
         self.calls.append(("grant", Path(path), sid, mode))
         return self._entry(path, sid)
 
+    def grant_traverse_lease(self, path: Path, sid: str) -> AclLeaseEntry:
+        self.calls.append(("grant_traverse", Path(path), sid))
+        return self._entry(path, sid)
+
     def grant_execute_lease(self, path: Path, sid: str) -> AclLeaseEntry:
         self.calls.append(("grant_execute", Path(path), sid))
         return self._entry(path, sid)
@@ -122,6 +126,41 @@ def test_real_windows_acl_lease_adds_verifies_and_removes_only_its_exact_ace(tmp
     assert manager.verify_entry(entry)
     assert manager.revoke_entry(entry)
     assert not manager.verify_entry(entry)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL integration test")
+def test_real_windows_traverse_lease_is_minimal_and_does_not_propagate(tmp_path: Path) -> None:
+    import ntsecuritycon
+    import win32security
+
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    manager = WindowsAclManager()
+    sid = random_capability_sid()
+
+    def child_dacl() -> str:
+        descriptor = win32security.GetNamedSecurityInfo(
+            str(child),
+            win32security.SE_FILE_OBJECT,
+            win32security.DACL_SECURITY_INFORMATION,
+        )
+        return win32security.ConvertSecurityDescriptorToStringSecurityDescriptor(
+            descriptor,
+            win32security.SDDL_REVISION_1,
+            win32security.DACL_SECURITY_INFORMATION,
+        )
+
+    original_child_dacl = child_dacl()
+    entry = manager.grant_traverse_lease(parent, sid)
+
+    assert entry.mask == ntsecuritycon.FILE_TRAVERSE | ntsecuritycon.FILE_READ_ATTRIBUTES
+    assert entry.inheritance == 0
+    assert manager.verify_entry(entry)
+    assert child_dacl() == original_child_dacl
+    assert manager.revoke_entry(entry)
+    assert not manager.verify_entry(entry)
+    assert child_dacl() == original_child_dacl
 
 
 def test_cmd_command_line_preserves_native_inner_quotes() -> None:
@@ -261,6 +300,9 @@ def test_launcher_uses_two_phase_broker_for_every_file_and_network_mode(
     assert reserve[1]["cwd"] == str(project_workspace)
     granted_roots = {call[1] for call in calls if call[0] == "grant"}
     assert {session_workspace, project_workspace}.issubset(granted_roots)
+    traversed = {call[1] for call in calls if call[0] == "grant_traverse"}
+    assert tmp_path in traversed
+    assert all(path.anchor != str(path) for path in traversed)
     assert calls.index(reserve) < next(index for index, call in enumerate(calls) if call[0] == "grant")
     assert next(index for index, call in enumerate(calls) if call[0] == "grant") < calls.index(launch)
     if network_mode is NetworkMode.FULL_NETWORK:

@@ -42,19 +42,36 @@ class WindowsAclManager:
         rights = _modules()["ntsecuritycon"].FILE_GENERIC_READ | _modules()["ntsecuritycon"].FILE_GENERIC_EXECUTE
         if mode is not FileAccessMode.READ_ONLY:
             rights |= _modules()["ntsecuritycon"].FILE_GENERIC_WRITE | _modules()["ntsecuritycon"].DELETE
-        return self._grant(path, logon_sid, rights)
+        return self._grant(path, logon_sid, rights, inheritance=self._child_inheritance())
+
+    def grant_traverse_lease(self, path: Path, sid_value: str) -> AclLeaseEntry:
+        """Allow one account to traverse an explicit boundary ancestor."""
+
+        nt = _modules()["ntsecuritycon"]
+        return self._grant(
+            path,
+            sid_value,
+            nt.FILE_TRAVERSE | nt.FILE_READ_ATTRIBUTES,
+            inheritance=0,
+            direct=True,
+        )
 
     def grant_execute_lease(self, path: Path, sid_value: str) -> AclLeaseEntry:
         """Grant the temporary image/cwd access CreateProcessAsUser needs."""
 
         nt = _modules()["ntsecuritycon"]
-        return self._grant(path, sid_value, nt.FILE_GENERIC_READ | nt.FILE_GENERIC_EXECUTE)
+        return self._grant(
+            path,
+            sid_value,
+            nt.FILE_GENERIC_READ | nt.FILE_GENERIC_EXECUTE,
+            inheritance=self._child_inheritance(),
+        )
 
     def grant_capability_write(self, path: Path, sid_value: str) -> AclLeaseEntry:
         modules = _modules()
         rights = modules["ntsecuritycon"].FILE_GENERIC_READ | modules["ntsecuritycon"].FILE_GENERIC_EXECUTE
         rights |= modules["ntsecuritycon"].FILE_GENERIC_WRITE | modules["ntsecuritycon"].DELETE
-        return self._grant(path, sid_value, rights)
+        return self._grant(path, sid_value, rights, inheritance=self._child_inheritance())
 
     def deny_capability_write(self, path: Path, sid_value: str) -> AclLeaseEntry:
         modules = _modules()
@@ -83,26 +100,41 @@ class WindowsAclManager:
     def path_identity(self, path: Path) -> PathIdentity:
         return _path_identity(Path(path))
 
-    def _grant(self, path: Path, sid_value: str, rights: int) -> AclLeaseEntry:
+    @staticmethod
+    def _child_inheritance() -> int:
+        modules = _modules()
+        return modules["con"].OBJECT_INHERIT_ACE | modules["con"].CONTAINER_INHERIT_ACE
+
+    def _grant(
+        self,
+        path: Path,
+        sid_value: str,
+        rights: int,
+        *,
+        inheritance: int,
+        direct: bool = False,
+    ) -> AclLeaseEntry:
         modules = _modules()
         security = modules["security"]
         target, identity, dacl = self._dacl(Path(path))
-        inheritance = modules["con"].OBJECT_INHERIT_ACE | modules["con"].CONTAINER_INHERIT_ACE
         sid = security.ConvertStringSidToSid(sid_value)
         existing = _find_covering_ace(dacl, security.ACCESS_ALLOWED_ACE_TYPE, sid, rights, inheritance)
         if existing is not None:
             return AclLeaseEntry(str(target), identity.object_id, sid_value, "allow", rights, inheritance, False)
         try:
             dacl.AddAccessAllowedAceEx(security.ACL_REVISION_DS, inheritance, rights, sid)
-            security.SetNamedSecurityInfo(
-                str(target),
-                security.SE_FILE_OBJECT,
-                security.DACL_SECURITY_INFORMATION,
-                None,
-                None,
-                dacl,
-                None,
-            )
+            if direct:
+                _set_directory_dacl_direct(target, dacl)
+            else:
+                security.SetNamedSecurityInfo(
+                    str(target),
+                    security.SE_FILE_OBJECT,
+                    security.DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    dacl,
+                    None,
+                )
         except Exception as exc:  # pragma: no cover - requires Windows ACL support
             raise SandboxInitializationError("sandbox ACL lease could not be applied") from exc
 
@@ -165,15 +197,18 @@ class WindowsAclManager:
             if index is None:
                 return True
             dacl.DeleteAce(index)
-            security.SetNamedSecurityInfo(
-                str(target),
-                security.SE_FILE_OBJECT,
-                security.DACL_SECURITY_INFORMATION,
-                None,
-                None,
-                dacl,
-                None,
-            )
+            if entry.inheritance == 0:
+                _set_directory_dacl_direct(target, dacl)
+            else:
+                security.SetNamedSecurityInfo(
+                    str(target),
+                    security.SE_FILE_OBJECT,
+                    security.DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    dacl,
+                    None,
+                )
             return True
         except Exception:  # pragma: no cover - requires Windows ACL support
             return False
@@ -183,6 +218,34 @@ class WindowsAclManager:
 class PathIdentity:
     path: Path
     object_id: str
+
+
+def _set_directory_dacl_direct(path: Path, dacl: Any) -> None:
+    """Update one directory object without propagating ACEs to descendants."""
+
+    modules = _modules()
+    con = modules["con"]
+    handle = None
+    try:
+        handle = modules["file"].CreateFile(
+            str(path),
+            con.READ_CONTROL | con.WRITE_DAC,
+            con.FILE_SHARE_READ | con.FILE_SHARE_WRITE | con.FILE_SHARE_DELETE,
+            None,
+            con.OPEN_EXISTING,
+            con.FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        descriptor = modules["types"].SECURITY_DESCRIPTOR()
+        descriptor.SetSecurityDescriptorDacl(1, dacl, 0)
+        modules["security"].SetKernelObjectSecurity(
+            handle,
+            modules["security"].DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    finally:
+        if handle is not None:
+            handle.Close()
 
 
 def _find_covering_ace(dacl: Any, ace_type: int, sid: Any, mask: int, inheritance: int) -> int | None:

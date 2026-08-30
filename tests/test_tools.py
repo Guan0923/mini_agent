@@ -85,6 +85,8 @@ def test_command_tool_uses_powershell_on_windows_and_workspace_cwd(tmp_path: Pat
         "-NoLogo",
         "-NoProfile",
         "-NonInteractive",
+        "-WorkingDirectory",
+        str(tmp_path.resolve()),
         "-Command",
         "New-Item -ItemType Directory demo",
     ]
@@ -103,7 +105,19 @@ def test_command_tool_uses_powershell_on_windows_and_workspace_cwd(tmp_path: Pat
     ("terminal_type", "expected"),
     [
         ("cmd", ["cmd.exe", "/d", "/s", "/c", "echo hi"]),
-        ("pwsh", ["pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "echo hi"]),
+        (
+            "pwsh",
+            [
+                "pwsh.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-WorkingDirectory",
+                "{workspace}",
+                "-Command",
+                "echo hi",
+            ],
+        ),
     ],
 )
 def test_command_tool_uses_selected_windows_terminal(tmp_path: Path, terminal_type: str, expected: list[str]) -> None:
@@ -121,6 +135,7 @@ def test_command_tool_uses_selected_windows_terminal(tmp_path: Path, terminal_ty
         environment={"PATH": ""},
     ).run("echo hi")
 
+    expected = [str(tmp_path.resolve()) if value == "{workspace}" else value for value in expected]
     assert calls == [expected]
 
 

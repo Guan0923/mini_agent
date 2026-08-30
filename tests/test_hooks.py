@@ -304,7 +304,7 @@ def test_workspace_file_mutation_approval_matrix_executes_real_handler(
 
 @pytest.mark.parametrize(
     ("permission_mode", "expected_approvals"),
-    [("read_only", 1), ("workspace_write", 1), ("full_access", 0)],
+    [("read_only", 1), ("workspace_write", 0), ("full_access", 0)],
 )
 def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(
     tmp_path: Path, permission_mode: str, expected_approvals: int

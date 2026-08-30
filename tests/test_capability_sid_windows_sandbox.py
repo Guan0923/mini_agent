@@ -80,12 +80,12 @@ class _Security:
     [
         (
             FileAccessMode.READ_ONLY,
-            0x1 | 0x4,
+            0x1 | 0x4 | 0x8,
             ["workspace-cap", "temp-cap", "account", "S-1-5-5-10-20", "S-1-1-0"],
         ),
         (
             FileAccessMode.WORKSPACE_WRITE,
-            0x1 | 0x4,
+            0x1 | 0x4 | 0x8,
             ["workspace-cap", "temp-cap", "account", "S-1-5-5-10-20", "S-1-1-0"],
         ),
         (FileAccessMode.FULL_ACCESS, 0x1 | 0x4, []),
