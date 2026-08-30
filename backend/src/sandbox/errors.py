@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from enum import StrEnum
+from pathlib import Path
 
 
 class SandboxFailureCode(StrEnum):
@@ -11,6 +13,18 @@ class SandboxFailureCode(StrEnum):
     RESOURCE_EXCEEDED = "resource_exceeded"
     ADMISSION_TIMEOUT = "admission_timeout"
     CLEANUP_PENDING = "cleanup_pending"
+
+
+class SandboxPathFailure(StrEnum):
+    WORKSPACE_INVALID = "workspace_invalid"
+    CWD_INVALID = "cwd_invalid"
+    CWD_OUTSIDE_WORKSPACE = "cwd_outside_workspace"
+    TEMP_INVALID = "temp_invalid"
+    DACL_READ_FAILED = "dacl_read_failed"
+    DACL_APPLY_FAILED = "dacl_apply_failed"
+    DACL_VERIFY_FAILED = "dacl_verify_failed"
+    PATH_IDENTITY_CHANGED = "path_identity_changed"
+    CLEANUP_FAILED = "sandbox_cleanup_failed"
 
 
 class BrokerInstallFailureCode(StrEnum):
@@ -69,6 +83,16 @@ class SandboxInitializationError(SandboxError):
         super().__init__(message, SandboxFailureCode.INIT_FAILED)
 
 
+class SandboxPathError(SandboxInitializationError):
+    """Stable path-scoped failure with the inspected absolute path."""
+
+    def __init__(self, reason: SandboxPathFailure, path: str | Path) -> None:
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        super().__init__(f"{reason.value}: {absolute}")
+        self.reason = reason
+        self.path = absolute
+
+
 class BrokerInstallationError(SandboxInitializationError):
     """A categorized Broker installation failure safe to expose at the API boundary."""
 
@@ -96,6 +120,8 @@ __all__ = [
     "SandboxError",
     "SandboxFailureCode",
     "SandboxInitializationError",
+    "SandboxPathError",
+    "SandboxPathFailure",
     "SandboxPolicyError",
     "SandboxResourceExceeded",
 ]

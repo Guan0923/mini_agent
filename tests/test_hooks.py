@@ -25,14 +25,14 @@ from backend.runtime.core.hooks import (
     before_tool_hook_manager,
 )
 from backend.sandbox import (
+    FileAccessMode,
     NetworkMode,
-    PermissionMode,
+    ResourceLimits,
     SandboxExecutionDecision,
-    SandboxLauncher,
-    SandboxLimits,
 )
 from backend.sandbox.control.operation import sandbox_operation
 from backend.tools import Tool, ToolError, ToolInvocationContext, ToolRegistry, WorkspaceCommand
+from tests.testing_sandbox import DirectTestSandboxLauncher
 
 
 def test_six_global_managers_are_independent_and_sandbox_is_first() -> None:
@@ -309,16 +309,7 @@ def test_workspace_file_mutation_approval_matrix_executes_real_handler(
 def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(
     tmp_path: Path, permission_mode: str, expected_approvals: int
 ) -> None:
-    class RecordingLauncher(SandboxLauncher):
-        def __init__(self) -> None:
-            super().__init__(is_windows=os.name == "nt", allow_local_backend=True, environment=os.environ)
-            self.policies = []
-
-        def launch(self, argv, policy, **kwargs):
-            self.policies.append(policy)
-            return super().launch(argv, policy, **kwargs)
-
-    launcher = RecordingLauncher()
+    launcher = DirectTestSandboxLauncher()
     requests = []
     planner = _OneToolPlanner()
     decisions = 0
@@ -370,7 +361,7 @@ def test_approved_command_uses_hook_decision_for_real_process_and_cleans_up(
     if requests:
         assert requests[0].data["permission_target"] == permission_mode
         assert requests[0].data["network_target"]["mode"] == "no_network"
-    assert launcher.policies[0].file_mode is PermissionMode(permission_mode)
+    assert launcher.policies[0].file_mode is FileAccessMode(permission_mode)
     assert launcher.policies[0].network_mode is NetworkMode.NO_NETWORK
     assert launcher._temp_dirs == {}
 
@@ -421,17 +412,17 @@ def test_command_without_sandbox_launcher_is_rejected_before_handler() -> None:
 
 
 def test_real_sandbox_command_timeout_cleans_process_resources(tmp_path: Path) -> None:
-    launcher = SandboxLauncher(is_windows=os.name == "nt", allow_local_backend=True, environment=os.environ)
+    launcher = DirectTestSandboxLauncher()
     decision = SandboxExecutionDecision(
         launcher=launcher,
         workspaces=(tmp_path,),
         session_id="session-timeout",
         user_id="local",
-        file_mode=PermissionMode.READ_ONLY,
+        file_mode=FileAccessMode.READ_ONLY,
         network_mode=NetworkMode.NO_NETWORK,
         network_allowlist=(),
         proxy_port=17831,
-        limits=SandboxLimits(wall_seconds=5),
+        limits=ResourceLimits(wall_seconds=5),
     )
     command = WorkspaceCommand(tmp_path)
     slow_command = "powershell -NoProfile -Command Start-Sleep -Seconds 5" if os.name == "nt" else "sleep 5"
@@ -451,17 +442,17 @@ def test_real_local_sandbox_command_starts_from_project_workspace(tmp_path: Path
     project_workspace = tmp_path / "project"
     session_workspace.mkdir()
     project_workspace.mkdir()
-    launcher = SandboxLauncher(is_windows=os.name == "nt", allow_local_backend=True, environment=os.environ)
+    launcher = DirectTestSandboxLauncher()
     decision = SandboxExecutionDecision(
         launcher=launcher,
         workspaces=(session_workspace, project_workspace),
         session_id="session-project-cwd",
         user_id="local",
-        file_mode=PermissionMode.READ_ONLY,
+        file_mode=FileAccessMode.READ_ONLY,
         network_mode=NetworkMode.NO_NETWORK,
         network_allowlist=(),
         proxy_port=17831,
-        limits=SandboxLimits(),
+        limits=ResourceLimits(),
     )
     command = WorkspaceCommand(project_workspace)
 

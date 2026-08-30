@@ -21,7 +21,6 @@ from backend.sandbox import (
     FileAccessMode,
     NetworkMode,
     NetworkRule,
-    PermissionMode,
     ResourceLimits,
     ResourceMonitor,
     ResourceRequest,
@@ -31,7 +30,6 @@ from backend.sandbox import (
     SandboxInitializationError,
     SandboxJobContext,
     SandboxLauncher,
-    SandboxLimits,
     SandboxMaintenanceBusy,
     SandboxMaintenanceGate,
     SandboxPolicy,
@@ -43,22 +41,21 @@ from backend.sandbox import (
     normalize_permission_mode,
 )
 from backend.sandbox.broker_service import BrokerCredentialPackage, build_ready_marker
-from backend.sandbox.runtime.leases import CommandLease
+from backend.sandbox.native_windows import AclLeaseEntry
+from backend.sandbox.runtime.leases import CommandLease, CommandLeaseStore
 
 
 def test_permission_modes_use_only_the_three_level_contract(tmp_path: Path) -> None:
-    assert {mode.value for mode in PermissionMode} == {"read_only", "workspace_write", "full_access"}
-    assert normalize_permission_mode("full_access") is PermissionMode.FULL_ACCESS
-    assert normalize_permission_mode(None) is PermissionMode.READ_ONLY
-    assert PermissionMode is FileAccessMode
-    assert SandboxLimits is ResourceLimits
+    assert {mode.value for mode in FileAccessMode} == {"read_only", "workspace_write", "full_access"}
+    assert normalize_permission_mode("full_access") is FileAccessMode.FULL_ACCESS
+    assert normalize_permission_mode(None) is FileAccessMode.READ_ONLY
     assert SandboxJobContext("user-1", SandboxPolicy((tmp_path,), "session", "job")).job_kind == "command"
 
 
 def test_limits_validate_hard_bounds() -> None:
     with pytest.raises(Exception):
-        SandboxLimits(memory_mib=127).validate()
-    assert SandboxLimits.from_mapping({"memory_mb": 128}).memory_mib == 128
+        ResourceLimits(memory_mib=127).validate()
+    assert ResourceLimits.from_mapping({"memory_mib": 128}).memory_mib == 128
 
 
 @pytest.mark.parametrize("network_mode", list(NetworkMode))
@@ -70,7 +67,7 @@ def test_full_access_file_mode_is_independent_from_network_mode(tmp_path: Path, 
         "job",
         network_mode=network_mode,
         network_allowlist=allowlist,
-        file_mode=PermissionMode.FULL_ACCESS,
+        file_mode=FileAccessMode.FULL_ACCESS,
     )
     assert len(policy.policy_hash()) == hashlib.sha256().digest_size * 2
 
@@ -154,10 +151,10 @@ def test_broker_request_authenticates_nonce() -> None:
             "nonce": request["nonce"],
             "installed": True,
             "healthy": True,
-            "version": "2",
+            "version": "3",
             "generation": "test-generation",
             "proxy_port": 17831,
-            "token_model": "capability_sid_v1",
+            "token_model": "capability_sid_v2",
         }
         response["hmac"] = hmac.new(
             key,
@@ -435,7 +432,7 @@ def test_broker_service_rejects_expired_signed_request(tmp_path: Path) -> None:
 
 
 def test_resource_monitor_rejects_memory() -> None:
-    monitor = ResourceMonitor(1, SandboxLimits(memory_mib=128), provider=lambda: None)  # type: ignore[arg-type]
+    monitor = ResourceMonitor(1, ResourceLimits(memory_mib=128), provider=lambda: None)  # type: ignore[arg-type]
     with pytest.raises(SandboxResourceExceeded):
         monitor.check(ResourceUsage(memory_bytes=129 * 1024 * 1024))
 
@@ -447,7 +444,7 @@ def test_resource_monitor_fails_closed_when_sampling_breaks() -> None:
         def sample(self, _pid: int) -> ResourceUsage:
             raise OSError("accounting unavailable")
 
-    monitor = ResourceMonitor(1, SandboxLimits(), provider=Provider(), on_exceeded=lambda _error: exceeded.set())
+    monitor = ResourceMonitor(1, ResourceLimits(), provider=Provider(), on_exceeded=lambda _error: exceeded.set())
     monitor.start()
     try:
         assert exceeded.wait(1.0)
@@ -495,21 +492,85 @@ def test_windows_launcher_fails_closed_without_broker(tmp_path: Path) -> None:
         launcher.launch(["cmd.exe", "/c", "echo ok"], policy)
 
 
+class _LauncherAcl:
+    @staticmethod
+    def inspect_dacl(path: Path):
+        resolved = Path(path).resolve(strict=True)
+        return types.SimpleNamespace(path=resolved, object_id=str(resolved).casefold())
+
+    @staticmethod
+    def _entry(path: Path, sid: str, ace_type: str = "allow") -> AclLeaseEntry:
+        resolved = Path(path).resolve(strict=True)
+        return AclLeaseEntry(str(resolved), str(resolved).casefold(), sid, ace_type, 1, 3, True)
+
+    def grant_lease(self, path: Path, sid: str, _mode: FileAccessMode) -> AclLeaseEntry:
+        return self._entry(path, sid)
+
+    def grant_execute_lease(self, path: Path, sid: str) -> AclLeaseEntry:
+        return self._entry(path, sid)
+
+    def grant_capability_write(self, path: Path, sid: str) -> AclLeaseEntry:
+        return self._entry(path, sid)
+
+    def deny_capability_write(self, path: Path, sid: str) -> AclLeaseEntry:
+        return self._entry(path, sid, "deny")
+
+    @staticmethod
+    def revoke_entry(_entry: AclLeaseEntry) -> bool:
+        return True
+
+    @staticmethod
+    def verify_entry(_entry: AclLeaseEntry) -> bool:
+        return True
+
+
+class _LauncherBroker:
+    backend_instance_id = "backend-test"
+
+    def __init__(self, process=None) -> None:
+        self.process = process or types.SimpleNamespace(pid=4321)
+
+    @staticmethod
+    def reclaim_stale() -> tuple[str, ...]:
+        return ()
+
+    @staticmethod
+    def reserve(*, policy, policy_hash: str, user_id: str):
+        del policy_hash, user_id
+        return {
+            "reservation_id": f"reservation-{policy['job_id']}",
+            "logon_sid": "S-1-5-5-1-2",
+            "account_sid": "S-1-5-21-1-2-3-1001",
+            "service_sid": "S-1-5-80-1-2-3-4-5",
+            "capability_sids": {"workspace": "S-1-5-21-10-20-30-40", "temp": "S-1-5-21-50-60-70-80"},
+            "capability_digest": "capability-digest",
+        }
+
+    def launch(self, **_kwargs):
+        return self.process
+
+    @staticmethod
+    def release(_job_id: str, *, user_id: str) -> None:
+        del user_id
+
+
 def test_launcher_holds_maintenance_lease_until_cleanup(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     gate = SandboxMaintenanceGate()
     process = types.SimpleNamespace(pid=4321)
-    monkeypatch.setattr("backend.sandbox.runtime.launcher.subprocess.Popen", lambda *_args, **_kwargs: process)
     launcher = SandboxLauncher(
+        broker=_LauncherBroker(process),
         is_windows=True,
-        allow_local_backend=True,
+        acl_manager=_LauncherAcl(),
         lease_store_path=tmp_path / "leases.json",
         maintenance_gate=gate,
     )
 
-    launched = launcher.launch(["cmd.exe", "/c", "echo ok"], SandboxPolicy((tmp_path,), "session", "job"))
+    launched = launcher.launch(
+        ["cmd.exe", "/c", "echo ok"],
+        SandboxPolicy((tmp_path,), "session", "job", network_mode=NetworkMode.FULL_NETWORK),
+    )
 
     assert launched is process
     assert gate.active_commands == 1
@@ -531,16 +592,19 @@ def test_launcher_holds_maintenance_lease_during_admission(tmp_path: Path) -> No
             raise AssertionError("unadmitted request must not be released")
 
     launcher = SandboxLauncher(
+        broker=_LauncherBroker(),
         is_windows=True,
-        allow_local_backend=True,
         admission=RejectingAdmission(),
+        acl_manager=_LauncherAcl(),
         lease_store_path=tmp_path / "leases.json",
         maintenance_gate=gate,
     )
 
-    with pytest.raises(RuntimeError, match="rejected"):
+    with pytest.raises(SandboxInitializationError, match="sandbox process launch failed") as exc_info:
         launcher.launch(["cmd.exe", "/c", "echo ok"], SandboxPolicy((tmp_path,), "session", "job"))
 
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "rejected"
     assert gate.active_commands == 0
 
 
@@ -557,7 +621,7 @@ def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> No
             calls.append("broker")
 
     class Acl:
-        def revoke_lease(self, _path: Path, _sid: str) -> bool:
+        def revoke_entry(self, _entry: AclLeaseEntry) -> bool:
             calls.append("acl")
             return True
 
@@ -569,7 +633,6 @@ def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> No
     launcher = SandboxLauncher(
         broker=broker,
         is_windows=True,
-        allow_local_backend=True,
         acl_manager=Acl(),
         lease_store_path=tmp_path / "leases.json",
     )
@@ -582,13 +645,13 @@ def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> No
         "S-1-5-21-1-2-3-1001",
         "S-1-5-80-1-2-3-4-5",
         (str(tmp_path),),
+        str(tmp_path),
         str(temp_dir),
         "read_only",
         "S-1-5-21-10-20-30-40",
         "S-1-5-21-50-60-70-80",
         "capability-digest",
         (),
-        {},
     )
     launcher.lease_store.add(lease)
     launcher._leases[1234] = lease
@@ -598,6 +661,114 @@ def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> No
     assert calls[0] == "broker"
 
 
+def test_cleanup_keeps_acl_and_temp_until_broker_release_is_confirmed(tmp_path: Path) -> None:
+    class Broker:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def release(self, _job_id: str, *, user_id: str) -> None:
+            del user_id
+            self.attempts += 1
+            if self.attempts == 1:
+                raise OSError("broker unavailable")
+
+    revoked: list[AclLeaseEntry] = []
+
+    class Acl:
+        def revoke_entry(self, entry: AclLeaseEntry) -> bool:
+            revoked.append(entry)
+            return True
+
+    broker = Broker()
+    workspace = tmp_path / "workspace"
+    temp_dir = tmp_path / "scratch" / "job"
+    workspace.mkdir()
+    temp_dir.mkdir(parents=True)
+    entry = AclLeaseEntry(str(workspace), "workspace-id", "sandbox-sid", "allow", 1, 3, True)
+    lease = CommandLease(
+        "job",
+        "reservation",
+        "S-1-5-5-1-2",
+        "S-1-5-21-1-2-3-1001",
+        "S-1-5-80-1-2-3-4-5",
+        (str(workspace),),
+        str(workspace),
+        str(temp_dir),
+        "read_only",
+        "S-1-5-21-10-20-30-40",
+        "S-1-5-21-50-60-70-80",
+        "capability-digest",
+        (entry,),
+    )
+    launcher = SandboxLauncher(
+        broker=broker,
+        is_windows=True,
+        acl_manager=Acl(),
+        lease_store_path=tmp_path / "leases.json",
+    )
+    launcher.lease_store.add(lease)
+    launcher._temp_dirs[1234] = temp_dir
+    launcher._job_contexts[1234] = SandboxJobContext("user-1", SandboxPolicy((workspace,), "session", "job"))
+    launcher._leases[1234] = lease
+
+    assert not launcher.cleanup(1234)
+    assert temp_dir.exists()
+    assert revoked == []
+    assert launcher.cleanup(1234)
+    assert not temp_dir.exists()
+    assert revoked == [entry]
+
+
+def test_command_lease_transfers_exact_ace_ownership_between_concurrent_jobs(tmp_path: Path) -> None:
+    revoked: list[AclLeaseEntry] = []
+
+    class Acl:
+        def revoke_entry(self, entry: AclLeaseEntry) -> bool:
+            revoked.append(entry)
+            return True
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    temp_one = tmp_path / "temp-one"
+    temp_two = tmp_path / "temp-two"
+    temp_one.mkdir()
+    temp_two.mkdir()
+    owned = AclLeaseEntry(str(workspace), "workspace-id", "shared-sid", "allow", 7, 3, True)
+    shared = AclLeaseEntry(str(workspace), "workspace-id", "shared-sid", "allow", 7, 3, False)
+
+    def lease(job_id: str, temp_dir: Path, entry: AclLeaseEntry) -> CommandLease:
+        return CommandLease(
+            job_id,
+            f"reservation-{job_id}",
+            f"S-1-5-5-1-{job_id[-1]}",
+            "S-1-5-21-1-2-3-1001",
+            "S-1-5-80-1-2-3-4-5",
+            (str(workspace),),
+            str(workspace),
+            str(temp_dir),
+            "workspace_write",
+            f"workspace-cap-{job_id}",
+            f"temp-cap-{job_id}",
+            f"digest-{job_id}",
+            (entry,),
+        )
+
+    store = CommandLeaseStore(tmp_path / "leases.json", Acl())
+    first = lease("job-1", temp_one, owned)
+    second = lease("job-2", temp_two, shared)
+    store.add(first)
+    store.add(second)
+
+    assert store.release(first)
+    assert revoked == []
+    remaining = store._read()
+    assert len(remaining) == 1
+    assert remaining[0].acl_entries[0].owned
+    assert store.release(remaining[0])
+    assert revoked == [owned]
+    assert store._read() == ()
+
+
 def test_launcher_terminates_through_broker_managed_process() -> None:
     class Process:
         terminated = False
@@ -605,7 +776,7 @@ def test_launcher_terminates_through_broker_managed_process() -> None:
         def terminate(self) -> None:
             self.terminated = True
 
-    launcher = SandboxLauncher(is_windows=True, allow_local_backend=True)
+    launcher = SandboxLauncher(is_windows=True)
     process = Process()
 
     launcher.terminate_tree(process)

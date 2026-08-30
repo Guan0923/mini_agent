@@ -47,13 +47,14 @@ class SandboxLimitsPayload(BaseModel):
     processes: StrictInt = Field(default=256, ge=1, le=256)
     handles: StrictInt = Field(default=16384, ge=64, le=16384)
     output_chars: StrictInt = Field(default=20000, ge=1000, le=20000)
-    disk_mib: StrictInt = Field(default=0, ge=0, le=20 * 1024)
+    write_io_mib: StrictInt = Field(default=0, ge=0, le=20 * 1024)
 
 
 class SandboxNetworkRulePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     host: str = Field(min_length=1, max_length=253)
+    port: StrictInt | None = Field(default=None, ge=1, le=65535)
 
 
 class SandboxConfigPayload(BaseModel):

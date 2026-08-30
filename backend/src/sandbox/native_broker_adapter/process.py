@@ -168,8 +168,9 @@ class _NativeWindowsProcess:
         with self._lock:
             if self._stdin_closed:
                 return
-            self._stdin_closed = True
             self._modules["api"].CloseHandle(self.stdin_handle)
+            self._stdin_closed = True
+            self.stdin_handle = None
 
     def communicate(self, input_value: bytes | None, timeout: float | None) -> tuple[int | None, bytes, bytes]:
         if input_value:
@@ -213,19 +214,40 @@ class _NativeWindowsProcess:
                 thread.start()
 
     def terminate(self) -> int | None:
+        if self.job is None:
+            return self.returncode
         self.job.terminate()
         return self.wait(5.0)
 
     def close(self) -> None:
-        self.terminate()
+        failures: list[Exception] = []
+        try:
+            self.terminate()
+        except Exception as exc:
+            failures.append(exc)
         for thread in self._reader_threads:
             thread.join(timeout=5.0)
-        for handle in (self.stdout_handle, self.stderr_handle, self.thread_handle, self.process_handle):
+        for name in ("stdin_handle", "stdout_handle", "stderr_handle", "thread_handle", "process_handle"):
+            handle = getattr(self, name)
+            if handle is None:
+                continue
             try:
                 self._modules["api"].CloseHandle(handle)
-            except Exception:
-                pass
-        self.job.close()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                setattr(self, name, None)
+                if name == "stdin_handle":
+                    self._stdin_closed = True
+        if self.job is not None:
+            try:
+                self.job.close()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                self.job = None
+        if failures:
+            raise SandboxInitializationError("Broker process handles could not be closed") from failures[0]
 
 
 def _object_security_attributes(logon_sid: str, service_sid: str) -> Any:

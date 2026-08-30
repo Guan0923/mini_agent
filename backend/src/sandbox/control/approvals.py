@@ -9,7 +9,7 @@ from enum import StrEnum
 from threading import RLock
 from typing import Protocol
 
-from ..policy import PermissionMode
+from ..policy import FileAccessMode
 
 
 class ApprovalDecision(StrEnum):
@@ -94,7 +94,7 @@ class ApprovalStore:
         session_id: str,
         command: str,
         cwd: str,
-        permission_target: PermissionMode | str,
+        permission_target: FileAccessMode | str,
         network_target: str = "",
         decision: ApprovalDecision | str,
     ) -> ApprovalGrant | None:
@@ -134,7 +134,7 @@ class ApprovalStore:
         session_id: str,
         command: str,
         cwd: str,
-        permission_target: PermissionMode | str,
+        permission_target: FileAccessMode | str,
         network_target: str = "",
     ) -> bool:
         digest = authorization_hash(

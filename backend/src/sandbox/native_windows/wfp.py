@@ -8,8 +8,10 @@ Offline/Online account identities and survive helper/service restarts.
 from __future__ import annotations
 
 import ctypes
+import ipaddress
 import os
 import re
+import socket
 import uuid
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -49,6 +51,7 @@ _CONDITION_ALE_USER_ID = uuid.UUID("af043a0a-b34d-4f86-979c-c90371af6e66")
 _CONDITION_FLAGS = uuid.UUID("632ce23b-5167-435c-86d7-e903684aa80c")
 _CONDITION_IP_PROTOCOL = uuid.UUID("3971ef2b-623e-4f9a-8cb1-6e79b806b9a7")
 _CONDITION_IP_REMOTE_PORT = uuid.UUID("c35a604d-d22b-4e1a-91b4-68f674ee674b")
+_CONDITION_IP_REMOTE_ADDRESS = uuid.UUID("b235ae9a-1d64-49b8-a44c-5ff3d9095045")
 
 _FILTER_NAMESPACE = uuid.UUID("71962528-c050-5993-a2cc-b15d3a71530f")
 _SID_PATTERN = re.compile(r"S-\d+(?:-\d+)+", flags=re.IGNORECASE)
@@ -183,6 +186,7 @@ class StaticFilterSpec:
     loopback_only: bool = False
     tcp_only: bool = False
     remote_port: int | None = None
+    remote_address: str | None = None
 
     @property
     def key(self) -> uuid.UUID:
@@ -194,22 +198,25 @@ def build_static_filter_specs(offline_sid: str, online_sid: str, proxy_port: int
 
     _validate_inputs(offline_sid, online_sid, proxy_port)
     specs: list[StaticFilterSpec] = []
-    for suffix, layer in (("v4", _LAYER_CONNECT_V4), ("v6", _LAYER_CONNECT_V6)):
-        specs.extend(
-            (
-                StaticFilterSpec(
-                    f"offline-connect-proxy-{suffix}",
-                    layer,
-                    offline_sid,
-                    _FWP_ACTION_PERMIT,
-                    15,
-                    loopback_only=True,
-                    tcp_only=True,
-                    remote_port=proxy_port,
-                ),
-                StaticFilterSpec(f"offline-connect-block-{suffix}", layer, offline_sid, _FWP_ACTION_BLOCK, 0),
-            )
+    specs.append(
+        StaticFilterSpec(
+            "offline-connect-proxy-v4",
+            _LAYER_CONNECT_V4,
+            offline_sid,
+            _FWP_ACTION_PERMIT,
+            15,
+            loopback_only=True,
+            tcp_only=True,
+            remote_port=proxy_port,
+            remote_address="127.0.0.1",
         )
+    )
+    specs.extend(
+        (
+            StaticFilterSpec("offline-connect-block-v4", _LAYER_CONNECT_V4, offline_sid, _FWP_ACTION_BLOCK, 0),
+            StaticFilterSpec("offline-connect-block-v6", _LAYER_CONNECT_V6, offline_sid, _FWP_ACTION_BLOCK, 0),
+        )
+    )
     for role, sid in (("offline", offline_sid), ("online", online_sid)):
         for suffix, layer in (("v4", _LAYER_RECV_ACCEPT_V4), ("v6", _LAYER_RECV_ACCEPT_V6)):
             specs.extend(
@@ -280,6 +287,24 @@ class _WfpApi:
         self.library.FwpmFilterAdd0.restype = ctypes.c_uint32
         self.library.FwpmFilterDeleteByKey0.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Guid)]
         self.library.FwpmFilterDeleteByKey0.restype = ctypes.c_uint32
+        self.library.FwpmFilterCreateEnumHandle0.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.HANDLE),
+        ]
+        self.library.FwpmFilterCreateEnumHandle0.restype = ctypes.c_uint32
+        self.library.FwpmFilterEnum0.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.POINTER(ctypes.POINTER(_Filter))),
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        self.library.FwpmFilterEnum0.restype = ctypes.c_uint32
+        self.library.FwpmFilterDestroyEnumHandle0.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        self.library.FwpmFilterDestroyEnumHandle0.restype = ctypes.c_uint32
+        self.library.FwpmFreeMemory0.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        self.library.FwpmFreeMemory0.restype = None
         self.advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
             wintypes.LPCWSTR,
             ctypes.c_uint32,
@@ -323,13 +348,7 @@ def configure_static_wfp(offline_sid: str, online_sid: str, proxy_port: int) -> 
     try:
         api.check(api.library.FwpmTransactionBegin0(handle, 0), "transaction begin")
         transaction_started = True
-        for spec in specs:
-            key = _Guid.from_uuid(spec.key)
-            api.check(
-                api.library.FwpmFilterDeleteByKey0(handle, ctypes.byref(key)),
-                "filter delete",
-                allowed=frozenset({_FWP_E_FILTER_NOT_FOUND}),
-            )
+        _delete_owned_filters(api, handle)
         sublayer_key = _Guid.from_uuid(_SUBLAYER_UUID)
         api.check(
             api.library.FwpmSubLayerDeleteByKey0(handle, ctypes.byref(sublayer_key)),
@@ -382,13 +401,7 @@ def remove_static_wfp() -> None:
     try:
         api.check(api.library.FwpmTransactionBegin0(handle, 0), "transaction begin")
         transaction_started = True
-        for spec in build_static_filter_specs("S-1-5-21-1-1-1-1", "S-1-5-21-1-1-1-2", 1):
-            key = _Guid.from_uuid(spec.key)
-            api.check(
-                api.library.FwpmFilterDeleteByKey0(handle, ctypes.byref(key)),
-                "filter delete",
-                allowed=frozenset({_FWP_E_FILTER_NOT_FOUND}),
-            )
+        _delete_owned_filters(api, handle)
         sublayer_key = _Guid.from_uuid(_SUBLAYER_UUID)
         api.check(
             api.library.FwpmSubLayerDeleteByKey0(handle, ctypes.byref(sublayer_key)),
@@ -409,6 +422,47 @@ def remove_static_wfp() -> None:
         raise
     finally:
         api.library.FwpmEngineClose0(handle)
+
+
+def _delete_owned_filters(api: _WfpApi, engine: wintypes.HANDLE) -> None:
+    """Delete every filter in Mini-Agent's sublayer, independent of old names."""
+
+    enum_handle = wintypes.HANDLE()
+    api.check(
+        api.library.FwpmFilterCreateEnumHandle0(engine, None, ctypes.byref(enum_handle)),
+        "filter enumeration create",
+    )
+    keys: list[_Guid] = []
+    expected_sublayer = _Guid.from_uuid(_SUBLAYER_UUID)
+    expected_bytes = ctypes.string_at(ctypes.byref(expected_sublayer), ctypes.sizeof(_Guid))
+    try:
+        while True:
+            entries = ctypes.POINTER(ctypes.POINTER(_Filter))()
+            count = ctypes.c_uint32()
+            api.check(
+                api.library.FwpmFilterEnum0(engine, enum_handle, 256, ctypes.byref(entries), ctypes.byref(count)),
+                "filter enumeration",
+            )
+            try:
+                for index in range(count.value):
+                    current = entries[index].contents
+                    sublayer_bytes = ctypes.string_at(ctypes.byref(current.sub_layer_key), ctypes.sizeof(_Guid))
+                    if sublayer_bytes == expected_bytes:
+                        keys.append(_Guid.from_buffer_copy(bytes(current.filter_key)))
+            finally:
+                if entries:
+                    pointer = ctypes.cast(ctypes.byref(entries), ctypes.POINTER(ctypes.c_void_p))
+                    api.library.FwpmFreeMemory0(pointer)
+            if count.value < 256:
+                break
+    finally:
+        api.check(api.library.FwpmFilterDestroyEnumHandle0(engine, enum_handle), "filter enumeration destroy")
+    for key in keys:
+        api.check(
+            api.library.FwpmFilterDeleteByKey0(engine, ctypes.byref(key)),
+            "filter delete",
+            allowed=frozenset({_FWP_E_FILTER_NOT_FOUND}),
+        )
 
 
 def _add_filter(
@@ -439,6 +493,14 @@ def _add_filter(
         value.type = _FWP_UINT16
         value.uint16 = spec.remote_port
         conditions.append(_FilterCondition(_Guid.from_uuid(_CONDITION_IP_REMOTE_PORT), _FWP_MATCH_EQUAL, value))
+    if spec.remote_address is not None:
+        address = ipaddress.ip_address(spec.remote_address)
+        if not isinstance(address, ipaddress.IPv4Address):
+            raise ValueError("Only the IPv4 loopback proxy address is supported")
+        value = _ConditionValue()
+        value.type = _FWP_UINT32
+        value.uint32 = socket.htonl(int(address))
+        conditions.append(_FilterCondition(_Guid.from_uuid(_CONDITION_IP_REMOTE_ADDRESS), _FWP_MATCH_EQUAL, value))
     condition_array = (_FilterCondition * len(conditions))(*conditions)
     weight = _Value()
     weight.type = _FWP_UINT8

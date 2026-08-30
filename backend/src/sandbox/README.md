@@ -13,11 +13,10 @@
 `full_access` 与 Broker 模式必须显式区分；任何健康或安装失败都不得静默回退为后端用户执行。
 
 `run_command` 的 Windows 文件隔离使用每-job随机普通 `S-1-5-21-*` Capability SID，而不是
-AppContainer。`read_only`/`workspace_write` Token 保留 `WRITE_RESTRICTED` 并把 `Everyone`
-加入 restricting SID 以支持 Winsock/loopback；`Everyone` 不进入 Token 默认 DACL。
-为防止 workspace 外已有的 `Everyone`/sandbox account 可写 ACL 绕过限制，backend 会在
-启动前执行一层、每目录 1000 项、总计 50000 项、2 秒的有界扫描，并为本次 Capability
-添加 deny-write ACE。扫描、ACL读取、路径身份或 deny 应用不完整时命令 fail closed。
+AppContainer。Token 使用固定低权限账户、Capability、Account、Logon 与 Everyone SID，
+不启用 `WRITE_RESTRICTED`。Backend 只解析并审计本次命令明确声明的 workspace、cwd 和
+Job temp，对这些路径添加可验证、可精确撤销的 ACL lease；不会扫描用户目录、PATH、
+Windows 目录或固定磁盘，也不向执行边界外的路径写临时 Deny ACE。
 
-这是有界扫描下的实用隔离，不是对全系统所有路径的形式化不可写证明。风险边界与
-`Everyone` 可写目录警告参见 [OpenAI Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox)。
+系统其他位置能否写入由低权限账户原有 DACL 决定；这里不声称对整台 Windows 提供
+“绝对不可写”证明。

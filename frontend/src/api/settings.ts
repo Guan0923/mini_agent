@@ -48,11 +48,12 @@ export interface SandboxLimits {
   processes: number;
   handles: number;
   output_chars: number;
-  disk_mib: number;
+  write_io_mib: number;
 }
 
 export interface SandboxNetworkRule {
   host: string;
+  port?: number;
 }
 
 export interface SandboxConfig {

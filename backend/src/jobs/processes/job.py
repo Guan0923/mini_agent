@@ -177,6 +177,7 @@ class SubprocessJob(Job):
     # -- monitor thread -----------------------------------------------------
 
     def _monitor(self) -> None:
+        outcome: tuple[str, int | None, Exception | None] = ("failed", None, CommandError("Command failed."))
         try:
             try:
                 stdout, stderr = self._group.communicate(timeout=self._timeout_seconds)
@@ -185,39 +186,31 @@ class SubprocessJob(Job):
                 stdout, stderr = self._group.communicate(timeout=30.0)
                 exit_code = self._group.poll()
                 self._capture(stdout, stderr)
-                # If the user canceled around the timeout boundary, honor that
-                # instead of reporting a timeout failure.
                 if self.info().cancel_requested_at is not None:
-                    self._mark_cancelled(exit_code=exit_code)
+                    outcome = ("cancelled", exit_code, None)
                 else:
-                    self._finish_timeout(exit_code)
-                return
-
-            exit_code = self._group.poll()
-            self._capture(stdout, stderr)
-            if self.info().cancel_requested_at is not None:
-                self._mark_cancelled(exit_code=exit_code)
-            elif exit_code == 0:
-                self._mark_succeeded(exit_code=0)
+                    outcome = (
+                        "failed",
+                        exit_code,
+                        CommandError(f"Command timed out after {self._timeout_seconds} seconds."),
+                    )
             else:
-                self._mark_failed(
-                    CommandError(f"Command exited with code {exit_code}."),
-                    exit_code=exit_code,
-                )
+                exit_code = self._group.poll()
+                self._capture(stdout, stderr)
+                if self.info().cancel_requested_at is not None:
+                    outcome = ("cancelled", exit_code, None)
+                elif exit_code == 0:
+                    outcome = ("succeeded", 0, None)
+                else:
+                    outcome = ("failed", exit_code, CommandError(f"Command exited with code {exit_code}."))
         except OSError as exc:
-            try:
-                self._mark_failed(exc)
-            except JobStateError:
-                pass
+            outcome = ("failed", self._group.poll(), exc)
         except JobStateError:
             # A concurrent cancel/close already sealed the terminal state.
-            pass
+            return
         except Exception as exc:
-            try:
-                self._mark_sandbox_failure(getattr(exc, "code", "init_failed"))
-                self._mark_failed(exc)
-            except JobStateError:
-                pass
+            self._mark_sandbox_failure(getattr(exc, "code", "init_failed"))
+            outcome = ("failed", self._group.poll(), exc)
         finally:
             if self.resource_monitor is not None:
                 self.resource_monitor.stop()
@@ -225,8 +218,20 @@ class SubprocessJob(Job):
                 process = getattr(self._group, "_process", None)
                 if not self.sandbox_launcher.cleanup(process):
                     current = self.info().sandbox or {}
-                    current.update({"cleanup_pending": True, "failure_code": "cleanup_pending"})
+                    current.update({"cleanup_pending": True, "failure_code": "sandbox_cleanup_failed"})
                     self._set_sandbox_info(current)
+                    outcome = ("failed", self._group.poll(), CommandError("Sandbox cleanup failed."))
+
+        kind, exit_code, error = outcome
+        try:
+            if kind == "cancelled":
+                self._mark_cancelled(exit_code=exit_code)
+            elif kind == "succeeded":
+                self._mark_succeeded(exit_code=0)
+            else:
+                self._mark_failed(error or CommandError("Command failed."), exit_code=exit_code)
+        except JobStateError:
+            return
 
     def _resource_exceeded(self, error: Exception) -> None:
         self._mark_sandbox_failure("resource_exceeded")

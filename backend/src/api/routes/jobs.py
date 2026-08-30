@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from backend.jobs import TERMINAL_STATES, JobLane, JobQuery, JobState
-from backend.sandbox import SandboxLimits
+from backend.sandbox import ResourceLimits
 
 from ..state import WebAppState
 
@@ -58,14 +58,14 @@ def _public(info: Any) -> dict[str, object]:
             "enforced": bool(raw.get("enforced", True)),
             "file_mode": raw.get("file_mode", "read_only"),
             "network_mode": raw.get("network_mode", "no_network"),
-            "limits": raw.get("limits", SandboxLimits().to_dict()),
+            "limits": raw.get("limits", ResourceLimits().to_dict()),
         }
     else:
         sandbox_projection = {
             "enforced": False,
             "file_mode": "read_only",
             "network_mode": "no_network",
-            "limits": SandboxLimits().to_dict(),
+            "limits": ResourceLimits().to_dict(),
         }
     sandbox_projection.setdefault("failure_code", None)
     sandbox_projection.setdefault("cleanup_pending", False)

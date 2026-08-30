@@ -4,8 +4,8 @@ import pytest
 
 from backend.api.state import WebAppState
 from backend.runtime.application import factory
-from backend.sandbox import SandboxLauncher
 from backend.storage.message_queue import MemoryMessageQueue
+from tests.testing_sandbox import DirectTestSandboxLauncher
 
 
 @pytest.fixture
@@ -16,7 +16,7 @@ def local_sandbox_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
         factory,
         "_sandbox_runtime",
         lambda _config, **_kwargs: (
-            SandboxLauncher(is_windows=False, allow_local_backend=True),
+            DirectTestSandboxLauncher(),
             {},
         ),
     )

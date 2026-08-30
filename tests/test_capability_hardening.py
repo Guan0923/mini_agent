@@ -118,12 +118,12 @@ def test_sandbox_runtime_only_disables_run_command_when_broker_is_unhealthy(monk
 
     healthy = Broker(BrokerStatus(installed=True, healthy=True))
     monkeypatch.setattr(app_factory.WindowsBrokerClient, "from_system", lambda **_kwargs: healthy)
-    launcher, config = app_factory._sandbox_runtime({"sandbox_config": {"policy_version": 2, "enabled": False}})
+    launcher, config = app_factory._sandbox_runtime({"sandbox_config": {"policy_version": 4}})
 
     assert isinstance(launcher, SandboxLauncher)
     assert "enabled" not in config
     assert "file_mode" not in config
-    assert config["policy_version"] == 3
+    assert config["policy_version"] == 4
 
 
 def test_mcp_trust_store_is_compat_noop(tmp_path: Path) -> None:

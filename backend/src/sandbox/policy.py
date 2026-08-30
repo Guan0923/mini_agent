@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from .errors import SandboxPolicyError
+from .errors import SandboxPathError, SandboxPathFailure, SandboxPolicyError
 
 
 class FileAccessMode(StrEnum):
@@ -38,10 +38,6 @@ class TerminalKind(StrEnum):
 SUPPORTED_TERMINALS = frozenset(item.value for item in TerminalKind)
 
 
-PermissionMode = FileAccessMode
-"""Compatibility alias for the pre-stage-two public name."""
-
-
 def normalize_permission_mode(value: object, *, default: FileAccessMode = FileAccessMode.READ_ONLY) -> FileAccessMode:
     """Validate the three-level permission contract."""
 
@@ -57,9 +53,14 @@ def normalize_permission_mode(value: object, *, default: FileAccessMode = FileAc
 @dataclass(frozen=True, slots=True)
 class NetworkRule:
     host: str
+    port: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "host", canonical_network_host(self.host))
+        if self.port is not None and (
+            isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535
+        ):
+            raise SandboxPolicyError("network port must be between 1 and 65535")
 
 
 def canonical_network_host(value: str) -> str:
@@ -90,7 +91,7 @@ class ResourceLimits:
     processes: int = 256
     handles: int = 16384
     output_chars: int = 20000
-    disk_mib: int = 0
+    write_io_mib: int = 0
 
     def validate(self) -> None:
         ranges = {
@@ -105,26 +106,18 @@ class ResourceLimits:
             value = getattr(self, name)
             if isinstance(value, bool) or not minimum <= value <= maximum:
                 raise SandboxPolicyError(f"{name} must be between {minimum} and {maximum}")
-        if isinstance(self.disk_mib, bool) or not (self.disk_mib == 0 or 1 <= self.disk_mib <= 20 * 1024):
-            raise SandboxPolicyError("disk_mib must be 0 or between 1 and 20480")
+        if isinstance(self.write_io_mib, bool) or not (self.write_io_mib == 0 or 1 <= self.write_io_mib <= 20 * 1024):
+            raise SandboxPolicyError("write_io_mib must be 0 or between 1 and 20480")
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object] | None) -> ResourceLimits:
         values = dict(raw or {})
-        aliases = {"wall_clock_seconds": "wall_seconds", "memory_mb": "memory_mib", "max_processes": "processes"}
-        for source, target in aliases.items():
-            if source in values and target not in values:
-                values[target] = values[source]
         result = cls(**{name: values.get(name, getattr(cls(), name)) for name in cls.__dataclass_fields__})
         result.validate()
         return result
 
     def to_dict(self) -> dict[str, int]:
         return {name: int(getattr(self, name)) for name in self.__dataclass_fields__}
-
-
-SandboxLimits = ResourceLimits
-"""Compatibility alias for the pre-stage-two public name."""
 
 
 _DEFAULT_ENVIRONMENT = frozenset(
@@ -169,7 +162,7 @@ class SandboxPolicy:
     def __post_init__(self) -> None:
         normalized_workspaces: list[Path] = []
         for raw_workspace in self.workspaces:
-            workspace = Path(raw_workspace).resolve()
+            workspace = _safe_directory(Path(raw_workspace))
             if workspace not in normalized_workspaces:
                 normalized_workspaces.append(workspace)
         if not normalized_workspaces:
@@ -213,7 +206,7 @@ class SandboxPolicy:
         self.limits.validate()
         for workspace in self.workspaces:
             safe_workspace = _safe_directory(workspace)
-            if safe_workspace != workspace.resolve():
+            if safe_workspace != workspace:
                 raise SandboxPolicyError("workspace path must resolve to a regular directory")
 
     def to_dict(self) -> dict[str, object]:
@@ -223,7 +216,10 @@ class SandboxPolicy:
             "job_id": self.job_id,
             "file_mode": self.file_mode.value,
             "network_mode": self.network_mode.value,
-            "network_allowlist": [{"host": rule.host} for rule in self.network_allowlist],
+            "network_allowlist": [
+                {"host": rule.host, **({"port": rule.port} if rule.port is not None else {})}
+                for rule in self.network_allowlist
+            ],
             "limits": self.limits.to_dict(),
             "terminal": self.terminal.value,
             "proxy_port": self.proxy_port,
@@ -274,16 +270,14 @@ class SandboxPolicy:
         else:
             temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
             base = temp_root / "mini-agent-sandbox" / session_component
-        if _has_reparse_ancestor(base):
-            raise SandboxPolicyError("job temp root cannot be a reparse point")
         base.mkdir(parents=True, exist_ok=True)
-        if _has_reparse_ancestor(base):
-            raise SandboxPolicyError("job temp root cannot be a reparse point")
+        base = base.resolve(strict=True)
         result = Path(tempfile.mkdtemp(prefix=f"job-{job_component}-", dir=base))
-        if _is_reparse_point(result):
+        resolved = result.resolve(strict=True)
+        if not resolved.is_dir() or not resolved.is_relative_to(base):
             remove_temp_dir(result)
-            raise SandboxPolicyError("job temp directory cannot be a reparse point")
-        return result
+            raise SandboxPolicyError(f"job temp directory is invalid: {resolved}")
+        return resolved
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,20 +317,13 @@ def ensure_disk_reserve(path: Path, *, required_bytes: int = 0) -> None:
 
 
 def _safe_directory(path: Path) -> Path:
+    absolute = Path(os.path.abspath(str(path)))
     try:
-        if _is_reparse_point(path) or not path.is_dir():
-            raise SandboxPolicyError("workspace must be a regular directory")
-        current = path
-        while True:
-            if _is_reparse_point(current):
-                raise SandboxPolicyError("workspace cannot contain a reparse point")
-            if current == current.parent:
-                break
-            current = current.parent
-        resolved = path.resolve(strict=True)
-        _reject_reparse_descendants(resolved)
-    except OSError as exc:
-        raise SandboxPolicyError("workspace cannot be inspected") from exc
+        resolved = absolute.resolve(strict=True)
+        if not resolved.is_dir():
+            raise OSError("workspace is not a directory")
+    except (OSError, RuntimeError) as exc:
+        raise SandboxPathError(SandboxPathFailure.WORKSPACE_INVALID, absolute) from exc
     return resolved
 
 
@@ -358,34 +345,6 @@ def _is_reparse_point(path: Path) -> bool:
         return False
 
 
-def _has_reparse_ancestor(path: Path) -> bool:
-    """Reject a path whose existing parents include a junction or symlink."""
-
-    current = path
-    while True:
-        if _is_reparse_point(current):
-            return True
-        parent = current.parent
-        if parent == current:
-            return False
-        current = parent
-
-
-def _reject_reparse_descendants(root: Path) -> None:
-    """Fail closed if an existing workspace entry redirects path traversal."""
-
-    pending = [root]
-    while pending:
-        current = pending.pop()
-        with os.scandir(current) as entries:
-            for entry in entries:
-                child = Path(entry.path)
-                if _is_reparse_point(child):
-                    raise SandboxPolicyError("workspace cannot contain a reparse point")
-                if entry.is_dir(follow_symlinks=False):
-                    pending.append(child)
-
-
 def remove_temp_dir(path: Path) -> bool:
     """Remove a job temp directory without following links."""
 
@@ -405,9 +364,7 @@ __all__ = [
     "FileAccessMode",
     "NetworkMode",
     "NetworkRule",
-    "PermissionMode",
     "ResourceLimits",
-    "SandboxLimits",
     "SandboxJobContext",
     "SandboxPolicy",
     "TerminalKind",

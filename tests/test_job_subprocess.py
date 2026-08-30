@@ -153,6 +153,28 @@ def test_exit_zero_succeeds_with_captured_stdout(tmp_path) -> None:
     assert "stdout:\nhello stdout" in job.output
 
 
+def test_exit_zero_is_not_published_as_success_when_sandbox_cleanup_fails(tmp_path) -> None:
+    class Launcher:
+        @staticmethod
+        def cleanup(_process) -> bool:
+            return False
+
+    job = make_job(
+        tmp_path,
+        argv=_print_cmd("cleanup must finish"),
+        sandbox_launcher=Launcher(),
+        error_formatter=MessageErrorFormatter(),
+    )
+    job.start()
+    wait_until(lambda: job.info().state is JobState.FAILED)
+
+    info = job.info()
+    assert info.error == "Sandbox cleanup failed."
+    assert info.sandbox is not None
+    assert info.sandbox["failure_code"] == "sandbox_cleanup_failed"
+    assert info.sandbox["cleanup_pending"] is True
+
+
 def test_nonzero_exit_fails_with_exit_code_and_compatible_message(tmp_path) -> None:
     job = make_job(tmp_path, argv=_exit_cmd(4), error_formatter=MessageErrorFormatter())
     job.start()

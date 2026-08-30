@@ -203,9 +203,9 @@ class WindowsBrokerClient:
             else:
                 marker = {}
             payload = self.request("status", {})
-            if payload.get("version") != "2":
+            if payload.get("version") != "3":
                 raise SandboxInitializationError("Broker protocol version requires repair")
-            if payload.get("token_model") != "capability_sid_v1":
+            if payload.get("token_model") != "capability_sid_v2":
                 raise SandboxInitializationError("Broker token model requires repair")
             if marker and payload.get("generation") != marker.get("generation"):
                 raise SandboxInitializationError("Broker generation requires repair")

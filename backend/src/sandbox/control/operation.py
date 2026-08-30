@@ -9,7 +9,7 @@ from backend.runtime.core.contracts import InterruptDecision, InterruptRequest
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.core.hook_contracts import HookOperationResult, ToolHookContext
 
-from ..policy import NetworkMode, NetworkRule, PermissionMode, SandboxLimits
+from ..policy import FileAccessMode, NetworkMode, NetworkRule, ResourceLimits
 from ..runtime.launcher import SandboxLauncher
 from .decision import SandboxExecutionDecision
 
@@ -87,14 +87,28 @@ def _approval_request(context: ToolHookContext) -> InterruptRequest:
 def _command_decision(context: ToolHookContext) -> SandboxExecutionDecision:
     assert isinstance(context.sandbox_launcher, SandboxLauncher)
     raw_limits = context.sandbox_config.get("limits")
-    limits = SandboxLimits.from_mapping(raw_limits if isinstance(raw_limits, Mapping) else None)
+    limits = ResourceLimits.from_mapping(raw_limits if isinstance(raw_limits, Mapping) else None)
     try:
-        file_mode = PermissionMode(context.permission_mode)
+        file_mode = FileAccessMode(context.permission_mode)
         network_mode = NetworkMode(str(context.sandbox_config.get("network_mode") or NetworkMode.NO_NETWORK.value))
         proxy_port = int(context.sandbox_config.get("proxy_port", 17831))
         raw_rules = context.sandbox_config.get("network_allowlist")
+        if isinstance(raw_rules, (list, tuple)):
+            for item in raw_rules:
+                if not isinstance(item, Mapping):
+                    continue
+                port = item.get("port")
+                if port is not None and (isinstance(port, bool) or not isinstance(port, int)):
+                    raise ValueError("run_command sandbox network port is invalid")
         network_allowlist = (
-            tuple(NetworkRule(str(item.get("host") or "")) for item in raw_rules if isinstance(item, Mapping))
+            tuple(
+                NetworkRule(
+                    str(item.get("host") or ""),
+                    item.get("port"),
+                )
+                for item in raw_rules
+                if isinstance(item, Mapping)
+            )
             if isinstance(raw_rules, (list, tuple))
             else ()
         )

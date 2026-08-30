@@ -96,7 +96,7 @@ export const defaultSandboxConfig: SandboxConfig = {
     processes: 256,
     handles: 16384,
     output_chars: 20000,
-    disk_mib: 0,
+    write_io_mib: 0,
   },
 };
 

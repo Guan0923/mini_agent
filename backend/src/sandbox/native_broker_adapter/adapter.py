@@ -73,7 +73,7 @@ class _NativeResourceProvider:
             processes=int(usage["processes"]),
             handles=int(usage["handles"]),
             output_chars=self.process.output_bytes,
-            disk_bytes=int(usage["disk_bytes"]),
+            write_io_bytes=int(usage["write_io_bytes"]),
         )
 
 
@@ -118,8 +118,17 @@ class WindowsNativeBrokerAdapter:
         for reservation in reservations:
             self._close_reservation(reservation)
         for lease in leases:
-            lease.process.close()
-            lease.desktop.close()
+            failures: list[Exception] = []
+            try:
+                lease.process.close()
+            except Exception as exc:
+                failures.append(exc)
+            try:
+                lease.desktop.close()
+            except Exception as exc:
+                failures.append(exc)
+            if failures:
+                raise SandboxInitializationError("Broker adapter cleanup failed") from failures[0]
 
     def reserve(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         policy = request.get("policy")
@@ -338,21 +347,45 @@ class WindowsNativeBrokerAdapter:
         job_id = _required_text(request, "job_id")
         key = (backend_id, user_id, job_id)
         with self._lock:
-            reservation_ids = [
-                reservation_id
+            reservations = [
+                (reservation_id, reservation)
                 for reservation_id, reservation in self._reservations.items()
                 if (reservation.backend_instance_id, reservation.user_id, reservation.job_id) == key
             ]
-            for reservation_id in reservation_ids:
-                self._close_reservation(self._reservations.pop(reservation_id))
-            process_id = self._jobs.pop(key, None)
-            lease = self._processes.pop(process_id, None) if process_id else None
-        if lease is None:
-            return True
-        if lease.resource_monitor is not None:
-            lease.resource_monitor.stop()
-        lease.process.close()
-        lease.desktop.close()
+            process_id = self._jobs.get(key)
+            lease = self._processes.get(process_id) if process_id else None
+        failures: list[Exception] = []
+        for reservation_id, reservation in reservations:
+            try:
+                self._close_reservation(reservation)
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                with self._lock:
+                    if self._reservations.get(reservation_id) is reservation:
+                        self._reservations.pop(reservation_id)
+        if lease is not None:
+            if lease.resource_monitor is not None:
+                try:
+                    lease.resource_monitor.stop()
+                except Exception as exc:
+                    failures.append(exc)
+            try:
+                lease.process.close()
+            except Exception as exc:
+                failures.append(exc)
+            try:
+                lease.desktop.close()
+            except Exception as exc:
+                failures.append(exc)
+        if failures:
+            raise SandboxInitializationError("Broker Job cleanup failed") from failures[0]
+        if lease is not None:
+            with self._lock:
+                if self._processes.get(process_id) is lease:
+                    self._processes.pop(process_id)
+                if self._jobs.get(key) == process_id:
+                    self._jobs.pop(key)
         return True
 
     def reclaim(self, request: Mapping[str, Any]) -> tuple[str, ...]:
@@ -410,8 +443,20 @@ class WindowsNativeBrokerAdapter:
 
     @staticmethod
     def _close_reservation(reservation: _Reservation) -> None:
-        _close_handle(reservation.token)
-        reservation.desktop.close()
+        failures: list[Exception] = []
+        if reservation.token is not None:
+            try:
+                _close_handle(reservation.token)
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                reservation.token = None
+        try:
+            reservation.desktop.close()
+        except Exception as exc:
+            failures.append(exc)
+        if failures:
+            raise SandboxInitializationError("Broker reservation cleanup failed") from failures[0]
 
     @staticmethod
     def _terminate_pid(pid: int) -> bool:
@@ -502,11 +547,13 @@ def _policy_hash(policy: Mapping[str, Any]) -> str:
 def _close_handle(handle: Any) -> None:
     try:
         handle.Close()
+        return
     except Exception:
         try:
             _modules()["api"].CloseHandle(handle)
-        except Exception:
-            pass
+            return
+        except Exception as api_error:
+            raise SandboxInitializationError("Broker handle could not be closed") from api_error
 
 
 __all__ = ["WindowsNativeBrokerAdapter"]

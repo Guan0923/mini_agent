@@ -68,17 +68,27 @@ class WindowsPrivateDesktop:
         return cls(current, station_name, logon_sid, station_ace_added, station_participant, handle, name)
 
     def close(self) -> None:
-        handle, self.handle = self.handle, None
-        if handle is None:
-            return
-        try:
-            handle.CloseDesktop()
-        except Exception:
-            pass
-        station, self.station_handle = self.station_handle, None
+        handle = self.handle
+        failure: Exception | None = None
+        if handle is not None:
+            try:
+                handle.CloseDesktop()
+            except Exception as exc:
+                failure = exc
+            else:
+                self.handle = None
+        station = self.station_handle
         if station is not None and self.station_ace_added:
             with _WINDOW_STATION_LOCK:
-                _revoke_station_access(station, self.logon_sid, self.station_rights)
+                try:
+                    _revoke_station_access(station, self.logon_sid, self.station_rights)
+                except Exception as exc:
+                    failure = failure or exc
+                else:
+                    self.station_handle = None
+                    self.station_ace_added = False
+        if failure is not None:
+            raise SandboxInitializationError("sandbox private desktop cleanup failed") from failure
 
 
 def _security_attributes(full: int, participant: int, logon_sid: str, service_sid: str) -> Any:
@@ -145,26 +155,23 @@ def _grant_station_access(handle: Any, sid_value: str, rights: int) -> bool:
 def _revoke_station_access(handle: Any, sid_value: str, rights: int) -> None:
     modules = _modules()
     security = modules["security"]
-    try:
-        descriptor = security.GetUserObjectSecurity(handle, security.DACL_SECURITY_INFORMATION)
-        dacl = descriptor.GetSecurityDescriptorDacl()
-        if dacl is None:
-            return
-        sid = security.ConvertStringSidToSid(sid_value)
-        matches = [
-            index
-            for index in range(dacl.GetAceCount())
-            if (ace := dacl.GetAce(index))[0][0] == security.ACCESS_ALLOWED_ACE_TYPE
-            and ace[2] == sid
-            and int(ace[1]) == rights
-        ]
-        for index in reversed(matches):
-            dacl.DeleteAce(index)
-        if matches:
-            descriptor.SetSecurityDescriptorDacl(1, dacl, 0)
-            security.SetUserObjectSecurity(handle, security.DACL_SECURITY_INFORMATION, descriptor)
-    except Exception:
-        pass
+    descriptor = security.GetUserObjectSecurity(handle, security.DACL_SECURITY_INFORMATION)
+    dacl = descriptor.GetSecurityDescriptorDacl()
+    if dacl is None:
+        return
+    sid = security.ConvertStringSidToSid(sid_value)
+    matches = [
+        index
+        for index in range(dacl.GetAceCount())
+        if (ace := dacl.GetAce(index))[0][0] == security.ACCESS_ALLOWED_ACE_TYPE
+        and ace[2] == sid
+        and int(ace[1]) == rights
+    ]
+    for index in reversed(matches):
+        dacl.DeleteAce(index)
+    if matches:
+        descriptor.SetSecurityDescriptorDacl(1, dacl, 0)
+        security.SetUserObjectSecurity(handle, security.DACL_SECURITY_INFORMATION, descriptor)
 
 
 __all__ = ["WindowsPrivateDesktop"]

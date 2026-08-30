@@ -8,9 +8,10 @@ from .accounts import (
 )
 from .desktop import WindowsPrivateDesktop
 from .jobs import WindowsJobObject
-from .security import WindowsAclManager, windows_pipe_security_attributes, windows_service_sid
+from .security import AclLeaseEntry, WindowsAclManager, windows_pipe_security_attributes, windows_service_sid
 
 __all__ = [
+    "AclLeaseEntry",
     "WindowsAclManager",
     "WindowsJobObject",
     "WindowsPrivateDesktop",

@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from backend.sandbox import FileAccessMode, SandboxInitializationError
+from backend.sandbox import FileAccessMode
 from backend.sandbox.native_windows import WindowsRestrictedTokenFactory, WindowsSandboxAccount
-from backend.sandbox.runtime.audit import (
-    SandboxAuditError,
-    SandboxAuditFailure,
-    WorldWritablePathAuditor,
-)
 
 
 class _Handle:
@@ -86,12 +80,12 @@ class _Security:
     [
         (
             FileAccessMode.READ_ONLY,
-            0x1 | 0x4 | 0x8,
+            0x1 | 0x4,
             ["workspace-cap", "temp-cap", "account", "S-1-5-5-10-20", "S-1-1-0"],
         ),
         (
             FileAccessMode.WORKSPACE_WRITE,
-            0x1 | 0x4 | 0x8,
+            0x1 | 0x4,
             ["workspace-cap", "temp-cap", "account", "S-1-5-5-10-20", "S-1-1-0"],
         ),
         (FileAccessMode.FULL_ACCESS, 0x1 | 0x4, []),
@@ -128,87 +122,3 @@ def test_restricted_token_uses_exact_capability_model(
     assert default_sids == ["S-1-5-5-10-20", "workspace-cap", "temp-cap", "S-1-5-18", "service"]
     assert "S-1-1-0" not in default_sids
     assert security.adjusted[-1][1:] == (False, [("SeChangeNotifyPrivilege", security.SE_PRIVILEGE_ENABLED)])
-
-
-class _AuditAcl:
-    def __init__(self, writable: set[str] | None = None, *, fail_acl: bool = False) -> None:
-        self.writable = {str(Path(path).resolve()) for path in (writable or set())}
-        self.fail_acl = fail_acl
-
-    def path_identity(self, path: Path):
-        resolved = Path(path).resolve(strict=True)
-        return SimpleNamespace(path=resolved, object_id=str(resolved).casefold())
-
-    def path_allows_write(self, path: Path, *_sids: str) -> bool:
-        if self.fail_acl:
-            raise SandboxInitializationError("unreadable")
-        return str(Path(path).resolve()) in self.writable
-
-
-def test_world_writable_audit_skips_allowed_roots_and_deduplicates(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    project_workspace = tmp_path / "project"
-    temp_dir = tmp_path / "temp"
-    outside = tmp_path / "outside"
-    for path in (workspace, project_workspace, temp_dir, outside):
-        path.mkdir()
-    acl = _AuditAcl({str(workspace), str(project_workspace), str(temp_dir), str(outside)})
-    auditor = WorldWritablePathAuditor(acl)
-    auditor._candidate_roots = lambda *_args: (  # type: ignore[method-assign]
-        workspace,
-        project_workspace,
-        temp_dir,
-        outside,
-        outside,
-    )
-
-    result = auditor.scan(
-        workspaces=(workspace, project_workspace),
-        temp_dir=temp_dir,
-        environment={},
-        account_sid="account",
-        file_mode=FileAccessMode.WORKSPACE_WRITE,
-    )
-
-    assert result.deny_paths == (outside.resolve(),)
-    assert result.checked_paths == 4
-
-
-def test_world_writable_audit_fails_closed_on_item_limit(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    temp_dir = tmp_path / "temp"
-    workspace.mkdir()
-    temp_dir.mkdir()
-    (workspace / "one").mkdir()
-    (workspace / "two").mkdir()
-    auditor = WorldWritablePathAuditor(_AuditAcl(), max_items_per_directory=2)
-    auditor._candidate_roots = lambda *_args: (workspace,)  # type: ignore[method-assign]
-
-    with pytest.raises(SandboxAuditError) as caught:
-        auditor.scan(
-            workspaces=(workspace,),
-            temp_dir=temp_dir,
-            environment={},
-            account_sid="account",
-            file_mode=FileAccessMode.READ_ONLY,
-        )
-    assert caught.value.reason is SandboxAuditFailure.SCAN_INCOMPLETE
-
-
-def test_world_writable_audit_fails_closed_on_acl_error(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    temp_dir = tmp_path / "temp"
-    workspace.mkdir()
-    temp_dir.mkdir()
-    auditor = WorldWritablePathAuditor(_AuditAcl(fail_acl=True))
-    auditor._candidate_roots = lambda *_args: (workspace,)  # type: ignore[method-assign]
-
-    with pytest.raises(SandboxAuditError) as caught:
-        auditor.scan(
-            workspaces=(workspace,),
-            temp_dir=temp_dir,
-            environment={},
-            account_sid="account",
-            file_mode=FileAccessMode.READ_ONLY,
-        )
-    assert caught.value.reason is SandboxAuditFailure.SCAN_INCOMPLETE

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import socket
 import threading
 from pathlib import Path
@@ -16,14 +17,16 @@ from backend.sandbox import (
     NetworkRule,
     SandboxInitializationError,
     SandboxLauncher,
+    SandboxPathError,
+    SandboxPathFailure,
     SandboxPolicy,
 )
 from backend.sandbox.broker_service import BrokerCredentialPackage
 from backend.sandbox.native_broker_adapter import WindowsNativeBrokerAdapter
 from backend.sandbox.native_broker_adapter.process import _process_creation_flags, _windows_command_line
+from backend.sandbox.native_windows import AclLeaseEntry, WindowsAclManager, random_capability_sid
 from backend.sandbox.native_windows.desktop import _station_participant_rights
 from backend.sandbox.native_windows.wfp import build_static_filter_specs
-from backend.sandbox.runtime.audit import WritablePathAudit
 from backend.sandbox.runtime.proxy import ProxyCredential, RunCommandProxy
 
 
@@ -40,26 +43,38 @@ class _Acl:
     def __init__(self, calls: list[tuple]) -> None:
         self.calls = calls
 
-    def grant_lease(self, path: Path, sid: str, mode: FileAccessMode) -> None:
+    @staticmethod
+    def _entry(path: Path, sid: str, ace_type: str = "allow") -> AclLeaseEntry:
+        resolved = Path(path).resolve()
+        return AclLeaseEntry(str(resolved), str(resolved).casefold(), sid, ace_type, 1, 3, True)
+
+    def inspect_dacl(self, path: Path):
+        resolved = Path(path).resolve(strict=True)
+        return SimpleNamespace(path=resolved, object_id=str(resolved).casefold())
+
+    def grant_lease(self, path: Path, sid: str, mode: FileAccessMode) -> AclLeaseEntry:
         self.calls.append(("grant", Path(path), sid, mode))
+        return self._entry(path, sid)
 
-    def grant_execute_lease(self, path: Path, sid: str) -> None:
+    def grant_execute_lease(self, path: Path, sid: str) -> AclLeaseEntry:
         self.calls.append(("grant_execute", Path(path), sid))
+        return self._entry(path, sid)
 
-    def grant_capability_write(self, path: Path, sid: str) -> None:
+    def grant_capability_write(self, path: Path, sid: str) -> AclLeaseEntry:
         self.calls.append(("grant_capability", Path(path), sid))
+        return self._entry(path, sid)
 
-    def deny_capability_write(self, path: Path, sid: str) -> None:
+    def deny_capability_write(self, path: Path, sid: str) -> AclLeaseEntry:
         self.calls.append(("deny_capability", Path(path), sid))
+        return self._entry(path, sid, "deny")
 
-    def revoke_lease(self, path: Path, sid: str) -> bool:
-        self.calls.append(("revoke", Path(path), sid))
+    def revoke_entry(self, entry: AclLeaseEntry) -> bool:
+        self.calls.append(("revoke", Path(entry.path), entry.sid))
         return True
 
-
-class _Audit:
-    def scan(self, **_kwargs) -> WritablePathAudit:
-        return WritablePathAudit((), {}, 0)
+    @staticmethod
+    def verify_entry(_entry: AclLeaseEntry) -> bool:
+        return True
 
 
 class _Proxy:
@@ -79,18 +94,34 @@ def test_static_wfp_policy_is_account_scoped_and_fail_closed() -> None:
     online_sid = "S-1-5-21-1-2-3-1002"
     specs = build_static_filter_specs(offline_sid, online_sid, 17831)
 
-    assert len(specs) == 12
+    assert len(specs) == 11
     assert len({spec.key for spec in specs}) == len(specs)
     outbound = [spec for spec in specs if "connect" in spec.name]
     assert {spec.user_sid for spec in outbound} == {offline_sid}
     permits = [spec for spec in outbound if "proxy" in spec.name]
     assert {spec.remote_port for spec in permits} == {17831}
+    assert {spec.remote_address for spec in permits} == {"127.0.0.1"}
     assert all(spec.loopback_only and spec.tcp_only and spec.weight == 15 for spec in permits)
     assert all(spec.weight == 0 for spec in outbound if "block" in spec.name)
     inbound = [spec for spec in specs if "accept" in spec.name]
     assert {spec.user_sid for spec in inbound} == {offline_sid, online_sid}
     assert all(spec.loopback_only for spec in inbound if "loopback" in spec.name)
     assert all(spec.weight == 0 for spec in inbound if "block" in spec.name)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL integration test")
+def test_real_windows_acl_lease_adds_verifies_and_removes_only_its_exact_ace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    manager = WindowsAclManager()
+    sid = random_capability_sid()
+
+    entry = manager.grant_capability_write(workspace, sid)
+
+    assert entry.owned
+    assert manager.verify_entry(entry)
+    assert manager.revoke_entry(entry)
+    assert not manager.verify_entry(entry)
 
 
 def test_cmd_command_line_preserves_native_inner_quotes() -> None:
@@ -213,7 +244,6 @@ def test_launcher_uses_two_phase_broker_for_every_file_and_network_mode(
         acl_manager=_Acl(calls),
         lease_store_path=tmp_path / "leases.json",
         proxy_factory=lambda port: calls.append(("proxy", port)) or proxy,
-        path_auditor=_Audit(),
     )
 
     process = launcher.launch(
@@ -247,6 +277,144 @@ def test_launcher_uses_two_phase_broker_for_every_file_and_network_mode(
     assert any(call[0] == "release" for call in calls)
     revoked_roots = {call[1] for call in calls if call[0] == "revoke"}
     assert {session_workspace, project_workspace}.issubset(revoked_roots)
+
+
+def test_workspace_and_cwd_failures_expose_stable_reason_and_absolute_path(tmp_path: Path) -> None:
+    missing_workspace = tmp_path / "missing-workspace"
+    with pytest.raises(SandboxPathError) as workspace_error:
+        SandboxPolicy((missing_workspace,), "session", "job")
+    assert workspace_error.value.reason is SandboxPathFailure.WORKSPACE_INVALID
+    assert workspace_error.value.path == missing_workspace.absolute()
+
+    calls: list[tuple] = []
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing_cwd = workspace / "missing-cwd"
+    launcher = SandboxLauncher(
+        broker=_Broker(calls),
+        is_windows=True,
+        acl_manager=_Acl(calls),
+        lease_store_path=tmp_path / "leases.json",
+    )
+    with pytest.raises(SandboxPathError) as cwd_error:
+        launcher.launch(
+            ["cmd.exe", "/c", "echo ok"],
+            SandboxPolicy((workspace,), "session", "job"),
+            cwd=missing_cwd,
+        )
+    assert cwd_error.value.reason is SandboxPathFailure.CWD_INVALID
+    assert cwd_error.value.path == missing_cwd.absolute()
+
+
+def test_cwd_outside_workspace_is_rejected_with_final_absolute_path(tmp_path: Path) -> None:
+    calls: list[tuple] = []
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    launcher = SandboxLauncher(
+        broker=_Broker(calls),
+        is_windows=True,
+        acl_manager=_Acl(calls),
+        lease_store_path=tmp_path / "leases.json",
+    )
+
+    with pytest.raises(SandboxPathError) as exc_info:
+        launcher.launch(
+            ["cmd.exe", "/c", "echo ok"],
+            SandboxPolicy((workspace,), "session", "job"),
+            cwd=outside,
+        )
+
+    assert exc_info.value.reason is SandboxPathFailure.CWD_OUTSIDE_WORKSPACE
+    assert exc_info.value.path == outside.resolve()
+    assert not any(call[0] == "reserve" for call in calls)
+
+
+def test_workspace_descendant_link_is_not_scanned_but_linked_cwd_escape_is_rejected(tmp_path: Path) -> None:
+    calls: list[tuple] = []
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    link = workspace / "node_modules-link"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory links are unavailable: {exc}")
+    launcher = SandboxLauncher(
+        broker=_Broker(calls),
+        is_windows=True,
+        acl_manager=_Acl(calls),
+        lease_store_path=tmp_path / "leases.json",
+    )
+    policy = SandboxPolicy((workspace,), "session", "job", network_mode=NetworkMode.FULL_NETWORK)
+
+    process = launcher.launch(["cmd.exe", "/c", "echo ok"], policy, cwd=workspace)
+    assert launcher.cleanup(process)
+    with pytest.raises(SandboxPathError) as exc_info:
+        launcher.launch(["cmd.exe", "/c", "echo ok"], policy, cwd=link)
+    assert exc_info.value.reason is SandboxPathFailure.CWD_OUTSIDE_WORKSPACE
+    assert exc_info.value.path == outside.resolve()
+
+
+def test_dacl_read_verify_and_identity_failures_are_stable(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    class FailingReadAcl(_Acl):
+        def inspect_dacl(self, path: Path):
+            raise OSError(path)
+
+    launcher = SandboxLauncher(
+        broker=_Broker([]),
+        is_windows=True,
+        acl_manager=FailingReadAcl([]),
+        lease_store_path=tmp_path / "read-leases.json",
+    )
+    with pytest.raises(SandboxPathError) as read_error:
+        launcher.launch(["cmd.exe", "/c", "echo ok"], SandboxPolicy((workspace,), "session", "read"))
+    assert read_error.value.reason is SandboxPathFailure.DACL_READ_FAILED
+    assert read_error.value.path == workspace.resolve()
+
+    class FailingVerifyAcl(_Acl):
+        @staticmethod
+        def verify_entry(_entry: AclLeaseEntry) -> bool:
+            return False
+
+    launcher = SandboxLauncher(
+        broker=_Broker([]),
+        is_windows=True,
+        acl_manager=FailingVerifyAcl([]),
+        lease_store_path=tmp_path / "verify-leases.json",
+    )
+    with pytest.raises(SandboxPathError) as verify_error:
+        launcher.launch(["cmd.exe", "/c", "echo ok"], SandboxPolicy((workspace,), "session", "verify"))
+    assert verify_error.value.reason is SandboxPathFailure.DACL_VERIFY_FAILED
+
+    class ReplacedAcl(_Acl):
+        def __init__(self, calls: list[tuple]) -> None:
+            super().__init__(calls)
+            self.workspace_reads = 0
+
+        def inspect_dacl(self, path: Path):
+            identity = super().inspect_dacl(path)
+            if identity.path == workspace.resolve():
+                self.workspace_reads += 1
+                if self.workspace_reads >= 4:
+                    return SimpleNamespace(path=identity.path, object_id="replacement")
+            return identity
+
+    launcher = SandboxLauncher(
+        broker=_Broker([]),
+        is_windows=True,
+        acl_manager=ReplacedAcl([]),
+        lease_store_path=tmp_path / "identity-leases.json",
+    )
+    with pytest.raises(SandboxPathError) as identity_error:
+        launcher.launch(["cmd.exe", "/c", "echo ok"], SandboxPolicy((workspace,), "session", "identity"))
+    assert identity_error.value.reason is SandboxPathFailure.PATH_IDENTITY_CHANGED
+    assert identity_error.value.path == workspace.resolve()
 
 
 def test_proxy_authenticates_pins_dns_and_allows_explicit_loopback() -> None:
@@ -322,14 +490,21 @@ def test_proxy_authenticates_pins_dns_and_allows_explicit_loopback() -> None:
     ],
 )
 def test_proxy_matches_exact_host_rules_for_public_and_local_targets(configured: str, candidate: str) -> None:
-    assert RunCommandProxy._allowed((NetworkRule(configured),), candidate)
+    assert RunCommandProxy._allowed((NetworkRule(configured),), candidate, 443)
 
 
 def test_proxy_does_not_extend_a_rule_to_subdomains_or_aliases() -> None:
     rules = (NetworkRule("example.test"), NetworkRule("127.0.0.1"))
 
-    assert not RunCommandProxy._allowed(rules, "sub.example.test")
-    assert not RunCommandProxy._allowed(rules, "localhost")
+    assert not RunCommandProxy._allowed(rules, "sub.example.test", 443)
+    assert not RunCommandProxy._allowed(rules, "localhost", 443)
+
+
+def test_proxy_rule_with_port_does_not_allow_other_ports() -> None:
+    rule = NetworkRule("example.test", 443)
+
+    assert RunCommandProxy._allowed((rule,), "example.test", 443)
+    assert not RunCommandProxy._allowed((rule,), "example.test", 80)
 
 
 def test_broker_reservation_rejects_hash_tampering_and_expiry(tmp_path: Path) -> None:

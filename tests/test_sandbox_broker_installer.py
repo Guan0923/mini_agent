@@ -70,10 +70,10 @@ def _status_transport(key: bytes, **overrides: object):
             "nonce": request["nonce"],
             "installed": True,
             "healthy": True,
-            "version": "2",
+            "version": "3",
             "generation": "generation-1",
             "proxy_port": 17831,
-            "token_model": "capability_sid_v1",
+            "token_model": "capability_sid_v2",
             **overrides,
         }
         response["hmac"] = hmac.new(

@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-BROKER_VERSION = "2"
+BROKER_VERSION = "3"
 MAX_REQUEST_TTL_SECONDS = 60
 MAX_CLOCK_SKEW_SECONDS = 5
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..errors import SandboxResourceExceeded
-from ..policy import SandboxLimits
+from ..policy import ResourceLimits
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +18,7 @@ class ResourceUsage:
     processes: int = 1
     handles: int = 0
     output_chars: int = 0
-    disk_bytes: int = 0
+    write_io_bytes: int = 0
 
 
 class ResourceProvider(Protocol):
@@ -31,7 +31,7 @@ class ResourceMonitor:
     def __init__(
         self,
         pid: int,
-        limits: SandboxLimits,
+        limits: ResourceLimits,
         *,
         provider: ResourceProvider,
         interval_seconds: float = 0.25,
@@ -67,7 +67,10 @@ class ResourceMonitor:
             (usage.processes > self.limits.processes, "process limit exceeded"),
             (usage.handles > self.limits.handles, "handle limit exceeded"),
             (usage.output_chars > self.limits.output_chars, "output limit exceeded"),
-            (self.limits.disk_mib > 0 and usage.disk_bytes > self.limits.disk_mib * 1024 * 1024, "disk limit exceeded"),
+            (
+                self.limits.write_io_mib > 0 and usage.write_io_bytes > self.limits.write_io_mib * 1024 * 1024,
+                "write I/O limit exceeded",
+            ),
         )
         for exceeded, message in checks:
             if exceeded:

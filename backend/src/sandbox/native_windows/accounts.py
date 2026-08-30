@@ -67,9 +67,6 @@ class WindowsRestrictedTokenFactory:
             if file_mode is not FileAccessMode.FULL_ACCESS:
                 account_sid_value = security.ConvertStringSidToSid(account.sid)
                 everyone_sid = security.CreateWellKnownSid(security.WinWorldSid, None)
-                # WRITE_RESTRICTED causes write access to require both the
-                # ordinary token and one of these per-job restricting SIDs.
-                flags |= 0x8
                 restricting_sids.extend(
                     (
                         (capability_values[0], 0),

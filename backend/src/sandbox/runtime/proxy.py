@@ -164,7 +164,7 @@ class RunCommandProxy:
                 return
             method = request.method.decode("ascii", errors="strict").upper()
             host, port, target = self._target(request, method)
-            if not self._allowed(grant.rules, host):
+            if not self._allowed(grant.rules, host, port):
                 self._send_error(client, 403, b"Proxy target denied")
                 return
             upstream = self._connect_once(host, port)
@@ -238,9 +238,9 @@ class RunCommandProxy:
         return parsed.hostname, port, path.encode("ascii")
 
     @staticmethod
-    def _allowed(rules: tuple[NetworkRule, ...], host: str) -> bool:
+    def _allowed(rules: tuple[NetworkRule, ...], host: str, port: int) -> bool:
         candidate = canonical_network_host(host)
-        return any(rule.host == candidate for rule in rules)
+        return any(rule.host == candidate and (rule.port is None or rule.port == port) for rule in rules)
 
     def _connect_once(self, host: str, port: int) -> socket.socket:
         answers = self._resolver(host, port, type=socket.SOCK_STREAM)

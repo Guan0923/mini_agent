@@ -54,7 +54,7 @@ const limitFields: Array<{
   { key: "processes", label: "进程数", min: 1, max: 256, hint: "1–256" },
   { key: "handles", label: "句柄数", min: 64, max: 16384, hint: "64–16384" },
   { key: "output_chars", label: "输出字符数", min: 1000, max: 20000, hint: "1000–20000" },
-  { key: "disk_mib", label: "磁盘写入（MiB）", min: 0, max: 20480, hint: "0 表示不额外限制，最大 20480" },
+  { key: "write_io_mib", label: "总写 I/O（MiB）", min: 0, max: 20480, hint: "包含文件、管道等写入；0 表示不限制" },
 ];
 
 export function SandboxSettingsSection({ state }: SectionProps) {
@@ -144,7 +144,7 @@ export function SandboxSettingsSection({ state }: SectionProps) {
 
       <Typography.Title level={5}>网络白名单</Typography.Title>
       <Typography.Paragraph type="secondary">
-        每条精确 IP 或域名规则允许该目标的全部端口，也可显式允许本机、环回和局域网地址；仅在“仅白名单”网络模式下生效。
+        每条规则可指定端口；端口留空时允许该 IP 或域名的全部端口。仅在“仅白名单”网络模式下生效。
       </Typography.Paragraph>
       {config.network_allowlist.length === 0 ? (
         <Typography.Paragraph type="secondary">暂无白名单规则</Typography.Paragraph>
@@ -158,6 +158,15 @@ export function SandboxSettingsSection({ state }: SectionProps) {
                 style={{ flex: 1 }}
                 value={rule.host}
                 onChange={(event) => updateAllowlist(index, { host: event.target.value })}
+              />
+              <InputNumber
+                aria-label={`白名单端口 ${index + 1}`}
+                min={1}
+                max={65535}
+                placeholder="全部端口"
+                style={{ width: 120 }}
+                value={rule.port}
+                onChange={(value) => updateAllowlist(index, { port: value ?? undefined })}
               />
               <Button
                 type="text"

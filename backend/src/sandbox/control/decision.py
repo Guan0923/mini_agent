@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..policy import NetworkMode, NetworkRule, PermissionMode, SandboxLimits, SandboxPolicy, TerminalKind
+from ..policy import FileAccessMode, NetworkMode, NetworkRule, ResourceLimits, SandboxPolicy, TerminalKind
 from ..runtime.launcher import SandboxLauncher
 
 
@@ -17,11 +17,11 @@ class SandboxExecutionDecision:
     workspaces: tuple[Path, ...]
     session_id: str
     user_id: str
-    file_mode: PermissionMode
+    file_mode: FileAccessMode
     network_mode: NetworkMode
     network_allowlist: tuple[NetworkRule, ...]
     proxy_port: int
-    limits: SandboxLimits
+    limits: ResourceLimits
 
     def command_policy(self, job_id: str, terminal: TerminalKind) -> SandboxPolicy:
         return SandboxPolicy(

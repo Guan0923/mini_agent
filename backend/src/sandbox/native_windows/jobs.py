@@ -17,6 +17,7 @@ class WindowsJobObject:
         modules = _modules()
         self._api = modules["api"]
         self._job = modules["job"]
+        self.handle = None
         try:
             self.handle = self._job.CreateJobObject(None, name)
             info = self._job.QueryInformationJobObject(
@@ -45,6 +46,9 @@ class WindowsJobObject:
                 info,
             )
         except Exception as exc:  # pragma: no cover - Windows kernel adapter
+            if self.handle is not None:
+                self._api.CloseHandle(self.handle)
+                self.handle = None
             raise SandboxInitializationError("sandbox Job Object could not be configured") from exc
 
     def assign(self, process_handle: Any) -> None:
@@ -54,10 +58,12 @@ class WindowsJobObject:
             raise SandboxInitializationError("sandbox process could not enter its Job Object") from exc
 
     def terminate(self, exit_code: int = 1) -> None:
+        if self.handle is None:
+            return
         try:
             self._job.TerminateJobObject(self.handle, exit_code)
-        except Exception:
-            pass
+        except Exception as exc:
+            raise SandboxInitializationError("sandbox Job Object could not be terminated") from exc
 
     def usage(self) -> dict[str, int | float]:
         """Return cumulative Job Object accounting without exposing PIDs."""
@@ -85,7 +91,7 @@ class WindowsJobObject:
                 "memory_bytes": int(extended.get("PeakJobMemoryUsed", 0)),
                 "processes": len(pids),
                 "handles": handles,
-                "disk_bytes": int(io.get("WriteTransferCount", 0)),
+                "write_io_bytes": int(io.get("WriteTransferCount", 0)),
             }
         except Exception as exc:  # pragma: no cover - Windows kernel adapter
             raise OSError("sandbox Job Object usage could not be sampled") from exc
@@ -104,7 +110,10 @@ class WindowsJobObject:
             ctypes.windll.kernel32.CloseHandle(process)
 
     def close(self) -> None:
+        if self.handle is None:
+            return
         try:
             self._api.CloseHandle(self.handle)
-        except Exception:
-            pass
+        except Exception as exc:
+            raise SandboxInitializationError("sandbox Job Object handle could not be closed") from exc
+        self.handle = None

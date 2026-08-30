@@ -13,8 +13,8 @@ from ..errors import SandboxInitializationError
 from .credentials import BrokerCredentialPackage
 from .protocol import BROKER_VERSION, _canonical
 
-READY_SCHEMA = 2
-TOKEN_MODEL = "capability_sid_v1"
+READY_SCHEMA = 3
+TOKEN_MODEL = "capability_sid_v2"
 
 
 def build_ready_marker(package: BrokerCredentialPackage, proxy_port: int) -> dict[str, object]:

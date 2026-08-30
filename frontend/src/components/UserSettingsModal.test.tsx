@@ -48,7 +48,7 @@ const settings = {
       processes: 256,
       handles: 16384,
       output_chars: 20000,
-      disk_mib: 0,
+      write_io_mib: 0,
     },
   },
   terminal_options: [
@@ -329,7 +329,7 @@ describe("UserSettingsModal", () => {
     }
   });
 
-  it("edits host-only command allowlist rules that grant every port", async () => {
+  it("edits command allowlist rules with an optional port", async () => {
     const hostOnlySettings = {
       ...structuredClone(settings),
       sandbox_config: {
@@ -344,15 +344,16 @@ describe("UserSettingsModal", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "沙箱" }));
 
     const host = screen.getByRole("textbox", { name: "白名单主机 1" });
+    const port = screen.getByRole("spinbutton", { name: "白名单端口 1" });
     expect(host).toHaveValue("127.0.0.1");
-    expect(screen.queryByLabelText("白名单端口 1")).not.toBeInTheDocument();
-    expect(screen.getByText(/允许该目标的全部端口/)).toBeInTheDocument();
-    await userEvent.clear(host);
-    await userEvent.type(host, "localhost");
-    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(port).toHaveValue("");
+    expect(screen.getByText(/端口留空时允许该 IP 或域名的全部端口/)).toBeInTheDocument();
+    fireEvent.change(host, { target: { value: "localhost" } });
+    fireEvent.change(port, { target: { value: "443" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => expect(api.updateSandboxConfig).toHaveBeenCalledTimes(1));
-    expect(api.updateSandboxConfig.mock.calls[0][0].network_allowlist).toEqual([{ host: "localhost" }]);
+    expect(api.updateSandboxConfig.mock.calls[0][0].network_allowlist).toEqual([{ host: "localhost", port: 443 }]);
   });
 
   it("saves command network policy independently from Turn file permission", async () => {

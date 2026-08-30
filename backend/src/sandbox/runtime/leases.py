@@ -1,4 +1,4 @@
-"""Atomic backend ownership records for command ACL leases."""
+"""Atomic ownership records for ACL entries added by command jobs."""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ import json
 import os
 import threading
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from ..errors import SandboxInitializationError
+from ..native_windows.security import AclLeaseEntry
 from ..policy import FileAccessMode, remove_temp_dir
+
+LEASE_MANIFEST_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,17 +24,17 @@ class CommandLease:
     account_sid: str
     service_sid: str
     workspaces: tuple[str, ...]
+    cwd: str
     temp_dir: str
     file_mode: str
     workspace_cap_sid: str
     temp_cap_sid: str
     capability_digest: str
-    deny_paths: tuple[str, ...]
-    path_identities: dict[str, str]
+    acl_entries: tuple[AclLeaseEntry, ...]
 
 
 class CommandLeaseStore:
-    """Persist active ACE ownership so a restarted backend can undo it."""
+    """Persist exact ACE ownership so recovery never deletes pre-existing ACLs."""
 
     _process_lock = threading.RLock()
 
@@ -51,52 +54,39 @@ class CommandLeaseStore:
             self._write(tuple(item for item in self._read() if item.job_id != job_id))
 
     def release(self, lease: CommandLease) -> bool:
-        """Revoke one persisted lease without breaking same-account peers."""
+        """Revoke only ACEs inserted by this job and preserve concurrent users."""
 
         with self._process_lock:
             values = self._read()
-            if not any(item.job_id == lease.job_id for item in values):
+            stored = next((item for item in values if item.job_id == lease.job_id), None)
+            if stored is None:
                 return True
-            remaining = tuple(item for item in values if item.job_id != lease.job_id)
-            workspaces = tuple(Path(workspace) for workspace in lease.workspaces)
-            temp_path = Path(lease.temp_dir)
+            remaining = [item for item in values if item.job_id != lease.job_id]
             checks: list[bool] = []
-            for workspace in workspaces:
-                checks.extend(
-                    (
-                        self.acl_manager.revoke_lease(workspace, lease.workspace_cap_sid),
-                        self.acl_manager.revoke_lease(workspace, lease.service_sid),
-                    )
-                )
-            for deny_path in lease.deny_paths:
-                checks.extend(
-                    (
-                        self.acl_manager.revoke_lease(Path(deny_path), lease.workspace_cap_sid),
-                        self.acl_manager.revoke_lease(Path(deny_path), lease.temp_cap_sid),
-                    )
-                )
-            for workspace in workspaces:
-                account_still_used = any(
-                    item.account_sid == lease.account_sid
-                    and any(Path(other_workspace) == workspace for other_workspace in item.workspaces)
-                    for item in remaining
-                )
-                if not account_still_used:
-                    checks.append(self.acl_manager.revoke_lease(workspace, lease.account_sid))
-            if temp_path.exists():
-                checks.extend(
-                    (
-                        self.acl_manager.revoke_lease(temp_path, lease.logon_sid),
-                        self.acl_manager.revoke_lease(temp_path, lease.workspace_cap_sid),
-                        self.acl_manager.revoke_lease(temp_path, lease.temp_cap_sid),
-                        self.acl_manager.revoke_lease(temp_path, lease.account_sid),
-                    )
-                )
-            checks.append(remove_temp_dir(temp_path))
+            for entry in reversed(stored.acl_entries):
+                if not entry.owned:
+                    continue
+                if self._transfer_ownership(remaining, entry):
+                    continue
+                checks.append(self.acl_manager.revoke_entry(entry))
+            checks.append(remove_temp_dir(Path(stored.temp_dir)))
             if all(checks):
-                self._write(remaining)
+                self._write(tuple(remaining))
                 return True
             return False
+
+    @staticmethod
+    def _transfer_ownership(remaining: list[CommandLease], owner: AclLeaseEntry) -> bool:
+        for lease_index, lease in enumerate(remaining):
+            entries = list(lease.acl_entries)
+            for entry_index, entry in enumerate(entries):
+                if entry.signature != owner.signature:
+                    continue
+                if not entry.owned:
+                    entries[entry_index] = replace(entry, owned=True)
+                    remaining[lease_index] = replace(lease, acl_entries=tuple(entries))
+                return True
+        return False
 
     def recover(self) -> tuple[str, ...]:
         recovered: list[str] = []
@@ -111,15 +101,25 @@ class CommandLeaseStore:
         except FileNotFoundError:
             return ()
         except (OSError, ValueError) as exc:
-            raise SandboxInitializationError("sandbox lease manifest is invalid") from exc
-        if not isinstance(raw, list):
-            raise SandboxInitializationError("sandbox lease manifest is invalid")
+            raise SandboxInitializationError(f"sandbox lease manifest is invalid: {self.path.resolve()}") from exc
+        if (
+            not isinstance(raw, dict)
+            or raw.get("version") != LEASE_MANIFEST_VERSION
+            or not isinstance(raw.get("leases"), list)
+        ):
+            raise SandboxInitializationError(f"sandbox lease manifest version is unsupported: {self.path.resolve()}")
         result: list[CommandLease] = []
         try:
-            for item in raw:
-                if not isinstance(item, dict):
+            for item in raw["leases"]:
+                if not isinstance(item, dict) or not isinstance(item.get("acl_entries"), list):
                     raise TypeError
-                lease = CommandLease(**item)
+                lease = CommandLease(
+                    **{
+                        **item,
+                        "workspaces": tuple(item["workspaces"]),
+                        "acl_entries": tuple(AclLeaseEntry(**entry) for entry in item["acl_entries"]),
+                    }
+                )
                 FileAccessMode(lease.file_mode)
                 if (
                     not lease.job_id
@@ -127,49 +127,31 @@ class CommandLeaseStore:
                     or not lease.logon_sid
                     or not lease.account_sid
                     or not lease.service_sid
+                    or not lease.workspaces
+                    or not lease.cwd
+                    or not lease.temp_dir
                     or not lease.workspace_cap_sid
                     or not lease.temp_cap_sid
                     or not lease.capability_digest
-                    or not isinstance(lease.workspaces, (list, tuple))
-                    or not lease.workspaces
-                    or not all(isinstance(path, str) and path for path in lease.workspaces)
-                    or not isinstance(lease.deny_paths, (list, tuple))
-                    or not all(isinstance(path, str) and path for path in lease.deny_paths)
-                    or not isinstance(lease.path_identities, dict)
-                    or not all(
-                        isinstance(path, str) and path and isinstance(identity, str) and identity
-                        for path, identity in lease.path_identities.items()
-                    )
                 ):
                     raise ValueError
-                result.append(
-                    CommandLease(
-                        **{
-                            **asdict(lease),
-                            "workspaces": tuple(lease.workspaces),
-                            "deny_paths": tuple(lease.deny_paths),
-                            "path_identities": dict(lease.path_identities),
-                        }
-                    )
-                )
-        except (TypeError, ValueError) as exc:
-            raise SandboxInitializationError("sandbox lease manifest is invalid") from exc
+                result.append(lease)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SandboxInitializationError(f"sandbox lease manifest is invalid: {self.path.resolve()}") from exc
         return tuple(result)
 
     def _write(self, values: tuple[CommandLease, ...]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}")
+        payload = {"version": LEASE_MANIFEST_VERSION, "leases": [asdict(item) for item in values]}
         try:
             with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-                json.dump([asdict(item) for item in values], stream, sort_keys=True, separators=(",", ":"))
+                json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
         finally:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+            temporary.unlink(missing_ok=True)
 
 
-__all__ = ["CommandLease", "CommandLeaseStore"]
+__all__ = ["CommandLease", "CommandLeaseStore", "LEASE_MANIFEST_VERSION"]

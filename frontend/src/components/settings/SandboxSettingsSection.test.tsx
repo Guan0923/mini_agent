@@ -40,7 +40,7 @@ describe("brokerErrorTitle", () => {
             processes: 16,
             handles: 1024,
             output_chars: 20000,
-            disk_mib: 0,
+            write_io_mib: 0,
           },
         },
       },

@@ -8,7 +8,6 @@ paid or external service.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import subprocess
@@ -20,7 +19,6 @@ from pathlib import Path
 
 from backend.sandbox import FileAccessMode, NetworkMode, NetworkRule, SandboxLauncher, SandboxPolicy
 from backend.sandbox.control.broker import WindowsBrokerClient
-from backend.sandbox.runtime.audit import WritablePathAudit
 
 
 class _LoopbackHandler(BaseHTTPRequestHandler):
@@ -33,14 +31,6 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
-
-
-class _ControlledRuntimeAuditor:
-    """Limit a runtime smoke to paths created by this acceptance process."""
-
-    @staticmethod
-    def scan(**_kwargs: object) -> WritablePathAudit:
-        return WritablePathAudit((), {}, 0)
 
 
 def _run(
@@ -97,25 +87,14 @@ def _network_command(probe: Path, target_host: str, target_port: int, *, use_pro
     return f'"{probe}" {target_host} {target_port} {mode}'
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--controlled-runtime-smoke",
-        action="store_true",
-        help="exercise Broker/Token/process/network behavior without the machine-wide path audit",
-    )
-    args = parser.parse_args(argv)
+def main() -> int:
     if os.name != "nt":
         raise RuntimeError("Windows sandbox acceptance is available only on Windows")
     broker = WindowsBrokerClient.from_system(expected_proxy_port=17831)
     status = broker.status()
     if not status.healthy:
         raise RuntimeError("Windows Broker is not healthy")
-    launcher = SandboxLauncher(
-        broker=broker,
-        is_windows=True,
-        path_auditor=_ControlledRuntimeAuditor() if args.controlled_runtime_smoke else None,
-    )
+    launcher = SandboxLauncher(broker=broker, is_windows=True)
     servers = [ThreadingHTTPServer(("127.0.0.1", 0), _LoopbackHandler) for _ in range(2)]
     server_threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
     for server_thread in server_threads:
@@ -127,48 +106,47 @@ def main(argv: list[str] | None = None) -> int:
         with tempfile.TemporaryDirectory(prefix="mini-agent-real-acceptance-") as temporary:
             workspace = Path(temporary).resolve()
             network_probe = _compile_network_probe(workspace)
-            if args.controlled_runtime_smoke:
-                powershell_results: list[dict[str, object]] = []
-                for smoke_mode in FileAccessMode:
-                    smoke_policy = SandboxPolicy(
-                        workspace,
-                        "runtime-smoke",
-                        f"powershell-{smoke_mode.value}-{uuid.uuid4().hex}",
-                        file_mode=smoke_mode,
-                        network_mode=NetworkMode.FULL_NETWORK,
-                    )
-                    powershell_rc, powershell_output, powershell_error = _run_argv(
-                        launcher,
-                        smoke_policy,
-                        [
-                            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-                            "-NoLogo",
-                            "-NoProfile",
-                            "-NonInteractive",
-                            "-Command",
-                            "Write-Output powershell-ok",
-                        ],
-                    )
-                    powershell_results.append(
+            powershell_results: list[dict[str, object]] = []
+            for smoke_mode in FileAccessMode:
+                smoke_policy = SandboxPolicy(
+                    (workspace,),
+                    "runtime-smoke",
+                    f"powershell-{smoke_mode.value}-{uuid.uuid4().hex}",
+                    file_mode=smoke_mode,
+                    network_mode=NetworkMode.FULL_NETWORK,
+                )
+                powershell_rc, powershell_output, powershell_error = _run_argv(
+                    launcher,
+                    smoke_policy,
+                    [
+                        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "Write-Output powershell-ok",
+                    ],
+                )
+                powershell_results.append(
+                    {
+                        "file_mode": smoke_mode.value,
+                        "rc": powershell_rc,
+                        "passed": powershell_rc == 0 and "powershell-ok" in powershell_output,
+                        "error": powershell_error.strip()[:500],
+                    }
+                )
+            if not all(bool(result["passed"]) for result in powershell_results):
+                print(
+                    json.dumps(
                         {
-                            "file_mode": smoke_mode.value,
-                            "rc": powershell_rc,
-                            "passed": powershell_rc == 0 and "powershell-ok" in powershell_output,
-                            "error": powershell_error.strip()[:500],
-                        }
+                            "status": "failed",
+                            "runtime_smoke": {"powershell": powershell_results},
+                        },
+                        ensure_ascii=True,
+                        indent=2,
                     )
-                if not all(bool(result["passed"]) for result in powershell_results):
-                    print(
-                        json.dumps(
-                            {
-                                "status": "failed",
-                                "runtime_smoke": {"powershell": powershell_results},
-                            },
-                            ensure_ascii=True,
-                            indent=2,
-                        )
-                    )
-                    return 1
+                )
+                return 1
             for file_mode in FileAccessMode:
                 for network_mode in NetworkMode:
                     suffix = f"{file_mode.value}-{network_mode.value}-{uuid.uuid4().hex[:8]}"
@@ -176,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
 
                     def policy(label: str) -> SandboxPolicy:
                         return SandboxPolicy(
-                            workspace,
+                            (workspace,),
                             "real-acceptance",
                             f"{suffix}-{label}",
                             file_mode=file_mode,
@@ -274,6 +252,41 @@ def main(argv: list[str] | None = None) -> int:
                     if not all(checks):
                         print(json.dumps({"status": "failed", "case": row}, ensure_ascii=True, indent=2))
                         return 1
+            port_policy = SandboxPolicy(
+                (workspace,),
+                "real-acceptance",
+                f"restricted-port-{uuid.uuid4().hex}",
+                file_mode=FileAccessMode.READ_ONLY,
+                network_mode=NetworkMode.RESTRICTED_NETWORK,
+                network_allowlist=(NetworkRule("127.0.0.1", target_ports[0]),),
+            )
+            allowed_rc, allowed_body, allowed_error = _run(
+                launcher,
+                port_policy,
+                _network_command(network_probe, "127.0.0.1", target_ports[0], use_proxy=True),
+            )
+            denied_policy = SandboxPolicy(
+                (workspace,),
+                "real-acceptance",
+                f"restricted-port-denied-{uuid.uuid4().hex}",
+                file_mode=FileAccessMode.READ_ONLY,
+                network_mode=NetworkMode.RESTRICTED_NETWORK,
+                network_allowlist=(NetworkRule("127.0.0.1", target_ports[0]),),
+            )
+            denied_rc, denied_body, denied_error = _run(
+                launcher,
+                denied_policy,
+                _network_command(network_probe, "127.0.0.1", target_ports[1], use_proxy=True),
+            )
+            port_result = {
+                "allowed": allowed_rc == 0 and "sandbox-ok" in allowed_body,
+                "denied": denied_rc != 0 and "sandbox-ok" not in denied_body,
+                "allowed_error": allowed_error.strip()[:500],
+                "denied_error": denied_error.strip()[:500],
+            }
+            if not all((port_result["allowed"], port_result["denied"])):
+                print(json.dumps({"status": "failed", "restricted_port": port_result}, ensure_ascii=True, indent=2))
+                return 1
     finally:
         for server in servers:
             server.shutdown()
@@ -282,7 +295,13 @@ def main(argv: list[str] | None = None) -> int:
             server_thread.join(timeout=5)
         if outside.exists():
             outside.unlink()
-    print(json.dumps({"status": "passed", "cases": results}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {"status": "passed", "powershell": powershell_results, "cases": results, "restricted_port": port_result},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 
