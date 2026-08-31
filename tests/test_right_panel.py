@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -200,6 +201,7 @@ def test_side_chat_api_stays_out_of_sidebar_and_close_keeps_empty_panel_open(tmp
         assert client.get(f"/api/sidebar-threads/{window['thread_id']}/queued-messages").status_code == 404
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows terminal test")
 def test_terminal_creation_fails_closed_without_redis_and_restart_drops_stale_metadata(tmp_path: Path) -> None:
     state = WebAppState(tmp_path / ".mini_agent")
     with TestClient(create_app(state)) as client:
@@ -350,6 +352,7 @@ class _FakeTimer:
             self.callback(*self.args)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows terminal cleanup test")
 def test_terminal_disconnect_reconnect_and_explicit_cleanup(monkeypatch) -> None:
     monkeypatch.setattr("backend.api.terminal_manager.Timer", _FakeTimer)
     taskkill: list[list[str]] = []

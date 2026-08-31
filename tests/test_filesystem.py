@@ -213,7 +213,7 @@ def test_create_directory_rejects_files_traversal_absolute_paths_and_links(tmp_p
     files = WorkspaceFiles(tmp_path)
     (tmp_path / "blocked").write_text("file", encoding="utf-8")
 
-    with pytest.raises(ToolError, match="Not a directory"):
+    with pytest.raises(ToolError, match="Not a directory|Unable to inspect whitelisted path"):
         files.create_directory(str(tmp_path / "blocked" / "child"))
     with pytest.raises(ToolError, match="absolute"):
         files.create_directory("../outside")

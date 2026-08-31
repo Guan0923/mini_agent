@@ -391,6 +391,7 @@ def test_injected_runner_executes_one_local_transaction() -> None:
     assert calls[0][calls[0].index("obj=") + 1] == r"NT SERVICE\MiniAgentSandboxBroker"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows service host test")
 def test_pywin32_service_host_is_resolved_before_elevation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     host = tmp_path / "runtime" / "pythonservice.exe"
     host.parent.mkdir()
@@ -1333,6 +1334,7 @@ def test_source_acl_is_confined_to_rx_on_source_tree() -> None:
     assert grants[-1].inherit is True
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows runtime ACL test")
 def test_runtime_acl_requires_the_service_executable_and_grants_rx() -> None:
     runtime = Path("C:/workspace/mini_agent/.venv")
     base_runtime = Path("C:/python/cpython-3.12")
@@ -1346,6 +1348,7 @@ def test_runtime_acl_requires_the_service_executable_and_grants_rx() -> None:
         _runtime_acl_grants((base_runtime,), executable, "MiniAgentSandboxBroker")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Broker installation transaction test")
 def test_helper_transaction_orders_sid_service_acl_source_and_start(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
