@@ -198,7 +198,7 @@ def _build_subagent_runner(
                 ),
                 project_workspace=project_cwd,
                 terminal_type=terminal_type,
-                extra_tools=delegation_tools(subagent_settings.max_tasks_per_batch),
+                extra_tools=delegation_tools(),
             ),
             checkpoints,
             resolved_paths,
@@ -230,7 +230,7 @@ def _build_subagent_runner(
             project_workspace=project_cwd,
             terminal_type=terminal_type,
             extra_tools=(
-                *delegation_tools(subagent_settings.max_tasks_per_batch),
+                *delegation_tools(),
                 *external,
             ),
         )

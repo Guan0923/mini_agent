@@ -30,6 +30,17 @@
   margin: 4px 0 8px;
 }
 
+.runtime-agent-report {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.runtime-agent-report.failed {
+  border-color: var(--ant-color-error-border, #ffccc7);
+  background: var(--ant-color-error-bg, #fff2f0);
+  color: var(--ant-color-error-text, #a8071a);
+}
+
 .runtime-compaction-notice {
   margin-bottom: 6px;
   color: #a8a9aa;

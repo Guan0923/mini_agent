@@ -84,6 +84,70 @@ describe("Turn protocol projection", () => {
     expect(projectTurnPath(map, root.id)).toEqual([]);
   });
 
+  it("projects consecutive Assistant messages and preserves a plain-text agent report", () => {
+    const report = "thread_path: /root/worker\nthread_status: success\ntask_result: 第一行\n第二行";
+    const node = turn({
+      data: [[
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
+        { role: "assistant", content: [{ type: "text", text: "working", status: "success" }] },
+        {
+          role: "assistant",
+          content: [{
+            type: "subagent",
+            event: "agent_report",
+            status: "success",
+            text: report,
+            delivery_id: "agent_report_1",
+          }],
+        },
+      ]],
+    });
+    expect(normalizeRuntimeNode(node)).toEqual(node);
+    const projected = projectTurnPath(new Map([["session_1:turn_1", node]]), node.id);
+    expect(projected.map((message) => message.role)).toEqual(["user", "assistant", "assistant"]);
+    expect(projected[2].items).toEqual([{
+      type: "subagent",
+      event: "agent_report",
+      status: "success",
+      text: report,
+      delivery_id: "agent_report_1",
+    }]);
+  });
+
+  it("applies consecutive Assistant report deltas and enriches only the frontend projection", () => {
+    const accumulator = runtimeNodeAccumulator();
+    applyRuntimeNodeFrame(accumulator, { type: "turn.snapshot", revision: 0, turn: turn({ status: "running" }) });
+    const report = "thread_path: /root/worker\nthread_status: failed\ntask_result: error";
+    const updated = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 1,
+      operations: [{
+        op: "append_message",
+        data_idx: 0,
+        message_idx: 2,
+        message: {
+          role: "assistant",
+          content: [{
+            type: "subagent",
+            event: "agent_report",
+            status: "success",
+            text: report,
+            delivery_id: "agent_report_failed",
+          }],
+        },
+      }],
+      agent_report_statuses: { agent_report_failed: "failed" },
+    });
+    expect(updated.data[0][2].content[0]).not.toHaveProperty("report_status");
+    const projected = projectTurnPath(new Map([["session_1:turn_1", updated]]), updated.id);
+    expect(projected[2].items?.[0]).toMatchObject({
+      delivery_id: "agent_report_failed",
+      report_status: "failed",
+    });
+  });
+
   it("reconstructs the shared root when the first SSE snapshot only contains a Turn", () => {
     const conversation: Conversation = { id: "session_1", title: "x", messages: [], runtimeNodes: [] };
     const first = turn({

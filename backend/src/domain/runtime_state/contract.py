@@ -1,9 +1,10 @@
 """Runtime Turn payload types, constants, normalization, and validation.
 
-One persisted node is one Turn. A Turn owns every version of one interaction;
-each version alternates ``user, assistant, user, assistant...``. A running
-version may temporarily end in user; no legacy message-node representation is
-accepted.
+One persisted node is one Turn. A Turn owns every version of one interaction.
+Each version starts with one user Message, rejects consecutive user Messages,
+and may contain consecutive assistant Messages for durable Agent reports. A
+running version may temporarily end in user; no legacy message-node
+representation is accepted.
 """
 
 from __future__ import annotations
@@ -283,20 +284,24 @@ def validate_data(value: Any) -> list[list[dict[str, Any]]]:
         if not isinstance(raw_version, list) or not raw_version:
             raise RuntimeStateValidationError(f"data[{version_index}] must contain at least one Message.")
         messages: list[dict[str, Any]] = []
+        previous_role: str | None = None
         for message_index, raw_message in enumerate(raw_version):
             message = _mapping(raw_message, f"data[{version_index}][{message_index}]")
-            expected_role = "user" if message_index % 2 == 0 else "assistant"
-            if message.get("role") != expected_role:
-                raise RuntimeStateValidationError(
-                    f"data[{version_index}][{message_index}].role must be {expected_role}."
-                )
+            role = message.get("role")
+            if message_index == 0 and role != "user":
+                raise RuntimeStateValidationError(f"data[{version_index}][{message_index}].role must be user.")
+            if role not in MESSAGE_ROLES:
+                raise RuntimeStateValidationError(f"data[{version_index}][{message_index}].role is invalid.")
+            if role == "user" and previous_role == "user":
+                raise RuntimeStateValidationError("Consecutive user Messages are not allowed.")
             message["content"] = normalize_content(message.get("content"))
-            if expected_role == "user" and len(message["content"]) != 1:
+            if role == "user" and len(message["content"]) != 1:
                 raise RuntimeStateValidationError("Every user Message must contain exactly one Item.")
-            if expected_role == "user":
+            if role == "user":
                 item = message["content"][0]
                 if item.get("type") != "text" or not isinstance(item.get("text"), str):
                     raise RuntimeStateValidationError("Every user Message must contain one text Item.")
             messages.append(_json(message, "message"))
+            previous_role = str(role)
         versions.append(messages)
     return versions

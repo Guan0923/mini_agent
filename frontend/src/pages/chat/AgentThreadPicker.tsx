@@ -20,10 +20,9 @@ interface AgentThreadPickerProps {
   onSelect: (threadId: string) => void;
 }
 
-function nodeTitle(summary: AgentThreadSummary): string {
-  const parts = summary.thread_path.split("/").filter(Boolean);
-  const name = parts[parts.length - 1] ?? summary.thread_id;
-  return `${name} · ${summary.thread_status}`;
+function nodeTitle(summary: AgentThreadSummary): ReactNode {
+  const label = `${summary.thread_path} · ${summary.thread_status}`;
+  return <Tooltip title={summary.task_result || undefined}>{label}</Tooltip>;
 }
 
 function updateNode(nodes: PickerNode[], key: Key, children: PickerNode[]): PickerNode[] {

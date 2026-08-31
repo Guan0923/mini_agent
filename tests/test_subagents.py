@@ -44,32 +44,56 @@ class _IdleTools:
 
 
 def test_persistent_subagent_tool_contract_exposes_only_the_read_query_in_plan_mode() -> None:
-    tools = delegation_tools(3)
+    tools = delegation_tools()
     assert [tool.name for tool in tools] == [
         "delegate_tasks",
         "send_agent_message",
         "set_thread_node_status",
-        "list_current_node_sub_thread",
+        "get_thread_node",
+        "pause_current_turn",
     ]
-    assert [tool.name for tool in tools if tool.read_only] == ["list_current_node_sub_thread"]
+    assert [tool.name for tool in tools if tool.read_only] == ["get_thread_node"]
     delegate = tools[0].spec.parameters
-    assert delegate["properties"]["context_transfer_strategy"]["items"]["enum"] == [
+    assert set(delegate["properties"]) == {
+        "source_thread_id",
+        "subagent_path",
+        "subagent_task",
+        "context_transfer_strategy",
+    }
+    assert delegate["properties"]["context_transfer_strategy"]["enum"] == [
         "share",
         "compaction_share",
         "independent",
     ]
-    assert delegate["properties"]["subagent_count"]["maximum"] == 3
+    assert delegate["required"] == ["subagent_path", "subagent_task", "context_transfer_strategy"]
     send = tools[1].spec.parameters
-    assert send["required"] == ["target_thread_id", "subagent_tasks"]
+    assert set(send["properties"]) == {
+        "source_thread_id",
+        "target_thread_path",
+        "subagent_task",
+        "references",
+        "need_reply",
+    }
+    assert send["required"] == ["target_thread_path", "subagent_task"]
+    assert send["properties"]["references"]["items"]["required"] == ["path"]
+    status = tools[2].spec.parameters
+    assert set(status["properties"]) == {"source_thread_id", "target_thread_path", "thread_status"}
+    assert status["required"] == ["target_thread_path", "thread_status"]
+    assert status["properties"]["thread_status"]["enum"] == ["running", "paused", "success"]
+    query = tools[3].spec.parameters
+    assert set(query["properties"]) == {"source_thread_id", "target_thread_path"}
+    assert query["required"] == []
+    pause = tools[4].spec.parameters
+    assert pause == {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
     registry = ToolRegistry(tools)
     registry.validate_arguments(
         "send_agent_message",
-        {"target_thread_id": "target", "subagent_tasks": "follow up"},
+        {"target_thread_path": "/root/target", "subagent_task": "follow up"},
     )
     with pytest.raises(ToolError, match="non-empty"):
         registry.validate_arguments(
             "send_agent_message",
-            {"source_thread_id": "", "target_thread_id": "target", "subagent_tasks": "follow up"},
+            {"source_thread_id": "", "target_thread_path": "/root/target", "subagent_task": "follow up"},
         )
 
 

@@ -116,15 +116,24 @@ export function normalizeRuntimeNode(node: RuntimeTreeNode): RuntimeTreeNode {
     if (!Array.isArray(version) || version.length === 0) throw new Error("A Turn version must contain Messages");
     for (let index = 0; index < version.length; index += 1) {
       const message = version[index];
-      const expectedRole = index % 2 === 0 ? "user" : "assistant";
-      if (message?.role !== expectedRole || !Array.isArray(message.content)) {
-        throw new Error("Turn Messages must alternate user and assistant");
+      const expectedRole = index === 0 ? "user" : undefined;
+      if ((expectedRole && message?.role !== expectedRole) || !["user", "assistant"].includes(String(message?.role)) || !Array.isArray(message.content)) {
+        throw new Error("A Turn must start with user and contain valid Messages");
       }
-      if (expectedRole === "user" && (message.content.length !== 1 || message.content[0]?.type !== "text" || typeof message.content[0]?.text !== "string")) {
+      if (message.role === "user" && index > 0 && version[index - 1]?.role === "user") {
+        throw new Error("Consecutive user Messages are not allowed");
+      }
+      if (message.role === "user" && (message.content.length !== 1 || message.content[0]?.type !== "text" || typeof message.content[0]?.text !== "string")) {
         throw new Error("A user Message must contain one text Item");
       }
     }
     if (turn.status !== "running" && version[version.length - 1]?.role !== "assistant") throw new Error("A non-running Turn must end with assistant");
+  }
+  if (turn.agent_report_statuses !== undefined) {
+    const statuses = objectValue(turn.agent_report_statuses);
+    if (Object.keys(statuses).some((key) => !key || !["success", "failed"].includes(String(statuses[key])))) {
+      throw new Error("Invalid Agent report delivery metadata");
+    }
   }
   const model = objectValue(turn.model);
   const normalizedModel = normalizeRuntimeNodeModel(model);

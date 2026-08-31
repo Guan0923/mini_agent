@@ -13,7 +13,9 @@ from ..lifecycle.outcomes import cancel_run, complete_run, fail_run, planning_fa
 from ..steps import USER_DENIED_BATCH_FAILURE_CODE, ToolStepExecutor
 from .budgets import _claim_model_turn, _ensure_tool_budget, _reject_over_budget_tools, _tool_batch_fits
 from .common import (
+    _apply_tool_batch_reports,
     _apply_tool_batch_steering,
+    _consume_agent_reports,
     _execute_tool,
     _fail_pending_tools,
     _finish_assistant,
@@ -40,6 +42,7 @@ class ExecutionWorkflow:
             runtime.apply_pending_runtime_config()
             if runtime.run.mode != "agent":
                 raise WorkflowModeChanged("Agent workflow changed to Plan mode.")
+            _consume_agent_reports(runtime)
             if cancel_if_requested(runtime):
                 return runtime.run
             if not _ensure_tool_budget(runtime):
@@ -68,6 +71,10 @@ class ExecutionWorkflow:
                 _fail_pending_tools(runtime, response, "Not executed because the run was cancelled.")
                 return runtime.run
 
+            if _consume_agent_reports(runtime):
+                _fail_pending_tools(runtime, response, "Not executed because a subagent report arrived.")
+                continue
+
             if consume_steering(runtime, phase="after_model_response") is not None:
                 _fail_pending_tools(runtime, response, "Not executed because the user supplied new instructions.")
                 continue
@@ -85,6 +92,10 @@ class ExecutionWorkflow:
             for index, tool in enumerate(response.tool_messages):
                 if cancel_if_requested(runtime):
                     return runtime.run
+                if _consume_agent_reports(runtime):
+                    _apply_tool_batch_reports(runtime, next_tool_index=index)
+                    steered = True
+                    break
                 update = collect_steering(runtime)
                 if update is not None:
                     _apply_tool_batch_steering(
@@ -103,6 +114,10 @@ class ExecutionWorkflow:
                     raise
                 if cancel_if_requested(runtime):
                     return runtime.run
+                if _consume_agent_reports(runtime):
+                    _apply_tool_batch_reports(runtime, next_tool_index=index + 1)
+                    steered = True
+                    break
                 if outcome.interrupt is not None:
                     if outcome.interrupt.choice == "deny":
                         _fail_pending_tools(

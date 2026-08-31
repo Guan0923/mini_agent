@@ -34,7 +34,6 @@ from backend.domain import (
 from backend.domain.runtime_state import (
     NodeFrame,
     NodeWriter,
-    RuntimeRootState,
     RuntimeState,
     new_node_id,
     new_thread_id,
@@ -51,7 +50,7 @@ from backend.runtime.subagents import SubagentCoordinator
 from backend.storage.message_queue import MemoryMessageQueue, RedisMessageQueue
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.storage.sqlite_agent_threads import AgentThreadCreate
-from backend.tools import ToolError, ToolRegistry, delegation_tools
+from backend.tools import Tool, ToolError, ToolRegistry, delegation_tools
 
 
 class _AnswerPlanner:
@@ -69,34 +68,52 @@ class _DelegatingRootPlanner:
 
     def decide(self, runtime):
         self.calls += 1
-        if self.calls == 1:
+        delegated_paths: set[str] = set()
+        for message in runtime.model_messages():
+            if not isinstance(message, AssistantMessage):
+                continue
+            for tool in message.tool_messages:
+                if tool.name != "delegate_tasks" or not tool.content:
+                    continue
+                try:
+                    result = json.loads(tool.content)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(result, dict) and result.get("thread_path"):
+                    delegated_paths.add(str(result["thread_path"]))
+        pending = next(
+            (
+                (name, task)
+                for name, task in (("one", "first"), ("two", "second"))
+                if f"/root/{name}" not in delegated_paths
+            ),
+            None,
+        )
+        if pending is not None:
+            name, task = pending
             return AssistantMessage(
                 tool_messages=[
                     ToolMessage(
                         name="delegate_tasks",
-                        call_id="delegate_http_children",
+                        call_id=f"delegate_http_{name}",
                         arguments={
-                            "subagent_count": 2,
-                            "subagent_name": ["one", "two"],
-                            "subagent_tasks": ["first", "second"],
-                            "context_transfer_strategy": ["independent", "independent"],
+                            "subagent_path": f"/root/{name}",
+                            "subagent_task": task,
+                            "context_transfer_strategy": "independent",
                         },
                     )
                 ]
             )
-        messages = [str(message.content or "") for message in runtime.model_messages()]
-        received = sum('"type": "subagent_initial_result"' in content for content in messages)
-        if received >= 2:
-            return AssistantMessage(content="root received both Agent results")
-        return AssistantMessage(
-            tool_messages=[
-                ToolMessage(
-                    name="list_current_node_sub_thread",
-                    call_id=f"wait_for_agents_{self.calls}",
-                    arguments={},
-                )
-            ]
-        )
+        if not any(
+            tool.name == "get_thread_node" and tool.content
+            for message in runtime.model_messages()
+            if isinstance(message, AssistantMessage)
+            for tool in message.tool_messages
+        ):
+            return AssistantMessage(
+                tool_messages=[ToolMessage(name="get_thread_node", call_id="inspect_agents", arguments={})]
+            )
+        return AssistantMessage(content="root delegated both Agents")
 
 
 @pytest.fixture
@@ -239,8 +256,7 @@ def _agent_create(
             root_thread_id or session_id,
             parent.thread_id,
             f"/root/{name}",
-            f"task:{name}",
-            "opening",
+            "running",
             1,
             timestamp,
             timestamp,
@@ -276,8 +292,7 @@ def _nested_agent_create(
             root_thread_id or session_id,
             parent.thread_id,
             f"{parent_path}/{name}",
-            f"task:{name}",
-            "opening",
+            "running",
             depth,
             timestamp,
             timestamp,
@@ -294,7 +309,7 @@ def test_agent_thread_index_rebuilds_and_tracks_committed_heads(tmp_path: Path) 
     session = store.create_session("index")
     source = _finished_source(store, session.session_id)
     child = _agent_create(session.session_id, source, name="worker")
-    store.create_agent_threads(session.session_id, [child])
+    store.create_agent_thread(session.session_id, child)
 
     assert index.threads_for_session(session.session_id) == frozenset({session.session_id, child.node.thread_id})
     assert index.session_for_thread(child.node.thread_id) == session.session_id
@@ -306,6 +321,20 @@ def test_agent_thread_index_rebuilds_and_tracks_committed_heads(tmp_path: Path) 
     rebuilt.rebuild(SQLiteSessionStore(paths))
     assert rebuilt.threads_for_session(session.session_id) == index.threads_for_session(session.session_id)
     assert rebuilt.path_for_thread(child.node.thread_id) == "/root/worker"
+
+
+def test_empty_session_creates_agent_root_only_with_its_first_turn(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "empty-root"))
+    session = store.create_session("empty")
+    assert store.get_thread_node(session.session_id, session.session_id) is None
+    runtime_thread = store.get_runtime_thread(session.session_id, session.session_id)
+    assert runtime_thread is not None and runtime_thread.current_turn_id is None
+
+    source = _finished_source(store, session.session_id)
+    root = store.get_thread_node(session.session_id, session.session_id)
+    assert root is not None
+    assert root.thread_path == "/root" and root.thread_status == "success"
+    assert root.thread_id == source.thread_id == session.session_id
 
 
 def test_agent_thread_event_hub_replays_latest_and_stays_open_across_turns(tmp_path: Path) -> None:
@@ -466,7 +495,7 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             store = SQLiteSessionStore(state.paths, state.agent_thread_index)
             source = _finished_source(store, sidebar["session_id"])
             child = _agent_create(sidebar["session_id"], source, name="worker")
-            store.create_agent_threads(sidebar["session_id"], [child])
+            store.create_agent_thread(sidebar["session_id"], child)
             grandchild = _nested_agent_create(
                 sidebar["session_id"],
                 child.turn,
@@ -474,7 +503,7 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
                 parent_path=child.node.thread_path,
                 depth=2,
             )
-            store.create_agent_threads(sidebar["session_id"], [grandchild])
+            store.create_agent_thread(sidebar["session_id"], grandchild)
 
             fork_response = client.post(f"/api/turns/{source.id}/fork", json={})
             assert fork_response.status_code == 201, fork_response.text
@@ -498,7 +527,7 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
                 name="worker",
                 root_thread_id=fork_thread_id,
             )
-            store.create_agent_threads(sidebar["session_id"], [fork_child])
+            store.create_agent_thread(sidebar["session_id"], fork_child)
 
             children = client.get(
                 f"/api/agent-threads/{sidebar['session_id']}/children",
@@ -509,8 +538,8 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
                 {
                     "thread_id": child.node.thread_id,
                     "thread_path": "/root/worker",
-                    "thread_task": "task:worker",
-                    "thread_status": "opening",
+                    "thread_status": "running",
+                    "task_result": "",
                 }
             ]
             fork_children = client.get(
@@ -522,8 +551,8 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
                 {
                     "thread_id": fork_child.node.thread_id,
                     "thread_path": "/root/worker",
-                    "thread_task": "task:worker",
-                    "thread_status": "opening",
+                    "thread_status": "running",
+                    "task_result": "",
                 }
             ]
             nested = client.get(
@@ -535,8 +564,8 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
                 {
                     "thread_id": grandchild.node.thread_id,
                     "thread_path": "/root/worker/nested",
-                    "thread_task": "task:nested",
-                    "thread_status": "opening",
+                    "thread_status": "running",
+                    "task_result": "",
                 }
             ]
             assert (
@@ -552,7 +581,6 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
                 json={
                     "session_id": sidebar["session_id"],
                     "content": "inspect the file",
-                    "references": [{"source": "project", "path": "README.md"}],
                     "permission_mode": "workspace_write",
                     "running_mode": "plan",
                 },
@@ -562,7 +590,7 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             envelope = queue.peek_thread(child.node.thread_id)
             assert envelope is not None
             assert envelope.source_thread_id == sidebar["session_id"]
-            assert envelope.references == ({"source": "project", "path": "README.md"},)
+            assert envelope.references == ()
             assert envelope.payload["runtime_config"]["permission_mode"] == "workspace_write"
 
             fork_message = client.post(
@@ -582,13 +610,14 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             source_runtime.run.thread_id = sidebar["thread_id"]
             source_runtime.run.turn_id = source.id
             source_runtime.services.runtime_node_context = lambda: [source]
-            with pytest.raises(ToolError, match="same Agent tree"):
+            with pytest.raises(ToolError, match="does not match"):
                 state.subagent_coordinator.invoke(
                     source_runtime,
                     "send_agent_message",
                     {
-                        "target_thread_id": fork_child.node.thread_id,
-                        "subagent_tasks": "cross-tree message",
+                        "source_thread_id": fork_thread_id,
+                        "target_thread_path": "/root/worker",
+                        "subagent_task": "spoofed cross-tree message",
                     },
                 )
             source_runner.close()
@@ -604,13 +633,6 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             nested_envelope = queue.peek_thread(grandchild.node.thread_id)
             assert nested_envelope is not None
             assert nested_envelope.source_thread_id == sidebar["session_id"]
-
-            store.update_thread_status(sidebar["session_id"], grandchild.node.thread_id, "closed")
-            closed = client.post(
-                f"/api/agent-threads/{grandchild.node.thread_id}/messages",
-                json={"session_id": sidebar["session_id"], "content": "rejected"},
-            )
-            assert closed.status_code == 409
 
             unknown = client.get(
                 "/api/agent-threads/thread_missing/children",
@@ -674,14 +696,15 @@ def test_fork_sidebar_root_can_delegate_its_own_subagent(tmp_path: Path) -> None
                 runtime,
                 "delegate_tasks",
                 {
-                    "subagent_count": 1,
-                    "subagent_name": ["worker"],
-                    "subagent_tasks": ["fork-only task"],
-                    "context_transfer_strategy": ["independent"],
+                    "subagent_path": "/root/worker",
+                    "subagent_task": "fork-only task",
+                    "context_transfer_strategy": "independent",
                 },
             )
         )
-        child_id = delegated["subagents"][0]["thread_id"]
+        assert delegated == {"thread_path": "/root/worker", "thread_status": "running"}
+        child_id = index.thread_for_path(session.session_id, fork.thread_id, "/root/worker")
+        assert child_id is not None
         child = store.get_thread_node(session.session_id, child_id)
         assert child is not None and child.root_thread_id == fork.thread_id
         assert child.parent_thread_id == fork.thread_id and child.thread_path == "/root/worker"
@@ -700,6 +723,677 @@ def test_fork_sidebar_root_can_delegate_its_own_subagent(tmp_path: Path) -> None
         parent_runner.close()
 
 
+def test_delegate_terminal_result_is_delivered_once_as_plain_text_assistant_report(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("assistant report")
+    source = _finished_source(store, session.session_id)
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        settings=SubagentSettings(max_workers=2),
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(_AnswerPlanner(), ToolRegistry(), job_registry=registry),
+        tmp_path,
+    )
+    try:
+        coordinator.invoke(
+            runtime,
+            "delegate_tasks",
+            {
+                "subagent_path": "/root/reporter",
+                "subagent_task": "中文结果",
+                "context_transfer_strategy": "independent",
+            },
+        )
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            reports = store.list_agent_turn_reports(session.session_id, states=("delivered",))
+            if len(reports) == 1:
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("Agent report was not delivered")
+
+        expected = "thread_path: /root/reporter\nthread_status: success\ntask_result: done:中文结果"
+        assert reports[0].reply_content == expected
+        assert reports[0].recipient_thread_id == session.session_id
+        assert reports[0].delivery_id.startswith("agent_report_")
+
+        received = store.get_node(session.session_id, source.id)
+        assert isinstance(received, RuntimeState)
+        assert [message["role"] for message in received.data[received.current_data_idx]] == [
+            "user",
+            "assistant",
+            "assistant",
+        ]
+        assert received.data[received.current_data_idx][-1] == {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "subagent",
+                    "event": "agent_report",
+                    "status": "success",
+                    "text": expected,
+                    "delivery_id": reports[0].delivery_id,
+                }
+            ],
+        }
+        assert not any(
+            item.get("event") == "subagent_initial_result"
+            for message in received.data[received.current_data_idx]
+            for item in message.get("content", [])
+        )
+
+        coordinator._drain_inactive_reports(session.session_id, session.session_id)
+        replayed = store.get_node(session.session_id, source.id)
+        assert isinstance(replayed, RuntimeState)
+        assert len(replayed.data[replayed.current_data_idx]) == 3
+    finally:
+        coordinator.close()
+        registry.close_all(reason="test cleanup", timeout=2)
+        parent_runner.close()
+
+
+def test_one_agent_turn_reports_once_to_every_registered_sender(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("multiple report recipients")
+    root = _finished_source(store, session.session_id)
+    sender = _agent_create(session.session_id, root, name="sender")
+    worker = _agent_create(session.session_id, root, name="worker")
+    store.create_agent_thread(session.session_id, sender)
+    store.create_agent_thread(session.session_id, worker)
+
+    sender_turn = sender.turn.clone()
+    sender_turn.data[0][1]["content"].append({"type": "text", "text": "sender ready", "status": "success"})
+    sender_turn.status = "success"
+    store.finalize_node(RuntimeState.from_dict(sender_turn.to_dict()))
+    store.register_agent_turn_report(
+        session.session_id,
+        worker.turn.id,
+        worker.node.thread_id,
+        session.session_id,
+    )
+    store.register_agent_turn_report(
+        session.session_id,
+        worker.turn.id,
+        worker.node.thread_id,
+        sender.node.thread_id,
+    )
+
+    completed = worker.turn.clone()
+    completed.data[0][1]["content"].append({"type": "text", "text": "shared result", "status": "success"})
+    completed.status = "success"
+    completed = RuntimeState.from_dict(completed.to_dict())
+    store.finalize_node(completed)
+    coordinator = SubagentCoordinator(store=store, message_queue=queue, index=index, job_registry=registry)
+    try:
+        coordinator._publish_turn_reports(worker.node, completed)
+        reports = store.list_agent_turn_reports(session.session_id, states=("delivered",))
+        assert len(reports) == 2
+        assert {report.recipient_thread_id for report in reports} == {
+            session.session_id,
+            sender.node.thread_id,
+        }
+        assert len({report.delivery_id for report in reports}) == 2
+        assert len({report.reply_content for report in reports}) == 1
+
+        for recipient_thread_id, turn_id in (
+            (session.session_id, root.id),
+            (sender.node.thread_id, sender.turn.id),
+        ):
+            received = store.get_node(session.session_id, turn_id)
+            assert isinstance(received, RuntimeState)
+            report_items = [
+                item
+                for message in received.data[received.current_data_idx]
+                for item in message.get("content", [])
+                if item.get("event") == "agent_report"
+            ]
+            assert len(report_items) == 1
+            delivery_id = report_items[0]["delivery_id"]
+            assert store.agent_report_statuses(session.session_id, {delivery_id}) == {delivery_id: "success"}
+            coordinator._drain_inactive_reports(session.session_id, recipient_thread_id)
+            replayed = store.get_node(session.session_id, turn_id)
+            assert isinstance(replayed, RuntimeState)
+            assert (
+                sum(
+                    item.get("event") == "agent_report"
+                    for message in replayed.data[replayed.current_data_idx]
+                    for item in message.get("content", [])
+                )
+                == 1
+            )
+    finally:
+        coordinator.close()
+        registry.close_all(reason="test cleanup", timeout=2)
+
+
+def test_report_replay_after_sqlite_delivery_before_queue_ack_is_idempotent(tmp_path: Path) -> None:
+    class CrashBeforeAckQueue(MemoryMessageQueue):
+        fail_ack = True
+
+        def ack(self, claimed):
+            if self.fail_ack and claimed.envelope.target_kind == "report":
+                self.fail_ack = False
+                raise RuntimeError("simulated crash before Redis ACK")
+            return super().ack(claimed)
+
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = CrashBeforeAckQueue()
+    registry = JobRegistry()
+    session = store.create_session("report crash replay")
+    root = _finished_source(store, session.session_id)
+    worker = _agent_create(session.session_id, root, name="worker")
+    store.create_agent_thread(session.session_id, worker)
+    store.register_agent_turn_report(
+        session.session_id,
+        worker.turn.id,
+        worker.node.thread_id,
+        session.session_id,
+    )
+    completed = worker.turn.clone()
+    completed.data[0][1]["content"].append({"type": "text", "text": "durable", "status": "success"})
+    completed.status = "success"
+    completed = RuntimeState.from_dict(completed.to_dict())
+    store.finalize_node(completed)
+    coordinator = SubagentCoordinator(store=store, message_queue=queue, index=index, job_registry=registry)
+    try:
+        content = coordinator._reply_content(worker.node, completed)
+        coordinator._reply_context.value = (session.session_id, completed.id, "success")
+        try:
+            coordinator.reply_subagent_message(content)
+        finally:
+            del coordinator._reply_context.value
+        coordinator._dispatch_ready_reports(session.session_id)
+
+        delivered = store.list_agent_turn_reports(session.session_id, states=("delivered",))
+        assert len(delivered) == 1
+        after_crash = store.get_node(session.session_id, root.id)
+        assert isinstance(after_crash, RuntimeState)
+        assert len(after_crash.data[after_crash.current_data_idx]) == 3
+
+        recovered = SubagentCoordinator(store=store, message_queue=queue, index=index, job_registry=registry)
+        try:
+            recovered._drain_inactive_reports(session.session_id, session.session_id)
+        finally:
+            recovered.close()
+        replayed = store.get_node(session.session_id, root.id)
+        assert isinstance(replayed, RuntimeState)
+        assert len(replayed.data[replayed.current_data_idx]) == 3
+        assert queue.pending_deliveries() == []
+    finally:
+        coordinator.close()
+        registry.close_all(reason="test cleanup", timeout=2)
+
+
+def test_waiting_report_survives_queue_outage_and_dispatches_after_restart(tmp_path: Path) -> None:
+    class UnavailableReportQueue(MemoryMessageQueue):
+        def dispatch_report(self, envelope):
+            raise MessageQueueUnavailable("message_queue_unavailable")
+
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    registry = JobRegistry()
+    session = store.create_session("waiting report restart")
+    root = _finished_source(store, session.session_id)
+    worker = _agent_create(session.session_id, root, name="worker")
+    store.create_agent_thread(session.session_id, worker)
+    store.register_agent_turn_report(
+        session.session_id,
+        worker.turn.id,
+        worker.node.thread_id,
+        session.session_id,
+    )
+    completed = worker.turn.clone()
+    completed.data[0][1]["content"].append({"type": "text", "text": "after outage", "status": "success"})
+    completed.status = "success"
+    completed = RuntimeState.from_dict(completed.to_dict())
+    store.finalize_node(completed)
+
+    unavailable = SubagentCoordinator(
+        store=store,
+        message_queue=UnavailableReportQueue(),
+        index=index,
+        job_registry=registry,
+    )
+    content = unavailable._reply_content(worker.node, completed)
+    unavailable._reply_context.value = (session.session_id, completed.id, "success")
+    try:
+        unavailable.reply_subagent_message(content)
+    finally:
+        del unavailable._reply_context.value
+    unavailable._dispatch_ready_reports(session.session_id)
+    unavailable.close()
+    assert len(store.list_agent_turn_reports(session.session_id, states=("waiting",))) == 1
+
+    queue = MemoryMessageQueue()
+    recovered = SubagentCoordinator(store=store, message_queue=queue, index=index, job_registry=registry)
+    try:
+        recovered._dispatch_ready_reports(session.session_id)
+        assert len(store.list_agent_turn_reports(session.session_id, states=("delivered",))) == 1
+        received = store.get_node(session.session_id, root.id)
+        assert isinstance(received, RuntimeState)
+        assert received.data[received.current_data_idx][-1]["content"][0]["text"] == content
+    finally:
+        recovered.close()
+        registry.close_all(reason="test cleanup", timeout=2)
+
+
+def test_failed_agent_report_uses_exact_single_newline_retry_text(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("failed assistant report")
+    source = _finished_source(store, session.session_id)
+
+    class FailingPlanner:
+        name = "failing"
+
+        def decide(self, _runtime):
+            raise RuntimeError("精确错误")
+
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(FailingPlanner(), ToolRegistry(), job_registry=registry),
+        tmp_path,
+    )
+    try:
+        coordinator.invoke(
+            runtime,
+            "delegate_tasks",
+            {
+                "subagent_path": "/root/failure",
+                "subagent_task": "fail",
+                "context_transfer_strategy": "independent",
+            },
+        )
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            reports = store.list_agent_turn_reports(session.session_id, states=("delivered",))
+            if reports:
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("Failed Agent report was not delivered")
+        assert reports[0].reply_content == (
+            "thread_path: /root/failure\n"
+            "thread_status: failed\n"
+            "task_result: 精确错误\n"
+            "This agent's turn failed. If you still need this agent, "
+            "use the send_agent_message tool to give it another task."
+        )
+        assert "精确错误\n\nThis agent" not in reports[0].reply_content
+    finally:
+        coordinator.close()
+        registry.close_all(reason="test cleanup", timeout=2)
+        parent_runner.close()
+
+
+def test_pause_current_turn_waits_for_child_report_and_resumes_the_same_turn(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("pause for child")
+    source = _finished_source(store, session.session_id)
+
+    class WaitingPlanner:
+        name = "waiting"
+
+        def decide(self, child_runtime):
+            if child_runtime.run.task == "child work":
+                sleep(0.2)
+                return AssistantMessage(content="child completed")
+            messages = child_runtime.model_messages()
+            reports = [
+                message.content
+                for message in messages
+                if isinstance(message, AssistantMessage) and message.name == "subagent_report"
+            ]
+            if reports:
+                assert reports == [
+                    "thread_path: /root/waiter/worker\nthread_status: success\ntask_result: child completed"
+                ]
+                return AssistantMessage(content="waiter resumed")
+            delegated = any(
+                tool.name == "delegate_tasks" and tool.status == "succeeded"
+                for message in messages
+                if isinstance(message, AssistantMessage)
+                for tool in message.tool_messages
+            )
+            if not delegated:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="delegate_tasks",
+                            call_id="delegate_waited_child",
+                            arguments={
+                                "subagent_path": "/root/waiter/worker",
+                                "subagent_task": "child work",
+                                "context_transfer_strategy": "independent",
+                            },
+                        )
+                    ]
+                )
+            return AssistantMessage(
+                tool_messages=[
+                    ToolMessage(name="pause_current_turn", call_id="pause_waiter", arguments={}),
+                    ToolMessage(name="get_thread_node", call_id="must_not_run", arguments={}),
+                ]
+            )
+
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        settings=SubagentSettings(max_workers=3, max_depth=2),
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(
+            WaitingPlanner(),
+            ToolRegistry(list(delegation_tools())),
+            job_registry=registry,
+        ),
+        tmp_path,
+    )
+    try:
+        coordinator.invoke(
+            runtime,
+            "delegate_tasks",
+            {
+                "subagent_path": "/root/waiter",
+                "subagent_task": "wait",
+                "context_transfer_strategy": "independent",
+            },
+        )
+        waiter_id = index.thread_for_path(session.session_id, session.session_id, "/root/waiter")
+        assert waiter_id is not None
+        initial_turn_id = index.head_for_thread(waiter_id)
+        deadline = monotonic() + 8
+        observed_paused = False
+        while monotonic() < deadline:
+            waiter = store.get_thread_node(session.session_id, waiter_id)
+            if waiter is not None and waiter.thread_status == "paused":
+                observed_paused = True
+            if waiter is not None and waiter.thread_status == "success":
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("The paused waiter did not resume after its child report")
+
+        assert observed_paused is True
+        assert index.head_for_thread(waiter_id) == initial_turn_id
+        waiter_turn = store.get_node(session.session_id, initial_turn_id)
+        assert isinstance(waiter_turn, RuntimeState)
+        assert waiter_turn.status == "success"
+        report_items = [
+            item
+            for message in waiter_turn.data[waiter_turn.current_data_idx]
+            for item in message.get("content", [])
+            if item.get("type") == "subagent" and item.get("event") == "agent_report"
+        ]
+        assert len(report_items) == 1
+        pause_results = [
+            item
+            for message in waiter_turn.data[waiter_turn.current_data_idx]
+            for item in message.get("content", [])
+            if item.get("type") == "tool_result" and item.get("call_id") == "pause_waiter"
+        ]
+        assert pause_results[0]["content"] == "thread_status: paused"
+        skipped = [
+            item
+            for message in waiter_turn.data[waiter_turn.current_data_idx]
+            for item in message.get("content", [])
+            if item.get("type") == "tool_result" and item.get("call_id") == "must_not_run"
+        ]
+        assert skipped == []
+    finally:
+        coordinator.close()
+        registry.close_all(reason="test cleanup", timeout=5)
+        parent_runner.close()
+
+
+def test_send_agent_message_registers_reports_only_when_need_reply_is_true(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("optional send reply")
+    source = _finished_source(store, session.session_id)
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(_AnswerPlanner(), ToolRegistry(), job_registry=registry),
+        tmp_path,
+    )
+
+    def wait_for_worker(expected_status: str = "success") -> str:
+        worker_id = index.thread_for_path(session.session_id, session.session_id, "/root/worker")
+        assert worker_id is not None
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            worker = store.get_thread_node(session.session_id, worker_id)
+            if worker is not None and worker.thread_status == expected_status:
+                return worker_id
+            sleep(0.01)
+        pytest.fail("worker did not settle")
+
+    try:
+        coordinator.invoke(
+            runtime,
+            "delegate_tasks",
+            {
+                "subagent_path": "/root/worker",
+                "subagent_task": "initial",
+                "context_transfer_strategy": "independent",
+            },
+        )
+        worker_id = wait_for_worker()
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            if len(store.list_agent_turn_reports(session.session_id, states=("delivered",))) == 1:
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("initial delegate report did not settle")
+
+        coordinator.invoke(
+            runtime,
+            "send_agent_message",
+            {"target_thread_path": "/root/worker", "subagent_task": "no reply"},
+        )
+        wait_for_worker()
+        no_reply_head = index.head_for_thread(worker_id)
+        reports = store.list_agent_turn_reports(session.session_id)
+        assert all(report.turn_id != no_reply_head for report in reports)
+
+        coordinator.invoke(
+            runtime,
+            "send_agent_message",
+            {
+                "target_thread_path": "/root/worker",
+                "subagent_task": "reply please",
+                "need_reply": True,
+            },
+        )
+        wait_for_worker()
+        reply_head = index.head_for_thread(worker_id)
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            reports = store.list_agent_turn_reports(session.session_id, states=("delivered",))
+            if any(report.turn_id == reply_head for report in reports):
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("need_reply Agent message did not report")
+        report = next(report for report in reports if report.turn_id == reply_head)
+        assert report.recipient_thread_id == session.session_id
+        assert report.reply_content.endswith("task_result: done:reply please")
+    finally:
+        coordinator.close()
+        registry.close_all(reason="test cleanup", timeout=5)
+        parent_runner.close()
+
+
+def test_running_agent_inserts_report_at_safe_boundary_and_continues(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("running report")
+    source = _finished_source(store, session.session_id)
+
+    class RunningReportPlanner:
+        name = "running-report"
+
+        def decide(self, child_runtime):
+            if child_runtime.run.task == "quick child":
+                sleep(0.05)
+                return AssistantMessage(content="quick result")
+            messages = child_runtime.model_messages()
+            if any(isinstance(message, AssistantMessage) and message.name == "subagent_report" for message in messages):
+                return AssistantMessage(content="continued after report")
+            delegated = any(
+                tool.name == "delegate_tasks" and tool.status == "succeeded"
+                for message in messages
+                if isinstance(message, AssistantMessage)
+                for tool in message.tool_messages
+            )
+            if delegated:
+                sleep(0.15)
+                return AssistantMessage(
+                    tool_messages=[ToolMessage(name="get_thread_node", call_id="boundary_tool", arguments={})]
+                )
+            return AssistantMessage(
+                tool_messages=[
+                    ToolMessage(
+                        name="delegate_tasks",
+                        call_id="delegate_quick_child",
+                        arguments={
+                            "subagent_path": "/root/running/worker",
+                            "subagent_task": "quick child",
+                            "context_transfer_strategy": "independent",
+                        },
+                    )
+                ]
+            )
+
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        settings=SubagentSettings(max_workers=3, max_depth=2),
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(
+            RunningReportPlanner(),
+            ToolRegistry(list(delegation_tools())),
+            job_registry=registry,
+        ),
+        tmp_path,
+    )
+    try:
+        coordinator.invoke(
+            runtime,
+            "delegate_tasks",
+            {
+                "subagent_path": "/root/running",
+                "subagent_task": "run",
+                "context_transfer_strategy": "independent",
+            },
+        )
+        running_id = index.thread_for_path(session.session_id, session.session_id, "/root/running")
+        assert running_id is not None
+        turn_id = index.head_for_thread(running_id)
+        deadline = monotonic() + 8
+        while monotonic() < deadline:
+            node = store.get_thread_node(session.session_id, running_id)
+            if node is not None and node.thread_status == "success":
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("running report recipient did not continue")
+
+        assert index.head_for_thread(running_id) == turn_id
+        completed = store.get_node(session.session_id, turn_id)
+        assert isinstance(completed, RuntimeState)
+        selected = completed.data[completed.current_data_idx]
+        report_indexes = [
+            index
+            for index, message in enumerate(selected)
+            if message.get("role") == "assistant" and message.get("content", [{}])[0].get("event") == "agent_report"
+        ]
+        assert len(report_indexes) == 1
+        report_index = report_indexes[0]
+        assert len(selected[report_index]["content"]) == 1
+        assert selected[report_index + 1]["content"][-1]["text"] == "continued after report"
+        boundary_results = [
+            item
+            for message in selected
+            for item in message.get("content", [])
+            if item.get("type") == "tool_result" and item.get("call_id") == "boundary_tool"
+        ]
+        assert len(boundary_results) == 1
+        assert boundary_results[0]["status"] == "failed"
+        assert boundary_results[0]["content"] == "Not executed because a subagent report arrived."
+    finally:
+        coordinator.close()
+        registry.close_all(reason="test cleanup", timeout=5)
+        parent_runner.close()
+
+
 def test_agent_thread_message_returns_503_when_redis_is_unavailable(tmp_path: Path) -> None:
     class UnavailableQueue(MemoryMessageQueue):
         def dispatch_agent(self, envelope: MessageEnvelope) -> MessageEnvelope:
@@ -713,7 +1407,7 @@ def test_agent_thread_message_returns_503_when_redis_is_unavailable(tmp_path: Pa
             store = SQLiteSessionStore(state.paths, state.agent_thread_index)
             source = _finished_source(store, sidebar["session_id"])
             child = _agent_create(sidebar["session_id"], source, name="worker")
-            store.create_agent_threads(sidebar["session_id"], [child])
+            store.create_agent_thread(sidebar["session_id"], child)
 
             response = client.post(
                 f"/api/agent-threads/{child.node.thread_id}/messages",
@@ -734,7 +1428,7 @@ def test_agent_thread_failed_admission_publishes_terminal_without_closing_channe
             store = SQLiteSessionStore(state.paths, state.agent_thread_index)
             source = _finished_source(store, sidebar["session_id"])
             child = _agent_create(sidebar["session_id"], source, name="worker")
-            store.create_agent_threads(sidebar["session_id"], [child])
+            store.create_agent_thread(sidebar["session_id"], child)
             initial = child.turn.clone()
             initial.status = "success"
             store.finalize_node(initial)
@@ -787,185 +1481,47 @@ def test_idle_turn_creation_uses_sqlite_cas(tmp_path: Path) -> None:
     assert runtime_thread is not None and runtime_thread.running_turn_id in {"turn_one", "turn_two"}
 
 
-def _create_v13_database(path: Path, session_id: str, *, orphan_sidebar: bool = False) -> None:
+def _create_legacy_database(path: Path, session_id: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     timestamp = utc_iso()
-    root = RuntimeRootState.create(session_id, id="root")
-    main = RuntimeState.create(
-        session_id=session_id,
-        thread_id=session_id,
-        id="main_turn",
-        parent=root,
-        user_content="first task",
-    )
-    main.status = "success"
-    fork = RuntimeState.from_dict(main.to_dict())
-    fork.id = "fork_turn"
-    fork.thread_id = "thread_fork"
-    fork.compaction_id = fork.id
-    fork = RuntimeState.from_dict(fork.to_dict())
-    side = RuntimeState.from_dict(fork.to_dict())
-    side.id = "side_turn"
-    side.thread_id = "thread_side"
-    side.compaction_id = side.id
-    side = RuntimeState.from_dict(side.to_dict())
-    child = RuntimeState.create(
-        session_id=session_id,
-        thread_id="thread_child",
-        id="child_turn",
-        parent=main,
-        user_content="task:worker",
-    )
-    child.status = "success"
-    child = RuntimeState.from_dict(child.to_dict())
     with sqlite3.connect(path) as connection:
         connection.executescript(
             """
-            CREATE TABLE store_metadata(session_id TEXT PRIMARY KEY,schema_version INTEGER NOT NULL CHECK(schema_version=13),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-            CREATE TABLE json_objects(session_id TEXT NOT NULL,namespace TEXT NOT NULL,object_id TEXT NOT NULL,payload_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(session_id,namespace,object_id));
-            CREATE TABLE workspace_files(session_id TEXT NOT NULL,relative_path TEXT NOT NULL,size INTEGER NOT NULL,sha256 TEXT NOT NULL,mtime_ns INTEGER NOT NULL,PRIMARY KEY(session_id,relative_path));
-            CREATE TABLE sandbox_approvals(request_hash TEXT PRIMARY KEY,session_id TEXT NOT NULL,command_hash TEXT NOT NULL,cwd_hash TEXT NOT NULL,permission_target TEXT NOT NULL,network_target_hash TEXT NOT NULL,command_summary TEXT NOT NULL,cwd_summary TEXT NOT NULL,created_at TEXT NOT NULL);
-            CREATE TABLE runtime_threads(session_id TEXT NOT NULL,thread_id TEXT PRIMARY KEY,origin_kind TEXT NOT NULL,current_turn_id TEXT,running_turn_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-            CREATE INDEX runtime_threads_session_idx ON runtime_threads(session_id,created_at,thread_id);
-            CREATE TABLE thread_nodes(session_id TEXT NOT NULL,thread_id TEXT PRIMARY KEY REFERENCES runtime_threads(thread_id) ON DELETE CASCADE,parent_thread_id TEXT REFERENCES thread_nodes(thread_id),thread_path TEXT NOT NULL,thread_task TEXT NOT NULL,thread_status TEXT NOT NULL,depth INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(session_id,thread_path));
-            CREATE INDEX thread_nodes_parent_idx ON thread_nodes(session_id,parent_thread_id,created_at,thread_id);
-            CREATE TABLE thread_contexts(thread_id TEXT PRIMARY KEY REFERENCES thread_nodes(thread_id) ON DELETE CASCADE,requested_strategy TEXT NOT NULL,effective_strategy TEXT NOT NULL,source_turn_id TEXT NOT NULL,source_data_idx INTEGER NOT NULL,snapshot_json TEXT,summary TEXT);
+            CREATE TABLE store_metadata(
+                session_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE thread_nodes(
+                session_id TEXT NOT NULL,
+                thread_id TEXT PRIMARY KEY,
+                thread_task TEXT NOT NULL,
+                thread_status TEXT NOT NULL
+            );
             """
         )
         connection.execute(
             "INSERT INTO store_metadata VALUES (?,13,?,?)",
             (session_id, timestamp, timestamp),
         )
-        session_payload = {
-            "session_id": session_id,
-            "title": "migrated",
-            "created_at": timestamp,
-            "updated_at": timestamp,
-            "title_is_custom": False,
-        }
-        sidebar_payloads = (
-            {
-                "thread_id": session_id,
-                "session_id": session_id,
-                "title": "migrated",
-                "created_at": timestamp,
-                "updated_at": timestamp,
-                "archived_at": None,
-                "deleted_at": None,
-                "title_is_custom": False,
-            },
-            {
-                "thread_id": "thread_fork",
-                "session_id": session_id,
-                "title": "migrated fork",
-                "created_at": timestamp,
-                "updated_at": timestamp,
-                "archived_at": None,
-                "deleted_at": None,
-                "title_is_custom": False,
-            },
-        )
-        for namespace, object_id, payload in (
-            ("session", session_id, session_payload),
-            ("runtime_node", root.id, root.to_dict()),
-            ("runtime_node", main.id, main.to_dict()),
-            ("runtime_node", fork.id, fork.to_dict()),
-            ("runtime_node", side.id, side.to_dict()),
-            ("runtime_node", child.id, child.to_dict()),
-            *(("sidebar_thread", item["thread_id"], item) for item in sidebar_payloads),
-        ):
-            connection.execute(
-                "INSERT INTO json_objects VALUES (?,?,?,?,?)",
-                (session_id, namespace, object_id, json.dumps(payload), timestamp),
-            )
-        for values in (
-            (session_id, session_id, "main", main.id, None, timestamp, timestamp),
-            (session_id, fork.thread_id, "fork", fork.id, None, timestamp, timestamp),
-            (session_id, side.thread_id, "fork", side.id, None, timestamp, timestamp),
-            (session_id, child.thread_id, "subagent", child.id, None, timestamp, timestamp),
-        ):
-            connection.execute("INSERT INTO runtime_threads VALUES (?,?,?,?,?,?,?)", values)
-        connection.execute(
-            "INSERT INTO thread_nodes VALUES (?,?,NULL,'/root','first task','opening',0,?,?)",
-            (session_id, session_id, timestamp, timestamp),
-        )
-        connection.execute(
-            "INSERT INTO thread_nodes VALUES (?,?,?,'/root/worker','task:worker','opening',1,?,?)",
-            (session_id, child.thread_id, session_id, timestamp, timestamp),
-        )
-        connection.execute(
-            "INSERT INTO thread_contexts VALUES (?,?,?,?,?,?,?)",
-            (child.thread_id, "independent", "independent", main.id, 0, None, None),
-        )
-        if orphan_sidebar:
-            orphan = {**sidebar_payloads[1], "thread_id": "thread_orphan", "title": "orphan"}
-            connection.execute(
-                "INSERT INTO json_objects VALUES (?,?,?,?,?)",
-                (session_id, "sidebar_thread", orphan["thread_id"], json.dumps(orphan), timestamp),
-            )
 
 
-def test_v13_migrates_to_v14_with_independent_sidebar_roots_and_excludes_side_chat(tmp_path: Path) -> None:
+def test_legacy_schema_is_rejected_without_mutating_or_deleting_database(tmp_path: Path) -> None:
     paths = ClientPaths(tmp_path / "data")
     paths.ensure()
-    session_id = "session_migrate"
+    session_id = "session_legacy"
     database = paths.session_db(session_id)
-    _create_v13_database(database, session_id)
+    _create_legacy_database(database, session_id)
+    before = database.read_bytes()
 
-    store = SQLiteSessionStore(paths)
-    threads = store.list_runtime_threads(session_id)
-    assert {(item.thread_id, item.origin_kind) for item in threads} == {
-        (session_id, "main"),
-        ("thread_fork", "fork"),
-        ("thread_side", "fork"),
-        ("thread_child", "subagent"),
-    }
-    main_root = store.get_thread_node(session_id, session_id)
-    child = store.get_thread_node(session_id, "thread_child")
-    fork_root = store.get_thread_node(session_id, "thread_fork")
-    assert main_root is not None and main_root.root_thread_id == session_id
-    assert child is not None and child.root_thread_id == session_id
-    assert fork_root is not None and fork_root.root_thread_id == "thread_fork"
-    assert fork_root.thread_path == "/root" and fork_root.depth == 0
-    assert store.list_child_thread_nodes(session_id, "thread_fork") == []
-    assert store.get_thread_node(session_id, "thread_side") is None
-
-    fork_turn = store.get_node(session_id, "fork_turn")
-    assert isinstance(fork_turn, RuntimeState)
-    fork_child = _agent_create(session_id, fork_turn, name="worker", root_thread_id="thread_fork")
-    store.create_agent_threads(session_id, [fork_child])
-    assert store.get_thread_node(session_id, fork_child.node.thread_id).thread_path == "/root/worker"
-    assert store.get_thread_node(session_id, "thread_child").thread_path == "/root/worker"
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT schema_version FROM store_metadata").fetchone()[0] == 14
-
-    rejected_id = "session_rejected"
-    rejected = paths.session_db(rejected_id)
-    _create_v13_database(rejected, rejected_id)
-    with sqlite3.connect(rejected) as connection:
-        connection.execute("PRAGMA ignore_check_constraints=ON")
-        connection.execute("UPDATE store_metadata SET schema_version=12")
-    before = rejected.read_bytes()
-    with pytest.raises(RuntimeError, match="Unsupported state.db schema"):
-        store.get_session(rejected_id)
-    assert rejected.read_bytes() == before
+    with pytest.raises(RuntimeError, match="requires v16 and left the database untouched"):
+        SQLiteSessionStore(paths).get_session(session_id)
+    assert database.exists()
+    assert database.read_bytes() == before
 
 
-def test_v13_migration_rolls_back_when_sidebar_runtime_is_missing(tmp_path: Path) -> None:
-    paths = ClientPaths(tmp_path / "data")
-    paths.ensure()
-    session_id = "session_orphan"
-    database = paths.session_db(session_id)
-    _create_v13_database(database, session_id, orphan_sidebar=True)
-
-    with pytest.raises(RuntimeError, match="no main or fork Runtime Thread"):
-        SQLiteSessionStore(paths).list_runtime_threads(session_id)
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT schema_version FROM store_metadata").fetchone()[0] == 13
-        assert connection.execute("PRAGMA table_info(thread_nodes)").fetchall()[2][1] == "parent_thread_id"
-
-
-def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_path: Path) -> None:
+def test_persistent_delegate_has_no_automatic_result_delivery_and_accepts_follow_up(tmp_path: Path) -> None:
     session_workspace = tmp_path / "session-workspace"
     project_workspace = tmp_path / "project-workspace"
     session_workspace.mkdir()
@@ -999,8 +1555,18 @@ def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_pat
     runtime.run.turn_id = source.id
     runtime.services.runtime_node_context = lambda: [source]
 
+    follow_up_started = Event()
+    release_follow_up = Event()
+
+    class ChildPlanner(_AnswerPlanner):
+        def decide(self, child_runtime):
+            if child_runtime.run.task == "follow-up":
+                follow_up_started.set()
+                assert release_follow_up.wait(5)
+            return super().decide(child_runtime)
+
     coordinator = SubagentCoordinator(
-        settings=SubagentSettings(max_tasks_per_batch=4, max_workers=2),
+        settings=SubagentSettings(max_workers=2),
         store=store,
         message_queue=queue,
         index=index,
@@ -1009,91 +1575,58 @@ def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_pat
 
     def child_factory() -> AgentRunner:
         return AgentRunner(
-            _AnswerPlanner(),
-            ToolRegistry(list(delegation_tools(4))),
+            ChildPlanner(),
+            ToolRegistry(list(delegation_tools())),
             job_registry=registry,
         )
 
     coordinator.bind_session(session.session_id, child_factory, session_workspace, project_workspace)
-    response = json.loads(
+    delegated = json.loads(
         coordinator.invoke(
             runtime,
             "delegate_tasks",
             {
-                "subagent_count": 2,
-                "subagent_name": ["one", "two"],
-                "subagent_tasks": ["first", "second"],
-                "context_transfer_strategy": ["independent", "share"],
+                "subagent_path": "/root/worker",
+                "subagent_task": "first",
+                "context_transfer_strategy": "independent",
             },
         )
     )
-    assert response["subagent_count"] == 2
-    assert all(item["background_admission"] == "admitted" for item in response["subagents"])
+    assert delegated == {"thread_path": "/root/worker", "thread_status": "running"}
 
     deadline = monotonic() + 5
     while monotonic() < deadline:
         children = store.list_child_thread_nodes(session.session_id, session.session_id)
-        if len(children) == 2 and all(
-            store.get_runtime_thread(session.session_id, child.thread_id).running_turn_id is None for child in children
-        ):
+        if len(children) == 1 and children[0].thread_status == "success":
             break
         sleep(0.01)
     else:
-        pytest.fail("background Agent Turns did not finish")
+        pytest.fail("background Agent Turn did not finish")
 
     children = store.list_child_thread_nodes(session.session_id, session.session_id)
-    assert {item.thread_path for item in children} == {"/root/one", "/root/two"}
-    assert all(item.thread_status == "opening" for item in children)
-    child_turns = [
-        store.get_node(session.session_id, index.head_for_thread(child.thread_id) or "") for child in children
+    child = children[0]
+    first_turn_id = index.head_for_thread(child.thread_id)
+    first_turn = store.get_node(session.session_id, first_turn_id or "")
+    assert isinstance(first_turn, RuntimeState)
+    assert first_turn.cwd == str(session_workspace.resolve())
+    assert first_turn.project_cwd == str(project_workspace.resolve())
+    assert queue.pending_deliveries() == []
+    assert json.loads(coordinator.invoke(runtime, "get_thread_node", {})) == [
+        {
+            "thread_path": "/root/worker",
+            "thread_status": "success",
+            "task_result": "done:first",
+        }
     ]
-    assert all(
-        isinstance(turn, RuntimeState)
-        and turn.cwd == str(session_workspace.resolve())
-        and turn.project_cwd == str(project_workspace.resolve())
-        for turn in child_turns
-    )
-    deadline = monotonic() + 5
-    pending = queue.pending_deliveries()
-    while monotonic() < deadline and len(pending) < 2:
-        sleep(0.01)
-        pending = queue.pending_deliveries()
-    assert len(pending) == 2
-    results = [json.loads(item.envelope.content) for item in pending]
-    assert {item["status"] for item in results} == {"success"}
-    assert {item["answer"] for item in results} == {"done:first", "done:second"}
 
-    listed = json.loads(coordinator.invoke(runtime, "list_current_node_sub_thread", {}))
-    assert {item["thread_path"] for item in listed} == {"/root/one", "/root/two"}
-    first_child = children[0]
-    coordinator.invoke(
-        runtime,
-        "set_thread_node_status",
-        {"target_thread_id": first_child.thread_id, "thread_status": "closed"},
-    )
-    with pytest.raises(ToolError, match="closed"):
-        coordinator.invoke(
-            runtime,
-            "send_agent_message",
-            {
-                "source_thread_id": session.session_id,
-                "target_thread_id": first_child.thread_id,
-                "subagent_tasks": "rejected while closed",
-            },
-        )
-    coordinator.invoke(
-        runtime,
-        "set_thread_node_status",
-        {"target_thread_id": first_child.thread_id, "thread_status": "opening"},
-    )
     with pytest.raises(ToolError, match="does not match"):
         coordinator.invoke(
             runtime,
             "send_agent_message",
             {
                 "source_thread_id": "another-thread",
-                "target_thread_id": first_child.thread_id,
-                "subagent_tasks": "rejected for the wrong source",
+                "target_thread_path": "/root/worker",
+                "subagent_task": "rejected for the wrong source",
             },
         )
     follow_up = json.loads(
@@ -1101,24 +1634,29 @@ def test_persistent_delegate_runs_in_background_and_auto_delivers_result(tmp_pat
             runtime,
             "send_agent_message",
             {
-                "target_thread_id": first_child.thread_id,
-                "subagent_tasks": "follow-up",
+                "target_thread_path": "/root/worker",
+                "subagent_task": "follow-up",
             },
         )
     )
-    assert follow_up["accepted"] is True and follow_up["target_state"] == "started"
+    assert follow_up == {"thread_path": "/root/worker", "thread_status": "running"}
+    assert follow_up_started.wait(5)
+    current = store.get_runtime_thread(session.session_id, child.thread_id)
+    assert current is not None and current.current_turn_id != first_turn_id
+    follow_up_turn_id = current.current_turn_id
+    release_follow_up.set()
     deadline = monotonic() + 5
     while monotonic() < deadline:
-        current = store.get_runtime_thread(session.session_id, first_child.thread_id)
-        if current is not None and current.running_turn_id is None and current.current_turn_id == follow_up["turn_id"]:
+        current = store.get_runtime_thread(session.session_id, child.thread_id)
+        if current is not None and current.running_turn_id is None and current.current_turn_id == follow_up_turn_id:
             break
         sleep(0.01)
     else:
         pytest.fail("idle Agent mailbox delivery did not finish")
-    delivered = store.get_node(session.session_id, follow_up["turn_id"])
+    delivered = store.get_node(session.session_id, follow_up_turn_id or "")
     assert isinstance(delivered, RuntimeState) and delivered.status == "success"
     assert delivered.user_message["content"][0]["text"] == "follow-up"
-    assert delivered.user_message.get("delivery_id") == follow_up["delivery_id"]
+    assert delivered.user_message.get("delivery_id")
     registry.close_all(reason="test complete", timeout=5)
     parent_runner.close()
 
@@ -1165,14 +1703,15 @@ def test_running_subagent_bridge_accepts_live_runtime_config(tmp_path: Path) -> 
                 runtime,
                 "delegate_tasks",
                 {
-                    "subagent_count": 1,
-                    "subagent_name": ["worker"],
-                    "subagent_tasks": ["wait for config"],
-                    "context_transfer_strategy": ["independent"],
+                    "subagent_path": "/root/worker",
+                    "subagent_task": "wait for config",
+                    "context_transfer_strategy": "independent",
                 },
             )
         )
-        thread_id = delegated["subagents"][0]["thread_id"]
+        assert delegated == {"thread_path": "/root/worker", "thread_status": "running"}
+        thread_id = index.thread_for_path(session.session_id, session.session_id, "/root/worker")
+        assert thread_id is not None
         assert started.wait(5), "Subagent did not start"
         updated = coordinator.apply_runtime_config(
             session.session_id,
@@ -1221,7 +1760,7 @@ def test_recover_session_reclaims_preclaimed_delivery_without_duplicate_canonica
     child.turn.data[0][0]["delivery_id"] = delivery_id
     turn = RuntimeState.from_dict(child.turn.to_dict())
     child = AgentThreadCreate(child.runtime, child.node, child.context, turn)
-    store.create_agent_threads(session.session_id, [child])
+    store.create_agent_thread(session.session_id, child)
 
     envelope = MessageEnvelope(
         delivery_id,
@@ -1238,7 +1777,7 @@ def test_recover_session_reclaims_preclaimed_delivery_without_duplicate_canonica
     assert queue.claim_thread(child.node.thread_id, "dead-worker") is not None
 
     coordinator = SubagentCoordinator(
-        settings=SubagentSettings(max_tasks_per_batch=4, max_workers=1),
+        settings=SubagentSettings(max_workers=1),
         store=store,
         message_queue=queue,
         index=index,
@@ -1282,7 +1821,7 @@ def test_web_startup_reconciliation_leaves_running_subagent_for_coordinator_reco
     session = store.create_session("startup recovery")
     source = _finished_source(store, session.session_id)
     child = _agent_create(session.session_id, source, name="worker")
-    store.create_agent_threads(session.session_id, [child])
+    store.create_agent_thread(session.session_id, child)
 
     state = WebAppState(data_root, message_queue=queue)
     try:
@@ -1297,7 +1836,7 @@ def test_web_startup_reconciliation_leaves_running_subagent_for_coordinator_reco
         state.close()
 
 
-def test_real_http_sse_redis_subagents_auto_steer_root_and_restart_idle_child(
+def test_real_http_sse_redis_subagents_auto_report_and_restart_idle_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     local_sandbox_runtime: None,
@@ -1356,16 +1895,35 @@ def test_real_http_sse_redis_subagents_auto_steer_root_and_restart_idle_child(
             store = SQLiteSessionStore(state.paths, state.agent_thread_index)
             children = store.list_child_thread_nodes(sidebar["session_id"], sidebar["thread_id"])
             assert {child.thread_path for child in children} == {"/root/one", "/root/two"}
+            deadline = monotonic() + 5
+            while monotonic() < deadline:
+                children = store.list_child_thread_nodes(sidebar["session_id"], sidebar["thread_id"])
+                if len(children) == 2 and all(child.thread_status == "success" for child in children):
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail("delegated Agent Turns did not finish")
+            deadline = monotonic() + 5
+            while monotonic() < deadline:
+                reports = store.list_agent_turn_reports(sidebar["session_id"], states=("delivered",))
+                if len(reports) == 2:
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail("delegated Agent reports were not delivered")
             root_turn = store.get_node(sidebar["session_id"], "turn_agent_root")
             assert isinstance(root_turn, RuntimeState) and root_turn.status == "success"
-            result_messages = [
-                str(item.get("text") or "")
+            assert "subagent_initial_result" not in json.dumps(root_turn.to_dict())
+            report_items = [
+                item
                 for message in root_turn.data[root_turn.current_data_idx]
-                if message.get("role") == "user"
+                if message.get("role") == "assistant"
                 for item in message.get("content", [])
-                if item.get("type") == "text" and '"type": "subagent_initial_result"' in str(item.get("text") or "")
+                if item.get("type") == "subagent" and item.get("event") == "agent_report"
             ]
-            assert len(result_messages) == 2
+            assert len(report_items) == 2
+            assert {item["delivery_id"] for item in report_items} == {report.delivery_id for report in reports}
+            assert all(item["status"] == "success" for item in report_items)
             assert queue.peek_thread(sidebar["thread_id"]) is None
 
             source_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
@@ -1379,12 +1937,17 @@ def test_real_http_sse_redis_subagents_auto_steer_root_and_restart_idle_child(
                     "send_agent_message",
                     {
                         "source_thread_id": sidebar["thread_id"],
-                        "target_thread_id": children[0].thread_id,
-                        "subagent_tasks": "idle follow-up",
+                        "target_thread_path": children[0].thread_path,
+                        "subagent_task": "idle follow-up",
                     },
                 )
             )
-            assert follow_up["target_state"] == "started"
+            assert set(follow_up) == {"thread_path", "thread_status"}
+            assert follow_up["thread_path"] == children[0].thread_path
+            assert follow_up["thread_status"] in {"running", "success"}
+            child_thread = store.get_runtime_thread(sidebar["session_id"], children[0].thread_id)
+            assert child_thread is not None and child_thread.current_turn_id is not None
+            follow_up_turn_id = child_thread.current_turn_id
             deadline = monotonic() + 5
             while monotonic() < deadline:
                 child_thread = store.get_runtime_thread(sidebar["session_id"], children[0].thread_id)
@@ -1393,9 +1956,9 @@ def test_real_http_sse_redis_subagents_auto_steer_root_and_restart_idle_child(
                 sleep(0.01)
             else:
                 pytest.fail("idle child follow-up did not finish")
-            child_turn = store.get_node(sidebar["session_id"], follow_up["turn_id"])
+            child_turn = store.get_node(sidebar["session_id"], follow_up_turn_id)
             assert isinstance(child_turn, RuntimeState) and child_turn.status == "success"
-            assert child_turn.user_message.get("delivery_id") == follow_up["delivery_id"]
+            assert child_turn.user_message.get("delivery_id")
             source_runner.close()
     finally:
         state.close()
@@ -1547,7 +2110,7 @@ def test_real_http_sse_redis_subagents_persist_model_trace(
         client.close()
 
 
-def test_context_strategies_freeze_share_compact_once_and_keep_independent_isolated(tmp_path: Path) -> None:
+def test_context_strategies_freeze_share_compact_and_keep_independent_isolated(tmp_path: Path) -> None:
     paths = ClientPaths(tmp_path / "data")
     index = AgentThreadIndex()
     store = SQLiteSessionStore(paths, index)
@@ -1585,7 +2148,7 @@ def test_context_strategies_freeze_share_compact_once_and_keep_independent_isola
     runtime.run.turn_id = source.id
     runtime.services.runtime_node_context = lambda: [source]
     coordinator = SubagentCoordinator(
-        settings=SubagentSettings(max_tasks_per_batch=4, max_workers=4),
+        settings=SubagentSettings(max_workers=4),
         store=store,
         message_queue=queue,
         index=index,
@@ -1595,34 +2158,32 @@ def test_context_strategies_freeze_share_compact_once_and_keep_independent_isola
         session.session_id,
         lambda: AgentRunner(
             RecordingPlanner(),
-            ToolRegistry(list(delegation_tools(4))),
+            ToolRegistry(list(delegation_tools())),
             job_registry=registry,
         ),
         tmp_path,
     )
-    result = json.loads(
-        coordinator.invoke(
-            runtime,
-            "delegate_tasks",
-            {
-                "subagent_count": 4,
-                "subagent_name": ["shared", "solo", "compact-one", "compact-two"],
-                "subagent_tasks": ["shared", "solo", "compact-one", "compact-two"],
-                "context_transfer_strategy": [
-                    "share",
-                    "independent",
-                    "compaction_share",
-                    "compaction_share",
-                ],
-            },
-        )
+    specs = (
+        ("shared", "share"),
+        ("solo", "independent"),
+        ("compact-one", "compaction_share"),
+        ("compact-two", "compaction_share"),
     )
-    assert compaction_calls == 1
-    assert {item["effective_strategy"] for item in result["subagents"]} == {
-        "share",
-        "independent",
-        "compaction_share",
-    }
+    for name, strategy in specs:
+        result = json.loads(
+            coordinator.invoke(
+                runtime,
+                "delegate_tasks",
+                {
+                    "subagent_path": f"/root/{name}",
+                    "subagent_task": name,
+                    "context_transfer_strategy": strategy,
+                },
+            )
+        )
+        assert set(result) == {"thread_path", "thread_status"}
+        assert result["thread_path"] == f"/root/{name}"
+    assert compaction_calls == 2
     expected_tasks = {"shared", "solo", "compact-one", "compact-two"}
     deadline = monotonic() + 5
     while monotonic() < deadline and not expected_tasks.issubset(seen):
@@ -1634,3 +2195,718 @@ def test_context_strategies_freeze_share_compact_once_and_keep_independent_isola
     assert seen["compact-two"] == [f"{CHECKPOINT_PREAMBLE}\n\none shared summary", "compact-two"]
     registry.close_all(reason="test complete", timeout=5)
     parent_runner.close()
+
+
+def test_compaction_share_failure_falls_back_to_independent(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("compaction fallback")
+    source = _finished_source(store, session.session_id)
+    seen: list[str] = []
+
+    class FailingCompactionPlanner(_AnswerPlanner):
+        def compact_context(self, _runtime):
+            raise RuntimeError("local compaction failed")
+
+    class RecordingPlanner(_AnswerPlanner):
+        def decide(self, child_runtime):
+            seen.extend(str(message.content or "") for message in child_runtime.model_messages())
+            return super().decide(child_runtime)
+
+    parent_runner = AgentRunner(FailingCompactionPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(RecordingPlanner(), ToolRegistry(), job_registry=registry),
+        tmp_path,
+    )
+    try:
+        coordinator.invoke(
+            runtime,
+            "delegate_tasks",
+            {
+                "subagent_path": "/root/fallback",
+                "subagent_task": "fallback",
+                "context_transfer_strategy": "compaction_share",
+            },
+        )
+        child_id = index.thread_for_path(session.session_id, session.session_id, "/root/fallback")
+        assert child_id is not None
+        context = store.get_thread_context(session.session_id, child_id)
+        assert context is not None
+        assert context.requested_strategy == "compaction_share"
+        assert context.effective_strategy == "independent"
+        deadline = monotonic() + 5
+        while monotonic() < deadline and not seen:
+            sleep(0.01)
+        assert seen == ["fallback"]
+    finally:
+        registry.close_all(reason="test complete", timeout=5)
+        parent_runner.close()
+
+
+def test_delegate_paths_source_auth_and_recursive_get_thread_node(tmp_path: Path) -> None:
+    paths = ClientPaths(tmp_path / "data")
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(paths, index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("paths")
+    source = _finished_source(store, session.session_id)
+    release = Event()
+
+    class BlockingPlanner:
+        name = "blocking-paths"
+
+        def decide(self, _runtime):
+            assert release.wait(5)
+            return AssistantMessage(content="released")
+
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        settings=SubagentSettings(max_workers=3),
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(BlockingPlanner(), ToolRegistry(), job_registry=registry),
+        tmp_path,
+    )
+    try:
+        for path in ("/root/parent", "/root/parent/grandchild", "/root/other"):
+            result = json.loads(
+                coordinator.invoke(
+                    runtime,
+                    "delegate_tasks",
+                    {
+                        "subagent_path": path,
+                        "subagent_task": path.rsplit("/", 1)[-1],
+                        "context_transfer_strategy": "independent",
+                    },
+                )
+            )
+            assert result == {"thread_path": path, "thread_status": "running"}
+
+        with pytest.raises(ToolError, match="already exists"):
+            coordinator.invoke(
+                runtime,
+                "delegate_tasks",
+                {
+                    "subagent_path": "/root/parent",
+                    "subagent_task": "duplicate",
+                    "context_transfer_strategy": "independent",
+                },
+            )
+        with pytest.raises(ToolError, match="parent path does not exist"):
+            coordinator.invoke(
+                runtime,
+                "delegate_tasks",
+                {
+                    "subagent_path": "/root/missing/leaf",
+                    "subagent_task": "missing",
+                    "context_transfer_strategy": "independent",
+                },
+            )
+        with pytest.raises(ToolError, match="does not match"):
+            coordinator.invoke(
+                runtime,
+                "delegate_tasks",
+                {
+                    "source_thread_id": "thread_spoofed",
+                    "subagent_path": "/root/spoofed",
+                    "subagent_task": "spoofed",
+                    "context_transfer_strategy": "independent",
+                },
+            )
+
+        descendants = store.list_descendant_thread_nodes(session.session_id, session.session_id)
+        listed = json.loads(coordinator.invoke(runtime, "get_thread_node", {}))
+        assert [item["thread_path"] for item in listed] == [item.thread_path for item in descendants]
+        assert all(set(item) == {"thread_path", "thread_status", "task_result"} for item in listed)
+        assert json.loads(
+            coordinator.invoke(
+                runtime,
+                "get_thread_node",
+                {"target_thread_path": "/root/parent/grandchild"},
+            )
+        ) == [
+            {
+                "thread_path": "/root/parent/grandchild",
+                "thread_status": "running",
+                "task_result": "",
+            }
+        ]
+        assert json.loads(coordinator.invoke(runtime, "get_thread_node", {"target_thread_path": "/root"})) == [
+            {"thread_path": "/root", "thread_status": "success", "task_result": ""}
+        ]
+
+        parent_id = index.thread_for_path(session.session_id, session.session_id, "/root/parent")
+        assert parent_id is not None
+        parent_turn_id = index.head_for_thread(parent_id)
+        parent_turn = store.get_node(session.session_id, parent_turn_id or "")
+        assert isinstance(parent_turn, RuntimeState)
+        child_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+        child_runtime = child_runner.new_runtime(task="parent", session_id=session.session_id)
+        child_runtime.run.thread_id = parent_id
+        child_runtime.run.turn_id = parent_turn.id
+        child_runtime.services.runtime_node_context = lambda: [parent_turn]
+        with pytest.raises(ToolError, match="descendants"):
+            coordinator.invoke(
+                child_runtime,
+                "get_thread_node",
+                {"target_thread_path": "/root/other"},
+            )
+        child_runner.close()
+    finally:
+        release.set()
+        registry.close_all(reason="test complete", timeout=5)
+        parent_runner.close()
+
+
+def test_send_agent_message_reference_boundaries_and_symlink_escape(tmp_path: Path) -> None:
+    session_workspace = (tmp_path / "session").resolve()
+    project_workspace = (tmp_path / "project").resolve()
+    outside_workspace = (tmp_path / "outside").resolve()
+    for path in (session_workspace, project_workspace, outside_workspace):
+        path.mkdir()
+    session_file = session_workspace / "session.txt"
+    project_file = project_workspace / "project.txt"
+    outside_file = outside_workspace / "outside.txt"
+    session_file.write_text("session", encoding="utf-8")
+    project_file.write_text("project", encoding="utf-8")
+    outside_file.write_text("outside", encoding="utf-8")
+
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("references")
+    root = store.ensure_root_node(session.session_id, id="root")
+    writer = NodeWriter(store)
+    source = writer.create(
+        RuntimeState.create(
+            session_id=session.session_id,
+            thread_id=session.session_id,
+            id="source",
+            parent=root,
+            user_content="parent",
+            cwd=str(session_workspace),
+            project_cwd=str(project_workspace),
+        )
+    )
+    source = writer.finalize(source, "success")
+    child = _agent_create(session.session_id, source, name="worker")
+    child.turn.cwd = str(session_workspace)
+    child.turn.project_cwd = str(project_workspace)
+    child = AgentThreadCreate(child.runtime, child.node, child.context, RuntimeState.from_dict(child.turn.to_dict()))
+    store.create_agent_thread(session.session_id, child)
+
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    try:
+        result = json.loads(
+            coordinator.invoke(
+                runtime,
+                "send_agent_message",
+                {
+                    "target_thread_path": "/root/worker",
+                    "subagent_task": "inspect files",
+                    "references": [{"path": str(session_file)}, {"path": str(project_file)}],
+                },
+            )
+        )
+        assert result == {"thread_path": "/root/worker", "thread_status": "running"}
+        envelope = queue.peek_thread(child.node.thread_id)
+        assert envelope is not None
+        assert envelope.references == ({"path": str(session_file)}, {"path": str(project_file)})
+
+        invalid_references = (
+            ({"path": "relative.txt"}, "absolute"),
+            ({"path": str(tmp_path / "missing.txt")}, "does not exist"),
+            ({"path": str(session_workspace)}, "not a file"),
+            ({"path": str(outside_file)}, "outside"),
+        )
+        for reference, message in invalid_references:
+            with pytest.raises(ToolError, match=message):
+                coordinator.invoke(
+                    runtime,
+                    "send_agent_message",
+                    {
+                        "target_thread_path": "/root/worker",
+                        "subagent_task": "invalid reference",
+                        "references": [reference],
+                    },
+                )
+
+        link = session_workspace / "escape.txt"
+        try:
+            link.symlink_to(outside_file)
+        except OSError:
+            link = None
+        if link is not None:
+            with pytest.raises(ToolError, match="outside"):
+                coordinator.invoke(
+                    runtime,
+                    "send_agent_message",
+                    {
+                        "target_thread_path": "/root/worker",
+                        "subagent_task": "symlink escape",
+                        "references": [{"path": str(link)}],
+                    },
+                )
+        with pytest.raises(ToolError, match="cannot send a message to itself"):
+            coordinator.invoke(
+                runtime,
+                "send_agent_message",
+                {"target_thread_path": "/root", "subagent_task": "self"},
+            )
+    finally:
+        registry.close_all(reason="test complete", timeout=5)
+        parent_runner.close()
+
+
+def test_status_control_transitions_are_direct_child_only_and_reuse_the_paused_turn(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("status control")
+    source = _finished_source(store, session.session_id)
+    tick_entered = Event()
+    tick_gate = Event()
+
+    def tick() -> str:
+        tick_entered.set()
+        assert tick_gate.wait(5), "test did not release the safe-boundary tool"
+        return "tick"
+
+    tick_tool = Tool(
+        "tick",
+        "Pause at a deterministic safe boundary.",
+        tick,
+        {"type": "object", "properties": {}, "additionalProperties": False},
+    )
+
+    class SpinningPlanner:
+        name = "spinning"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def decide(self, _runtime):
+            self.calls += 1
+            return AssistantMessage(
+                tool_messages=[ToolMessage(name="tick", call_id=f"tick_{self.calls}", arguments={})]
+            )
+
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(
+            SpinningPlanner(),
+            ToolRegistry([tick_tool]),
+            max_tool_calls=1_000,
+            job_registry=registry,
+        ),
+        tmp_path,
+    )
+    try:
+        coordinator.invoke(
+            runtime,
+            "delegate_tasks",
+            {
+                "subagent_path": "/root/worker",
+                "subagent_task": "spin",
+                "context_transfer_strategy": "independent",
+            },
+        )
+        assert tick_entered.wait(5), "Subagent did not enter its first tool boundary"
+        child_id = index.thread_for_path(session.session_id, session.session_id, "/root/worker")
+        assert child_id is not None
+        initial_turn_id = index.head_for_thread(child_id)
+        assert initial_turn_id is not None
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pausing = pool.submit(
+                coordinator.invoke,
+                runtime,
+                "set_thread_node_status",
+                {"target_thread_path": "/root/worker", "thread_status": "paused"},
+            )
+            deadline = monotonic() + 5
+            while monotonic() < deadline:
+                with coordinator._state_lock:
+                    if child_id in coordinator._status_controls:
+                        break
+                sleep(0.01)
+            else:
+                pytest.fail("pause control was not registered")
+            with pytest.raises(ToolError, match="pending status change"):
+                coordinator.invoke(
+                    runtime,
+                    "set_thread_node_status",
+                    {"target_thread_path": "/root/worker", "thread_status": "success"},
+                )
+            tick_gate.set()
+            assert json.loads(pausing.result(timeout=5)) == {
+                "thread_path": "/root/worker",
+                "thread_status": "paused",
+            }
+
+        assert index.head_for_thread(child_id) == initial_turn_id
+        with pytest.raises(ToolError, match="paused to paused"):
+            coordinator.invoke(
+                runtime,
+                "set_thread_node_status",
+                {"target_thread_path": "/root/worker", "thread_status": "paused"},
+            )
+
+        tick_gate.clear()
+        tick_entered.clear()
+        assert json.loads(
+            coordinator.invoke(
+                runtime,
+                "set_thread_node_status",
+                {"target_thread_path": "/root/worker", "thread_status": "running"},
+            )
+        ) == {"thread_path": "/root/worker", "thread_status": "running"}
+        assert index.head_for_thread(child_id) == initial_turn_id
+        assert tick_entered.wait(5), "resumed Subagent did not re-enter its tool boundary"
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pausing_again = pool.submit(
+                coordinator.invoke,
+                runtime,
+                "set_thread_node_status",
+                {"target_thread_path": "/root/worker", "thread_status": "paused"},
+            )
+            deadline = monotonic() + 5
+            while monotonic() < deadline:
+                with coordinator._state_lock:
+                    if child_id in coordinator._status_controls:
+                        break
+                sleep(0.01)
+            else:
+                pytest.fail("second pause control was not registered")
+            tick_gate.set()
+            assert json.loads(pausing_again.result(timeout=5))["thread_status"] == "paused"
+
+        tick_gate.clear()
+        tick_entered.clear()
+        assert json.loads(
+            coordinator.invoke(
+                runtime,
+                "send_agent_message",
+                {"target_thread_path": "/root/worker", "subagent_task": "resume with task"},
+            )
+        ) == {"thread_path": "/root/worker", "thread_status": "running"}
+        assert index.head_for_thread(child_id) == initial_turn_id
+        assert tick_entered.wait(5), "message-resumed Subagent did not reach a safe boundary"
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            completing = pool.submit(
+                coordinator.invoke,
+                runtime,
+                "set_thread_node_status",
+                {"target_thread_path": "/root/worker", "thread_status": "success"},
+            )
+            deadline = monotonic() + 5
+            while monotonic() < deadline:
+                with coordinator._state_lock:
+                    if child_id in coordinator._status_controls:
+                        break
+                sleep(0.01)
+            else:
+                pytest.fail("success control was not registered")
+            tick_gate.set()
+            assert json.loads(completing.result(timeout=5)) == {
+                "thread_path": "/root/worker",
+                "thread_status": "success",
+            }
+
+        assert index.head_for_thread(child_id) == initial_turn_id
+        final_turn = store.get_node(session.session_id, initial_turn_id)
+        assert isinstance(final_turn, RuntimeState)
+        assert any(
+            item.get("type") == "text" and item.get("text") == "resume with task"
+            for message in final_turn.data[final_turn.current_data_idx]
+            if message.get("role") == "user"
+            for item in message.get("content", [])
+        )
+        with pytest.raises(ToolError, match="success to running"):
+            coordinator.invoke(
+                runtime,
+                "set_thread_node_status",
+                {"target_thread_path": "/root/worker", "thread_status": "running"},
+            )
+    finally:
+        tick_gate.set()
+        registry.close_all(reason="test complete", timeout=5)
+        parent_runner.close()
+
+
+def test_running_status_control_timeout_revokes_unclaimed_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("status timeout")
+    source = _finished_source(store, session.session_id)
+    child = _agent_create(session.session_id, source, name="worker")
+    store.create_agent_thread(session.session_id, child)
+
+    class ImmediateTimeoutEvent:
+        def wait(self, _timeout: float | None = None) -> bool:
+            return False
+
+        def set(self) -> None:
+            return None
+
+    monkeypatch.setattr("backend.runtime.subagents.Event", ImmediateTimeoutEvent)
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    try:
+        with pytest.raises(ToolError, match="request was revoked and current status is running"):
+            coordinator.invoke(
+                runtime,
+                "set_thread_node_status",
+                {"target_thread_path": "/root/worker", "thread_status": "paused"},
+            )
+        assert coordinator._status_controls == {}
+        current = store.get_thread_node(session.session_id, child.node.thread_id)
+        assert current is not None and current.thread_status == "running"
+    finally:
+        registry.close_all(reason="test complete", timeout=5)
+        parent_runner.close()
+
+
+def test_running_message_uses_steering_without_creating_another_turn(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("running steering")
+    source = _finished_source(store, session.session_id)
+    tool_entered = Event()
+    release_tool = Event()
+    saw_message = Event()
+
+    def hold() -> str:
+        tool_entered.set()
+        assert release_tool.wait(5)
+        return "held"
+
+    hold_tool = Tool(
+        "hold",
+        "Hold the first model cycle while a steering message arrives.",
+        hold,
+        {"type": "object", "properties": {}, "additionalProperties": False},
+    )
+
+    class SteeringPlanner:
+        name = "steering"
+
+        def decide(self, child_runtime):
+            messages = [str(message.content or "") for message in child_runtime.model_messages()]
+            if any("steered task" in message for message in messages):
+                saw_message.set()
+                return AssistantMessage(content="handled steering")
+            return AssistantMessage(tool_messages=[ToolMessage(name="hold", call_id="hold_once", arguments={})])
+
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(SteeringPlanner(), ToolRegistry([hold_tool]), job_registry=registry),
+        tmp_path,
+    )
+    try:
+        coordinator.invoke(
+            runtime,
+            "delegate_tasks",
+            {
+                "subagent_path": "/root/worker",
+                "subagent_task": "wait",
+                "context_transfer_strategy": "independent",
+            },
+        )
+        assert tool_entered.wait(5)
+        child_id = index.thread_for_path(session.session_id, session.session_id, "/root/worker")
+        assert child_id is not None
+        turn_id = index.head_for_thread(child_id)
+        assert turn_id is not None
+        assert json.loads(
+            coordinator.invoke(
+                runtime,
+                "send_agent_message",
+                {"target_thread_path": "/root/worker", "subagent_task": "steered task"},
+            )
+        ) == {"thread_path": "/root/worker", "thread_status": "running"}
+        release_tool.set()
+        assert saw_message.wait(5), "running Agent did not consume its explicit steering message"
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            node = store.get_thread_node(session.session_id, child_id)
+            if node is not None and node.thread_status == "success":
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("steered Agent did not finish")
+        assert index.head_for_thread(child_id) == turn_id
+        assert queue.peek_thread(child_id) is None
+    finally:
+        release_tool.set()
+        registry.close_all(reason="test complete", timeout=5)
+        parent_runner.close()
+
+
+def test_failed_result_retry_and_success_without_text(tmp_path: Path) -> None:
+    index = AgentThreadIndex()
+    store = SQLiteSessionStore(ClientPaths(tmp_path / "data"), index)
+    queue = MemoryMessageQueue()
+    registry = JobRegistry()
+    session = store.create_session("results")
+    source = _finished_source(store, session.session_id)
+
+    class ResultPlanner:
+        name = "results"
+
+        def decide(self, child_runtime):
+            if child_runtime.run.task == "fail naturally":
+                raise RuntimeError("natural failure detail")
+            if child_runtime.run.task == "no text":
+                return AssistantMessage(content="")
+            return AssistantMessage(content=f"recovered:{child_runtime.run.task}")
+
+    parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
+    runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
+    runtime.run.thread_id = session.session_id
+    runtime.run.turn_id = source.id
+    runtime.services.runtime_node_context = lambda: [source]
+    coordinator = SubagentCoordinator(
+        settings=SubagentSettings(max_workers=2),
+        store=store,
+        message_queue=queue,
+        index=index,
+        job_registry=registry,
+    )
+    coordinator.bind_session(
+        session.session_id,
+        lambda: AgentRunner(ResultPlanner(), ToolRegistry(), job_registry=registry),
+        tmp_path,
+    )
+    try:
+        for path, task in (("/root/failing", "fail naturally"), ("/root/empty", "no text")):
+            coordinator.invoke(
+                runtime,
+                "delegate_tasks",
+                {
+                    "subagent_path": path,
+                    "subagent_task": task,
+                    "context_transfer_strategy": "independent",
+                },
+            )
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            nodes = store.list_descendant_thread_nodes(session.session_id, session.session_id)
+            if len(nodes) == 2 and all(node.thread_status != "running" for node in nodes):
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("result Agents did not settle")
+
+        listed = json.loads(coordinator.invoke(runtime, "get_thread_node", {}))
+        by_path = {item["thread_path"]: item for item in listed}
+        failed = by_path["/root/failing"]
+        assert failed["thread_status"] == "failed"
+        assert failed["task_result"].startswith("natural failure detail\n\n")
+        assert failed["task_result"].endswith(
+            "This agent's turn failed. If you still need this agent, use the send_agent_message tool to give it another task."
+        )
+        assert by_path["/root/empty"] == {
+            "thread_path": "/root/empty",
+            "thread_status": "success",
+            "task_result": "",
+        }
+
+        failing_id = index.thread_for_path(session.session_id, session.session_id, "/root/failing")
+        assert failing_id is not None
+        failed_turn_id = index.head_for_thread(failing_id)
+        retry = json.loads(
+            coordinator.invoke(
+                runtime,
+                "send_agent_message",
+                {"target_thread_path": "/root/failing", "subagent_task": "retry task"},
+            )
+        )
+        assert set(retry) == {"thread_path", "thread_status"}
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            node = store.get_thread_node(session.session_id, failing_id)
+            if node is not None and node.thread_status == "success":
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("failed Agent retry did not finish")
+        assert index.head_for_thread(failing_id) != failed_turn_id
+    finally:
+        registry.close_all(reason="test complete", timeout=5)
+        parent_runner.close()

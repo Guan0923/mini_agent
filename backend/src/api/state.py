@@ -26,6 +26,7 @@ from backend.storage.projects import ProjectStore
 from backend.storage.settings import LocalSettingsStore
 from backend.tools.terminal import available_terminal_executables, effective_terminal_type
 
+from .agent_report_projection import project_frame
 from .agent_thread_stream import AgentThreadEventHub
 
 DEFAULT_DATA_ROOT = Path.home() / ".mini_agent"
@@ -76,11 +77,13 @@ class WebAppState:
         self.active_turn_streams: dict[str, object] = {}
         self.active_turn_streams_lock = RLock()
         self.active_runtime_config_locks: dict[str, RLock] = {}
-        self.agent_thread_events = AgentThreadEventHub()
-        self._reconcile_message_queue()
         from backend.storage.sqlite import SQLiteSessionStore
 
         agent_store = SQLiteSessionStore(self.paths, self.agent_thread_index)
+        self.agent_thread_events = AgentThreadEventHub(
+            lambda frame, current: project_frame(agent_store, frame, current)
+        )
+        self._reconcile_message_queue()
         self.agent_thread_index.rebuild(agent_store)
         self.subagent_coordinator = SubagentCoordinator(
             settings=SubagentSettings.from_config(self.settings.config_store.read()),
@@ -95,9 +98,9 @@ class WebAppState:
     def _delivery_in_node(node: RuntimeState, delivery_id: str) -> bool:
         return any(
             message.get("delivery_id") == delivery_id
+            or any(item.get("delivery_id") == delivery_id for item in message.get("content", []))
             for version in node.data
             for message in version
-            if message.get("role") == "user"
         )
 
     @staticmethod
@@ -185,7 +188,7 @@ class WebAppState:
         released_turns: set[str] = set()
         for claimed in pending:
             envelope = claimed.envelope
-            if envelope.target_kind == "thread":
+            if envelope.target_kind in {"thread", "report"}:
                 continue
             node = store.find_node(envelope.target_id)
             sqlite_persisted = store.has_turn_delivery(envelope.session_id, envelope.delivery_id)
@@ -313,6 +316,7 @@ class WebAppState:
         return {"runtime": self.settings.runtime_config()}
 
     def close(self) -> None:
+        self.subagent_coordinator.close()
         self.job_registry.close_all(reason="web application closed", timeout=5.0)
         self.agent_thread_events.close()
         self.terminal_manager.close_all()

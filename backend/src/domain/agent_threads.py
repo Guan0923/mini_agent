@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 ThreadOrigin = Literal["main", "fork", "subagent"]
-ThreadStatus = Literal["opening", "closed"]
+ThreadStatus = Literal["running", "success", "paused", "failed"]
 ContextStrategy = Literal["share", "compaction_share", "independent"]
 
 
@@ -39,7 +39,6 @@ class ThreadNode:
     root_thread_id: str
     parent_thread_id: str | None
     thread_path: str
-    thread_task: str
     thread_status: ThreadStatus
     depth: int
     created_at: str
@@ -50,8 +49,8 @@ class ThreadNode:
             raise ValueError("ThreadNode identifiers are required.")
         if not self.thread_path.startswith("/root"):
             raise ValueError("thread_path must start with /root.")
-        if self.thread_status not in {"opening", "closed"}:
-            raise ValueError("thread_status must be opening or closed.")
+        if self.thread_status not in {"running", "success", "paused", "failed"}:
+            raise ValueError("thread_status must match the current Turn status.")
         if isinstance(self.depth, bool) or self.depth < 0:
             raise ValueError("ThreadNode depth must be non-negative.")
         if self.depth == 0 and (self.root_thread_id != self.thread_id or self.parent_thread_id is not None):
@@ -63,9 +62,9 @@ class ThreadNode:
         return {
             "session_id": self.session_id,
             "thread_id": self.thread_id,
+            "root_thread_id": self.root_thread_id,
             "parent_thread_id": self.parent_thread_id,
             "thread_path": self.thread_path,
-            "thread_task": self.thread_task,
             "thread_status": self.thread_status,
             "depth": self.depth,
             "created_at": self.created_at,

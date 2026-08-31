@@ -20,6 +20,7 @@ from backend.storage.message_queue import RedisAgentMailbox
 from backend.storage.settings.crypto import SecretDecryptionError
 
 from ..active_turn_stream import ActiveTurnStream
+from ..agent_report_projection import project_frame
 from ..pause_control import TurnPauseController
 from ..session_store import session_store as _store
 from ..state import WebAppState
@@ -114,7 +115,11 @@ def _stream(
     if not hasattr(active_turn_streams_lock, "__enter__"):
         active_turn_streams_lock = threading.RLock()
         setattr(state, "active_turn_streams_lock", active_turn_streams_lock)
-    active_stream = ActiveTurnStream(turn_id)
+    stream_store = _store(state)
+    active_stream = ActiveTurnStream(
+        turn_id,
+        lambda frame, current: project_frame(stream_store, frame, current),
+    )
     active_stream_aliases: set[str] = {turn_id}
     with active_turn_streams_lock:
         active_turn_streams[turn_id] = active_stream

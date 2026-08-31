@@ -115,6 +115,13 @@ class SQLiteNodeMixin:
                 origin_kind="main" if node.thread_id == node.session_id else "fork",
                 timestamp=node.timestamp,
             )
+            if node.thread_id == node.session_id or node.thread_id != parent.thread_id:
+                self._ensure_agent_tree_root_record(
+                    connection,
+                    session_id=node.session_id,
+                    thread_id=node.thread_id,
+                    timestamp=node.timestamp,
+                )
             self._claim_thread_turn(
                 connection,
                 session_id=node.session_id,
@@ -123,11 +130,6 @@ class SQLiteNodeMixin:
                 timestamp=node.timestamp,
             )
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
-            if node.thread_id == node.session_id:
-                connection.execute(
-                    "UPDATE thread_nodes SET thread_task=?,updated_at=? WHERE thread_id=? AND thread_task=''",
-                    (str(node.user_message["content"][0].get("text") or ""), node.timestamp, node.thread_id),
-                )
             self._touch_session(connection, node.session_id, node.timestamp)
 
     def update_node(self, node: TreeRuntimeState) -> None:
@@ -185,6 +187,13 @@ class SQLiteNodeMixin:
                     origin_kind="main" if node.thread_id == node.session_id else "fork",
                     timestamp=node.timestamp,
                 )
+                if node.thread_id == node.session_id or node.parent_thread_id != node.thread_id:
+                    self._ensure_agent_tree_root_record(
+                        connection,
+                        session_id=node.session_id,
+                        thread_id=node.thread_id,
+                        timestamp=node.timestamp,
+                    )
                 self._put_json_object(connection, session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
                 self._set_thread_head(
                     connection,
@@ -328,13 +337,46 @@ class SQLiteNodeMixin:
                 turn_id=node.id,
                 timestamp=utc_iso(),
             )
-            content = node.data[node.current_data_idx][1]["content"]
+            content = next(
+                message["content"]
+                for message in reversed(node.data[node.current_data_idx])
+                if message.get("role") == "assistant"
+            )
             if content and content[-1].get("type") == "error" and bool(content[-1].get("retryable")):
                 content.pop()
             node.status = "running"
             node = TreeRuntimeState.from_dict(node.to_dict())
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), utc_iso())
             self._touch_session(connection, node.session_id, utc_iso())
+        return node
+
+    def complete_paused_turn(self, turn_id: str) -> TreeRuntimeState:
+        """Seal a paused Turn as success without creating another Turn."""
+
+        node = _require_runtime_turn(self.find_node(turn_id), turn_id)
+        if node.status != "paused":
+            raise ValueError("Only a paused Turn can be marked successful.")
+        content = node.data[node.current_data_idx][-1]["content"]
+        if content and content[-1].get("type") == "error" and bool(content[-1].get("retryable")):
+            content.pop()
+        node.status = "success"
+        node.timestamp = utc_iso()
+        node = TreeRuntimeState.from_dict(node.to_dict())
+        with self._connection(node.session_id) as connection:
+            self._assert_writable(connection)
+            current = self._json_object(connection, node.session_id, "runtime_node", node.id)
+            if current is None or str(current.get("status")) != "paused":
+                raise ValueError("The paused Turn changed before it could be marked successful.")
+            self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+            self._set_thread_head(
+                connection,
+                session_id=node.session_id,
+                thread_id=node.thread_id,
+                turn_id=node.id,
+                timestamp=node.timestamp,
+                clear_running=True,
+            )
+            self._touch_session(connection, node.session_id, node.timestamp)
         return node
 
     def settle_indeterminate_tool_calls(self, turn_id: str) -> TreeRuntimeState:

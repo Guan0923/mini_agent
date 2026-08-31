@@ -1224,8 +1224,8 @@ describe("ChatPage Agent Thread navigation", () => {
         ? [{
             thread_id: "thread-child-agent",
             thread_path: "/root/worker",
-            thread_task: "child task",
-            thread_status: "opening",
+            thread_status: "running",
+            task_result: "child task",
           }]
         : []
     ));
@@ -1248,7 +1248,7 @@ describe("ChatPage Agent Thread navigation", () => {
     const tree = await screen.findByRole("tree", { name: "Agent Thread 树" });
     const root = within(tree).getByText("root").closest('[role="treeitem"]')!;
     fireEvent.click(root.querySelector(".ant-tree-switcher")!);
-    await user.click(await within(tree).findByText("worker · opening"));
+    await user.click(await within(tree).findByText("/root/worker · running"));
     await waitFor(() => expect(streamAgentThread).toHaveBeenCalledTimes(1));
   }
 

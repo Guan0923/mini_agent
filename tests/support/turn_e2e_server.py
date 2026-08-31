@@ -327,9 +327,34 @@ APPROVED_PLAN_TASK = f"<approved_plan>\n{PLAN_REVIEW_MARKDOWN}\n</approved_plan>
 ORDERED_REASONING = "推理内容持续更新并保持右侧最新字符可见。" * 12
 
 
-def _received_subagent_result(runtime) -> bool:
+def _agent_succeeded(runtime, thread_path: str) -> bool:
+    for message in runtime.model_messages():
+        if not isinstance(message, AssistantMessage):
+            continue
+        for tool_message in message.tool_messages:
+            if tool_message.name != "get_thread_node" or not tool_message.content:
+                continue
+            try:
+                nodes = json.loads(tool_message.content)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(nodes, list) and any(
+                isinstance(node, dict)
+                and node.get("thread_path") == thread_path
+                and node.get("thread_status") == "success"
+                for node in nodes
+            ):
+                return True
+    return False
+
+
+def _agent_reported(runtime, thread_path: str) -> bool:
+    prefix = f"thread_path: {thread_path}\nthread_status: success\n"
     return any(
-        '"type": "subagent_initial_result"' in str(message.content or "") for message in runtime.model_messages()
+        isinstance(message, AssistantMessage)
+        and message.name == "subagent_report"
+        and message.content.startswith(prefix)
+        for message in runtime.model_messages()
     )
 
 
@@ -353,22 +378,20 @@ class AgentThreadE2EPlanner:
                         name="delegate_tasks",
                         call_id="delegate_nested_e2e",
                         arguments={
-                            "subagent_count": 1,
-                            "subagent_name": ["nested"],
-                            "subagent_tasks": [AGENT_THREAD_NESTED_TASK],
-                            "context_transfer_strategy": ["independent"],
+                            "subagent_path": "/root/direct/nested",
+                            "subagent_task": AGENT_THREAD_NESTED_TASK,
+                            "context_transfer_strategy": "independent",
                         },
                     )
                 ]
             )
-        if _received_subagent_result(runtime):
-            return AssistantMessage(content="Direct Agent received the nested result.")
-        sleep(0.05)
+        if _agent_reported(runtime, "/root/direct/nested"):
+            return AssistantMessage(content="Direct Agent observed the nested result.")
         return AssistantMessage(
             tool_messages=[
                 ToolMessage(
-                    name="list_current_node_sub_thread",
-                    call_id=f"wait_nested_e2e_{runtime.run.model_turns}",
+                    name="pause_current_turn",
+                    call_id=f"pause_for_nested_e2e_{runtime.run.model_turns}",
                     arguments={},
                 )
             ]
@@ -421,21 +444,20 @@ class CooperativePausePlanner(LLMPlanner):
                             name="delegate_tasks",
                             call_id="delegate_direct_e2e",
                             arguments={
-                                "subagent_count": 1,
-                                "subagent_name": ["direct"],
-                                "subagent_tasks": [AGENT_THREAD_DIRECT_TASK],
-                                "context_transfer_strategy": ["independent"],
+                                "subagent_path": "/root/direct",
+                                "subagent_task": AGENT_THREAD_DIRECT_TASK,
+                                "context_transfer_strategy": "independent",
                             },
                         )
                     ]
                 )
-            if _received_subagent_result(runtime):
+            if _agent_succeeded(runtime, "/root/direct"):
                 return AssistantMessage(content="Agent Thread tree is ready.")
             sleep(0.05)
             return AssistantMessage(
                 tool_messages=[
                     ToolMessage(
-                        name="list_current_node_sub_thread",
+                        name="get_thread_node",
                         call_id=f"wait_direct_e2e_{runtime.run.model_turns}",
                         arguments={},
                     )

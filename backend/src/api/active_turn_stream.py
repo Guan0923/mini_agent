@@ -6,7 +6,7 @@ import asyncio
 import html
 import json
 import queue
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from threading import RLock
 
@@ -57,8 +57,13 @@ class ActiveTurnSubscription:
 class ActiveTurnStream:
     """Broadcast one runtime's frames while rebasing each late subscriber."""
 
-    def __init__(self, turn_id: str) -> None:
+    def __init__(
+        self,
+        turn_id: str,
+        frame_projector: Callable[[NodeFrame, RuntimeState], dict[str, object]] | None = None,
+    ) -> None:
         self.turn_id = turn_id
+        self._frame_projector = frame_projector or (lambda frame, _current: frame.to_dict())
         self._lock = RLock()
         self._next_token = 0
         self._subscriptions: dict[int, ActiveTurnSubscription] = {}
@@ -75,7 +80,8 @@ class ActiveTurnStream:
             matching = [(key, node) for key, node in self._latest_nodes.items() if key[1] == turn_id]
             if matching:
                 key, node = matching[-1]
-                subscription.events.put(NodeFrame.snapshot(node).to_dict())
+                snapshot = NodeFrame.snapshot(node)
+                subscription.events.put(self._frame_projector(snapshot, node))
                 subscription.source_bases[key] = self._source_revisions[key]
             if self._terminal is not None:
                 subscription.events.put({**self._terminal, "terminal_id": turn_id})
@@ -94,27 +100,28 @@ class ActiveTurnStream:
             self._source_revisions[key] = frame.revision
             for subscription in self._subscriptions.values():
                 if frame.type == "turn.snapshot":
-                    subscription.events.put(NodeFrame.snapshot(current).to_dict())
+                    snapshot = NodeFrame.snapshot(current)
+                    subscription.events.put(self._frame_projector(snapshot, current))
                     subscription.source_bases[key] = frame.revision
                     continue
                 base = subscription.source_bases.get(key)
                 if base is None:
-                    subscription.events.put(NodeFrame.snapshot(current).to_dict())
+                    snapshot = NodeFrame.snapshot(current)
+                    subscription.events.put(self._frame_projector(snapshot, current))
                     subscription.source_bases[key] = frame.revision
                     continue
                 local_revision = frame.revision - base
                 if local_revision <= 0:
                     continue
-                subscription.events.put(
-                    NodeFrame(
-                        "turn.delta",
-                        frame.session_id,
-                        frame.turn_id,
-                        local_revision,
-                        patch=frame.patch,
-                        operations=frame.operations,
-                    ).to_dict()
+                local_frame = NodeFrame(
+                    "turn.delta",
+                    frame.session_id,
+                    frame.turn_id,
+                    local_revision,
+                    patch=frame.patch,
+                    operations=frame.operations,
                 )
+                subscription.events.put(self._frame_projector(local_frame, current))
 
     def publish_terminal(self, terminal_type: str, terminal_id: str, message: str = "") -> None:
         terminal = {

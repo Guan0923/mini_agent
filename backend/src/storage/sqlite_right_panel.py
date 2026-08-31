@@ -111,6 +111,12 @@ class SQLiteRightPanelMixin:
                 origin_kind="fork",
                 timestamp=anchor.timestamp,
             )
+            self._ensure_agent_tree_root_record(
+                connection,
+                session_id=anchor.session_id,
+                thread_id=anchor.thread_id,
+                timestamp=anchor.timestamp,
+            )
             self._put_json_object(
                 connection,
                 anchor.session_id,

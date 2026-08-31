@@ -401,6 +401,38 @@ def test_root_and_turn_shapes_are_strict() -> None:
         RuntimeState.from_dict(legacy_tool_status)
 
 
+def test_turn_allows_consecutive_assistant_messages_but_rejects_other_role_violations() -> None:
+    turn = make_turn().to_dict()
+    turn["data"][0].append(
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "subagent",
+                    "event": "agent_report",
+                    "status": "success",
+                    "text": "thread_path: /root/worker\nthread_status: success\ntask_result: 完成",
+                    "delivery_id": "agent_report_1",
+                }
+            ],
+        }
+    )
+    assert RuntimeState.from_dict(turn).data[0][-1]["role"] == "assistant"
+
+    first_assistant = make_turn().to_dict()
+    first_assistant["data"][0][0]["role"] = "assistant"
+    with pytest.raises(RuntimeStateValidationError, match="role must be user"):
+        RuntimeState.from_dict(first_assistant)
+
+    consecutive_user = make_turn().to_dict()
+    consecutive_user["data"][0].insert(
+        1,
+        {"role": "user", "content": [{"type": "text", "text": "again", "status": "success"}]},
+    )
+    with pytest.raises(RuntimeStateValidationError, match="Consecutive user"):
+        RuntimeState.from_dict(consecutive_user)
+
+
 def test_turn_workspace_paths_round_trip_persist_fork_and_compact(tmp_path: Path) -> None:
     session_workspace = (tmp_path / "session-workspace").resolve()
     project_workspace = (tmp_path / "project-workspace").resolve()
@@ -1107,8 +1139,8 @@ def test_missing_ancestor_and_bad_version_index_are_rejected() -> None:
         RuntimeStateTree([root, first, RuntimeState.from_dict(cross_session)]).ancestors(("session_2", "turn_2"))
 
 
-@pytest.mark.parametrize("schema_version", [9, 10, 11, 12])
-def test_pre_v13_database_is_rejected_without_migration_or_deletion(tmp_path: Path, schema_version: int) -> None:
+@pytest.mark.parametrize("schema_version", [9, 10, 11, 12, 13, 14, 15])
+def test_legacy_database_is_rejected_without_migration_or_deletion(tmp_path: Path, schema_version: int) -> None:
     path = tmp_path / f"v{schema_version}.db"
     connection = sqlite3.connect(path)
     connection.executescript(SCHEMA)
@@ -1118,10 +1150,12 @@ def test_pre_v13_database_is_rejected_without_migration_or_deletion(tmp_path: Pa
         (schema_version,),
     )
     connection.commit()
-    with pytest.raises(RuntimeError, match="requires v13"):
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="requires v16"):
         SQLiteSchemaMixin._assert_supported_schema(connection)
     assert path.exists()
     connection.close()
+    assert path.read_bytes() == before
 
 
 def test_pause_targets_only_the_requested_turn_in_parallel_threads(tmp_path: Path) -> None:

@@ -16,16 +16,16 @@ describe("AgentThreadPicker", () => {
         return [{
           thread_id: "thread_child",
           thread_path: "/root/worker",
-          thread_task: "direct task",
-          thread_status: "opening",
+          thread_status: "running",
+          task_result: "direct result",
         }];
       }
       if (threadId === "thread_child") {
         return [{
           thread_id: "thread_grandchild",
           thread_path: "/root/worker/nested",
-          thread_task: "nested task",
-          thread_status: "opening",
+          thread_status: "success",
+          task_result: "nested result",
         }];
       }
       return [];
@@ -54,12 +54,15 @@ describe("AgentThreadPicker", () => {
 
     await waitFor(() => expect(api.listAgentThreadChildren).toHaveBeenCalledWith("session_1", "session_1"));
     expect(api.listAgentThreadChildren).toHaveBeenCalledTimes(1);
-    const child = (await within(tree).findByText("worker · opening")).closest('[role="treeitem"]')!;
+    const childLabel = await within(tree).findByText("/root/worker · running");
+    await user.hover(childLabel);
+    expect(await screen.findByText("direct result")).toBeInTheDocument();
+    const child = childLabel.closest('[role="treeitem"]')!;
     fireEvent.click(child.querySelector(".ant-tree-switcher")!);
 
     await waitFor(() => expect(api.listAgentThreadChildren).toHaveBeenCalledWith("session_1", "thread_child"));
     expect(api.listAgentThreadChildren).toHaveBeenCalledTimes(2);
-    await user.click(await within(tree).findByText("nested · opening"));
+    await user.click(await within(tree).findByText("/root/worker/nested · success"));
     expect(onSelect).toHaveBeenCalledWith("thread_grandchild");
   });
 
@@ -80,7 +83,7 @@ describe("AgentThreadPicker", () => {
     await user.click(screen.getByRole("button", { name: "Thread" }));
     let tree = await screen.findByRole("tree", { name: "Agent Thread 树" });
     fireEvent.click(within(tree).getByText("root").closest('[role="treeitem"]')!.querySelector(".ant-tree-switcher")!);
-    expect(await within(tree).findByText("worker · opening")).toBeInTheDocument();
+    expect(await within(tree).findByText("/root/worker · running")).toBeInTheDocument();
 
     rerender(
       <AntApp>
@@ -97,7 +100,7 @@ describe("AgentThreadPicker", () => {
     const previousTree = tree;
     await waitFor(() => expect(screen.getByRole("tree", { name: "Agent Thread 树" })).not.toBe(previousTree));
     tree = screen.getByRole("tree", { name: "Agent Thread 树" });
-    await waitFor(() => expect(within(tree).queryByText("worker · opening")).not.toBeInTheDocument());
+    await waitFor(() => expect(within(tree).queryByText("/root/worker · running")).not.toBeInTheDocument());
     fireEvent.click(within(tree).getByText("root").closest('[role="treeitem"]')!.querySelector(".ant-tree-switcher")!);
     await waitFor(() => expect(api.listAgentThreadChildren).toHaveBeenCalledWith("session_1", "thread_fork"));
   });
@@ -109,8 +112,8 @@ describe("AgentThreadPicker", () => {
       .mockResolvedValueOnce([{
         thread_id: "thread_child",
         thread_path: "/root/worker",
-        thread_task: "direct task",
-        thread_status: "opening",
+        thread_status: "paused",
+        task_result: "paused result",
       }]);
     const { rerender } = render(
       <AntApp>
@@ -128,7 +131,7 @@ describe("AgentThreadPicker", () => {
     let tree = await screen.findByRole("tree", { name: "Agent Thread 树" });
     fireEvent.click(within(tree).getByText("root").closest('[role="treeitem"]')!.querySelector(".ant-tree-switcher")!);
     await waitFor(() => expect(api.listAgentThreadChildren).toHaveBeenCalledTimes(1));
-    expect(within(tree).queryByText("worker · opening")).not.toBeInTheDocument();
+    expect(within(tree).queryByText("/root/worker · paused")).not.toBeInTheDocument();
 
     rerender(
       <AntApp>
@@ -149,6 +152,6 @@ describe("AgentThreadPicker", () => {
     fireEvent.click(within(tree).getByText("root").closest('[role="treeitem"]')!.querySelector(".ant-tree-switcher")!);
 
     await waitFor(() => expect(api.listAgentThreadChildren).toHaveBeenCalledTimes(2));
-    expect(await within(tree).findByText("worker · opening")).toBeInTheDocument();
+    expect(await within(tree).findByText("/root/worker · paused")).toBeInTheDocument();
   });
 });

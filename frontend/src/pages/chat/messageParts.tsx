@@ -361,6 +361,13 @@ function OrderedAssistantItems({
         if (item.type === "error") {
           return <Alert key={identity} className="error-text" type="error" showIcon title={`⚠️ ${String(item.message ?? "Execution failed.")}`} />;
         }
+        if (item.type === "subagent" && item.event === "agent_report") {
+          const value = String(item.text ?? "");
+          const failed = item.report_status === "failed";
+          return value ? (
+            <div className={`runtime-agent-report${failed ? " failed" : ""}`} data-item-type="subagent" data-report-status={failed ? "failed" : "success"} key={identity}>{value}</div>
+          ) : null;
+        }
         const decision = msg.decision;
         if (decision && (item.type === "approval" || item.type === "question") && decision.decision_id === item.decision_id) {
           return (

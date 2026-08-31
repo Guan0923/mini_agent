@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 from backend.domain import RuntimeThread, ThreadContext, ThreadNode
@@ -18,9 +18,89 @@ class AgentThreadCreate:
     node: ThreadNode
     context: ThreadContext
     turn: RuntimeState | None = None
+    report_recipient_thread_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTurnReport:
+    session_id: str
+    turn_id: str
+    agent_thread_id: str
+    recipient_thread_id: str
+    thread_status: str | None
+    reply_content: str
+    delivery_id: str
+    state: str
+    created_at: str
+    updated_at: str
+
+
+_THREAD_NODE_SELECT = (
+    "SELECT node.session_id,node.thread_id,node.root_thread_id,node.parent_thread_id,node.thread_path,"
+    "node.depth,node.created_at,runtime.updated_at AS updated_at,"
+    "json_extract(turn.payload_json,'$.status') AS thread_status "
+    "FROM thread_nodes AS node "
+    "JOIN runtime_threads AS runtime ON runtime.thread_id=node.thread_id "
+    "JOIN json_objects AS turn ON turn.session_id=node.session_id "
+    "AND turn.namespace='runtime_node' AND turn.object_id=runtime.current_turn_id "
+)
 
 
 class SQLiteAgentThreadMixin:
+    @staticmethod
+    def _agent_turn_report(row: sqlite3.Row) -> AgentTurnReport:
+        return AgentTurnReport(
+            session_id=str(row["session_id"]),
+            turn_id=str(row["turn_id"]),
+            agent_thread_id=str(row["agent_thread_id"]),
+            recipient_thread_id=str(row["recipient_thread_id"]),
+            thread_status=str(row["thread_status"]) if row["thread_status"] is not None else None,
+            reply_content=str(row["reply_content"]),
+            delivery_id=str(row["delivery_id"]),
+            state=str(row["state"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _report_delivery_id(turn_id: str, recipient_thread_id: str) -> str:
+        digest = hashlib.sha256(f"{turn_id}\0{recipient_thread_id}".encode()).hexdigest()
+        return f"agent_report_{digest}"
+
+    @classmethod
+    def _insert_agent_turn_report(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        turn_id: str,
+        agent_thread_id: str,
+        recipient_thread_id: str,
+        timestamp: str,
+    ) -> None:
+        if agent_thread_id == recipient_thread_id:
+            raise ValueError("An Agent cannot register itself as a report recipient.")
+        recipient = connection.execute(
+            "SELECT 1 FROM runtime_threads WHERE session_id=? AND thread_id=?",
+            (session_id, recipient_thread_id),
+        ).fetchone()
+        if recipient is None:
+            raise ValueError("The report recipient is not a Thread in this Session.")
+        connection.execute(
+            "INSERT INTO agent_turn_reports(session_id,turn_id,agent_thread_id,recipient_thread_id,"
+            "thread_status,reply_content,delivery_id,state,created_at,updated_at) "
+            "VALUES (?,?,?,?,NULL,'',?,'waiting',?,?) ON CONFLICT(turn_id,recipient_thread_id) DO NOTHING",
+            (
+                session_id,
+                turn_id,
+                agent_thread_id,
+                recipient_thread_id,
+                cls._report_delivery_id(turn_id, recipient_thread_id),
+                timestamp,
+                timestamp,
+            ),
+        )
+
     @staticmethod
     def _runtime_thread(row: sqlite3.Row | None) -> RuntimeThread | None:
         if row is None:
@@ -45,7 +125,6 @@ class SQLiteAgentThreadMixin:
             root_thread_id=str(row["root_thread_id"]),
             parent_thread_id=str(row["parent_thread_id"]) if row["parent_thread_id"] is not None else None,
             thread_path=str(row["thread_path"]),
-            thread_task=str(row["thread_task"]),
             thread_status=str(row["thread_status"]),  # type: ignore[arg-type]
             depth=int(row["depth"]),
             created_at=str(row["created_at"]),
@@ -86,16 +165,14 @@ class SQLiteAgentThreadMixin:
     @staticmethod
     def _insert_thread_node(connection: sqlite3.Connection, item: ThreadNode) -> None:
         connection.execute(
-            "INSERT INTO thread_nodes(session_id,thread_id,root_thread_id,parent_thread_id,thread_path,thread_task,thread_status,depth,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO thread_nodes(session_id,thread_id,root_thread_id,parent_thread_id,thread_path,depth,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (
                 item.session_id,
                 item.thread_id,
                 item.root_thread_id,
                 item.parent_thread_id,
                 item.thread_path,
-                item.thread_task,
-                item.thread_status,
                 item.depth,
                 item.created_at,
                 item.updated_at,
@@ -120,58 +197,69 @@ class SQLiteAgentThreadMixin:
             ),
         )
 
-    def create_agent_threads(self, session_id: str, items: Sequence[AgentThreadCreate]) -> list[ThreadNode]:
-        if not items:
-            return []
-        if any(item.runtime.session_id != session_id or item.node.session_id != session_id for item in items):
-            raise ValueError("Agent Thread batch must belong to one Session.")
+    def create_agent_thread(self, session_id: str, item: AgentThreadCreate) -> ThreadNode:
+        if item.runtime.session_id != session_id or item.node.session_id != session_id:
+            raise ValueError("Agent Thread must belong to the current Session.")
         with self._connection(session_id) as connection:
             self._assert_writable(connection)
             self._session_document(connection, session_id)
-            for item in items:
-                if item.runtime.thread_id != item.node.thread_id or item.context.thread_id != item.node.thread_id:
-                    raise ValueError("Agent Thread batch identities do not match.")
-                if item.turn is not None and (
-                    item.turn.session_id != session_id
-                    or item.turn.thread_id != item.node.thread_id
-                    or item.runtime.current_turn_id != item.turn.id
-                    or item.runtime.running_turn_id != item.turn.id
-                ):
-                    raise ValueError("Preallocated Agent Turn does not match its Thread record.")
-                parent = connection.execute(
-                    "SELECT root_thread_id,depth FROM thread_nodes WHERE session_id=? AND thread_id=?",
-                    (session_id, item.node.parent_thread_id),
-                ).fetchone()
-                if (
-                    parent is None
-                    or item.node.depth != int(parent["depth"]) + 1
-                    or item.node.root_thread_id != str(parent["root_thread_id"])
-                ):
-                    raise ValueError("Agent Thread parent and root ownership do not match.")
-                self._insert_runtime_thread(connection, item.runtime)
-                self._insert_thread_node(connection, item.node)
-                self._insert_thread_context(connection, item.context)
-                if item.turn is not None:
-                    parent = self._json_object(
-                        connection,
-                        item.turn.parent_session_id,
-                        "runtime_node",
-                        item.turn.parent_id,
-                    )
-                    if parent is None:
-                        raise ValueError("Agent Turn parent does not exist.")
-                    self._put_json_object(
-                        connection,
-                        session_id,
-                        "runtime_node",
-                        item.turn.id,
-                        item.turn.to_dict(),
-                        item.turn.timestamp,
-                    )
+            if item.runtime.thread_id != item.node.thread_id or item.context.thread_id != item.node.thread_id:
+                raise ValueError("Agent Thread identities do not match.")
+            if item.turn is None or (
+                item.turn.session_id != session_id
+                or item.turn.thread_id != item.node.thread_id
+                or item.runtime.current_turn_id != item.turn.id
+                or item.runtime.running_turn_id != item.turn.id
+            ):
+                raise ValueError("A new Agent Thread requires one matching running Turn.")
+            parent = connection.execute(
+                "SELECT root_thread_id,depth FROM thread_nodes WHERE session_id=? AND thread_id=?",
+                (session_id, item.node.parent_thread_id),
+            ).fetchone()
+            if (
+                parent is None
+                or item.node.depth != int(parent["depth"]) + 1
+                or item.node.root_thread_id != str(parent["root_thread_id"])
+            ):
+                raise ValueError("Agent Thread parent and root ownership do not match.")
+            turn_parent = self._json_object(
+                connection,
+                item.turn.parent_session_id,
+                "runtime_node",
+                item.turn.parent_id,
+            )
+            if turn_parent is None:
+                raise ValueError("Agent Turn parent does not exist.")
+            self._insert_runtime_thread(connection, item.runtime)
+            self._insert_thread_node(connection, item.node)
+            self._insert_thread_context(connection, item.context)
+            self._put_json_object(
+                connection,
+                session_id,
+                "runtime_node",
+                item.turn.id,
+                item.turn.to_dict(),
+                item.turn.timestamp,
+            )
+            if item.report_recipient_thread_id:
+                self._insert_agent_turn_report(
+                    connection,
+                    session_id=session_id,
+                    turn_id=item.turn.id,
+                    agent_thread_id=item.node.thread_id,
+                    recipient_thread_id=item.report_recipient_thread_id,
+                    timestamp=item.turn.timestamp,
+                )
             self._touch_session(connection, session_id, utc_now())
-        return [item.node for item in items]
+        return item.node
 
-    def create_thread_turn_if_idle(self, node: RuntimeState, *, expected_head_id: str) -> RuntimeState:
+    def create_thread_turn_if_idle(
+        self,
+        node: RuntimeState,
+        *,
+        expected_head_id: str,
+        report_recipient_thread_id: str | None = None,
+    ) -> RuntimeState:
         """CAS-create one running Turn without racing another mailbox worker."""
 
         if node.status != "running" or node.parent_id != expected_head_id:
@@ -179,13 +267,11 @@ class SQLiteAgentThreadMixin:
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
             target = connection.execute(
-                "SELECT thread_status FROM thread_nodes WHERE session_id=? AND thread_id=?",
+                "SELECT 1 FROM thread_nodes WHERE session_id=? AND thread_id=?",
                 (node.session_id, node.thread_id),
             ).fetchone()
             if target is None:
                 raise KeyError(node.thread_id)
-            if str(target[0]) != "opening":
-                raise ValueError("Target Agent Thread is closed.")
             cursor = connection.execute(
                 "UPDATE runtime_threads SET current_turn_id=?,running_turn_id=?,updated_at=? "
                 "WHERE session_id=? AND thread_id=? AND current_turn_id=? AND running_turn_id IS NULL",
@@ -211,7 +297,192 @@ class SQLiteAgentThreadMixin:
                 node.to_dict(),
                 node.timestamp,
             )
+            if report_recipient_thread_id:
+                self._insert_agent_turn_report(
+                    connection,
+                    session_id=node.session_id,
+                    turn_id=node.id,
+                    agent_thread_id=node.thread_id,
+                    recipient_thread_id=report_recipient_thread_id,
+                    timestamp=node.timestamp,
+                )
             self._touch_session(connection, node.session_id, node.timestamp)
+        return node
+
+    def register_agent_turn_report(
+        self,
+        session_id: str,
+        turn_id: str,
+        agent_thread_id: str,
+        recipient_thread_id: str,
+    ) -> AgentTurnReport:
+        timestamp = utc_now()
+        with self._connection(session_id) as connection:
+            self._assert_writable(connection)
+            turn = self._json_object(connection, session_id, "runtime_node", turn_id)
+            if turn is None or str(turn.get("thread_id") or "") != agent_thread_id:
+                raise ValueError("The report Turn does not belong to the target Agent Thread.")
+            self._insert_agent_turn_report(
+                connection,
+                session_id=session_id,
+                turn_id=turn_id,
+                agent_thread_id=agent_thread_id,
+                recipient_thread_id=recipient_thread_id,
+                timestamp=timestamp,
+            )
+            row = connection.execute(
+                "SELECT * FROM agent_turn_reports WHERE turn_id=? AND recipient_thread_id=?",
+                (turn_id, recipient_thread_id),
+            ).fetchone()
+            assert row is not None
+        return self._agent_turn_report(row)
+
+    def finalize_agent_turn_reports(
+        self,
+        session_id: str,
+        turn_id: str,
+        *,
+        thread_status: str,
+        reply_content: str,
+    ) -> list[AgentTurnReport]:
+        if thread_status not in {"success", "failed"}:
+            raise ValueError("Agent report status must be success or failed.")
+        timestamp = utc_now()
+        with self._connection(session_id) as connection:
+            self._assert_writable(connection)
+            rows = connection.execute(
+                "SELECT * FROM agent_turn_reports WHERE session_id=? AND turn_id=? ORDER BY created_at,delivery_id",
+                (session_id, turn_id),
+            ).fetchall()
+            for row in rows:
+                existing_status = row["thread_status"]
+                existing_content = str(row["reply_content"])
+                if existing_status is not None and (
+                    str(existing_status) != thread_status or existing_content != reply_content
+                ):
+                    raise ValueError("The finalized Agent report content is immutable.")
+            connection.execute(
+                "UPDATE agent_turn_reports SET thread_status=?,reply_content=?,updated_at=? "
+                "WHERE session_id=? AND turn_id=? AND state='waiting'",
+                (thread_status, reply_content, timestamp, session_id, turn_id),
+            )
+            result = connection.execute(
+                "SELECT * FROM agent_turn_reports WHERE session_id=? AND turn_id=? ORDER BY created_at,delivery_id",
+                (session_id, turn_id),
+            ).fetchall()
+        return [self._agent_turn_report(row) for row in result]
+
+    def list_agent_turn_reports(
+        self,
+        session_id: str,
+        *,
+        states: tuple[str, ...] = ("waiting", "queued", "delivered"),
+    ) -> list[AgentTurnReport]:
+        if not states:
+            return []
+        placeholders = ",".join("?" for _ in states)
+        with self._connection(session_id) as connection:
+            rows = connection.execute(
+                f"SELECT * FROM agent_turn_reports WHERE session_id=? AND state IN ({placeholders}) "
+                "ORDER BY created_at,delivery_id",
+                (session_id, *states),
+            ).fetchall()
+        return [self._agent_turn_report(row) for row in rows]
+
+    def agent_report_statuses(self, session_id: str, delivery_ids: set[str]) -> dict[str, str]:
+        """Project persisted child execution status without parsing report text."""
+
+        if not delivery_ids:
+            return {}
+        ordered = sorted(delivery_ids)
+        placeholders = ",".join("?" for _ in ordered)
+        with self._connection(session_id) as connection:
+            rows = connection.execute(
+                f"SELECT delivery_id,thread_status FROM agent_turn_reports "
+                f"WHERE session_id=? AND delivery_id IN ({placeholders}) AND thread_status IS NOT NULL",
+                (session_id, *ordered),
+            ).fetchall()
+        return {str(row["delivery_id"]): str(row["thread_status"]) for row in rows}
+
+    def mark_agent_turn_report_state(self, session_id: str, delivery_id: str, state: str) -> AgentTurnReport:
+        if state not in {"queued", "delivered"}:
+            raise ValueError("Agent report state must be queued or delivered.")
+        timestamp = utc_now()
+        with self._connection(session_id) as connection:
+            self._assert_writable(connection)
+            row = connection.execute(
+                "SELECT * FROM agent_turn_reports WHERE session_id=? AND delivery_id=?",
+                (session_id, delivery_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(delivery_id)
+            current = str(row["state"])
+            allowed = current == state or (current == "waiting" and state == "queued") or state == "delivered"
+            if not allowed:
+                raise ValueError(f"Cannot change Agent report state from {current} to {state}.")
+            connection.execute(
+                "UPDATE agent_turn_reports SET state=?,updated_at=? WHERE session_id=? AND delivery_id=?",
+                (state, timestamp, session_id, delivery_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM agent_turn_reports WHERE session_id=? AND delivery_id=?",
+                (session_id, delivery_id),
+            ).fetchone()
+            assert updated is not None
+        return self._agent_turn_report(updated)
+
+    def append_agent_report(
+        self,
+        session_id: str,
+        recipient_thread_id: str,
+        *,
+        delivery_id: str,
+        reply_content: str,
+    ) -> RuntimeState:
+        with self._connection(session_id) as connection:
+            self._assert_writable(connection)
+            runtime = connection.execute(
+                "SELECT current_turn_id FROM runtime_threads WHERE session_id=? AND thread_id=?",
+                (session_id, recipient_thread_id),
+            ).fetchone()
+            if runtime is None or runtime["current_turn_id"] is None:
+                raise ValueError("The report recipient has no canonical current Turn.")
+            turn_id = str(runtime["current_turn_id"])
+            payload = self._json_object(connection, session_id, "runtime_node", turn_id)
+            if payload is None:
+                raise ValueError("The report recipient Turn is unavailable.")
+            node = RuntimeState.from_dict(payload)
+            duplicate = any(
+                item.get("type") == "subagent" and item.get("delivery_id") == delivery_id
+                for version in node.data
+                for message in version
+                for item in message.get("content", [])
+            )
+            if not duplicate:
+                node.data[node.current_data_idx].append(
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "subagent",
+                                "event": "agent_report",
+                                "status": "success",
+                                "text": reply_content,
+                                "delivery_id": delivery_id,
+                            }
+                        ],
+                    }
+                )
+                node = RuntimeState.from_dict(node.to_dict())
+                self._put_json_object(
+                    connection,
+                    session_id,
+                    "runtime_node",
+                    node.id,
+                    node.to_dict(),
+                    utc_now(),
+                )
+                self._touch_session(connection, session_id, utc_now())
         return node
 
     def has_canonical_delivery(self, session_id: str, delivery_id: str) -> bool:
@@ -219,7 +490,8 @@ class SQLiteAgentThreadMixin:
             if not isinstance(node, RuntimeState):
                 continue
             if any(
-                message.get("role") == "user" and message.get("delivery_id") == delivery_id
+                (message.get("role") == "user" and message.get("delivery_id") == delivery_id)
+                or any(item.get("delivery_id") == delivery_id for item in message.get("content", []))
                 for version in node.data
                 for message in version
             ):
@@ -247,7 +519,7 @@ class SQLiteAgentThreadMixin:
             return []
         with self._connection(session_id) as connection:
             rows = connection.execute(
-                "SELECT * FROM thread_nodes WHERE session_id=? ORDER BY depth,created_at,thread_id",
+                _THREAD_NODE_SELECT + "WHERE node.session_id=? ORDER BY node.depth,node.created_at,node.thread_id",
                 (session_id,),
             ).fetchall()
         return [item for row in rows if (item := self._thread_node(row)) is not None]
@@ -256,7 +528,10 @@ class SQLiteAgentThreadMixin:
         if not self.paths.session_db(session_id).exists():
             return None
         with self._connection(session_id) as connection:
-            row = connection.execute("SELECT * FROM thread_nodes WHERE thread_id=?", (thread_id,)).fetchone()
+            row = connection.execute(
+                _THREAD_NODE_SELECT + "WHERE node.session_id=? AND node.thread_id=?",
+                (session_id, thread_id),
+            ).fetchone()
         return self._thread_node(row)
 
     def get_thread_context(self, session_id: str, thread_id: str) -> ThreadContext | None:
@@ -269,28 +544,25 @@ class SQLiteAgentThreadMixin:
     def list_child_thread_nodes(self, session_id: str, parent_thread_id: str) -> list[ThreadNode]:
         with self._connection(session_id) as connection:
             rows = connection.execute(
-                "SELECT * FROM thread_nodes WHERE session_id=? AND parent_thread_id=? ORDER BY created_at,thread_id",
+                _THREAD_NODE_SELECT
+                + "WHERE node.session_id=? AND node.parent_thread_id=? ORDER BY node.created_at,node.thread_id",
                 (session_id, parent_thread_id),
             ).fetchall()
         return [item for row in rows if (item := self._thread_node(row)) is not None]
 
-    def update_thread_status(self, session_id: str, thread_id: str, status: str) -> ThreadNode:
-        if status not in {"opening", "closed"}:
-            raise ValueError("thread_status must be opening or closed.")
-        timestamp = utc_now()
+    def list_descendant_thread_nodes(self, session_id: str, ancestor_thread_id: str) -> list[ThreadNode]:
         with self._connection(session_id) as connection:
-            self._assert_writable(connection)
-            cursor = connection.execute(
-                "UPDATE thread_nodes SET thread_status=?,updated_at=? WHERE session_id=? AND thread_id=?",
-                (status, timestamp, session_id, thread_id),
-            )
-            if cursor.rowcount != 1:
-                raise KeyError(thread_id)
-            row = connection.execute("SELECT * FROM thread_nodes WHERE thread_id=?", (thread_id,)).fetchone()
-        result = self._thread_node(row)
-        if result is None:
-            raise KeyError(thread_id)
-        return result
+            rows = connection.execute(
+                "WITH RECURSIVE descendants(thread_id) AS ("
+                "SELECT thread_id FROM thread_nodes WHERE session_id=? AND parent_thread_id=? "
+                "UNION ALL SELECT child.thread_id FROM thread_nodes AS child "
+                "JOIN descendants AS parent ON child.parent_thread_id=parent.thread_id "
+                "WHERE child.session_id=?"
+                ") " + _THREAD_NODE_SELECT + "JOIN descendants ON descendants.thread_id=node.thread_id "
+                "ORDER BY node.depth,node.created_at,node.thread_id",
+                (session_id, ancestor_thread_id, session_id),
+            ).fetchall()
+        return [item for row in rows if (item := self._thread_node(row)) is not None]
 
     def _ensure_agent_tree_root_record(
         self,
@@ -318,22 +590,10 @@ class SQLiteAgentThreadMixin:
             ):
                 raise ValueError("Sidebar Thread Agent-tree root is inconsistent.")
             return
-        task = ""
-        current_turn_id = str(runtime["current_turn_id"] or "")
-        if current_turn_id:
-            payload = self._json_object(connection, session_id, "runtime_node", current_turn_id)
-            try:
-                content = payload["data"][int(payload.get("current_data_idx") or 0)][0]["content"]  # type: ignore[index,union-attr]
-                task = next(
-                    (str(item.get("text") or "") for item in content if item.get("type") == "text"),
-                    "",
-                )
-            except (IndexError, KeyError, TypeError, ValueError):
-                task = ""
         connection.execute(
-            "INSERT INTO thread_nodes(session_id,thread_id,root_thread_id,parent_thread_id,thread_path,thread_task,thread_status,depth,created_at,updated_at) "
-            "VALUES (?,?,?,NULL,'/root',?,'opening',0,?,?)",
-            (session_id, thread_id, thread_id, task, timestamp, timestamp),
+            "INSERT INTO thread_nodes(session_id,thread_id,root_thread_id,parent_thread_id,thread_path,depth,created_at,updated_at) "
+            "VALUES (?,?,?,NULL,'/root',0,?,?)",
+            (session_id, thread_id, thread_id, timestamp, timestamp),
         )
 
     @staticmethod
@@ -394,4 +654,4 @@ class SQLiteAgentThreadMixin:
             raise ValueError("Unknown runtime Thread.")
 
 
-__all__ = ["AgentThreadCreate", "SQLiteAgentThreadMixin"]
+__all__ = ["AgentThreadCreate", "AgentTurnReport", "SQLiteAgentThreadMixin"]

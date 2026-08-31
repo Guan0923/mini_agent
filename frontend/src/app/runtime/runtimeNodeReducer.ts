@@ -96,6 +96,13 @@ export function applyRuntimeNodeFrame(
     throw new Error("Turn delta revision is not consecutive");
   }
   let turn: RuntimeStateNode = { ...previous };
+  if (frame.agent_report_statuses !== undefined) {
+    if (!isRecord(frame.agent_report_statuses)
+      || Object.values(frame.agent_report_statuses).some((status) => !["success", "failed"].includes(String(status)))) {
+      throw new Error("Turn Agent report metadata is invalid");
+    }
+    turn.agent_report_statuses = structuredClone(frame.agent_report_statuses);
+  }
   if (frame.patch) {
     if (!isRecord(frame.patch)) throw new Error("Turn delta patch is invalid");
     for (const [name, value] of Object.entries(frame.patch)) {
@@ -143,11 +150,14 @@ export function applyRuntimeNodeFrame(
       if (!version || operation.message_idx !== version.length || !isRecord(operation.message)) {
         throw new Error("Turn Message delta is out of order");
       }
-      const expectedRole = operation.message_idx % 2 === 0 ? "user" : "assistant";
-      if (operation.message.role !== expectedRole || !Array.isArray(operation.message.content)) {
-        throw new Error("Turn Message delta breaks role alternation");
+      const previousMessage = version[version.length - 1];
+      if (!["user", "assistant"].includes(String(operation.message.role)) || !Array.isArray(operation.message.content)) {
+        throw new Error("Turn Message delta has an invalid role");
       }
-      if (expectedRole === "user" && (
+      if (operation.message.role === "user" && previousMessage?.role === "user") {
+        throw new Error("Turn Message delta contains consecutive user Messages");
+      }
+      if (operation.message.role === "user" && (
         operation.message.content.length !== 1
         || !isRecord(operation.message.content[0])
         || operation.message.content[0].type !== "text"

@@ -65,6 +65,7 @@ RuntimeEventKind = Literal[
     "subagent_completed",
     "subagent_failed",
     "subagent_indeterminate",
+    "subagent_report",
 ]
 
 # Text stream chunks are high-volume presentation data, not durable state
@@ -102,6 +103,7 @@ CHECKPOINT_EVENT_KINDS: frozenset[RuntimeEventKind] = frozenset(
         "subagent_completed",
         "subagent_failed",
         "subagent_indeterminate",
+        "subagent_report",
         "run_finished",
     }
 )

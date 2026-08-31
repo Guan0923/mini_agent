@@ -85,6 +85,7 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         self.last_node: RuntimeState | None = None
         self.assistant_blocks: list[dict[str, Any]] = []
         self.assistant_message_idx: int | None = None
+        self._assistant_after_report = False
         self._stream_item_index: int | None = None
         self._stream_item_type: str | None = None
         self._stream_text = ""
@@ -198,6 +199,11 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
                 selected = source.data[source.current_data_idx]
                 self.assistant_message_idx = len(selected) - 1 if selected[-1]["role"] == "assistant" else None
                 self.assistant_blocks = source.assistant_items if self.assistant_message_idx is not None else []
+                self._assistant_after_report = bool(
+                    self.assistant_blocks
+                    and self.assistant_blocks[0].get("type") == "subagent"
+                    and self.assistant_blocks[0].get("event") == "agent_report"
+                )
                 if self.assistant_blocks and self.assistant_blocks[0].get("type") == "compaction":
                     self.protected_item_count = 1 + int(self.assistant_blocks[0].get("kept_item_count") or 0)
                 self._bind_existing_trace(source)
@@ -244,6 +250,14 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         assert self.assistant is not None
         current = self.writer.current(self.assistant.session_id, self.assistant.id)
         messages = current.data[current.current_data_idx]
+        if (
+            self.assistant_message_idx is not None
+            and 0 <= self.assistant_message_idx < len(messages)
+            and messages[self.assistant_message_idx].get("role") == "assistant"
+        ):
+            self.assistant = current
+            self.last_node = current
+            return
         if messages[-1]["role"] == "user":
             current = self.writer.append_message(
                 current,
@@ -255,6 +269,57 @@ class RuntimeEventNodeBridge(_EventProjectionMixin, _FinalizationMixin, _Lifecyc
         self.assistant = current
         self.last_node = current
         self.assistant_message_idx = len(messages) - 1
+
+    def _start_assistant_after_report(self) -> None:
+        if not self._assistant_after_report:
+            return
+        if self.assistant is None:
+            self.start()
+        assert self.assistant is not None
+        current = self.writer.current(self.assistant.session_id, self.assistant.id)
+        self.assistant = self.writer.append_message(
+            current,
+            {"role": "assistant", "content": []},
+            persist=True,
+        )
+        self.last_node = self.assistant
+        self.assistant_message_idx = len(self.assistant.data[self.assistant.current_data_idx]) - 1
+        self.assistant_blocks = []
+        self._assistant_after_report = False
+
+    def _append_subagent_report(self, data: Mapping[str, Any]) -> None:
+        reply_content = str(data.get("reply_content") or "")
+        delivery_id = str(data.get("delivery_id") or "")
+        if not delivery_id:
+            raise ValueError("A subagent report requires delivery_id.")
+        self._finish_stream_item()
+        if self.assistant is None:
+            self.start()
+        assert self.assistant is not None
+        selected = self.assistant.data[self.assistant.current_data_idx]
+        if any(
+            item.get("type") == "subagent" and item.get("delivery_id") == delivery_id
+            for message in selected
+            for item in message.get("content", [])
+        ):
+            return
+        message = {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "subagent",
+                    "event": "agent_report",
+                    "status": "success",
+                    "text": reply_content,
+                    "delivery_id": delivery_id,
+                }
+            ],
+        }
+        self.assistant = self.writer.append_message(self.assistant, message, persist=True)
+        self.last_node = self.assistant
+        message_idx = len(self.assistant.data[self.assistant.current_data_idx]) - 1
+        self._record_completed_item(message_idx, 0)
+        self._assistant_after_report = True
 
     def _append_steering_message(self, data: Mapping[str, Any]) -> None:
         content = str(data.get("content") or "").strip()

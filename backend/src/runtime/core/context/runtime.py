@@ -54,6 +54,7 @@ class RuntimeServices:
     steering: SteeringHandler | None = None
     cancel_requested: CancellationHandler | None = None
     suspend_requested: SuspensionHandler | None = None
+    complete_requested: CancellationHandler | None = None
     register_operation_abort: Callable[[Callable[[], None]], Callable[[], None]] | None = None
     confirm: Confirm | None = None
     id_factory: Callable[[], str] = new_tool_call_id
@@ -76,6 +77,9 @@ class RuntimeServices:
     # can replace a failed placeholder immediately before every model request.
     runtime_node_context: Callable[[], Sequence[RuntimeTreeNode]] | None = None
     context_prefix_messages: list[ChatMessage] = field(default_factory=list)
+    # Set only by pause_current_turn. The tool result is persisted before the
+    # next safe-boundary check consumes this one-shot request.
+    pause_after_tool: bool = False
     # In-process JobScope.  It is intentionally non-serializable and is
     # supplied by AgentRunner when a run is opened.
     job_scope: object | None = None
@@ -107,7 +111,12 @@ class AgentRuntime:
     def stop_requested(self) -> bool:
         cancel = self.services.cancel_requested
         suspend = self.services.suspend_requested
-        return bool((cancel is not None and cancel()) or (suspend is not None and suspend()))
+        complete = self.services.complete_requested
+        return bool(
+            (cancel is not None and cancel())
+            or (suspend is not None and suspend())
+            or (complete is not None and complete())
+        )
 
     def model_nodes(self) -> list[RuntimeTreeNode]:
         """Return the canonical provider context when a message-tree bridge is active.

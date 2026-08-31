@@ -17,6 +17,7 @@ interface RuntimeTurnResponse extends RuntimeRootResponse {
     delivery_id?: string;
     content: Array<Record<string, unknown> & { type: string; text?: string }>;
   }>>;
+  agent_report_statuses?: Record<string, "success" | "failed">;
 }
 
 function isRuntimeTurnResponse(node: RuntimeRootResponse | RuntimeTurnResponse): node is RuntimeTurnResponse {
@@ -183,7 +184,7 @@ test("Trace audit lists two real Turns oldest first and loads them independently
 });
 
 test("Agent Thread tree streams an idle nested Agent message and keeps Chat and Trace aligned", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(180_000);
   const resetResponse = await page.request.post("/api/test/trace-model-reset");
   expect(resetResponse.ok(), `${resetResponse.status()} ${await resetResponse.text()}`).toBeTruthy();
   const sidebarResponse = await page.request.post("/api/sidebar-threads", {
@@ -215,9 +216,9 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
   expect(rootChildren.ok(), `${rootChildren.status()} ${await rootChildren.text()}`).toBeTruthy();
   const directSummary = (await rootChildren.json() as Array<{ thread_id: string }>)[0];
   expect(directSummary?.thread_id).toBeTruthy();
-  const directLabel = tree.getByText("direct · opening", { exact: true });
+  const directLabel = tree.getByText("/root/direct · success", { exact: true });
   await expect(directLabel).toBeVisible();
-  await expect(tree.getByText("nested · opening", { exact: true })).toHaveCount(0);
+  await expect(tree.getByText("/root/direct/nested · success", { exact: true })).toHaveCount(0);
   const directItem = directLabel.locator("xpath=ancestor::*[@role='treeitem'][1]");
   const directChildrenResponse = page.waitForResponse((response) =>
     response.url().includes(`/api/agent-threads/${encodeURIComponent(directSummary.thread_id)}/children`),
@@ -227,7 +228,7 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
   expect(directChildren.ok(), `${directChildren.status()} ${await directChildren.text()}`).toBeTruthy();
   const nestedSummary = (await directChildren.json() as Array<{ thread_id: string }>)[0];
   expect(nestedSummary?.thread_id).toBeTruthy();
-  await tree.getByText("nested · opening", { exact: true }).click();
+  await tree.getByText("/root/direct/nested · success", { exact: true }).click();
 
   const nestedThreadId = nestedSummary.thread_id;
   await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(nestedThreadId);
@@ -253,12 +254,12 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
   tree = page.getByRole("tree", { name: "Agent Thread 树" });
   await tree.getByText("root", { exact: true }).locator("xpath=ancestor::*[@role='treeitem'][1]")
     .locator(".ant-tree-switcher").click();
-  const reloadedDirect = tree.getByText("direct · opening", { exact: true });
+  const reloadedDirect = tree.getByText("/root/direct · success", { exact: true });
   await reloadedDirect.locator("xpath=ancestor::*[@role='treeitem'][1]").locator(".ant-tree-switcher").click();
   const blockedStreamRequest = page.waitForRequest((request) => request.url().includes(
     `/api/agent-threads/${nestedThreadId}/stream`,
   ));
-  await tree.getByText("nested · opening", { exact: true }).click();
+  await tree.getByText("/root/direct/nested · success", { exact: true }).click();
   await blockedStreamRequest;
 
   const uploadResponse = page.waitForResponse((response) =>
@@ -302,9 +303,30 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
     .filter((node) => node.thread_id === nestedThreadId)
     .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
   expect(nestedTurns).toHaveLength(2);
+  const directTurns = (await fetchRuntimeNodes(page, sidebar.session_id))
+    .filter(isRuntimeTurnResponse)
+    .filter((node) => node.thread_id === directSummary.thread_id);
+  expect(directTurns).toHaveLength(1);
+  const directMessages = directTurns[0].data[directTurns[0].current_data_idx];
+  expect(directMessages.filter((message) => message.role === "assistant").length).toBeGreaterThanOrEqual(2);
+  expect(directMessages.some((message) => message.content.some((item) =>
+    item.type === "tool_result"
+      && item.tool === "pause_current_turn"
+      && item.content === "thread_status: paused"
+  ))).toBeTruthy();
+  expect(Object.values(directTurns[0].agent_report_statuses ?? {})).toEqual(["success"]);
+  expect(directMessages.some((message) => message.content.some((item) =>
+    item.type === "subagent"
+      && item.event === "agent_report"
+      && item.text?.startsWith("thread_path: /root/direct/nested\nthread_status: success\ntask_result: ")
+  ))).toBeTruthy();
   const latestUser = nestedTurns[1].data[nestedTurns[1].current_data_idx]
     .find((message) => message.role === "user");
-  expect(latestUser?.content[0].references).toEqual(postedMessage.references);
+  const canonicalReferences = latestUser?.content[0].references as Array<{ path: string }>;
+  expect(canonicalReferences).toHaveLength(1);
+  expect(Object.keys(canonicalReferences[0])).toEqual(["path"]);
+  expect(canonicalReferences[0].path).toMatch(/^(?:[A-Za-z]:[\\/]|\/)/);
+  expect(canonicalReferences[0].path.replaceAll("\\", "/")).toMatch(/\/workspace\/uploads\/README\.md$/);
 
   await page.getByRole("button", { name: "Trace", exact: true }).click();
   await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(nestedThreadId);
@@ -356,7 +378,7 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
   const emptyForkChildren = await emptyForkChildrenResponse;
   expect(emptyForkChildren.ok(), `${emptyForkChildren.status()} ${await emptyForkChildren.text()}`).toBeTruthy();
   expect(await emptyForkChildren.json()).toEqual([]);
-  await expect(tree.getByText("direct · opening", { exact: true })).toHaveCount(0);
+  await expect(tree.getByText("/root/direct · success", { exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Thread", exact: true }).click();
   await page.getByLabel("聊天输入").fill("agent thread navigation e2e");
@@ -386,7 +408,8 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
   const forkDirectSummary = (await forkChildren.json() as Array<{ thread_id: string }>)[0];
   expect(forkDirectSummary?.thread_id).toBeTruthy();
   expect(forkDirectSummary.thread_id).not.toBe(directSummary.thread_id);
-  const forkDirectLabel = tree.getByText("direct · opening", { exact: true });
+  const forkDirectLabel = tree.getByText("/root/direct · success", { exact: true });
+  await expect(forkDirectLabel).toBeVisible({ timeout: 15_000 });
   const forkDirectChildrenResponse = page.waitForResponse((response) =>
     response.url().includes(`/api/agent-threads/${encodeURIComponent(forkDirectSummary.thread_id)}/children`),
   );
@@ -396,7 +419,7 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
   const forkNestedSummary = (await forkDirectChildren.json() as Array<{ thread_id: string }>)[0];
   expect(forkNestedSummary?.thread_id).toBeTruthy();
   expect(forkNestedSummary.thread_id).not.toBe(nestedThreadId);
-  await tree.getByText("nested · opening", { exact: true }).click();
+  await tree.getByText("/root/direct/nested · success", { exact: true }).click();
   await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(forkNestedSummary.thread_id);
   await expect(page.locator(".message.assistant").last()).toContainText(
     "Agent Thread response from local HTTP.", { timeout: 15_000 },
@@ -420,9 +443,9 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
   tree = page.getByRole("tree", { name: "Agent Thread 树" });
   await tree.getByText("root", { exact: true }).locator("xpath=ancestor::*[@role='treeitem'][1]")
     .locator(".ant-tree-switcher").click();
-  await tree.getByText("direct · opening", { exact: true }).locator("xpath=ancestor::*[@role='treeitem'][1]")
+  await tree.getByText("/root/direct · success", { exact: true }).locator("xpath=ancestor::*[@role='treeitem'][1]")
     .locator(".ant-tree-switcher").click();
-  await tree.getByText("nested · opening", { exact: true }).click();
+  await tree.getByText("/root/direct/nested · success", { exact: true }).click();
   await expect(page.locator(".trace-toolbar-thread-id")).toHaveText(nestedThreadId);
 
   await page.getByRole("button", { name: "Agent Thread Navigation（分支）", exact: true }).click();

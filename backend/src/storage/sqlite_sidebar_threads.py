@@ -25,12 +25,6 @@ class SQLiteSidebarThreadMixin:
             self._assert_writable(connection)
             if self._json_object(connection, session_id, "sidebar_thread", thread_id) is not None:
                 raise ValueError("SidebarThread already exists.")
-            self._ensure_agent_tree_root_record(
-                connection,
-                session_id=session_id,
-                thread_id=thread_id,
-                timestamp=now,
-            )
             self._put_json_object(connection, session_id, "sidebar_thread", thread_id, item.to_dict(), now)
         return item
 

@@ -292,6 +292,33 @@ def test_real_redis_agent_thread_dispatch_is_fifo_deduplicated_and_acknowledged(
     assert 0 < redis_queue.client.ttl(redis_queue._receipt_key("agent-one")) <= 7 * 24 * 60 * 60
 
 
+def test_real_redis_assistant_report_stream_is_independent_and_idempotent(
+    redis_queue: RedisMessageQueue,
+) -> None:
+    report = MessageEnvelope(
+        "agent-report-one",
+        "agent",
+        "thread-worker",
+        "report",
+        "thread-parent",
+        "session",
+        "thread-parent",
+        {"content": "thread_path: /root/worker\nthread_status: success\ntask_result: done"},
+        ("agent-report-one",),
+        created_at="2026-08-31T00:00:00+00:00",
+    )
+    assert redis_queue.dispatch_report(report) == report
+    assert redis_queue.dispatch_report(report) == report
+    assert redis_queue.peek_thread("thread-parent") is None
+
+    claimed = redis_queue.claim_report("thread-parent", "report-consumer")
+    assert claimed is not None
+    assert claimed.envelope.content == report.content
+    assert redis_queue.claim_report("thread-parent", "second-consumer") is None
+    redis_queue.ack(claimed)
+    assert redis_queue.claim_report("thread-parent", "after-ack") is None
+
+
 def test_real_redis_reclaims_stale_delivery_and_returns_unconsumed_messages(redis_queue: RedisMessageQueue) -> None:
     redis_queue.create(QueuedMessage("one", "thread", "one"))
     redis_queue.create(QueuedMessage("two", "thread", "two"))

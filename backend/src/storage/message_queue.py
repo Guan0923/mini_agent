@@ -180,9 +180,14 @@ return {'acknowledged'}
     def _thread_stream_key(self, thread_id: str) -> str:
         return f"{self.key_prefix}:thread:{thread_id}:mailbox"
 
+    def _report_stream_key(self, thread_id: str) -> str:
+        return f"{self.key_prefix}:thread:{thread_id}:assistant-reports"
+
     def _envelope_stream_key(self, envelope: MessageEnvelope) -> str:
         if envelope.target_kind == "thread":
             return self._thread_stream_key(envelope.target_id)
+        if envelope.target_kind == "report":
+            return self._report_stream_key(envelope.target_id)
         return self._stream_key(envelope.target_id)
 
     def _receipt_key(self, delivery_id: str) -> str:
@@ -398,6 +403,24 @@ return {'acknowledged'}
             raise DeliveryConflict("delivery_id_conflict")
         return envelope
 
+    def dispatch_report(self, envelope: MessageEnvelope) -> MessageEnvelope:
+        """Atomically append one immutable report to the Assistant-report stream."""
+
+        if envelope.sender_kind != "agent" or envelope.target_kind != "report":
+            raise ValueError("Report dispatch requires sender_kind=agent and target_kind=report.")
+        fingerprint = _envelope_fingerprint(envelope)
+        receipt = self._receipt_key(envelope.delivery_id)
+        try:
+            result = self._direct_dispatch(
+                keys=[receipt, self._report_stream_key(envelope.target_id)],
+                args=[fingerprint, _json(replace(envelope, attempts=0).to_dict())],
+            )
+        except RedisError as exc:
+            raise self._unavailable(exc) from exc
+        if str(result[0]) == "delivery_conflict":
+            raise DeliveryConflict("delivery_id_conflict")
+        return envelope
+
     def _ensure_group(self, stream: str) -> None:
         try:
             self.client.xgroup_create(stream, self.consumer_group, id="0-0", mkstream=True)
@@ -447,6 +470,13 @@ return {'acknowledged'}
     def claim_thread_recovery(self, thread_id: str, consumer: str) -> ClaimedEnvelope | None:
         return self._claim_stream(self._thread_stream_key(thread_id), consumer, stale_claim_ms=0)
 
+    def claim_report(self, thread_id: str, consumer: str, *, recover: bool = False) -> ClaimedEnvelope | None:
+        return self._claim_stream(
+            self._report_stream_key(thread_id),
+            consumer,
+            stale_claim_ms=0 if recover else STALE_CLAIM_MS,
+        )
+
     def peek_thread(self, thread_id: str) -> MessageEnvelope | None:
         try:
             entries = self.client.xrange(self._thread_stream_key(thread_id), count=1)
@@ -459,7 +489,7 @@ return {'acknowledged'}
 
     def ack(self, claimed: ClaimedEnvelope) -> None:
         envelope = claimed.envelope
-        if envelope.target_kind == "thread":
+        if envelope.target_kind in {"thread", "report"}:
             arguments: list[object] = [
                 _envelope_fingerprint(envelope),
                 self.consumer_group,
@@ -469,7 +499,7 @@ return {'acknowledged'}
             ]
             try:
                 result = self._direct_ack(
-                    keys=[self._receipt_key(envelope.delivery_id), self._thread_stream_key(envelope.target_id)],
+                    keys=[self._receipt_key(envelope.delivery_id), self._envelope_stream_key(envelope)],
                     args=arguments,
                 )
             except RedisError as exc:
@@ -534,6 +564,7 @@ return {'acknowledged'}
             patterns = (
                 f"{self.key_prefix}:turn:*:mailbox",
                 f"{self.key_prefix}:thread:*:mailbox",
+                f"{self.key_prefix}:thread:*:assistant-reports",
             )
             for pattern in patterns:
                 for stream in self.client.scan_iter(pattern):
@@ -553,6 +584,7 @@ class MemoryMessageQueue:
         self._queues: dict[str, list[QueuedMessage]] = {}
         self._streams: dict[str, list[tuple[str, MessageEnvelope, float, str | None]]] = {}
         self._thread_streams: dict[str, list[tuple[str, MessageEnvelope, float, str | None]]] = {}
+        self._report_streams: dict[str, list[tuple[str, MessageEnvelope, float, str | None]]] = {}
         self._receipts: dict[str, tuple[str, str, MessageEnvelope]] = {}
         self._counter = 0
         self._lock = RLock()
@@ -673,6 +705,22 @@ class MemoryMessageQueue:
             self._receipts[envelope.delivery_id] = (fingerprint, "dispatched", canonical)
             return canonical
 
+    def dispatch_report(self, envelope: MessageEnvelope) -> MessageEnvelope:
+        if envelope.sender_kind != "agent" or envelope.target_kind != "report":
+            raise ValueError("Report dispatch requires sender_kind=agent and target_kind=report.")
+        with self._lock:
+            fingerprint = _envelope_fingerprint(envelope)
+            receipt = self._receipts.get(envelope.delivery_id)
+            if receipt is not None:
+                if receipt[0] != fingerprint:
+                    raise DeliveryConflict("delivery_id_conflict")
+                return receipt[2]
+            canonical = replace(envelope, attempts=0)
+            self._counter += 1
+            self._report_streams.setdefault(envelope.target_id, []).append((f"{self._counter}-0", canonical, 0.0, None))
+            self._receipts[envelope.delivery_id] = (fingerprint, "dispatched", canonical)
+            return canonical
+
     def claim(self, turn_id: str, consumer: str) -> ClaimedEnvelope | None:
         with self._lock:
             entries = self._streams.get(turn_id, [])
@@ -702,6 +750,16 @@ class MemoryMessageQueue:
                 return ClaimedEnvelope(stream_id, claimed)
             return None
 
+    def claim_report(self, thread_id: str, consumer: str, *, recover: bool = False) -> ClaimedEnvelope | None:
+        with self._lock:
+            entries = self._report_streams.get(thread_id, [])
+            for index, (stream_id, envelope, claimed_at, owner) in enumerate(entries):
+                if owner is None or recover:
+                    claimed = replace(envelope, attempts=envelope.attempts + 1)
+                    entries[index] = (stream_id, claimed, claimed_at + 1, consumer)
+                    return ClaimedEnvelope(stream_id, claimed)
+            return None
+
     def peek_thread(self, thread_id: str) -> MessageEnvelope | None:
         with self._lock:
             entries = self._thread_streams.get(thread_id, [])
@@ -710,9 +768,10 @@ class MemoryMessageQueue:
     def ack(self, claimed: ClaimedEnvelope) -> None:
         with self._lock:
             envelope = claimed.envelope
-            if envelope.target_kind == "thread":
-                self._thread_streams[envelope.target_id] = [
-                    item for item in self._thread_streams.get(envelope.target_id, []) if item[0] != claimed.stream_id
+            if envelope.target_kind in {"thread", "report"}:
+                streams = self._thread_streams if envelope.target_kind == "thread" else self._report_streams
+                streams[envelope.target_id] = [
+                    item for item in streams.get(envelope.target_id, []) if item[0] != claimed.stream_id
                 ]
                 fingerprint, _, stored = self._receipts[envelope.delivery_id]
                 self._receipts[envelope.delivery_id] = (fingerprint, "acknowledged", stored)
@@ -743,7 +802,7 @@ class MemoryMessageQueue:
         with self._lock:
             return [
                 ClaimedEnvelope(stream_id, envelope)
-                for entries in (*self._streams.values(), *self._thread_streams.values())
+                for entries in (*self._streams.values(), *self._thread_streams.values(), *self._report_streams.values())
                 for stream_id, envelope, _, _ in entries
             ]
 
@@ -769,6 +828,8 @@ class RedisTurnMailbox:
                 "delivery_id": envelope.delivery_id,
                 "content": envelope.content,
                 "references": list(envelope.references),
+                "source_thread_id": envelope.source_thread_id,
+                "need_reply": bool(envelope.payload.get("need_reply", False)),
                 "_ack": lambda: self.queue.ack(claimed),
             }
         ]
@@ -803,6 +864,8 @@ class RedisAgentMailbox(RedisTurnMailbox):
                 "delivery_id": envelope.delivery_id,
                 "content": envelope.content,
                 "references": list(envelope.references),
+                "source_thread_id": envelope.source_thread_id,
+                "need_reply": bool(envelope.payload.get("need_reply", False)),
                 "_ack": lambda: self.queue.ack(claimed),
             }
         ]

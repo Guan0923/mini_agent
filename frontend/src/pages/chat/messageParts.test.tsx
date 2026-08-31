@@ -99,6 +99,42 @@ function renderAssistant(message: ChatMessage, display: DisplayMode = "developer
   );
 }
 
+describe("subagent Assistant report", () => {
+  it("renders the exact plain text with preserved line breaks", async () => {
+    const report = "thread_path: /root/worker\nthread_status: success\ntask_result: 第一行\n第二行";
+    const { container } = render(renderAssistant(assistant([{
+      type: "subagent",
+      event: "agent_report",
+      status: "success",
+      text: report,
+      delivery_id: "agent_report_1",
+    }])));
+    const element = container.querySelector<HTMLElement>(".runtime-agent-report");
+    expect(element).not.toBeNull();
+    expect(element?.textContent).toBe(report);
+
+    const fs = await vi.importActual<{ readFileSync(path: string, encoding: "utf8"): string }>("node:fs");
+    const runtime = globalThis as typeof globalThis & { process: { cwd(): string } };
+    const css = fs.readFileSync(`${runtime.process.cwd()}/src/styles/chat-runtime.css`, "utf8");
+    expect(css).toMatch(/\.runtime-agent-report\s*{[^}]*white-space:\s*pre-wrap;/s);
+  });
+
+  it("uses delivery metadata for failed styling without parsing report text", () => {
+    const report = "opaque content without status fields";
+    const { container } = render(renderAssistant(assistant([{
+      type: "subagent",
+      event: "agent_report",
+      status: "success",
+      report_status: "failed",
+      text: report,
+      delivery_id: "agent_report_failed",
+    }])));
+    const element = container.querySelector<HTMLElement>(".runtime-agent-report.failed");
+    expect(element?.dataset.reportStatus).toBe("failed");
+    expect(element?.textContent).toBe(report);
+  });
+});
+
 describe("assistant Item presentation", () => {
   it("keeps Turn execution errors inside the assistant message bubble", () => {
     const message = assistant([]);

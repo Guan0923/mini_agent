@@ -232,6 +232,23 @@ def _execute_tool(runtime: AgentRuntime, index: int, executor: ToolStepExecutor)
     return executor.execute(runtime)
 
 
+def _consume_agent_reports(runtime: AgentRuntime) -> int:
+    consume = getattr(runtime.services.subagents, "consume_runtime_reports", None)
+    return int(consume(runtime) or 0) if callable(consume) else 0
+
+
+def _apply_tool_batch_reports(runtime: AgentRuntime, *, next_tool_index: int) -> None:
+    """Stop work selected without newly arrived Assistant reports in context."""
+
+    message = runtime.state.active_message
+    if message is not None:
+        _fail_pending_tools(runtime, message, "Not executed because a subagent report arrived.")
+        _finish_assistant(runtime)
+    else:
+        runtime.state.active_tool_index = None
+    del next_tool_index
+
+
 def _apply_tool_batch_steering(
     runtime: AgentRuntime,
     update: SteeringUpdate,

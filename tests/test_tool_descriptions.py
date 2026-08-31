@@ -22,7 +22,8 @@ EXPECTED_LOCAL_TOOLS = [
     "delegate_tasks",
     "send_agent_message",
     "set_thread_node_status",
-    "list_current_node_sub_thread",
+    "get_thread_node",
+    "pause_current_turn",
     "request_user_input",
     "request_plan_review",
 ]

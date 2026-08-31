@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 QueueMessageState = Literal["pending", "dispatched"]
 SenderKind = Literal["user", "agent", "system"]
-TargetKind = Literal["turn", "thread"]
+TargetKind = Literal["turn", "thread", "report"]
 
 
 def queue_utc_now() -> str:
@@ -113,7 +113,7 @@ class MessageEnvelope:
             raise ValueError("MessageEnvelope identifiers are required.")
         if self.sender_kind not in {"user", "agent", "system"}:
             raise ValueError("MessageEnvelope sender_kind is invalid.")
-        if self.target_kind not in {"turn", "thread"}:
+        if self.target_kind not in {"turn", "thread", "report"}:
             raise ValueError("MessageEnvelope target_kind is invalid.")
         if not self.source_message_ids or len(set(self.source_message_ids)) != len(self.source_message_ids):
             raise ValueError("MessageEnvelope source_message_ids must be non-empty and unique.")
@@ -121,10 +121,16 @@ class MessageEnvelope:
             raise ValueError("MessageEnvelope attempts must be non-negative.")
         if not self.content.strip() and not self.references:
             raise ValueError("MessageEnvelope payload requires content or references.")
-        if any(
-            reference.get("source") not in {"project", "upload"} or not reference.get("path")
-            for reference in self.references
-        ):
+        if self.sender_kind == "agent":
+            invalid_references = any(
+                set(reference) != {"path"} or not reference.get("path") for reference in self.references
+            )
+        else:
+            invalid_references = any(
+                reference.get("source") not in {"project", "upload"} or not reference.get("path")
+                for reference in self.references
+            )
+        if invalid_references:
             raise ValueError("MessageEnvelope contains an invalid reference.")
 
     def to_dict(self) -> dict[str, Any]:

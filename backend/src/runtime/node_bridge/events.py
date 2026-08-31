@@ -140,18 +140,21 @@ class _EventProjectionMixin:
         if isinstance(usage, Mapping):
             self._apply_usage(usage)
         if kind == "thinking_start":
+            self._start_assistant_after_report()
             self._begin_stream_item("reasoning")
         elif kind == "thinking_delta":
             self._update_stream_item("reasoning", message)
         elif kind == "thinking_end":
             self._finish_stream_item("reasoning")
         elif kind == "response_start":
+            self._start_assistant_after_report()
             self._begin_stream_item("text")
         elif kind == "response_delta":
             self._update_stream_item("text", message)
         elif kind == "response_end":
             self._finish_stream_item("text")
         elif kind == "assistant_message" and isinstance(data.get("message"), Mapping):
+            self._start_assistant_after_report()
             raw = data["message"]
             items: list[dict[str, Any]] = []
             if raw.get("reasoning") and not data.get("reasoning_streamed"):
@@ -216,6 +219,8 @@ class _EventProjectionMixin:
             self._append_steering_message(data)
         elif kind == "steering_received":
             return
+        elif kind == "subagent_report":
+            self._append_subagent_report(data)
         elif kind in {"plan", "feedback_received", "handoff_created"}:
             self._event_item("plan", kind, message, data)
         elif kind == "skills_selected":

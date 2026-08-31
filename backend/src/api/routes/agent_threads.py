@@ -1,4 +1,4 @@
-"""Read-only Agent-tree navigation, parent-mediated messages, and Thread SSE."""
+"""Agent-tree navigation, parent-mediated messages, and Thread SSE."""
 
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def send_agent_thread_message(
         raise HTTPException(status_code=503, detail="message_queue_unavailable") from exc
     except ToolError as exc:
         detail = str(exc)
-        status = 409 if "closed" in detail.lower() else 404 if "tree" in detail.lower() else 422
+        status = 404 if "tree" in detail.lower() else 422
         raise HTTPException(status_code=status, detail=detail) from exc
 
 

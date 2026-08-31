@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
@@ -29,6 +30,7 @@ from backend.domain.runtime_state import (
 from backend.sandbox import SandboxInitializationError
 
 from ..active_turn_stream import ActiveTurnStream
+from ..agent_report_projection import project_frame, project_turn
 from ..chat import routes as chat_routes
 from ..chat.routes import (
     RuntimeModelRequest,
@@ -224,7 +226,11 @@ def _stream_turn(
 def list_turns(session_id: str, request: Request) -> list[dict[str, object]]:
     store = session_store(request.app.state.web)
     require_active_session(store, session_id)
-    return [item.to_dict() for item in store.load_nodes(session_id) if item.session_id == session_id]
+    return [
+        project_turn(store, item) if isinstance(item, RuntimeState) else item.to_dict()
+        for item in store.load_nodes(session_id)
+        if item.session_id == session_id
+    ]
 
 
 @router.get("/{turn_id}/trace")
@@ -248,7 +254,7 @@ def get_turn_trace(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
-        "turn": turn.to_dict(),
+        "turn": project_turn(store, turn),
         "data_idx": data_idx,
         "context": trace.context.to_dict() if trace is not None and after_sequence is None else None,
         "items": [item.to_dict() for item in trace.items] if trace is not None else [],
@@ -273,7 +279,8 @@ def stream_running_turn(turn_id: str, request: Request) -> StreamingResponse:
         return StreamingResponse(subscription.as_sse(), media_type="text/event-stream")
 
     async def completed_stream():
-        yield NodeFrame.snapshot(turn).as_sse()
+        payload = project_frame(store, NodeFrame.snapshot(turn), turn)
+        yield f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
         terminal_type = "success" if turn.status in {"success", "paused"} else "failed"
         yield f'data: <SSE id="{turn.id}" type="{terminal_type}"></SSE>\n\n'
 

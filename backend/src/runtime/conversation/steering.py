@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from backend.domain import UserMessage
 
@@ -18,6 +19,8 @@ class SteeringUpdate:
     delivery_id: str = ""
     references: tuple[dict[str, str], ...] = ()
     ack: Callable[[], None] | None = None
+    source_thread_id: str = ""
+    need_reply: bool = False
 
 
 def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
@@ -32,6 +35,8 @@ def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
     ack: Callable[[], None] | None = None
     references: list[dict[str, str]] = []
     seen_references: set[tuple[str, str]] = set()
+    source_thread_id = ""
+    need_reply = False
     for raw in raw_messages:
         if isinstance(raw, Mapping):
             content = str(raw.get("content") or "").strip()
@@ -39,21 +44,35 @@ def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
             candidate_ack = raw.get("_ack")
             if ack is None and callable(candidate_ack):
                 ack = candidate_ack
+            source_thread_id = source_thread_id or str(raw.get("source_thread_id") or "")
+            need_reply = need_reply or bool(raw.get("need_reply", False))
             for value in raw.get("references", []):
                 if not isinstance(value, Mapping):
                     continue
                 source, path = str(value.get("source") or ""), str(value.get("path") or "")
                 key = (source, path)
-                if source in {"project", "upload"} and path and key not in seen_references:
+                if (
+                    ((source in {"project", "upload"}) or (not source and Path(path).is_absolute()))
+                    and path
+                    and key not in seen_references
+                ):
                     seen_references.add(key)
-                    references.append({"source": source, "path": path})
+                    references.append({"source": source, "path": path} if source else {"path": path})
         else:
             content = str(raw).strip()
         if content or references:
             messages.append(content)
     if not messages:
         return None
-    return SteeringUpdate("\n\n".join(messages), len(messages), delivery_id, tuple(references), ack)
+    return SteeringUpdate(
+        "\n\n".join(messages),
+        len(messages),
+        delivery_id,
+        tuple(references),
+        ack,
+        source_thread_id,
+        need_reply,
+    )
 
 
 def apply_steering(runtime: AgentRuntime, update: SteeringUpdate, *, phase: str) -> None:
@@ -89,6 +108,11 @@ def apply_steering(runtime: AgentRuntime, update: SteeringUpdate, *, phase: str)
     # persist the steering input as a first-class user node; without it the
     # canonical node projection would silently drop the message.
     publish(RuntimeEvent("steering_applied", "In-run user input applied", {**data, "content": update.content}))
+    if update.need_reply:
+        register_report = getattr(store, "register_turn_report", None)
+        if not callable(register_report) or not update.source_thread_id:
+            raise RuntimeError("A reply-requesting Agent message has no canonical report registration path.")
+        register_report(runtime.run.turn_id, runtime.run.thread_id, update.source_thread_id)
     runtime.save()
     if update.ack is not None:
         update.ack()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from threading import RLock
 from time import monotonic
@@ -58,9 +58,13 @@ class _ThreadChannel:
 class AgentThreadEventHub:
     """Keep one long-lived event channel per Agent Thread across its Turns."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        frame_projector: Callable[[NodeFrame, RuntimeState], dict[str, object]] | None = None,
+    ) -> None:
         self._lock = RLock()
         self._channels: dict[tuple[str, str], _ThreadChannel] = {}
+        self._frame_projector = frame_projector or (lambda frame, _current: frame.to_dict())
 
     def subscribe(self, session_id: str, thread_id: str) -> AgentThreadSubscription:
         key = (session_id, thread_id)
@@ -72,7 +76,8 @@ class AgentThreadEventHub:
             channel.subscribers[token] = subscription
             subscription.events.put({"type": "thread.ready", "session_id": session_id, "thread_id": thread_id})
             if channel.latest is not None:
-                subscription.events.put(NodeFrame.snapshot(channel.latest).to_dict())
+                snapshot = NodeFrame.snapshot(channel.latest)
+                subscription.events.put(self._frame_projector(snapshot, channel.latest))
                 subscription.source_bases[channel.latest.key] = channel.latest_source_revision
             return subscription
 
@@ -98,27 +103,28 @@ class AgentThreadEventHub:
             channel.latest_source_revision = frame.revision
             for subscription in channel.subscribers.values():
                 if frame.type == "turn.snapshot":
-                    subscription.events.put(NodeFrame.snapshot(current).to_dict())
+                    snapshot = NodeFrame.snapshot(current)
+                    subscription.events.put(self._frame_projector(snapshot, current))
                     subscription.source_bases = {turn_key: frame.revision}
                     continue
                 base = subscription.source_bases.get(turn_key)
                 if base is None:
-                    subscription.events.put(NodeFrame.snapshot(current).to_dict())
+                    snapshot = NodeFrame.snapshot(current)
+                    subscription.events.put(self._frame_projector(snapshot, current))
                     subscription.source_bases = {turn_key: frame.revision}
                     continue
                 local_revision = frame.revision - base
                 if local_revision <= 0:
                     continue
-                subscription.events.put(
-                    NodeFrame(
-                        "turn.delta",
-                        frame.session_id,
-                        frame.turn_id,
-                        local_revision,
-                        patch=frame.patch,
-                        operations=frame.operations,
-                    ).to_dict()
+                local_frame = NodeFrame(
+                    "turn.delta",
+                    frame.session_id,
+                    frame.turn_id,
+                    local_revision,
+                    patch=frame.patch,
+                    operations=frame.operations,
                 )
+                subscription.events.put(self._frame_projector(local_frame, current))
 
     def finish_turn(self, thread_id: str, turn: RuntimeState) -> None:
         key = (turn.session_id, thread_id)

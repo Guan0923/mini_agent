@@ -100,6 +100,8 @@ export interface RuntimeTurnNode {
   status: RuntimeNodeStatus;
   current_data_idx: number;
   data: TurnMessage[][];
+  /** Read-only delivery metadata; canonical Assistant Items remain unchanged. */
+  agent_report_statuses?: Record<string, "success" | "failed">;
 }
 
 export type RuntimeTreeNode = RuntimeRootNode | RuntimeTurnNode;
@@ -167,6 +169,7 @@ export interface RuntimeNodeDeltaFrame {
   revision: number;
   patch?: RuntimeNodePatch;
   operations?: TurnDeltaOperation[];
+  agent_report_statuses?: Record<string, "success" | "failed">;
 }
 
 export type RuntimeNodeFrame = RuntimeNodeSnapshotFrame | RuntimeNodeDeltaFrame;
@@ -174,8 +177,8 @@ export type RuntimeNodeFrame = RuntimeNodeSnapshotFrame | RuntimeNodeDeltaFrame;
 export interface AgentThreadSummary {
   thread_id: string;
   thread_path: string;
-  thread_task: string;
-  thread_status: "opening" | "closed";
+  thread_status: "running" | "success" | "paused" | "failed";
+  task_result: string;
 }
 
 export type AgentThreadStreamEvent = RuntimeNodeFrame
@@ -191,7 +194,7 @@ export type AgentThreadStreamEvent = RuntimeNodeFrame
 export interface AgentThreadMessageResponse {
   delivery_id: string;
   accepted: boolean;
-  target_state: "running" | "started" | "idle" | "closed";
+  target_state: "running" | "started" | "idle" | "missing";
   turn_id?: string | null;
   background_admission?: string;
 }
