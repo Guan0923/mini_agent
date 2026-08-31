@@ -183,6 +183,33 @@ test("Trace audit lists two real Turns oldest first and loads them independently
   expect(trace.items.filter((entry) => entry.item.type === "tool_result")).toHaveLength(1);
 });
 
+test("automatic Agent report and final answer share one Assistant reply frame", async ({ page }) => {
+  test.setTimeout(60_000);
+  const resetResponse = await page.request.post("/api/test/trace-model-reset");
+  expect(resetResponse.ok(), `${resetResponse.status()} ${await resetResponse.text()}`).toBeTruthy();
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Grouped Agent Report" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Grouped Agent Report", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("agent thread navigation e2e");
+  const rootTurnResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await rootTurnResponse).ok()).toBeTruthy();
+
+  const assistantFrames = page.locator(".chat-messages > .message.assistant");
+  await expect(assistantFrames).toHaveCount(1, { timeout: 15_000 });
+  const frame = assistantFrames.first();
+  await expect(frame).toContainText("Agent Thread tree is ready.", { timeout: 15_000 });
+  await expect(frame.locator(".runtime-agent-report")).toHaveCount(1);
+  await expect(frame.locator(".runtime-agent-report")).toContainText("thread_path: /root/direct");
+  await expect(frame.locator(".assistant-icon")).toHaveCount(1);
+});
+
 test("Agent Thread tree streams an idle nested Agent message and keeps Chat and Trace aligned", async ({ page }) => {
   test.setTimeout(180_000);
   const resetResponse = await page.request.post("/api/test/trace-model-reset");

@@ -100,6 +100,33 @@ function renderAssistant(message: ChatMessage, display: DisplayMode = "developer
 }
 
 describe("subagent Assistant report", () => {
+  it("renders multiple reports and final text inside one Assistant reply frame", () => {
+    const { container } = render(renderAssistant(assistant([
+      {
+        type: "subagent",
+        event: "agent_report",
+        status: "success",
+        text: "thread_path: /root/one\nthread_status: success\ntask_result: one",
+        delivery_id: "agent_report_one",
+      },
+      {
+        type: "subagent",
+        event: "agent_report",
+        status: "success",
+        report_status: "failed",
+        text: "thread_path: /root/two\nthread_status: failed\ntask_result: two",
+        delivery_id: "agent_report_two",
+      },
+      { type: "text", text: "all done", status: "success" },
+    ])));
+
+    expect(container.querySelectorAll(".message.assistant")).toHaveLength(1);
+    expect(container.querySelectorAll(".assistant-icon")).toHaveLength(1);
+    expect(container.querySelectorAll(".runtime-agent-report")).toHaveLength(2);
+    expect(container.querySelectorAll(".runtime-agent-report.failed")).toHaveLength(1);
+    expect(screen.getByText("all done")).toBeVisible();
+  });
+
   it("renders the exact plain text with preserved line breaks", async () => {
     const report = "thread_path: /root/worker\nthread_status: success\ntask_result: 第一行\n第二行";
     const { container } = render(renderAssistant(assistant([{

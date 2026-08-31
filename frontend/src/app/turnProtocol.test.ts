@@ -104,14 +104,18 @@ describe("Turn protocol projection", () => {
     });
     expect(normalizeRuntimeNode(node)).toEqual(node);
     const projected = projectTurnPath(new Map([["session_1:turn_1", node]]), node.id);
-    expect(projected.map((message) => message.role)).toEqual(["user", "assistant", "assistant"]);
-    expect(projected[2].items).toEqual([{
-      type: "subagent",
-      event: "agent_report",
-      status: "success",
-      text: report,
-      delivery_id: "agent_report_1",
-    }]);
+    expect(projected.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(projected[1].content).toBe("working");
+    expect(projected[1].items).toEqual([
+      { type: "text", text: "working", status: "success" },
+      {
+        type: "subagent",
+        event: "agent_report",
+        status: "success",
+        text: report,
+        delivery_id: "agent_report_1",
+      },
+    ]);
   });
 
   it("applies consecutive Assistant report deltas and enriches only the frontend projection", () => {
@@ -142,10 +146,109 @@ describe("Turn protocol projection", () => {
     });
     expect(updated.data[0][2].content[0]).not.toHaveProperty("report_status");
     const projected = projectTurnPath(new Map([["session_1:turn_1", updated]]), updated.id);
-    expect(projected[2].items?.[0]).toMatchObject({
+    expect(projected).toHaveLength(2);
+    expect(projected[1].items?.find((item) => item.type === "subagent")).toMatchObject({
       delivery_id: "agent_report_failed",
       report_status: "failed",
     });
+  });
+
+  it("merges incrementally appended reports and final output into the existing Assistant run", () => {
+    const accumulator = runtimeNodeAccumulator();
+    const baseline = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.snapshot",
+      revision: 0,
+      turn: turn({
+        status: "running",
+        data: [[
+          { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
+          { role: "assistant", content: [{ type: "text", text: "working", status: "success" }] },
+        ]],
+      }),
+    });
+    let conversation: Conversation = { id: "session_1", title: "reports", messages: [], runtimeNodes: [] };
+    conversation = integrateRuntimeNodeUpdates(conversation, [baseline], baseline.id, true);
+    const originalUser = conversation.messages[0];
+    const assistantId = conversation.messages[1].id;
+
+    const firstReport = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 1,
+      operations: [{
+        op: "append_message",
+        data_idx: 0,
+        message_idx: 2,
+        message: {
+          role: "assistant",
+          content: [{
+            type: "subagent",
+            event: "agent_report",
+            status: "success",
+            text: "thread_path: /root/one\nthread_status: success\ntask_result: one",
+            delivery_id: "agent_report_one",
+          }],
+        },
+      }],
+      agent_report_statuses: { agent_report_one: "success" },
+    });
+    conversation = integrateRuntimeNodeUpdates(conversation, [firstReport], firstReport.id, false);
+
+    const secondReport = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 2,
+      operations: [{
+        op: "append_message",
+        data_idx: 0,
+        message_idx: 3,
+        message: {
+          role: "assistant",
+          content: [{
+            type: "subagent",
+            event: "agent_report",
+            status: "success",
+            text: "thread_path: /root/two\nthread_status: failed\ntask_result: two",
+            delivery_id: "agent_report_two",
+          }],
+        },
+      }],
+      agent_report_statuses: { agent_report_one: "success", agent_report_two: "failed" },
+    });
+    conversation = integrateRuntimeNodeUpdates(conversation, [secondReport], secondReport.id, false);
+
+    const finalOutput = applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 3,
+      patch: { status: "success" },
+      operations: [{
+        op: "append_message",
+        data_idx: 0,
+        message_idx: 4,
+        message: { role: "assistant", content: [{ type: "text", text: "done", status: "success" }] },
+      }],
+    });
+    conversation = integrateRuntimeNodeUpdates(conversation, [finalOutput], finalOutput.id, false);
+
+    expect(conversation.messages).toHaveLength(2);
+    expect(conversation.messages[0]).toBe(originalUser);
+    expect(conversation.messages[1].id).toBe(assistantId);
+    expect(conversation.messages[1].content).toBe("workingdone");
+    expect(conversation.messages[1].items?.map((item) => item.type)).toEqual([
+      "text",
+      "subagent",
+      "subagent",
+      "text",
+    ]);
+    expect(conversation.messages[1].items?.filter((item) => item.type === "subagent").map((item) => item.report_status)).toEqual([
+      "success",
+      "failed",
+    ]);
+    expect(conversation.messages[1]).toMatchObject({ status: "success", running: false });
   });
 
   it("reconstructs the shared root when the first SSE snapshot only contains a Turn", () => {
@@ -345,7 +448,7 @@ describe("Turn protocol projection", () => {
     } as unknown as RuntimeNodeFrame)).toThrow("patch value is invalid for project_cwd");
   });
 
-  it("projects assistant Items without grouping or reordering repeated types", () => {
+  it("projects consecutive Assistant Items without grouping or reordering repeated types", () => {
     const items = [
       { type: "reasoning", text: "思考一", status: "success" as const },
       { type: "tool_call", call_id: "call-1", name: "read_file", arguments: {}, status: "success" as const },
@@ -357,7 +460,9 @@ describe("Turn protocol projection", () => {
     const projected = projectTurnPath(new Map([["session_1:turn_1", turn({
       data: [[
         { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
-        { role: "assistant", content: items },
+        { role: "assistant", content: items.slice(0, 3) },
+        { role: "assistant", content: items.slice(3, 5) },
+        { role: "assistant", content: items.slice(5) },
       ]],
     })]]), "turn_1");
 
@@ -526,13 +631,17 @@ describe("Turn protocol projection", () => {
           { type: "text", text: "kept", status: "success" },
           { type: "text", text: "new output", status: "success" },
         ] },
+        { role: "assistant", content: [
+          { type: "text", text: " continued", status: "success" },
+        ] },
       ]],
     });
     const projected = projectTurnPath(new Map([["session_1:turn_1", turn()], ["session_1:turn_compact", compact]]), compact.id);
-    expect(projected.map((message) => message.content)).toEqual(["hello", "world", "new output"]);
+    expect(projected.map((message) => message.content)).toEqual(["hello", "world", "new output continued"]);
     expect(projected[projected.length - 1]?.events[0]).toMatchObject({ kind: "compaction", message: "上下文已压缩" });
     expect(projected[projected.length - 1]?.items).toEqual([
       { type: "text", text: "new output", status: "success" },
+      { type: "text", text: " continued", status: "success" },
     ]);
     expect(projected[projected.length - 1]?.compactionNotice).toBe(true);
   });

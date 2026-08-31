@@ -30,6 +30,21 @@ function assistantMessageIndex(turn: RuntimeStateNode): number {
   return -1;
 }
 
+interface AssistantMessageRun {
+  start: number;
+  end: number;
+}
+
+function assistantMessageRun(turn: RuntimeStateNode, messageIdx: number): AssistantMessageRun | undefined {
+  const selected = turn.data[turn.current_data_idx] ?? [];
+  if (selected[messageIdx]?.role !== "assistant") return undefined;
+  let start = messageIdx;
+  let end = messageIdx;
+  while (start > 0 && selected[start - 1]?.role === "assistant") start -= 1;
+  while (end + 1 < selected.length && selected[end + 1]?.role === "assistant") end += 1;
+  return { start, end };
+}
+
 function visibleAssistantItems(turn: RuntimeStateNode, messageIdx = assistantMessageIndex(turn)): TurnItem[] {
   const selected = turn.data[turn.current_data_idx];
   const items = selected?.[messageIdx]?.role === "assistant" ? selected[messageIdx].content : [];
@@ -93,14 +108,14 @@ function displayAssistantItems(turn: RuntimeStateNode, items: TurnItem[]): TurnI
   return displayed;
 }
 
-function itemEvents(turn: RuntimeStateNode, items: TurnItem[], messageIdx: number): ToolEvent[] {
+function itemEvents(items: TurnItem[], compactionNotice: boolean, completed: boolean): ToolEvent[] {
   const events: ToolEvent[] = [];
-  if (turn.data[turn.current_data_idx]?.[messageIdx]?.content?.[0]?.type === "compaction") {
+  if (compactionNotice) {
     events.push({ kind: "compaction", message: "上下文已压缩" });
   }
   for (const item of items) {
     if (item.type === "reasoning") {
-      events.push({ kind: "thinking", message: text(item.text), data: { completed: turn.status !== "running" } });
+      events.push({ kind: "thinking", message: text(item.text), data: { completed } });
     } else if (item.type === "tool_call") {
       events.push({ kind: "tool_call", message: String(item.name ?? "工具"), data: { ...item } });
     } else if (item.type === "tool_result") {
@@ -152,15 +167,24 @@ export interface ProjectedNodeDetails {
 }
 
 export function projectRuntimeNode(turn: RuntimeStateNode, messageIdx = assistantMessageIndex(turn)): ProjectedNodeDetails {
-  const sourceItems = visibleAssistantItems(turn, messageIdx);
+  const run = assistantMessageRun(turn, messageIdx);
+  const sourceItems: TurnItem[] = [];
+  let compactionNotice = false;
+  if (run) {
+    for (let index = run.start; index <= run.end; index += 1) {
+      const message = turn.data[turn.current_data_idx]?.[index];
+      if (message?.content?.[0]?.type === "compaction") compactionNotice = true;
+      sourceItems.push(...visibleAssistantItems(turn, index));
+    }
+  }
   const items = displayAssistantItems(turn, sourceItems);
   const errorItem = [...items].reverse().find((item) => item.type === "error");
   return {
     role: "assistant",
     content: items.filter((item) => item.type === "text" || item.type === "bash").map((item) => text(item.text)).join(""),
-    events: itemEvents(turn, sourceItems, messageIdx),
+    events: itemEvents(sourceItems, compactionNotice, turn.status !== "running"),
     items,
-    compactionNotice: turn.data[turn.current_data_idx]?.[messageIdx]?.content?.[0]?.type === "compaction",
+    compactionNotice,
     error: errorItem ? text(errorItem.message) : undefined,
     status: turn.status,
     decision: pendingDecision(items, turn.status),
@@ -192,12 +216,15 @@ export function projectTurnPath(nodes: Map<string, RuntimeTreeNode>, activeTurnI
     const selected = turn.data[turn.current_data_idx];
     if (!selected) return [];
     const result: ChatMessage[] = [];
-    for (let messageIdx = 0; messageIdx < selected.length; messageIdx += 1) {
+    for (let messageIdx = 0; messageIdx < selected.length;) {
       const message = selected[messageIdx];
       if (message.role === "user") {
         const next = selected[messageIdx + 1];
         const compact = next?.role === "assistant" && next.content[0]?.type === "compaction";
-        if (compact) continue;
+        if (compact) {
+          messageIdx += 1;
+          continue;
+        }
         const userItem = message.content[0];
         result.push({
           id: `${turn.id}:message:${messageIdx}`,
@@ -210,13 +237,19 @@ export function projectTurnPath(nodes: Map<string, RuntimeTreeNode>, activeTurnI
           timelineSource: typeof message.delivery_id === "string" ? "steering" : "user",
           deliveryId: typeof message.delivery_id === "string" ? message.delivery_id : undefined,
         });
+        messageIdx += 1;
         continue;
       }
-      const assistant = projectRuntimeNode(turn, messageIdx);
-      const isLatestMessage = messageIdx === selected.length - 1;
+      const run = assistantMessageRun(turn, messageIdx);
+      if (!run) {
+        messageIdx += 1;
+        continue;
+      }
+      const assistant = projectRuntimeNode(turn, run.start);
+      const isLatestMessage = run.end === selected.length - 1;
       if (assistant.compactionNotice || assistant.content || assistant.events.length || assistant.error || (turn.status === "running" && isLatestMessage)) {
         result.push({
-          id: `${turn.id}:message:${messageIdx}`,
+          id: `${turn.id}:message:${run.start}`,
           role: "assistant",
           content: assistant.content,
           events: assistant.events,
@@ -231,6 +264,7 @@ export function projectTurnPath(nodes: Map<string, RuntimeTreeNode>, activeTurnI
           runtimeNodeIds: [keyOf(turn)],
         });
       }
+      messageIdx = run.end + 1;
     }
     return result;
   });
@@ -302,15 +336,14 @@ export function integrateRuntimeNodeUpdates(
   if (!activeTurn || !isRuntimeTurnNode(activeTurn)) throw new Error("Active Turn is missing after applying an SSE frame");
 
   let messages: ChatMessage[];
-  let assistantIndex = -1;
-  for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
-    const message = conversation.messages[index];
-    if (message.role === "assistant" && message.sourceNodeId === activeTurnId) {
-      assistantIndex = index;
-      break;
-    }
-  }
-  if (forcePathProjection || assistantIndex < 0) {
+  const latestAssistantIdx = assistantMessageIndex(activeTurn);
+  const latestRun = assistantMessageRun(activeTurn, latestAssistantIdx);
+  const latestRunId = latestRun ? `${activeTurn.id}:message:${latestRun.start}` : undefined;
+  const assistantIndex = latestRunId
+    ? conversation.messages.findIndex((message) => message.role === "assistant" && message.id === latestRunId)
+    : -1;
+  const latestRunEndsTurn = latestRun?.end === activeTurn.data[activeTurn.current_data_idx].length - 1;
+  if (forcePathProjection || !latestRun || assistantIndex < 0 || !latestRunEndsTurn) {
     messages = projectTurnPath(current, activeTurnId);
     if (conversation.hiddenBeforeTurnId) {
       const prefix = `${conversation.hiddenBeforeTurnId}:message:`;
@@ -324,7 +357,7 @@ export function integrateRuntimeNodeUpdates(
       if (hiddenIndex >= 0) messages = messages.slice(hiddenIndex + 1);
     }
   } else {
-    const projection = projectRuntimeNode(activeTurn);
+    const projection = projectRuntimeNode(activeTurn, latestRun.start);
     messages = [...conversation.messages];
     messages[assistantIndex] = {
       ...messages[assistantIndex],
