@@ -8,11 +8,13 @@ paid or external service.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -87,6 +89,89 @@ def _network_command(probe: Path, target_host: str, target_port: int, *, use_pro
     return f'"{probe}" {target_host} {target_port} {mode}'
 
 
+def _process_is_running(pid: int) -> bool:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))) and exit_code.value == 259
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _verify_job_tree(launcher: SandboxLauncher, workspace: Path) -> dict[str, object]:
+    marker = workspace / f"job-child-{uuid.uuid4().hex}.pid"
+    escaped_marker = str(marker).replace("'", "''")
+    policy = SandboxPolicy(
+        (workspace,),
+        "real-acceptance",
+        f"job-tree-{uuid.uuid4().hex}",
+        file_mode=FileAccessMode.WORKSPACE_WRITE,
+        network_mode=NetworkMode.FULL_NETWORK,
+    )
+    command = (
+        "$child = Start-Process -FilePath 'C:\\Windows\\System32\\cmd.exe' "
+        "-ArgumentList '/d','/c','ping.exe -t 127.0.0.1' -PassThru; "
+        f"[IO.File]::WriteAllText('{escaped_marker}', [string]$child.Id); "
+        "Wait-Process -Id $child.Id"
+    )
+    process = launcher.launch(
+        [
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ],
+        policy,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    child_pid = 0
+    child_started = False
+    child_stopped = False
+    error = ""
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not marker.exists() and process.poll() is None:
+            time.sleep(0.05)
+        if marker.exists():
+            child_pid = int(marker.read_text(encoding="utf-8").strip())
+            child_started = _process_is_running(child_pid)
+        else:
+            error = "child process did not publish its pid"
+        process.terminate()
+        process.wait(timeout=10)
+        deadline = time.monotonic() + 5.0
+        while child_pid and time.monotonic() < deadline and _process_is_running(child_pid):
+            time.sleep(0.05)
+        child_stopped = bool(child_pid) and not _process_is_running(child_pid)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        try:
+            process.terminate()
+        except Exception:
+            pass
+    finally:
+        if not launcher.cleanup(process):
+            raise RuntimeError("sandbox Job Object acceptance cleanup failed")
+    return {
+        "passed": child_started and child_stopped,
+        "child_started": child_started,
+        "child_stopped": child_stopped,
+        "error": error,
+    }
+
+
 def main() -> int:
     if os.name != "nt":
         raise RuntimeError("Windows sandbox acceptance is available only on Windows")
@@ -101,23 +186,15 @@ def main() -> int:
         server_thread.start()
     target_ports = [int(server.server_address[1]) for server in servers]
     results: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = []
     outside = Path(tempfile.gettempdir()).resolve().parent / f"mini-agent-outside-{uuid.uuid4().hex}.tmp"
     try:
         with tempfile.TemporaryDirectory(prefix="mini-agent-real-acceptance-") as temporary:
             workspace = Path(temporary).resolve()
             network_probe = _compile_network_probe(workspace)
-            powershell_results: list[dict[str, object]] = []
-            for smoke_mode in FileAccessMode:
-                smoke_policy = SandboxPolicy(
-                    (workspace,),
-                    "runtime-smoke",
-                    f"powershell-{smoke_mode.value}-{uuid.uuid4().hex}",
-                    file_mode=smoke_mode,
-                    network_mode=NetworkMode.FULL_NETWORK,
-                )
-                powershell_rc, powershell_output, powershell_error = _run_argv(
-                    launcher,
-                    smoke_policy,
+            terminal_commands = {
+                "cmd": ([r"C:\Windows\System32\cmd.exe", "/d", "/c", "echo cmd-ok"], "cmd-ok"),
+                "powershell": (
                     [
                         r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
                         "-NoLogo",
@@ -126,21 +203,46 @@ def main() -> int:
                         "-Command",
                         "Write-Output powershell-ok",
                     ],
-                )
-                powershell_results.append(
-                    {
-                        "file_mode": smoke_mode.value,
-                        "rc": powershell_rc,
-                        "passed": powershell_rc == 0 and "powershell-ok" in powershell_output,
-                        "error": powershell_error.strip()[:500],
-                    }
-                )
-            if not all(bool(result["passed"]) for result in powershell_results):
+                    "powershell-ok",
+                ),
+                "pwsh": (
+                    [
+                        r"C:\Program Files\PowerShell\7\pwsh.exe",
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "Write-Output pwsh-ok",
+                    ],
+                    "pwsh-ok",
+                ),
+            }
+            terminal_results: dict[str, list[dict[str, object]]] = {}
+            for terminal, (argv, marker) in terminal_commands.items():
+                terminal_results[terminal] = []
+                for smoke_mode in FileAccessMode:
+                    smoke_policy = SandboxPolicy(
+                        (workspace,),
+                        "runtime-smoke",
+                        f"{terminal}-{smoke_mode.value}-{uuid.uuid4().hex}",
+                        file_mode=smoke_mode,
+                        network_mode=NetworkMode.FULL_NETWORK,
+                    )
+                    rc, output, error = _run_argv(launcher, smoke_policy, argv)
+                    terminal_results[terminal].append(
+                        {
+                            "file_mode": smoke_mode.value,
+                            "rc": rc,
+                            "passed": rc == 0 and marker in output,
+                            "error": error.strip()[:500],
+                        }
+                    )
+            if not all(bool(result["passed"]) for values in terminal_results.values() for result in values):
                 print(
                     json.dumps(
                         {
                             "status": "failed",
-                            "runtime_smoke": {"powershell": powershell_results},
+                            "runtime_smoke": terminal_results,
                         },
                         ensure_ascii=True,
                         indent=2,
@@ -237,7 +339,7 @@ def main() -> int:
                     expected_direct = network_mode is NetworkMode.FULL_NETWORK
                     expected_alias = network_mode is NetworkMode.FULL_NETWORK
                     expected_identity = (
-                        "codexsandboxonline" if network_mode is NetworkMode.FULL_NETWORK else "codexsandboxoffline"
+                        "minisbxonline" if network_mode is NetworkMode.FULL_NETWORK else "minisbxoffline"
                     )
                     checks = (
                         row["workspace_write"] is expected_workspace,
@@ -250,8 +352,7 @@ def main() -> int:
                     )
                     results.append(row)
                     if not all(checks):
-                        print(json.dumps({"status": "failed", "case": row}, ensure_ascii=True, indent=2))
-                        return 1
+                        failures.append({"case": row})
             port_policy = SandboxPolicy(
                 (workspace,),
                 "real-acceptance",
@@ -285,8 +386,10 @@ def main() -> int:
                 "denied_error": denied_error.strip()[:500],
             }
             if not all((port_result["allowed"], port_result["denied"])):
-                print(json.dumps({"status": "failed", "restricted_port": port_result}, ensure_ascii=True, indent=2))
-                return 1
+                failures.append({"restricted_port": port_result})
+            job_tree_result = _verify_job_tree(launcher, workspace)
+            if not bool(job_tree_result["passed"]):
+                failures.append({"job_tree": job_tree_result})
     finally:
         for server in servers:
             server.shutdown()
@@ -297,12 +400,19 @@ def main() -> int:
             outside.unlink()
     print(
         json.dumps(
-            {"status": "passed", "powershell": powershell_results, "cases": results, "restricted_port": port_result},
-            ensure_ascii=False,
+            {
+                "status": "passed" if not failures else "failed",
+                "terminals": terminal_results,
+                "cases": results,
+                "restricted_port": port_result,
+                "job_tree": job_tree_result,
+                "failures": failures,
+            },
+            ensure_ascii=True,
             indent=2,
         )
     )
-    return 0
+    return 0 if not failures else 1
 
 
 if __name__ == "__main__":
