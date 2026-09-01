@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import monotonic, sleep
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1424,6 +1426,133 @@ def test_plan_compaction_failure_keeps_successful_plan_and_records_redacted_reas
     assert "summary provider unavailable" in error["message"]
     assert "super-secret" not in error["message"]
     assert "[REDACTED]" in error["message"]
+
+
+def test_http_resume_plan_compaction_handoff_uses_one_bridge_and_fake_model(
+    tmp_path: Path,
+    monkeypatch,
+    local_sandbox_runtime: None,
+) -> None:
+    state = WebAppState(tmp_path / "web")
+    monkeypatch.setattr(
+        state,
+        "model_config",
+        lambda *_args, **_kwargs: ModelConfig("test", "https://example.test/v1", "fake-plan-model"),
+    )
+
+    class FakePlanClient:
+        context_size = 100_000
+
+        def __init__(self) -> None:
+            self.operations: list[tuple[str | None, str]] = []
+
+        def estimate_tokens(self, messages, tools, request_parameters) -> int:
+            return 100
+
+        def estimate_input_tokens(self, messages, tools, request_parameters) -> int:
+            return 100
+
+        def run(self, runtime: AgentRuntime) -> PreparedResponse:
+            operation = runtime.exchange.operation
+            self.operations.append((operation, runtime.run.mode))
+            if operation == "summarize":
+                return PreparedResponse(AssistantMessage(content="HTTP resumed Plan summary."), {"total_tokens": 2})
+            if operation == "title":
+                return PreparedResponse(AssistantMessage(content="恢复计划测试"), {"total_tokens": 1})
+            if runtime.run.mode == "plan":
+                return PreparedResponse(
+                    AssistantMessage(
+                        tool_messages=[
+                            ToolMessage(
+                                name=REQUEST_PLAN_REVIEW_NAME,
+                                call_id="review_http_resume",
+                                arguments={"plan": "Implement the HTTP resumed Plan."},
+                            )
+                        ]
+                    ),
+                    {"total_tokens": 3},
+                )
+            return PreparedResponse(AssistantMessage(content="Implemented through HTTP resume."), {"total_tokens": 4})
+
+    fake_client = FakePlanClient()
+
+    def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
+        application = build_application(
+            workspace or state.session_workspace(session_id),
+            planner_name="rule",
+            paths=state.paths,
+        )
+        application.runner.planner = LLMPlanner(fake_client, [], [])
+        return application
+
+    monkeypatch.setattr(chat_routes, "build_local_application", local_application)
+
+    with TestClient(create_app(state)) as client:
+        sidebar = client.post("/api/sidebar-threads", json={}).json()
+        initial_application = local_application(state, session_id=sidebar["session_id"])
+        initial = initial_application.open_conversation(sidebar["session_id"])
+        paused = initial.run_task(
+            "plan an HTTP resumed change",
+            mode="plan",
+            suspend_requested=lambda: True,
+        )
+        assert paused.status == "cancelled" and paused.stop_reason == "user_paused"
+        store = session_store(state)
+        assert store.find_node(paused.turn_id).status == "paused"
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            response_future = executor.submit(
+                client.post,
+                f"/api/turns/{paused.turn_id}/resume",
+                json={"running_mode": "plan", "permission_mode": "read_only"},
+            )
+            decision_id = ""
+            deadline = monotonic() + 10
+            while monotonic() < deadline and not decision_id:
+                turn = store.find_node(paused.turn_id)
+                if isinstance(turn, RuntimeState):
+                    decision_id = next(
+                        (
+                            str(item.get("decision_id") or "")
+                            for item in turn.assistant_items
+                            if item.get("event") == "decision_requested"
+                        ),
+                        "",
+                    )
+                if not decision_id:
+                    sleep(0.02)
+            assert decision_id
+            decision = client.post(
+                "/api/decisions",
+                json={"decision_id": decision_id, "choice": "implement_and_compaction"},
+            )
+            assert decision.status_code == 200
+            response = response_future.result(timeout=15)
+
+        assert response.status_code == 200
+        payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+        assert payloads[-1].endswith('type="success"></SSE>')
+        frames = [json.loads(payload) for payload in payloads[:-1]]
+        snapshots = [frame["turn"] for frame in frames if frame["type"] == "turn.snapshot"]
+        assert len(snapshots) == 3
+        plan, compact, agent = snapshots
+        assert compact["parent_id"] == plan["id"] and agent["parent_id"] == compact["id"]
+        assert [plan["running_mode"], compact["running_mode"], agent["running_mode"]] == [
+            "plan",
+            "plan",
+            "agent",
+        ]
+
+        turns = [node for node in store.load_nodes(sidebar["session_id"]) if isinstance(node, RuntimeState)]
+        assert [turn.status for turn in turns] == ["success", "success", "success"]
+        trace = store.load_turn_trace(sidebar["session_id"], plan["id"], plan["current_data_idx"])
+        assert trace is not None
+        trace_events = [item.item.get("event") for item in trace.items]
+        assert trace_events.count("decision_requested") == 1
+        assert trace_events.count("approval_granted") == 1
+
+    assert ("summarize", "plan") in fake_client.operations
+    assert fake_client.operations.count(("decision", "agent")) == 1
 
 
 def test_sse_terminal_mapping_distinguishes_user_pause_from_network_pause() -> None:

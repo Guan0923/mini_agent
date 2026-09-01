@@ -90,15 +90,42 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
             delivery_id=delivery_id,
             on_started=on_started,
         )
+        return self._continue_handoff(
+            state,
+            on_event=on_event,
+            interrupt=interrupt,
+            steering=steering,
+            cancel_requested=cancel_requested,
+            suspend_requested=suspend_requested,
+            request_parameters=request_parameters,
+        )
+
+    def _continue_handoff(
+        self,
+        state: RunState,
+        *,
+        on_event: EventHandler | None,
+        interrupt: InterruptHandler | None,
+        steering: SteeringHandler | None,
+        cancel_requested: CancellationHandler | None,
+        suspend_requested: CancellationHandler | None,
+        request_parameters: Mapping[str, Any] | None,
+    ) -> RunState:
+        """Continue one completed Plan handoff through optional compaction and Agent execution."""
+
         handoff = state.handoff
         if handoff is None:
             return state
+        if self.runtime is None:
+            raise RuntimeError("Conversation runtime is unavailable for handoff.")
         source_session_id = (
             self.active_session.session_id if self.active_session is not None else self.runtime.state.session_id
         )
         bridge = self.runtime_node_bridge
         if handoff.compact_before:
             try:
+                if bridge is not None:
+                    bridge.finalize_current("success")
                 self.runner.compact_context(self.runtime)
                 if bridge is not None:
                     bridge.finalize_current("success")
@@ -284,7 +311,7 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         request_parameters: Mapping[str, Any] | None = None,
         resume_confirmed: bool = False,
     ) -> RunState | None:
-        return resume_conversation(
+        state = resume_conversation(
             self,
             session_id,
             on_event=on_event,
@@ -294,6 +321,17 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
             suspend_requested=suspend_requested,
             request_parameters=request_parameters,
             resume_confirmed=resume_confirmed,
+        )
+        if state is None:
+            return None
+        return self._continue_handoff(
+            state,
+            on_event=on_event,
+            interrupt=interrupt,
+            steering=steering,
+            cancel_requested=cancel_requested,
+            suspend_requested=suspend_requested,
+            request_parameters=request_parameters,
         )
 
     def _record_unexpected_failure(
@@ -305,6 +343,8 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
     ) -> None:
         if self.runtime is None or self.runtime.state.current_run is None:
             return
+        if message == FAILED_TERMINAL_MESSAGE:
+            message = f"{FAILED_TERMINAL_MESSAGE} ({error.__class__.__name__})"
         run = self.runtime.state.current_run
         run.status = "failed"
         boundary = min(max(run.turn_start_index, 0), len(self.runtime.state.messages))

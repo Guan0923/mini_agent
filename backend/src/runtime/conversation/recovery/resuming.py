@@ -41,6 +41,8 @@ class ResumableConversation(Protocol):
 
     def _finish_resume_node_bridge(self, state: RunState) -> None: ...
 
+    def _fail_resume_node_bridge(self, bridge, error: Exception) -> None: ...
+
 
 def prepare_resume(conversation: ResumableConversation, session_id: str | None = None) -> ResumePreview:
     """Inspect a resume target without changing the active conversation."""
@@ -155,7 +157,7 @@ def resume_session(
     try:
         result = conversation.runner.resume(conversation.runtime)
     except Exception as exc:
-        bridge.finish_exception(exc)
+        conversation._fail_resume_node_bridge(bridge, exc)
         conversation._record_unexpected_failure(exc)
         raise
     conversation._finish_resume_node_bridge(result)

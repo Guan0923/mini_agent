@@ -233,7 +233,10 @@ class _EventProjectionMixin:
             self.finish("paused", message or "Paused by user.", category="user")
         elif kind == "error":
             self.finish(
-                "failed", message or "Execution failed.", category=self.abort_category or self._error_category(data)
+                "failed",
+                message or "Execution failed.",
+                category=self.abort_category or self._error_category(data),
+                code=str(data.get("error_type") or ""),
             )
 
     def _begin_compact_turn(self, summary: str) -> RuntimeState:

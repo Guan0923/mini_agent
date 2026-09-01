@@ -188,21 +188,34 @@ class ConversationNodeBridgeMixin:
 
         if self.runtime is None:
             raise RuntimeError("Conversation runtime is unavailable for resume.")
-        bridge = self._node_bridge_for_runtime(
-            "",
-            source_node_id=turn_id,
-            adopt_existing=True,
-        )
-        if bridge is None:
-            raise RuntimeError("The Turn store cannot resume the interrupted Turn.")
-        self.runtime_node_bridge = bridge
-        self._node_bridge_events_external = False
+        bridge = self.runtime_node_bridge
+        if bridge is None or bridge.closed:
+            bridge = self._node_bridge_for_runtime(
+                "",
+                source_node_id=turn_id,
+                adopt_existing=True,
+            )
+            if bridge is None:
+                raise RuntimeError("The Turn store cannot resume the interrupted Turn.")
+            self.runtime_node_bridge = bridge
+            self._node_bridge_events_external = False
         bridge.bind_runtime(self.runtime)
         current = bridge.start()
+        if current.id != turn_id:
+            raise RuntimeError("The attached Turn bridge does not match the resumed Turn.")
+        bridge._bind_existing_trace(current)
         run = self.runtime.run
         run.thread_id = current.thread_id
         run.turn_id = current.id
         run.data_idx = current.current_data_idx
+
+        if self._node_bridge_events_external:
+            # Web SSE already owns RuntimeEvent projection and frame
+            # publication. Reusing its pre-started bridge is essential: a
+            # second dynamic writer would diverge after decision_requested and
+            # collide with the immutable Turn Trace coordinate.
+            self.runtime.services.on_event = on_event
+            return bridge
 
         def sink(event: RuntimeEvent) -> None:
             bridge.handle(event)
@@ -216,7 +229,7 @@ class ConversationNodeBridgeMixin:
         """Finalize and release an embedding-owned resumed Turn bridge."""
 
         bridge = self.runtime_node_bridge
-        if bridge is None or self._node_bridge_events_external:
+        if bridge is None or self._node_bridge_events_external or state.handoff is not None:
             return
         if state.status in {"completed", "success"}:
             bridge.finish("success", state.final_answer or "")
@@ -234,6 +247,12 @@ class ConversationNodeBridgeMixin:
         if bridge.closed:
             self.runtime_node_bridge = None
             self._node_bridge_events_external = False
+
+    def _fail_resume_node_bridge(self, bridge: RuntimeEventNodeBridge, error: Exception) -> None:
+        """Finalize only a locally owned resume bridge after an exception."""
+
+        if bridge is self.runtime_node_bridge and not self._node_bridge_events_external:
+            bridge.finish_exception(error)
 
     def _bind_node_bridge(
         self,

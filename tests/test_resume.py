@@ -4,15 +4,23 @@ import pytest
 
 from backend.domain import (
     AssistantMessage,
+    NodeFrame,
     RecoveryCheckpoint,
     RunProvenance,
     RunState,
     ToolMessage,
+    TurnTrace,
+    TurnTraceContext,
+    TurnTraceItem,
 )
+from backend.domain.runtime_state import RuntimeState as RuntimeTurnState
+from backend.planning.context_management import ContextCompactionResult
 from backend.runtime import AgentRunner, ConversationService
 from backend.runtime.conversation.recovery import reconstruct_attempt
 from backend.runtime.core.context import RuntimeState
 from backend.runtime.core.contracts import InterruptDecision
+from backend.runtime.core.events import RuntimeEvent
+from backend.runtime.node_bridge import RuntimeEventNodeBridge
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from backend.tools import Tool, ToolRegistry
 from tests.local_store import session_store
@@ -56,6 +64,17 @@ class PlanHandoffPlanner:
                 ]
             )
         return AssistantMessage(content="Implemented from the reviewed plan.")
+
+    def compact_context(self, runtime):
+        assert runtime.services.publish is not None
+        runtime.services.publish(
+            RuntimeEvent(
+                "context_compaction_completed",
+                "Conversation context compacted manually",
+                {"summary": "Resumed Plan context."},
+            )
+        )
+        return ContextCompactionResult(True, 2, 1, "Resumed Plan context.")
 
 
 def shared_service(tmp_path: Path, planner, tools: ToolRegistry):
@@ -185,6 +204,137 @@ def test_plan_review_handoff_creates_new_workflow_with_parent_source(tmp_path: P
         summary for summary in service.runtime.state.run_history if summary.run_id == result.provenance.source_run_id
     )
     assert source.workflow_id != result.provenance.workflow_id
+
+
+@pytest.mark.parametrize(
+    ("choice", "expected_modes"),
+    [
+        ("implement", ["plan", "agent"]),
+        ("implement_and_compaction", ["plan", "plan", "agent"]),
+    ],
+)
+def test_resumed_plan_review_continues_handoff(
+    tmp_path: Path,
+    choice: str,
+    expected_modes: list[str],
+) -> None:
+    service, store = shared_service(tmp_path, PlanHandoffPlanner(), ToolRegistry())
+    paused = service.run_task("plan the resumed change", mode="plan", suspend_requested=lambda: True)
+    assert paused.status == "cancelled" and paused.stop_reason == "user_paused"
+    assert service.active_session is not None
+
+    def interrupt(request):
+        return InterruptDecision("continue" if request.kind == "resume" else choice)
+
+    reopened = ConversationService(service.runner, store)
+    result = reopened.resume_session(service.active_session.session_id, interrupt=interrupt)
+
+    assert result is not None and result.status == "completed" and result.mode == "agent"
+    turns = [node for node in store.load_nodes(service.active_session.session_id) if isinstance(node, RuntimeTurnState)]
+    assert [turn.running_mode for turn in turns] == expected_modes
+    assert all(turn.status == "success" for turn in turns)
+    assert all(child.parent_id == parent.id for parent, child in zip(turns, turns[1:]))
+    if choice == "implement_and_compaction":
+        assert turns[1].assistant_items[0]["type"] == "compaction"
+        assert turns[1].assistant_items[0]["summary"] == "Resumed Plan context."
+
+
+def test_web_resume_reuses_external_bridge_for_plan_compaction_handoff(tmp_path: Path) -> None:
+    service, store = shared_service(tmp_path, PlanHandoffPlanner(), ToolRegistry())
+    paused = service.run_task("plan through Web resume", mode="plan", suspend_requested=lambda: True)
+    assert paused.status == "cancelled"
+    assert service.active_session is not None
+    session_id = service.active_session.session_id
+
+    reopened = ConversationService(service.runner, store, session_id=session_id)
+    assert reopened.runtime is not None
+    frames: list[NodeFrame] = []
+    bridge = RuntimeEventNodeBridge(
+        store,
+        session_id=session_id,
+        thread_id=session_id,
+        source_node_id=paused.turn_id,
+        adopt_existing=True,
+        prompt="",
+        running_mode="plan",
+        emit=frames.append,
+    )
+    bridge.bind_runtime(reopened.runtime)
+    current = bridge.start()
+    user_item = current.data[current.current_data_idx][0]["content"][0]
+    store.initialize_turn_trace(
+        session_id,
+        TurnTrace(
+            turn_id=current.id,
+            thread_id=current.thread_id,
+            data_idx=current.current_data_idx,
+            context=TurnTraceContext(
+                system_message="Plan resume test",
+                active_skills=[],
+                tools=[],
+                initialized_at="2026-09-01T00:00:00+00:00",
+            ),
+            items=[
+                TurnTraceItem(
+                    sequence=1,
+                    message_idx=0,
+                    item_idx=0,
+                    role="user",
+                    item=user_item,
+                    completed_at="2026-09-01T00:00:00+00:00",
+                )
+            ],
+            last_sequence=1,
+            updated_at="2026-09-01T00:00:00+00:00",
+        ),
+    )
+    reopened.attach_runtime_node_bridge(bridge, events_external=True)
+
+    def sink(item) -> None:
+        if isinstance(item, dict):
+            bridge.handle_input(item)
+        else:
+            bridge.handle(item)
+
+    def interrupt(request):
+        assert request.kind == "plan"
+        sink(
+            {
+                "kind": "approval",
+                "message": request.message,
+                "data": {
+                    "decision_id": "decision_resume_plan",
+                    "kind": "plan",
+                    "call_id": request.data.get("call_id"),
+                    "plan": request.data.get("plan"),
+                },
+            }
+        )
+        return InterruptDecision("implement_and_compaction")
+
+    result = reopened.resume_session(
+        session_id,
+        on_event=sink,
+        interrupt=interrupt,
+        resume_confirmed=True,
+    )
+
+    assert result is not None and result.status == "completed" and result.mode == "agent"
+    assert reopened.runtime_node_bridge is bridge
+    final = bridge.finish("success", result.final_answer or "")
+    assert final is not None and final.status == "success"
+    snapshots = [frame.turn for frame in frames if frame.type == "turn.snapshot"]
+    assert len(snapshots) == 3 and all(turn is not None for turn in snapshots)
+    plan, compact, agent = snapshots
+    assert plan is not None and compact is not None and agent is not None
+    assert compact.parent_id == plan.id and agent.parent_id == compact.id
+    assert [plan.running_mode, compact.running_mode, agent.running_mode] == ["plan", "plan", "agent"]
+
+    trace = store.load_turn_trace(session_id, plan.id, plan.current_data_idx)
+    assert trace is not None
+    events = [item.item.get("event") for item in trace.items]
+    assert events.count("decision_requested") == 1
+    assert events.count("approval_granted") == 1
 
 
 def test_legacy_run_state_defaults_provenance_to_original_run_id() -> None:
