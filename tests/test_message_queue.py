@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from time import monotonic, sleep
 from uuid import uuid4
 
 import pytest
-from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from redis import Redis
 
 from backend.api.app import create_app
 from backend.api.session_store import session_store
 from backend.api.state import WebAppState
+from backend.configuration import ClientPaths
 from backend.domain import DeliveryConflict, MessageEnvelope, QueuedMessage
 from backend.domain.runtime_state import RuntimeState
 from backend.storage.message_queue import STALE_CLAIM_MS, RedisMessageQueue
+from backend.storage.sqlite import SQLiteSessionStore
 
 
 def test_queued_message_api_is_ordered_idempotent_and_restricts_dispatched_mutations(tmp_path: Path) -> None:
@@ -73,19 +75,9 @@ def test_queued_message_api_is_ordered_idempotent_and_restricts_dispatched_mutat
         assert client.delete(f"/api/sidebar-threads/{thread_id}/queued-messages/{second_id}").status_code == 204
 
 
-def test_create_turn_accepts_exactly_one_message_source_and_claims_queued_delivery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from backend.api.routes import turns as turn_routes
-
-    captured: dict[str, object] = {}
-
-    def fake_stream_turn(_state, **kwargs):
-        captured.update(kwargs)
-        return JSONResponse({"accepted": True})
-
-    monkeypatch.setattr(turn_routes, "_stream_turn", fake_stream_turn)
+def test_create_turn_accepts_exactly_one_message_source_and_enqueues_queued_delivery(tmp_path: Path) -> None:
     state = WebAppState(tmp_path / "web")
+    state.turn_message_worker.close()
     with TestClient(create_app(state)) as client:
         sidebar = client.post("/api/sidebar-threads", json={}).json()
         message_id = str(uuid4())
@@ -120,25 +112,25 @@ def test_create_turn_accepts_exactly_one_message_source_and_claims_queued_delive
                 "queued_delivery": {"delivery_id": "delivery-create", "message_ids": [message_id]},
             },
         )
-        assert response.status_code == 200
-        assert captured["prompt"] == "queued turn"
-        assert captured["references"] == []
-        initial = captured["initial_delivery"]
+        assert response.status_code == 202
+        assert response.json() == {
+            "turn_id": "turn-queued",
+            "delivery_id": "delivery-create",
+            "status": "accepted",
+        }
+        initial = state.message_queue.claim_turn_start("test", recover=True)
+        assert initial is not None
+        assert initial.envelope.content == "queued turn"
+        assert initial.envelope.references == ()
     assert initial.envelope.delivery_id == "delivery-create"
 
 
-def test_create_turn_returns_claimed_delivery_to_pending_when_stream_setup_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from backend.api.routes import turns as turn_routes
+def test_create_turn_keeps_accepted_delivery_pending_until_worker_admission(tmp_path: Path) -> None:
     from backend.storage.message_queue import MemoryMessageQueue
 
-    def fail_stream_turn(_state, **_kwargs):
-        raise RuntimeError("stream setup failed")
-
-    monkeypatch.setattr(turn_routes, "_stream_turn", fail_stream_turn)
     queue = MemoryMessageQueue()
     state = WebAppState(tmp_path / "web", message_queue=queue)
+    state.turn_message_worker.close()
     with TestClient(create_app(state), raise_server_exceptions=False) as client:
         sidebar = client.post("/api/sidebar-threads", json={}).json()
         message_id = str(uuid4())
@@ -156,8 +148,36 @@ def test_create_turn_returns_claimed_delivery_to_pending_when_stream_setup_fails
             },
         )
 
-    assert response.status_code == 500
-    assert [(item.id, item.state) for item in queue.list(sidebar["thread_id"])] == [(message_id, "pending")]
+    assert response.status_code == 202
+    assert [(item.id, item.state) for item in queue.list(sidebar["thread_id"])] == [(message_id, "dispatched")]
+    claimed = queue.claim_turn_start("replacement", recover=True)
+    assert claimed is not None and claimed.envelope.delivery_id == "delivery-stream-failure"
+
+
+def test_create_turn_fails_closed_when_message_queue_is_unavailable(tmp_path: Path) -> None:
+    from backend.domain import MessageQueueUnavailable
+    from backend.storage.message_queue import MemoryMessageQueue
+
+    class UnavailableQueue(MemoryMessageQueue):
+        def dispatch_turn_start(self, envelope):
+            del envelope
+            raise MessageQueueUnavailable("message_queue_unavailable")
+
+    state = WebAppState(tmp_path / "web", message_queue=UnavailableQueue())
+    with TestClient(create_app(state)) as client:
+        sidebar = client.post("/api/sidebar-threads", json={}).json()
+        response = client.post(
+            "/api/turns",
+            json={
+                "id": "turn-unavailable",
+                "session_id": sidebar["session_id"],
+                "thread_id": sidebar["thread_id"],
+                "parent_id": "",
+                "message": {"role": "user", "content": [{"type": "text", "text": "keep composer"}]},
+            },
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "message_queue_unavailable"
 
 
 @pytest.fixture
@@ -231,6 +251,117 @@ def test_real_redis_dispatch_claim_ack_and_receipt_replay(redis_queue: RedisMess
             thread_id=thread_id,
             turn_id="turn-real",
         )
+
+
+def test_real_redis_turn_start_xautoclaim_recovers_one_delivery(redis_queue: RedisMessageQueue) -> None:
+    envelope = MessageEnvelope(
+        "turn-start-delivery",
+        "user",
+        "thread-real",
+        "turn_start",
+        "turn-real",
+        "session-real",
+        "thread-real",
+        {
+            "content": "recover once",
+            "references": [],
+            "version": 1,
+            "operation": "create",
+            "parent_id": "",
+            "config": {},
+        },
+        ("turn-start-delivery",),
+    )
+    redis_queue.dispatch_turn_start(envelope)
+    crashed = redis_queue.claim_turn_start("crashed-worker", recover=True)
+    assert crashed is not None and crashed.envelope.attempts == 1
+    stream = redis_queue._turn_start_stream_key()
+    redis_queue.client.xclaim(
+        stream,
+        "turn-start-runtime",
+        "crashed-worker",
+        min_idle_time=0,
+        message_ids=[crashed.stream_id],
+        idle=STALE_CLAIM_MS + 1,
+    )
+
+    replacement = redis_queue.claim_turn_start("replacement-worker")
+    assert replacement is not None
+    assert replacement.stream_id == crashed.stream_id
+    assert replacement.envelope.delivery_id == envelope.delivery_id
+    assert replacement.envelope.attempts == 2
+    redis_queue.ack(replacement)
+    assert redis_queue.claim_turn_start("after-ack", recover=True) is None
+    assert redis_queue.client.xlen(stream) == 0
+
+
+def test_real_redis_restart_acks_committed_turn_without_rerun_and_marks_process_stop(
+    tmp_path: Path,
+    redis_queue: RedisMessageQueue,
+) -> None:
+    paths = ClientPaths(tmp_path / "web")
+    paths.ensure()
+    store = SQLiteSessionStore(paths)
+    session = store.create_session("restart")
+    store.create_sidebar_thread(
+        session_id=session.session_id,
+        thread_id=session.session_id,
+        title="restart",
+    )
+    root = store.ensure_root_node(session.session_id, id="turn-restart-root")
+    envelope = MessageEnvelope(
+        "turn-restart-delivery",
+        "user",
+        session.session_id,
+        "turn_start",
+        "turn-restart",
+        session.session_id,
+        session.session_id,
+        {
+            "content": "do not rerun",
+            "references": [],
+            "version": 1,
+            "operation": "create",
+            "parent_id": "",
+            "config": {},
+        },
+        ("turn-restart-delivery",),
+    )
+    redis_queue.dispatch_turn_start(envelope)
+    crashed = redis_queue.claim_turn_start("crashed-worker", recover=True)
+    assert crashed is not None
+
+    node = RuntimeState.create(
+        session_id=session.session_id,
+        thread_id=session.session_id,
+        id="turn-restart",
+        parent=root,
+        user_content=[{"type": "text", "text": "do not rerun", "status": "success"}],
+    )
+    node.data[0][0]["delivery_id"] = envelope.delivery_id
+    store.create_node(RuntimeState.from_dict(node.to_dict()))
+    store.start_turn(session.session_id, "run-restart", "do not rerun", delivery_id=envelope.delivery_id)
+
+    reopened = WebAppState(tmp_path / "web", message_queue=redis_queue)
+    try:
+        deadline = monotonic() + 5
+        while monotonic() < deadline:
+            if redis_queue.client.hget(redis_queue._receipt_key(envelope.delivery_id), "status") == "acknowledged":
+                break
+            sleep(0.02)
+        else:
+            pytest.fail("restarted worker did not ACK the committed delivery")
+        failed = SQLiteSessionStore(paths).find_node(node.id)
+        assert isinstance(failed, RuntimeState) and failed.status == "failed"
+        errors = [
+            item
+            for message in failed.data[failed.current_data_idx]
+            for item in message["content"]
+            if item.get("type") == "error"
+        ]
+        assert errors and errors[-1].get("code") == "backend_process_stopped"
+    finally:
+        reopened.close()
 
 
 def test_real_redis_agent_thread_dispatch_is_fifo_deduplicated_and_acknowledged(

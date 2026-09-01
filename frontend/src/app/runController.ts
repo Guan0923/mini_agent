@@ -31,6 +31,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
     const accumulator = runtimeNodeAccumulator();
     const pendingTurns = new Map<string, RuntimeStateNode>();
     let finalTurn: RuntimeStateNode | undefined;
+    let admissionAccepted = false;
     let pendingActiveTurnId: string | undefined;
     let forcePathProjection = false;
     let scheduledFrame: number | undefined;
@@ -83,6 +84,15 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       if (callbacks.activeRuns.get(request.conversationId)?.controller !== controller) return;
       let turn: RuntimeStateNode;
       try {
+        if (message.type === "turn.snapshot") {
+          // Every Redis-backed reconnect begins with a fresh SQLite
+          // authority snapshot. Rebase this Turn before applying subsequent
+          // connection-local revisions; other continuation Turns keep their
+          // own accumulators.
+          const key = `${message.turn.session_id}:${message.turn.id}`;
+          accumulator.nodes.delete(key);
+          accumulator.revisions.delete(key);
+        }
         turn = applyRuntimeNodeFrame(accumulator, message);
       } catch (error) {
         throw new SseProtocolError(String((error as Error).message ?? error));
@@ -116,11 +126,21 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       model: request.model,
       references: request.references,
       queuedDelivery: request.queuedDelivery,
+      deliveryId: request.deliveryId,
+      onAccepted: () => {
+        admissionAccepted = true;
+        request.onAccepted?.();
+      },
     } as const;
 
     try {
       const result = request.attach
-        ? await streamAttachedTurn(request.turnId ?? request.sourceNodeId ?? "", onMessage, controller.signal)
+        ? await streamAttachedTurn(
+          request.turnId ?? request.sourceNodeId ?? "",
+          onMessage,
+          controller.signal,
+          request.sessionId,
+        )
         : request.resume
           ? await streamResume(
             request.sessionId,
@@ -162,6 +182,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       await callbacks.refreshSessions().catch(() => undefined);
     } catch (error) {
       flushPendingFrames();
+      if (!admissionAccepted) request.onAdmissionRejected?.();
       const protocolError = error instanceof SseProtocolError;
       if (protocolError) {
         controller.abort();

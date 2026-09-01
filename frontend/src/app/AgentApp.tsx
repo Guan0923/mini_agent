@@ -11,7 +11,7 @@ import {
 } from "../api";
 import type { ProjectInfo } from "../api/projects";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
-import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnreadArchived, summaryToConversation, STORAGE_KEY, ARCHIVE_READ_KEY } from "./storage";
+import { loadArchiveReadState, markArchivedAsRead, countUnreadArchived, summaryToConversation, ARCHIVE_READ_KEY } from "./storage";
 import type { ArchiveReadState } from "./storage";
 import AgentShell from "./AgentShell";
 import { createRunController } from "./runController";
@@ -42,8 +42,7 @@ function AgentApp() {
   const { message } = AntApp.useApp();
   const [profile, setProfile] = useState<LocalProfile>({ display_name: "本地用户", agent_preferences: "" });
   const [page, setPage] = useState<Page>("chat");
-  const storageKey = STORAGE_KEY;
-  const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations(storageKey));
+  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [archiveReadState, setArchiveReadState] = useState<ArchiveReadState>(() => loadArchiveReadState());
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -87,10 +86,6 @@ function AgentApp() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(storageKey, JSON.stringify(conversations));
-  }, [conversations, storageKey]);
-
-  useEffect(() => {
     localStorage.setItem(ARCHIVE_READ_KEY, JSON.stringify(archiveReadState));
   }, [archiveReadState]);
 
@@ -112,7 +107,7 @@ function AgentApp() {
 
   useEffect(() => {
     let disposed = false;
-    void hydrateConversationCatalog(storageKey).then((catalog) => {
+    void hydrateConversationCatalog().then((catalog) => {
       if (disposed) return;
       setProjects(catalog.projects);
       setRemovedProjects(catalog.removedProjects);
@@ -122,7 +117,7 @@ function AgentApp() {
     return () => {
       disposed = true;
     };
-  }, [storageKey]);
+  }, []);
 
   const visibleProjectIds = useMemo(() => new Set(projects.map((project) => project.project_id)), [projects]);
   const activeConversations = useMemo(

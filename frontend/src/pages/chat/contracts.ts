@@ -77,6 +77,9 @@ export interface ChatRunRequest {
   waitForActiveRun?: boolean;
   onBaseline?: (turn: RuntimeStateNode) => void;
   queuedDelivery?: { deliveryId: string; messageIds: string[] };
+  deliveryId?: string;
+  onAccepted?: () => void;
+  onAdmissionRejected?: () => void;
 }
 
 export function composerAction(

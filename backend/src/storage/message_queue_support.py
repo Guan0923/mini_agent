@@ -14,6 +14,7 @@ DEFAULT_KEY_PREFIX = "mini-agent:v1"
 DELIVERY_RECEIPT_TTL_SECONDS = 7 * 24 * 60 * 60
 STALE_CLAIM_MS = 60_000
 CONSUMER_GROUP = "runtime"
+TURN_START_CONSUMER_GROUP = "turn-start-runtime"
 
 
 def _json(value: object) -> str:

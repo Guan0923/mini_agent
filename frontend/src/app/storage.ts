@@ -1,26 +1,24 @@
 import type { SessionInfo } from "../api";
-import type { ChatMessage, Conversation } from "../types";
-import { normalizeRuntimeNode } from "./runtime/runtimeNodeNormalization";
+import type { Conversation } from "../types";
 
 export const STORAGE_KEY = "mini-agent-conversations";
 export const ARCHIVE_READ_KEY = "mini-agent-archive-read";
 export const BROWSER_STATE_VERSION_KEY = "mini-agent-browser-state-version";
-export const BROWSER_STATE_VERSION = "turn-protocol-v10";
+export const BROWSER_STATE_VERSION = "redis-message-transport-v1";
 export type ArchiveReadState = Record<string, string>;
 
-const LEGACY_BROWSER_PREFIXES = [STORAGE_KEY, ARCHIVE_READ_KEY, "mini-agent-session-modes"];
+const LEGACY_BROWSER_PREFIXES = [STORAGE_KEY];
 
 /**
- * Drop browser-only state written by the pre-RuntimeState message flow.
+ * Drop browser-owned conversation/message state. UI-only preferences remain.
  *
  * The backend cannot remove this cache because it lives in the browser.  Run
  * this once per browser profile during the protocol migration; subsequent
- * conversations continue using the same keys and are persisted normally.
+ * canonical conversations are always hydrated from the local backend.
  */
 export function resetLegacyBrowserState(storage?: Storage): void {
   if (typeof window === "undefined" && !storage) return;
   const target = storage ?? window.localStorage;
-  if (target.getItem(BROWSER_STATE_VERSION_KEY) === BROWSER_STATE_VERSION) return;
 
   const keysToRemove: string[] = [];
   for (let index = 0; index < target.length; index += 1) {
@@ -32,38 +30,6 @@ export function resetLegacyBrowserState(storage?: Storage): void {
   for (const key of keysToRemove) target.removeItem(key);
   target.setItem(BROWSER_STATE_VERSION_KEY, BROWSER_STATE_VERSION);
 }
-export function loadConversations(key: string): Conversation[] {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((value): value is Conversation => {
-        if (!value || typeof value !== "object") return false;
-        const candidate = value as Partial<Conversation>;
-        return typeof candidate.id === "string" && Array.isArray(candidate.messages);
-      })
-      .map((conversation) => ({
-        ...conversation,
-        clientId: conversation.clientId ?? conversation.id,
-        messageCount:
-          conversation.messages.length > 0
-            ? conversation.messages.filter((message) => message.role === "user" || message.role === "assistant").length
-            : conversation.messageCount ?? 0,
-        messagesLoaded: conversation.messagesLoaded ?? conversation.messages.length > 0,
-        runtimeNodes: conversation.runtimeNodes?.map(normalizeRuntimeNode),
-        messages: conversation.messages.map((message) =>
-          message.running
-            ? { ...message, running: false, status: message.status ?? "上次运行已中断" }
-            : message,
-        ),
-      }));
-  } catch {
-    return [];
-  }
-}
-
 export function loadArchiveReadState(): ArchiveReadState {
   try {
     const raw = localStorage.getItem(ARCHIVE_READ_KEY);

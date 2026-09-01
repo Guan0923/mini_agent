@@ -66,6 +66,25 @@ afterEach(() => {
 });
 
 describe("run controller incremental batching", () => {
+  it("reports admission rejection without clearing an unaccepted composer draft", async () => {
+    vi.mocked(streamChat).mockRejectedValue(new Error("message_queue_unavailable"));
+    const onAccepted = vi.fn();
+    const onAdmissionRejected = vi.fn();
+    const controller = createRunController({
+      activeRuns: new Map(),
+      updateLastMessage: vi.fn(),
+      rebindRunSession: vi.fn().mockResolvedValue(undefined),
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+      updateConversation: vi.fn(),
+      recoverConversation: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await controller.runConversation({ ...request(), onAccepted, onAdmissionRejected });
+
+    expect(onAccepted).not.toHaveBeenCalled();
+    expect(onAdmissionRejected).toHaveBeenCalledTimes(1);
+  });
+
   it("commits multiple SSE frames in one animation-frame state update", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -111,6 +130,41 @@ describe("run controller incremental batching", () => {
     release();
     await running;
     expect(updateConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it("rebases the same Turn from a repeated authoritative reconnect snapshot", async () => {
+    vi.mocked(streamChat).mockImplementation(async (_prompt, onMessage) => {
+      onMessage({ type: "turn.snapshot", revision: 0, turn: turn() });
+      const rebased = turn();
+      rebased.data[0][1].content = [{ type: "text", text: "reconnected", status: "running" }];
+      onMessage({ type: "turn.snapshot", revision: 0, turn: rebased });
+      onMessage({
+        type: "turn.delta",
+        session_id: "session_1",
+        turn_id: "turn_1",
+        revision: 1,
+        operations: [{ op: "append_text", data_idx: 0, message_idx: 1, item_idx: 0, delta: " stream" }],
+      });
+      return "completed";
+    });
+    let conversation: Conversation = { id: "conversation_1", title: "x", messages: [], runtimeNodes: [] };
+    const updateConversation = vi.fn((_id: string, updater: (value: Conversation) => Conversation) => {
+      conversation = updater(conversation);
+    });
+    const recoverConversation = vi.fn().mockResolvedValue(undefined);
+    const controller = createRunController({
+      activeRuns: new Map(),
+      updateLastMessage: vi.fn(),
+      rebindRunSession: vi.fn().mockResolvedValue(undefined),
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+      updateConversation,
+      recoverConversation,
+    });
+
+    await controller.runConversation(request());
+
+    expect(recoverConversation).not.toHaveBeenCalled();
+    expect(conversation.messages[conversation.messages.length - 1]?.content).toBe("reconnected stream");
   });
 
   it("pauses and reloads the authoritative session after a protocol error", async () => {
@@ -170,7 +224,12 @@ describe("run controller incremental batching", () => {
 
     await controller.runConversation({ ...request(), attach: true, prompt: null, onBaseline });
 
-    expect(streamAttachedTurn).toHaveBeenCalledWith("turn_1", expect.any(Function), expect.any(AbortSignal));
+    expect(streamAttachedTurn).toHaveBeenCalledWith(
+      "turn_1",
+      expect.any(Function),
+      expect.any(AbortSignal),
+      "session_1",
+    );
     expect(onBaseline).toHaveBeenCalledTimes(1);
     expect(pauseTurn).not.toHaveBeenCalled();
   });

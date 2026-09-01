@@ -41,11 +41,20 @@ class NodeWriter:
         self._revisions: dict[tuple[str, str], int] = {}
         self._lock = RLock()
 
-    def _emit_snapshot(self, node: RuntimeState) -> None:
+    def _emit_snapshot(self, node: RuntimeState, *, persist: bool = False) -> None:
         if not self._emits_frames:
+            if persist:
+                self.store.update_node(node)
             return
+        frame = NodeFrame.snapshot(node)
+        if persist:
+            persist_frame = getattr(self.store, "update_node_with_frame", None)
+            if callable(persist_frame):
+                persist_frame(node, frame)
+            else:
+                self.store.update_node(node)
         self._revisions[node.key] = 0
-        self.emit(NodeFrame.snapshot(node))
+        self.emit(frame)
 
     def _emit_delta(
         self,
@@ -53,30 +62,41 @@ class NodeWriter:
         *,
         patch: Mapping[str, Any] | None = None,
         operations: Sequence[TurnDeltaOperation] = (),
+        persist: bool = False,
     ) -> None:
-        if not self._emits_frames or (not patch and not operations):
+        if not self._emits_frames:
+            if persist:
+                self.store.update_node(node)
+            return
+        if not patch and not operations:
+            if persist:
+                self.store.update_node(node)
             return
         previous = self._revisions.get(node.key)
         if previous is None:
             raise RuntimeStateValidationError("A Turn delta requires a baseline snapshot.")
         revision = previous + 1
-        self.emit(
-            NodeFrame(
-                "turn.delta",
-                node.session_id,
-                node.id,
-                revision,
-                patch={str(key): _clone(value) for key, value in (patch or {}).items()},
-                operations=tuple(_clone(list(operations))),
-            )
+        frame = NodeFrame(
+            "turn.delta",
+            node.session_id,
+            node.id,
+            revision,
+            patch={str(key): _clone(value) for key, value in (patch or {}).items()},
+            operations=tuple(_clone(list(operations))),
         )
+        if persist:
+            persist_frame = getattr(self.store, "update_node_with_frame", None)
+            if callable(persist_frame):
+                persist_frame(node, frame)
+            else:
+                self.store.update_node(node)
+        self.emit(frame)
         self._revisions[node.key] = revision
 
     def _store_dynamic(self, node: RuntimeState, *, persist: bool) -> RuntimeState:
+        del persist
         value = RuntimeState.from_dict(node.to_dict())
         self._dynamic[value.key] = value.clone()
-        if persist:
-            self.store.update_node(value)
         return value
 
     def create(self, node: RuntimeState | None = None, **kwargs: Any) -> RuntimeState:
@@ -84,9 +104,16 @@ class NodeWriter:
             if node is None:
                 kwargs.setdefault("id", self.id_factory())
                 node = RuntimeState.create(**kwargs)
-            self.store.create_node(node)
+            frame = NodeFrame.snapshot(node)
+            persist_frame = getattr(self.store, "create_node_with_frame", None)
+            if callable(persist_frame):
+                persist_frame(node, frame)
+            else:
+                self.store.create_node(node)
             self._dynamic[node.key] = node.clone()
-            self._emit_snapshot(node)
+            if self._emits_frames:
+                self._revisions[node.key] = 0
+                self.emit(frame)
             return node.clone()
 
     def snapshot(self, node: RuntimeState) -> RuntimeState:
@@ -95,7 +122,7 @@ class NodeWriter:
         with self._lock:
             value = RuntimeState.from_dict(node.to_dict())
             self._dynamic[value.key] = value.clone()
-            self._emit_snapshot(value)
+            self._emit_snapshot(value, persist=True)
             return value.clone()
 
     def current(self, session_id: str, node_id: str) -> RuntimeState:
@@ -118,8 +145,16 @@ class NodeWriter:
             frame = NodeFrame.delta(previous, value, revision=revision) if self._emits_frames else None
             value = self._store_dynamic(value, persist=persist)
             if frame is not None:
+                if persist:
+                    persist_frame = getattr(self.store, "update_node_with_frame", None)
+                    if callable(persist_frame):
+                        persist_frame(value, frame)
+                    else:
+                        self.store.update_node(value)
                 self.emit(frame)
                 self._revisions[value.key] = revision
+            elif persist:
+                self.store.update_node(value)
             return value.clone()
 
     def update_data(self, node: RuntimeState, data: Any, *, persist: bool = False) -> RuntimeState:
@@ -146,7 +181,7 @@ class NodeWriter:
                 for name, item in after.items()
                 if name not in {*_TURN_IDENTITY_FIELDS, "data"} and before.get(name) != item
             }
-            self._emit_delta(value, patch=patch)
+            self._emit_delta(value, patch=patch, persist=True)
             return value.clone()
 
     def append_item(self, node: RuntimeState, item: Mapping[str, Any], *, persist: bool = True) -> RuntimeState:
@@ -176,6 +211,7 @@ class NodeWriter:
                         "message": _clone(messages[message_idx]),
                     },
                 ),
+                persist=persist,
             )
             return value.clone()
 
@@ -213,7 +249,7 @@ class NodeWriter:
                 content.append(normalized)
             current.data = validate_data(current.data)
             value = self._store_dynamic(current, persist=persist)
-            self._emit_delta(value, operations=operations)
+            self._emit_delta(value, operations=operations, persist=persist)
             return value.clone()
 
     def set_item_status(
@@ -248,6 +284,7 @@ class NodeWriter:
                         "status": status,
                     },
                 ),
+                persist=persist,
             )
             return value.clone()
 
@@ -288,6 +325,7 @@ class NodeWriter:
                         "delta": delta,
                     },
                 ),
+                persist=persist,
             )
             return value.clone()
 
@@ -296,6 +334,7 @@ class NodeWriter:
 
         with self._lock:
             value = self._store_dynamic(node, persist=True)
+            self.store.update_node(value)
             return value.clone()
 
     def finalize(self, node: RuntimeState, status: NodeStatus) -> RuntimeState:
@@ -305,7 +344,7 @@ class NodeWriter:
             current = self.current(node.session_id, node.id)
             current.status = status
             result = self._store_dynamic(current, persist=True)
-            self._emit_delta(result, patch={"status": status})
+            self._emit_delta(result, patch={"status": status}, persist=True)
             self._dynamic.pop(result.key, None)
             return result.clone()
 

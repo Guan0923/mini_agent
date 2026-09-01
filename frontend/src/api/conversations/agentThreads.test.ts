@@ -101,4 +101,28 @@ describe("Agent Thread API", () => {
       "turn.terminal",
     ]);
   });
+
+  it("accepts and advances the standard Redis Stream reconnect cursor", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      'id: 42-0\ndata: {"type":"thread.ready","session_id":"session_1","thread_id":"thread_child"}\n\n',
+      { status: 200, headers: { "Content-Type": "text/event-stream" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    const onCursor = vi.fn();
+
+    await streamAgentThread(
+      "session_1",
+      "thread_child",
+      vi.fn(),
+      new AbortController().signal,
+      "41-0",
+      onCursor,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      cache: "no-store",
+      headers: { "Last-Event-ID": "41-0" },
+    }));
+    expect(onCursor).toHaveBeenCalledWith("42-0");
+  });
 });

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from backend.domain import MessageQueueUnavailable
 from backend.tools import ToolError
 
+from ..runtime_event_transport import thread_sse
 from ..session_store import require_active_session, session_store
 from ..state import WebAppState
 from .turns import TurnExecutionConfig
@@ -92,8 +93,11 @@ def stream_agent_thread(thread_id: str, session_id: str, request: Request) -> St
     node = store.get_thread_node(session_id, thread_id)
     if node is None or node.session_id != session_id:
         raise HTTPException(status_code=404, detail="未知 Agent Thread。")
-    subscription = state.agent_thread_events.subscribe(session_id, thread_id)
-    return StreamingResponse(subscription.as_sse(), media_type="text/event-stream")
+    return StreamingResponse(
+        thread_sse(state, session_id, thread_id, request.headers.get("last-event-id")),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 __all__ = ["router"]

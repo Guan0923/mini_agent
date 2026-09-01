@@ -40,6 +40,7 @@ class CreateTurnRequest(TurnExecutionConfig):
     session_id: str = Field(min_length=1, max_length=200)
     thread_id: str = Field(min_length=1, max_length=200)
     parent_id: str = Field(default="", max_length=200)
+    delivery_id: str | None = Field(default=None, min_length=1, max_length=200)
     message: dict[str, object] | None = None
     queued_delivery: QueuedDeliveryRequest | None = None
 
@@ -52,6 +53,7 @@ class CreateTurnRequest(TurnExecutionConfig):
 
 class RewindTurnRequest(TurnExecutionConfig):
     message: dict[str, object]
+    delivery_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class CurrentDataRequest(BaseModel):

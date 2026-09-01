@@ -59,7 +59,7 @@ def test_upload_round_trip_and_binary_integrity(client: TestClient) -> None:
     assert content.status_code == 200
     assert content.content == payload
     assert content.headers["x-content-type-options"] == "nosniff"
-    assert "private" in content.headers["cache-control"]
+    assert content.headers["cache-control"] == "no-store"
     assert content.headers["content-disposition"].startswith("attachment")
 
     available = client.head(

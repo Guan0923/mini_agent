@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
+from uuid import uuid4
 
 from .contract import ITEM_STATUSES, RuntimeStateValidationError, _clone
 from .models import RuntimeState
@@ -147,6 +148,7 @@ class NodeFrame:
     turn: RuntimeState | None = None
     patch: dict[str, Any] = field(default_factory=dict)
     operations: tuple[TurnDeltaOperation, ...] = ()
+    event_id: str = field(default_factory=lambda: uuid4().hex, compare=False, repr=False)
 
     @classmethod
     def snapshot(cls, node: RuntimeState) -> NodeFrame:
@@ -195,6 +197,40 @@ class NodeFrame:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"))
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any], *, event_id: str | None = None) -> NodeFrame:
+        frame_type = str(value.get("type") or "")
+        if frame_type == "turn.snapshot":
+            raw_turn = value.get("turn")
+            if not isinstance(raw_turn, Mapping):
+                raise RuntimeStateValidationError("A Turn snapshot requires a complete Turn.")
+            turn = RuntimeState.from_dict(dict(raw_turn))
+            return cls(
+                "turn.snapshot",
+                turn.session_id,
+                turn.id,
+                int(value.get("revision") or 0),
+                turn=turn,
+                event_id=event_id or uuid4().hex,
+            )
+        if frame_type != "turn.delta":
+            raise RuntimeStateValidationError("Unsupported Turn frame type.")
+        operations = value.get("operations", [])
+        if not isinstance(operations, list):
+            raise RuntimeStateValidationError("Turn delta operations must be a list.")
+        patch = value.get("patch", {})
+        if not isinstance(patch, Mapping):
+            raise RuntimeStateValidationError("Turn delta patch must be an object.")
+        return cls(
+            "turn.delta",
+            str(value.get("session_id") or ""),
+            str(value.get("turn_id") or ""),
+            int(value.get("revision") or 0),
+            patch=dict(patch),
+            operations=tuple(dict(item) for item in operations if isinstance(item, Mapping)),
+            event_id=event_id or uuid4().hex,
+        )
 
     def as_sse(self) -> str:
         return f"data: {self.to_json()}\n\n"

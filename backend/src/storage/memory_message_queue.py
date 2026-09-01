@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from threading import RLock
 
@@ -28,6 +28,7 @@ class MemoryMessageQueue:
         self._streams: dict[str, list[tuple[str, MessageEnvelope, float, str | None]]] = {}
         self._thread_streams: dict[str, list[tuple[str, MessageEnvelope, float, str | None]]] = {}
         self._report_streams: dict[str, list[tuple[str, MessageEnvelope, float, str | None]]] = {}
+        self._turn_start_stream: list[tuple[str, MessageEnvelope, float, str | None]] = []
         self._receipts: dict[str, tuple[str, str, MessageEnvelope]] = {}
         self._counter = 0
         self._lock = RLock()
@@ -87,6 +88,7 @@ class MemoryMessageQueue:
         thread_id: str,
         turn_id: str,
         correlation_id: str | None = None,
+        command_payload: Mapping[str, object] | None = None,
     ) -> MessageEnvelope:
         with self._lock:
             fingerprint = _fingerprint(thread_id, turn_id, message_ids)
@@ -106,6 +108,10 @@ class MemoryMessageQueue:
             if any(item.state != "pending" for item in selected):
                 raise QueueItemStateConflict("queued_message_dispatched")
             content, references = _merge(selected)
+            payload: dict[str, object] = {"content": content, "references": list(references)}
+            if command_payload is not None:
+                payload.update(dict(command_payload))
+                payload["queued"] = True
             envelope = (
                 receipt[2]
                 if receipt is not None
@@ -113,11 +119,11 @@ class MemoryMessageQueue:
                     delivery_id,
                     "user",
                     thread_id,
-                    "turn",
+                    "turn_start" if command_payload is not None else "turn",
                     turn_id,
                     session_id,
                     thread_id,
-                    {"content": content, "references": list(references)},
+                    payload,
                     tuple(item.id for item in selected),
                     correlation_id=correlation_id,
                 )
@@ -128,9 +134,29 @@ class MemoryMessageQueue:
                 for item in self._queues[thread_id]
             ]
             self._counter += 1
-            self._streams.setdefault(turn_id, []).append((f"{self._counter}-0", envelope, 0.0, None))
+            entry = (f"{self._counter}-0", envelope, 0.0, None)
+            if command_payload is not None:
+                self._turn_start_stream.append(entry)
+            else:
+                self._streams.setdefault(turn_id, []).append(entry)
             self._receipts[delivery_id] = (fingerprint, "dispatched", envelope)
             return envelope
+
+    def dispatch_turn_start(self, envelope: MessageEnvelope) -> MessageEnvelope:
+        if envelope.sender_kind != "user" or envelope.target_kind != "turn_start":
+            raise ValueError("Turn-start dispatch requires sender_kind=user and target_kind=turn_start.")
+        with self._lock:
+            fingerprint = _envelope_fingerprint(envelope)
+            receipt = self._receipts.get(envelope.delivery_id)
+            if receipt is not None:
+                if receipt[0] != fingerprint:
+                    raise DeliveryConflict("delivery_id_conflict")
+                return receipt[2]
+            canonical = replace(envelope, attempts=0)
+            self._counter += 1
+            self._turn_start_stream.append((f"{self._counter}-0", canonical, 0.0, None))
+            self._receipts[envelope.delivery_id] = (fingerprint, "dispatched", canonical)
+            return canonical
 
     def dispatch_agent(self, envelope: MessageEnvelope) -> MessageEnvelope:
         if envelope.sender_kind != "agent" or envelope.target_kind != "thread":
@@ -171,6 +197,15 @@ class MemoryMessageQueue:
                 if owner is None:
                     claimed = replace(envelope, attempts=envelope.attempts + 1)
                     entries[index] = (stream_id, claimed, claimed_at + 1, consumer)
+                    return ClaimedEnvelope(stream_id, claimed)
+            return None
+
+    def claim_turn_start(self, consumer: str, *, recover: bool = False) -> ClaimedEnvelope | None:
+        with self._lock:
+            for index, (stream_id, envelope, claimed_at, owner) in enumerate(self._turn_start_stream):
+                if owner is None or recover:
+                    claimed = replace(envelope, attempts=envelope.attempts + 1)
+                    self._turn_start_stream[index] = (stream_id, claimed, claimed_at + 1, consumer)
                     return ClaimedEnvelope(stream_id, claimed)
             return None
 
@@ -219,6 +254,16 @@ class MemoryMessageQueue:
                 fingerprint, _, stored = self._receipts[envelope.delivery_id]
                 self._receipts[envelope.delivery_id] = (fingerprint, "acknowledged", stored)
                 return
+            if envelope.target_kind == "turn_start":
+                self._turn_start_stream = [item for item in self._turn_start_stream if item[0] != claimed.stream_id]
+                if bool(envelope.payload.get("queued")):
+                    ids = set(envelope.source_message_ids)
+                    self._queues[envelope.thread_id] = [
+                        item for item in self._queues.get(envelope.thread_id, []) if item.id not in ids
+                    ]
+                fingerprint, _, stored = self._receipts[envelope.delivery_id]
+                self._receipts[envelope.delivery_id] = (fingerprint, "acknowledged", stored)
+                return
             self._streams[envelope.target_id] = [
                 item for item in self._streams.get(envelope.target_id, []) if item[0] != claimed.stream_id
             ]
@@ -245,7 +290,12 @@ class MemoryMessageQueue:
         with self._lock:
             return [
                 ClaimedEnvelope(stream_id, envelope)
-                for entries in (*self._streams.values(), *self._thread_streams.values(), *self._report_streams.values())
+                for entries in (
+                    *self._streams.values(),
+                    *self._thread_streams.values(),
+                    *self._report_streams.values(),
+                    self._turn_start_stream,
+                )
                 for stream_id, envelope, _, _ in entries
             ]
 

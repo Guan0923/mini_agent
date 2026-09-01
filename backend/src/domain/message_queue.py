@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 QueueMessageState = Literal["pending", "dispatched"]
 SenderKind = Literal["user", "agent", "system"]
-TargetKind = Literal["turn", "thread", "report"]
+TargetKind = Literal["turn", "turn_start", "thread", "report"]
 
 
 def queue_utc_now() -> str:
@@ -113,7 +113,7 @@ class MessageEnvelope:
             raise ValueError("MessageEnvelope identifiers are required.")
         if self.sender_kind not in {"user", "agent", "system"}:
             raise ValueError("MessageEnvelope sender_kind is invalid.")
-        if self.target_kind not in {"turn", "thread", "report"}:
+        if self.target_kind not in {"turn", "turn_start", "thread", "report"}:
             raise ValueError("MessageEnvelope target_kind is invalid.")
         if not self.source_message_ids or len(set(self.source_message_ids)) != len(self.source_message_ids):
             raise ValueError("MessageEnvelope source_message_ids must be non-empty and unique.")

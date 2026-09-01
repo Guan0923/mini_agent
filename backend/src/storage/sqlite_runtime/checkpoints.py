@@ -157,13 +157,25 @@ class SQLiteCheckpointMixin:
     ) -> None:
         existing = self._json_values(connection, session_id, "turn_message")
         if delivery_id:
-            delivered = next((item for item in existing if item.get("delivery_id") == delivery_id), None)
+            delivered = self._json_object(connection, session_id, "turn_delivery", delivery_id)
+            if delivered is None:
+                # Existing v16 databases may predate the ledger. Backfill it
+                # from the canonical message record inside this transaction.
+                delivered = next((item for item in existing if item.get("delivery_id") == delivery_id), None)
             if delivered is not None:
                 if (
                     delivered.get("run_id") == run_id
                     and delivered.get("role") == role
                     and delivered.get("content") == content
                 ):
+                    self._put_json_object(
+                        connection,
+                        session_id,
+                        "turn_delivery",
+                        delivery_id,
+                        delivered,
+                        timestamp,
+                    )
                     return
                 raise ValueError("delivery_id already belongs to a different Turn message.")
         run_messages = [item for item in existing if str(item.get("run_id") or "") == run_id]
@@ -186,9 +198,23 @@ class SQLiteCheckpointMixin:
             **({"delivery_id": delivery_id} if delivery_id else {}),
         }
         self._put_json_object(connection, session_id, "turn_message", f"{run_id}:{sequence}", payload, timestamp)
+        if delivery_id:
+            # json_objects has UNIQUE(session_id, namespace, object_id), which
+            # makes delivery application a database-enforced idempotency
+            # boundary without introducing a second source of message truth.
+            self._put_json_object(
+                connection,
+                session_id,
+                "turn_delivery",
+                delivery_id,
+                payload,
+                timestamp,
+            )
 
     def has_turn_delivery(self, session_id: str, delivery_id: str) -> bool:
         with self._connection(session_id) as connection:
+            if self._json_object(connection, session_id, "turn_delivery", delivery_id) is not None:
+                return True
             return any(
                 item.get("delivery_id") == delivery_id
                 for item in self._json_values(connection, session_id, "turn_message")

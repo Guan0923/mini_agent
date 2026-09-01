@@ -43,7 +43,8 @@ async function send(page: import("@playwright/test").Page, text: string): Promis
   const response = await responsePromise;
   expect(response.ok(), `${response.status()} ${response.url()}`).toBeTruthy();
   await expect(page.locator(".message.user").last()).toContainText(text, { timeout: 15_000 });
-  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }))
+    .toBeVisible({ timeout: 15_000 });
 }
 
 async function distanceToBottom(locator: import("@playwright/test").Locator): Promise<number> {
@@ -231,6 +232,8 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
   await expect(page.locator(".message.assistant").last()).toContainText("Agent Thread tree is ready.", {
     timeout: 15_000,
   });
+  await expect(page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }))
+    .toBeVisible({ timeout: 15_000 });
 
   await page.getByRole("button", { name: "Thread", exact: true }).click();
   let tree = page.getByRole("tree", { name: "Agent Thread 树" });
@@ -483,6 +486,7 @@ test("Agent Thread tree streams an idle nested Agent message and keeps Chat and 
 });
 
 test("chat stays bottom-anchored and exposes a centered translucent return button only while reading above", async ({ page }) => {
+  test.slow();
   const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Playwright Scroll Anchor" } });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();
 
@@ -601,6 +605,7 @@ test("Todo panel auto-finishes and offers cleanup only for an incomplete termina
 });
 
 test("real Turn SSE flow supports tools, rewind versions, fork, and compact", async ({ page }) => {
+  test.slow();
   const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Playwright Turn" } });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();
 
@@ -724,6 +729,14 @@ test("refresh reattaches a running Turn and flushes the persisted queue as one m
   const sidebar = await sidebarResponse.json() as { session_id: string };
 
   await page.goto("/app");
+  await page.evaluate(() => {
+    localStorage.setItem("mini-agent-conversations", JSON.stringify({
+      messages: ["legacy browser message cache"],
+      runtimeNodes: [{ id: "legacy-runtime-node" }],
+    }));
+  });
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("mini-agent-conversations"))).toBeNull();
   await page.getByRole("button", { name: "Reconnect Queue", exact: true }).click();
   await page.getByLabel("聊天输入").fill("delayed reconnect");
   const createResponse = page.waitForResponse((response) =>
@@ -761,6 +774,15 @@ test("refresh reattaches a running Turn and flushes the persisted queue as one m
       .map((item) => item.text ?? "")
       .join(""));
   }, { timeout: 15_000 }).toEqual(["delayed reconnect", "queued first\n\nqueued second"]);
+  const localStoragePayload = await page.evaluate(() => JSON.stringify(Object.fromEntries(
+    Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+      .filter((key): key is string => key !== null)
+      .map((key) => [key, localStorage.getItem(key)]),
+  )));
+  expect(localStoragePayload).not.toContain("delayed reconnect");
+  expect(localStoragePayload).not.toContain("queued first");
+  expect(localStoragePayload).not.toContain("current_data_idx");
+  expect(localStoragePayload).not.toContain("runtimeNodes");
 });
 
 test("a paused Turn resumes in place with the same id", async ({ page }) => {
@@ -911,6 +933,8 @@ test("Pause merges the local queue into one same-Turn steering Message", async (
   await expect(page.locator(".message.user").last()).toContainText("merge first");
   await expect(page.locator(".message.user").last()).toContainText("merge second");
   await expect(page.locator(".message.assistant").last()).toContainText("Merged steering complete.");
+  await expect(page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }))
+    .toBeVisible({ timeout: 15_000 });
 
   const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
   expect(turns).toHaveLength(1);
@@ -1098,4 +1122,38 @@ test("Sandbox health gate recovers through the real status and repair HTTP flow"
   await page.getByRole("button", { name: "Close" }).click();
   await expect(page.locator(".sandbox-health-failure")).toHaveCount(0);
   await expect(editor).toHaveAttribute("contenteditable", "true");
+});
+
+test("Redis connection failure returns 503 and preserves the Composer draft", async ({ page }) => {
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Redis Offline Composer" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Redis Offline Composer", exact: true }).click();
+  const editor = page.getByLabel("聊天输入");
+  const draft = "redis offline composer must survive";
+  await editor.fill(draft);
+
+  const offline = await page.request.post("/api/test/redis-available", {
+    data: { available: false },
+  });
+  expect(offline.ok(), `${offline.status()} ${await offline.text()}`).toBeTruthy();
+  try {
+    const rejectedResponse = page.waitForResponse((response) =>
+      response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+    );
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    const rejected = await rejectedResponse;
+    expect(rejected.status()).toBe(503);
+    expect(await rejected.json()).toEqual({ detail: "message_queue_unavailable" });
+    await expect.poll(() => editor.textContent()).toContain(draft);
+    await expect(page.locator(".message.user.is-pending")).toHaveCount(0);
+  } finally {
+    const restored = await page.request.post("/api/test/redis-available", {
+      data: { available: true },
+    });
+    expect(restored.ok(), `${restored.status()} ${await restored.text()}`).toBeTruthy();
+  }
 });

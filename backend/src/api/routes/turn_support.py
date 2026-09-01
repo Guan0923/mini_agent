@@ -88,7 +88,8 @@ def _stream_turn(
     adopt_existing: bool = False,
     operation=None,
     initial_delivery=None,
-) -> StreamingResponse:
+    stream_response: bool = True,
+) -> StreamingResponse | None:
     model = config.model
     stream = _stream(
         state,
@@ -110,7 +111,10 @@ def _stream_turn(
         references=references,
         operation=operation,
         initial_delivery=initial_delivery,
+        subscribe=stream_response,
     )
+    if not stream_response:
+        return None
     return StreamingResponse(stream, media_type="text/event-stream")
 
 

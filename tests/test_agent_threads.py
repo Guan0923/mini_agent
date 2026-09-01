@@ -1521,7 +1521,7 @@ def test_legacy_schema_is_rejected_without_mutating_or_deleting_database(tmp_pat
     assert database.read_bytes() == before
 
 
-def test_persistent_delegate_has_no_automatic_result_delivery_and_accepts_follow_up(tmp_path: Path) -> None:
+def test_persistent_delegate_reports_result_and_accepts_follow_up(tmp_path: Path) -> None:
     session_workspace = tmp_path / "session-workspace"
     project_workspace = tmp_path / "project-workspace"
     session_workspace.mkdir()
@@ -1610,7 +1610,20 @@ def test_persistent_delegate_has_no_automatic_result_delivery_and_accepts_follow
     assert isinstance(first_turn, RuntimeState)
     assert first_turn.cwd == str(session_workspace.resolve())
     assert first_turn.project_cwd == str(project_workspace.resolve())
+
+    deadline = monotonic() + 5
+    while monotonic() < deadline:
+        reports = store.list_agent_turn_reports(session.session_id, states=("queued",))
+        if len(reports) == 1:
+            break
+        sleep(0.01)
+    else:
+        pytest.fail("automatic Agent report was not queued")
+    assert reports[0].recipient_thread_id == session.session_id
+    assert coordinator.consume_runtime_reports(runtime) == 1
     assert queue.pending_deliveries() == []
+    delivered_reports = store.list_agent_turn_reports(session.session_id, states=("delivered",))
+    assert [report.delivery_id for report in delivered_reports] == [reports[0].delivery_id]
     assert json.loads(coordinator.invoke(runtime, "get_thread_node", {})) == [
         {
             "thread_path": "/root/worker",
@@ -1657,6 +1670,7 @@ def test_persistent_delegate_has_no_automatic_result_delivery_and_accepts_follow
     assert isinstance(delivered, RuntimeState) and delivered.status == "success"
     assert delivered.user_message["content"][0]["text"] == "follow-up"
     assert delivered.user_message.get("delivery_id")
+    coordinator.close()
     registry.close_all(reason="test complete", timeout=5)
     parent_runner.close()
 
@@ -1874,7 +1888,7 @@ def test_real_http_sse_redis_subagents_auto_report_and_restart_idle_child(
     try:
         with TestClient(create_app(state)) as http:
             sidebar = http.post("/api/sidebar-threads", json={}).json()
-            response = http.post(
+            accepted = http.post(
                 "/api/turns",
                 json={
                     "id": "turn_agent_root",
@@ -1888,6 +1902,11 @@ def test_real_http_sse_redis_subagents_auto_report_and_restart_idle_child(
                     "permission_mode": "read_only",
                     "running_mode": "agent",
                 },
+            )
+            assert accepted.status_code == 202, accepted.text
+            response = http.get(
+                "/api/turns/turn_agent_root/stream",
+                params={"session_id": sidebar["session_id"], "thread_id": sidebar["thread_id"]},
             )
             assert response.status_code == 200, response.text
             assert response.text.rstrip().endswith('<SSE id="turn_agent_root" type="success"></SSE>')
@@ -2005,7 +2024,7 @@ def test_real_http_sse_redis_subagents_persist_model_trace(
     try:
         with TestClient(create_app(state)) as http:
             sidebar = http.post("/api/sidebar-threads", json={}).json()
-            response = http.post(
+            accepted = http.post(
                 "/api/turns",
                 json={
                     "id": "turn_agent_trace_root",
@@ -2019,6 +2038,11 @@ def test_real_http_sse_redis_subagents_persist_model_trace(
                     "permission_mode": "read_only",
                     "running_mode": "agent",
                 },
+            )
+            assert accepted.status_code == 202, accepted.text
+            response = http.get(
+                "/api/turns/turn_agent_trace_root/stream",
+                params={"session_id": sidebar["session_id"], "thread_id": sidebar["thread_id"]},
             )
             assert response.status_code == 200, response.text
             assert response.text.rstrip().endswith('<SSE id="turn_agent_trace_root" type="success"></SSE>')

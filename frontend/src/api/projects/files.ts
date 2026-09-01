@@ -57,6 +57,7 @@ export async function searchSessionFiles(
   const params = new URLSearchParams({ q, limit: String(limit) });
   const response = await fetch(
     apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/files?${params.toString()}`),
+    { cache: "no-store" },
   );
   if (!response.ok) {
     throw new ApiError(response.status, await errorFrom(response));
@@ -84,7 +85,7 @@ export async function deleteSessionFile(
   const params = new URLSearchParams({ source, path });
   const response = await fetch(
     apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/files?${params.toString()}`),
-    { method: "DELETE" },
+    { method: "DELETE", cache: "no-store" },
   );
   if (!response.ok) {
     throw new ApiError(response.status, await errorFrom(response));
@@ -95,7 +96,7 @@ export async function deleteSessionFile(
 export async function fileReferenceAvailable(reference: FileReference, sessionId: string): Promise<boolean> {
   const url = sessionFileContentUrl(sessionId, reference.source, reference.path);
   try {
-    const response = await fetch(url, { method: "HEAD" });
+    const response = await fetch(url, { method: "HEAD", cache: "no-store" });
     return response.ok;
   } catch {
     return false;

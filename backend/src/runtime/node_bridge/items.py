@@ -56,7 +56,7 @@ class _ItemProjectionMixin:
                 self.assistant,
                 [item],
                 message_idx=self.assistant_message_idx,
-                persist=False,
+                persist=True,
             )
         else:
             self._stream_text += chunk
@@ -72,6 +72,7 @@ class _ItemProjectionMixin:
                 message_idx=self.assistant_message_idx,
                 item_idx=self._stream_item_index,
                 delta=chunk,
+                persist=True,
             )
         self.last_node = self.assistant
 

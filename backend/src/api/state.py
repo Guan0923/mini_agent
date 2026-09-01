@@ -23,6 +23,7 @@ from backend.runtime.subagents import SubagentCoordinator
 from backend.sandbox import BrokerConfiguration, SandboxMaintenanceGate, WindowsBrokerClient
 from backend.storage.message_queue import MemoryMessageQueue, RedisMessageQueue
 from backend.storage.projects import ProjectStore
+from backend.storage.runtime_event_stream import MemoryRuntimeEventStream, RedisRuntimeEventStream
 from backend.storage.settings import LocalSettingsStore
 from backend.tools.terminal import available_terminal_executables, effective_terminal_type
 
@@ -66,6 +67,12 @@ class WebAppState:
         self.system_job_scope = self.job_registry.root_scope()
         self.message_queue = message_queue or RedisMessageQueue.from_url()
         self.redis_pool = getattr(getattr(self.message_queue, "client", None), "connection_pool", None)
+        redis_client = getattr(self.message_queue, "client", None)
+        self.runtime_event_stream = (
+            RedisRuntimeEventStream(redis_client, key_prefix=self.message_queue.key_prefix)
+            if redis_client is not None
+            else MemoryRuntimeEventStream()
+        )
         self.mailbox = self.message_queue
         from .terminal_manager import TerminalManager
 
@@ -93,6 +100,14 @@ class WebAppState:
             job_registry=self.job_registry,
             thread_events=self.agent_thread_events,
         )
+        from .runtime_event_transport import RuntimeEventRelay
+
+        self.runtime_event_relay = RuntimeEventRelay(self)
+        self.runtime_event_relay.start()
+        from .turn_message_worker import TurnMessageWorker
+
+        self.turn_message_worker = TurnMessageWorker(self)
+        self.turn_message_worker.start()
 
     @staticmethod
     def _delivery_in_node(node: RuntimeState, delivery_id: str) -> bool:
@@ -188,7 +203,7 @@ class WebAppState:
         released_turns: set[str] = set()
         for claimed in pending:
             envelope = claimed.envelope
-            if envelope.target_kind in {"thread", "report"}:
+            if envelope.target_kind in {"thread", "report", "turn_start"}:
                 continue
             node = store.find_node(envelope.target_id)
             sqlite_persisted = store.has_turn_delivery(envelope.session_id, envelope.delivery_id)
@@ -316,6 +331,8 @@ class WebAppState:
         return {"runtime": self.settings.runtime_config()}
 
     def close(self) -> None:
+        self.turn_message_worker.close()
+        self.runtime_event_relay.close()
         self.subagent_coordinator.close()
         self.job_registry.close_all(reason="web application closed", timeout=5.0)
         self.agent_thread_events.close()

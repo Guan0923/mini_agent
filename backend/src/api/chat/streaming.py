@@ -22,6 +22,8 @@ from backend.storage.settings.crypto import SecretDecryptionError
 from ..active_turn_stream import ActiveTurnStream
 from ..agent_report_projection import project_frame
 from ..pause_control import TurnPauseController
+from ..runtime_event_transport import publish_frame as publish_runtime_frame
+from ..runtime_event_transport import publish_terminal as publish_runtime_terminal
 from ..session_store import session_store as _store
 from ..state import WebAppState
 from .interrupts import make_interactive_interrupt
@@ -79,6 +81,7 @@ def _stream(
     references: list[dict[str, str]] | None = None,
     operation: Callable[..., object] | None = None,
     initial_delivery: ClaimedEnvelope | None = None,
+    subscribe: bool = True,
 ):
     # ``WebAppState`` owns these process-local registries in production, but
     # callers such as focused SSE tests may provide a small state double.  A
@@ -123,7 +126,7 @@ def _stream(
     active_stream_aliases: set[str] = {turn_id}
     with active_turn_streams_lock:
         active_turn_streams[turn_id] = active_stream
-    original_subscription = active_stream.subscribe(turn_id)
+    original_subscription = active_stream.subscribe(turn_id) if subscribe else None
     cancel_requested = threading.Event()
     pause_controller = TurnPauseController()
     active_turn_cancellations = getattr(state, "active_turn_cancellations", None)
@@ -213,10 +216,22 @@ def _stream(
         with active_turn_streams_lock:
             active_turn_streams[alias] = active_stream
             active_stream_aliases.add(alias)
-        active_stream.publish_frame(frame, bridge.writer.current(frame.session_id, frame.turn_id))
+        current = bridge.writer.current(frame.session_id, frame.turn_id)
+        publish_runtime_frame(state, frame, current)
+        active_stream.publish_frame(frame, current)
 
     def enqueue_terminal(terminal_type: str, terminal_id: str, message: str = "") -> None:
         active_stream.publish_terminal(terminal_type, terminal_id, message)
+        bridge = bridge_ref["bridge"]
+        current = bridge._current() if bridge is not None else None
+        publish_runtime_terminal(
+            state,
+            session_id=current.session_id if current is not None else session_id,
+            thread_id=current.thread_id if current is not None else thread_id,
+            turn_id=terminal_id,
+            terminal_type=terminal_type,
+            message=message,
+        )
 
     approval_store = ApprovalStore(_store(state))
     interrupt = make_interactive_interrupt(
@@ -505,4 +520,4 @@ def _stream(
         # self-contained fallback while production always supplies a registry.
         threading.Thread(target=worker, daemon=True).start()
 
-    return original_subscription.as_sse()
+    return original_subscription.as_sse() if original_subscription is not None else None

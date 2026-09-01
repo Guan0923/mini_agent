@@ -12,6 +12,7 @@ from pathlib import Path
 from time import monotonic, sleep
 
 import uvicorn
+from redis import ConnectionPool
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -76,13 +77,36 @@ state.model_config = lambda _provider_name=None: ModelConfig(
 )
 
 _redis_key_prefix = os.environ.get("MINI_AGENT_REDIS_KEY_PREFIX", "")
+_redis_client = state.message_queue.client
+_online_redis_pool = _redis_client.connection_pool
+_offline_redis_pool: ConnectionPool | None = None
 _close_state = state.close
+
+
+def set_e2e_redis_available(available: bool) -> None:
+    global _offline_redis_pool
+
+    if available:
+        _redis_client.connection_pool = _online_redis_pool
+        if _offline_redis_pool is not None:
+            _offline_redis_pool.disconnect()
+            _offline_redis_pool = None
+        return
+    if _offline_redis_pool is None:
+        _offline_redis_pool = ConnectionPool.from_url(
+            "redis://127.0.0.1:63999/0",
+            decode_responses=True,
+            socket_connect_timeout=0.2,
+            socket_timeout=0.2,
+        )
+    _redis_client.connection_pool = _offline_redis_pool
 
 
 def close_e2e_state() -> None:
     """Delete only this Playwright run's randomized Redis namespace."""
 
     try:
+        set_e2e_redis_available(True)
         if _redis_key_prefix.startswith("mini-agent:e2e:"):
             client = getattr(state.message_queue, "client", None)
             if client is not None:
@@ -328,7 +352,10 @@ ORDERED_REASONING = "推理内容持续更新并保持右侧最新字符可见�
 
 
 def _agent_succeeded(runtime, thread_path: str) -> bool:
-    for message in runtime.model_messages():
+    # A fork inherits earlier Turns. Only tool results produced for this Turn
+    # may satisfy the new branch's Agent wait condition.
+    current_turn_messages = runtime.run.history[runtime.run.turn_start_index :]
+    for message in current_turn_messages:
         if not isinstance(message, AssistantMessage):
             continue
         for tool_message in message.tool_messages:
@@ -634,7 +661,9 @@ def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
     application.runner.planner = CooperativePausePlanner()
 
     def slow_tool() -> str:
-        sleep(2.0)
+        # Keep the tool boundary open long enough for a real browser to render
+        # the call and dispatch Redis steering on slower Windows CI hosts.
+        sleep(5.0)
         return "Slow tool completed."
 
     application.runner.tools = ToolRegistry(
@@ -710,9 +739,16 @@ def set_sandbox_status(values: dict[str, object]) -> dict[str, object]:
     ).to_dict()
 
 
+@app.post("/api/test/redis-available")
+def set_redis_available(values: dict[str, object]) -> dict[str, bool]:
+    available = values.get("available") is True
+    set_e2e_redis_available(available)
+    return {"available": available}
+
+
 # create_app may mount a built frontend at "/". Keep the four test-only
 # control routes ahead of that catch-all mount in the Starlette route table.
-for _test_route in range(4):
+for _test_route in range(5):
     app.router.routes.insert(0, app.router.routes.pop())
 
 

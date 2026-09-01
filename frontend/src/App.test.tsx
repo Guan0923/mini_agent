@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import App, { countUnreadArchived, loadArchiveReadState, loadConversations, markArchivedAsRead } from "./App";
+import App, { countUnreadArchived, loadArchiveReadState, markArchivedAsRead } from "./App";
 import { BROWSER_STATE_VERSION, BROWSER_STATE_VERSION_KEY, resetLegacyBrowserState } from "./app/storage";
 import type { Conversation } from "./types";
 
@@ -26,27 +26,6 @@ describe("local-only routes", () => {
 });
 
 describe("conversation recovery", () => {
-  it("does not restore a stale running animation from localStorage", () => {
-    localStorage.setItem(
-      "mini-agent-conversations",
-      JSON.stringify([
-        {
-          id: "old-run",
-          title: "旧任务",
-          messages: [
-            { id: "assistant-1", role: "assistant", content: "", events: [], running: true },
-          ],
-        },
-      ]),
-    );
-
-    const conversations = loadConversations("mini-agent-conversations");
-    expect(conversations[0]?.messages[0]).toMatchObject({
-      running: false,
-      status: "上次运行已中断",
-    });
-  });
-
   it("persists archive reads by conversation archive timestamp", () => {
     const archived = [{ id: "archived-1", title: "旧对话", messages: [], archivedAt: "2026-08-05T00:00:00Z" }] as Conversation[];
     const initial = {};
@@ -61,48 +40,7 @@ describe("conversation recovery", () => {
     expect(countUnreadArchived([...archived, { ...archived[0], id: "archived-2" }], read)).toBe(1);
   });
 
-  it("derives the legacy sidebar count from user and assistant messages", () => {
-    localStorage.setItem(
-      "mini-agent-conversations",
-      JSON.stringify([
-        {
-          id: "legacy-count",
-          title: "旧计数",
-          messages: [
-            { id: "u", role: "user", content: "问题", events: [] },
-            { id: "tool", role: "tool_result", content: "工具结果", events: [] },
-            { id: "a", role: "assistant", content: "回答", events: [] },
-          ],
-        },
-      ]),
-    );
-
-    expect(loadConversations("mini-agent-conversations")[0]?.messageCount).toBe(2);
-  });
-
-  it("rejects cached runtime nodes from the removed protocol", () => {
-    localStorage.setItem(
-      "mini-agent-conversations",
-      JSON.stringify([{
-        id: "legacy-node",
-        title: "旧节点",
-        messages: [],
-        runtimeNodes: [{
-          session_id: "s",
-          id: "n",
-          parent_session_id: "",
-          parent_id: "",
-          timestamp: "2026-08-14T00:00:00+00:00",
-          status: "success",
-          data: { type: "message", message: { role: "assistant", content: [] } },
-        }],
-      }]),
-    );
-
-    expect(loadConversations("mini-agent-conversations")).toEqual([]);
-  });
-
-  it("clears pre-RuntimeState browser history once", () => {
+  it("clears conversation data while preserving UI-only preferences", () => {
     localStorage.setItem("mini-agent-conversations:user-1", "old history");
     localStorage.setItem("mini-agent-archive-read:user-1", "old archive state");
     localStorage.setItem("mini-agent-session-modes", "old modes");
@@ -110,12 +48,9 @@ describe("conversation recovery", () => {
     resetLegacyBrowserState();
 
     expect(localStorage.getItem("mini-agent-conversations:user-1")).toBeNull();
-    expect(localStorage.getItem("mini-agent-archive-read:user-1")).toBeNull();
-    expect(localStorage.getItem("mini-agent-session-modes")).toBeNull();
+    expect(localStorage.getItem("mini-agent-archive-read:user-1")).toBe("old archive state");
+    expect(localStorage.getItem("mini-agent-session-modes")).toBe("old modes");
     expect(localStorage.getItem(BROWSER_STATE_VERSION_KEY)).toBe(BROWSER_STATE_VERSION);
 
-    localStorage.setItem("mini-agent-conversations:user-1", "new history");
-    resetLegacyBrowserState();
-    expect(localStorage.getItem("mini-agent-conversations:user-1")).toBe("new history");
   });
 });

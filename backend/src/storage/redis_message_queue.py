@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from redis import Redis
@@ -28,6 +28,7 @@ from .message_queue_support import (
     DEFAULT_REDIS_URL,
     DELIVERY_RECEIPT_TTL_SECONDS,
     STALE_CLAIM_MS,
+    TURN_START_CONSUMER_GROUP,
     _envelope_fingerprint,
     _fingerprint,
     _json,
@@ -67,6 +68,9 @@ class RedisMessageQueue:
     def _stream_key(self, turn_id: str) -> str:
         return f"{self.key_prefix}:turn:{turn_id}:mailbox"
 
+    def _turn_start_stream_key(self) -> str:
+        return f"{self.key_prefix}:turn-start:commands"
+
     def _thread_stream_key(self, thread_id: str) -> str:
         return f"{self.key_prefix}:thread:{thread_id}:mailbox"
 
@@ -74,6 +78,8 @@ class RedisMessageQueue:
         return f"{self.key_prefix}:thread:{thread_id}:assistant-reports"
 
     def _envelope_stream_key(self, envelope: MessageEnvelope) -> str:
+        if envelope.target_kind == "turn_start":
+            return self._turn_start_stream_key()
         if envelope.target_kind == "thread":
             return self._thread_stream_key(envelope.target_id)
         if envelope.target_kind == "report":
@@ -207,6 +213,7 @@ class RedisMessageQueue:
         thread_id: str,
         turn_id: str,
         correlation_id: str | None = None,
+        command_payload: Mapping[str, object] | None = None,
     ) -> MessageEnvelope:
         if not message_ids or len(set(message_ids)) != len(message_ids):
             raise QueueItemConflict("message_ids_must_be_unique")
@@ -241,15 +248,19 @@ class RedisMessageQueue:
         if any(item.state != "pending" for item in queued):
             raise QueueItemStateConflict("queued_message_dispatched")
         content, references = _merge(queued)
+        payload: dict[str, object] = {"content": content, "references": [dict(value) for value in references]}
+        if command_payload is not None:
+            payload.update(dict(command_payload))
+            payload["queued"] = True
         envelope = stored_envelope or MessageEnvelope(
             delivery_id=delivery_id,
             sender_kind="user",
             source_thread_id=thread_id,
-            target_kind="turn",
+            target_kind="turn_start" if command_payload is not None else "turn",
             target_id=turn_id,
             session_id=session_id,
             thread_id=thread_id,
-            payload={"content": content, "references": [dict(value) for value in references]},
+            payload=payload,
             source_message_ids=tuple(canonical_ids),
             correlation_id=correlation_id,
         )
@@ -261,7 +272,8 @@ class RedisMessageQueue:
         arguments.extend(_json(item.to_dict()) for item in dispatched)
         arguments.append(_json(envelope.to_dict()))
         try:
-            result = self._dispatch(keys=[receipt_key, messages_key, self._stream_key(turn_id)], args=arguments)
+            stream = self._turn_start_stream_key() if command_payload is not None else self._stream_key(turn_id)
+            result = self._dispatch(keys=[receipt_key, messages_key, stream], args=arguments)
         except RedisError as exc:
             raise self._unavailable(exc) from exc
         code = str(result[0])
@@ -273,6 +285,24 @@ class RedisMessageQueue:
             raise QueueItemStateConflict("queued_message_dispatched")
         if code == "queue_changed":
             raise QueueItemConflict("queued_message_changed_during_dispatch")
+        return envelope
+
+    def dispatch_turn_start(self, envelope: MessageEnvelope) -> MessageEnvelope:
+        """Atomically admit one immutable user message to the Turn-start stream."""
+
+        if envelope.sender_kind != "user" or envelope.target_kind != "turn_start":
+            raise ValueError("Turn-start dispatch requires sender_kind=user and target_kind=turn_start.")
+        fingerprint = _envelope_fingerprint(envelope)
+        receipt = self._receipt_key(envelope.delivery_id)
+        try:
+            result = self._direct_dispatch(
+                keys=[receipt, self._turn_start_stream_key()],
+                args=[fingerprint, _json(replace(envelope, attempts=0).to_dict())],
+            )
+        except RedisError as exc:
+            raise self._unavailable(exc) from exc
+        if str(result[0]) == "delivery_conflict":
+            raise DeliveryConflict("delivery_id_conflict")
         return envelope
 
     def dispatch_agent(self, envelope: MessageEnvelope) -> MessageEnvelope:
@@ -311,9 +341,10 @@ class RedisMessageQueue:
             raise DeliveryConflict("delivery_id_conflict")
         return envelope
 
-    def _ensure_group(self, stream: str) -> None:
+    def _ensure_group(self, stream: str, group: str | None = None) -> None:
+        resolved_group = group or self.consumer_group
         try:
-            self.client.xgroup_create(stream, self.consumer_group, id="0-0", mkstream=True)
+            self.client.xgroup_create(stream, resolved_group, id="0-0", mkstream=True)
         except RedisError as exc:
             if "BUSYGROUP" not in str(exc):
                 raise self._unavailable(exc) from exc
@@ -324,12 +355,14 @@ class RedisMessageQueue:
         consumer: str,
         *,
         stale_claim_ms: int = STALE_CLAIM_MS,
+        group: str | None = None,
     ) -> ClaimedEnvelope | None:
-        self._ensure_group(stream)
+        resolved_group = group or self.consumer_group
+        self._ensure_group(stream, resolved_group)
         try:
             reclaimed = self.client.xautoclaim(
                 stream,
-                self.consumer_group,
+                resolved_group,
                 consumer,
                 min_idle_time=stale_claim_ms,
                 start_id="0-0",
@@ -337,10 +370,10 @@ class RedisMessageQueue:
             )
             entries = reclaimed[1] if len(reclaimed) > 1 else []
             if not entries:
-                pending = self.client.xpending(stream, self.consumer_group)
+                pending = self.client.xpending(stream, resolved_group)
                 if int(pending.get("pending", 0)) > 0:
                     return None
-                response = self.client.xreadgroup(self.consumer_group, consumer, {stream: ">"}, count=1, block=None)
+                response = self.client.xreadgroup(resolved_group, consumer, {stream: ">"}, count=1, block=None)
                 entries = response[0][1] if response else []
             if not entries:
                 return None
@@ -353,6 +386,14 @@ class RedisMessageQueue:
 
     def claim(self, turn_id: str, consumer: str) -> ClaimedEnvelope | None:
         return self._claim_stream(self._stream_key(turn_id), consumer)
+
+    def claim_turn_start(self, consumer: str, *, recover: bool = False) -> ClaimedEnvelope | None:
+        return self._claim_stream(
+            self._turn_start_stream_key(),
+            consumer,
+            stale_claim_ms=0 if recover else STALE_CLAIM_MS,
+            group=TURN_START_CONSUMER_GROUP,
+        )
 
     def claim_thread(self, thread_id: str, consumer: str) -> ClaimedEnvelope | None:
         return self._claim_stream(self._thread_stream_key(thread_id), consumer)
@@ -379,10 +420,13 @@ class RedisMessageQueue:
 
     def ack(self, claimed: ClaimedEnvelope) -> None:
         envelope = claimed.envelope
-        if envelope.target_kind in {"thread", "report"}:
+        if envelope.target_kind in {"thread", "report"} or (
+            envelope.target_kind == "turn_start" and not bool(envelope.payload.get("queued"))
+        ):
+            group = TURN_START_CONSUMER_GROUP if envelope.target_kind == "turn_start" else self.consumer_group
             arguments: list[object] = [
                 _envelope_fingerprint(envelope),
-                self.consumer_group,
+                group,
                 claimed.stream_id,
                 queue_utc_now(),
                 DELIVERY_RECEIPT_TTL_SECONDS,
@@ -401,7 +445,7 @@ class RedisMessageQueue:
         fingerprint = _fingerprint(envelope.thread_id, envelope.target_id, envelope.source_message_ids)
         arguments: list[object] = [
             fingerprint,
-            self.consumer_group,
+            TURN_START_CONSUMER_GROUP if envelope.target_kind == "turn_start" else self.consumer_group,
             claimed.stream_id,
             len(envelope.source_message_ids),
             *envelope.source_message_ids,
@@ -410,7 +454,14 @@ class RedisMessageQueue:
         ]
         try:
             result = self._ack(
-                keys=[self._receipt_key(envelope.delivery_id), self._stream_key(envelope.target_id), messages, order],
+                keys=[
+                    self._receipt_key(envelope.delivery_id),
+                    self._turn_start_stream_key()
+                    if envelope.target_kind == "turn_start"
+                    else self._stream_key(envelope.target_id),
+                    messages,
+                    order,
+                ],
                 args=arguments,
             )
         except RedisError as exc:
@@ -455,6 +506,7 @@ class RedisMessageQueue:
                 f"{self.key_prefix}:turn:*:mailbox",
                 f"{self.key_prefix}:thread:*:mailbox",
                 f"{self.key_prefix}:thread:*:assistant-reports",
+                self._turn_start_stream_key(),
             )
             for pattern in patterns:
                 for stream in self.client.scan_iter(pattern):

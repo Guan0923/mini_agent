@@ -34,7 +34,7 @@ export async function errorFrom(res: Response): Promise<string> {
 }
 
 async function request(url: string, init: RequestInit): Promise<Response> {
-  const res = await fetch(apiUrl(url), init);
+  const res = await fetch(apiUrl(url), { cache: "no-store", ...init });
   if (!res.ok) {
     const details = await errorDetailsFrom(res);
     throw new ApiError(res.status, details.message, details.code);

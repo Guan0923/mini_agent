@@ -28,7 +28,9 @@ async function sendMessage(scope: Locator | Page, page: Page, text: string): Pro
   const response = await responsePromise;
   expect(response.ok(), `${response.status()} ${await response.text()}`).toBeTruthy();
   await expect(scope.locator(".message.user").last()).toContainText(text, { timeout: 15_000 });
-  await expect(scope.getByRole("button", { name: "发送", exact: true })).toBeVisible({ timeout: 15_000 });
+  const assistantFrame = scope.locator(".message.assistant").last().locator(".assistant-run-frame");
+  await expect(assistantFrame).toBeVisible({ timeout: 15_000 });
+  await expect(assistantFrame).not.toHaveClass(/is-running/, { timeout: 15_000 });
 }
 
 async function openRightPanel(page: Page): Promise<void> {

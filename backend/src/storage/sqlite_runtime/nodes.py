@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 
 from backend.domain.runtime_state import (
+    NodeFrame,
     RuntimeNode,
     RuntimeRootState,
     RuntimeStateTree,
@@ -94,6 +95,12 @@ class SQLiteNodeMixin:
             return root
 
     def create_node(self, node: TreeRuntimeState) -> None:
+        self._create_node(node, None)
+
+    def create_node_with_frame(self, node: TreeRuntimeState, frame: NodeFrame) -> None:
+        self._create_node(node, frame)
+
+    def _create_node(self, node: TreeRuntimeState, frame: NodeFrame | None) -> None:
         if node.status != "running":
             raise ValueError("A Turn must be created with status='running'.")
         if not node.parent_id:
@@ -130,15 +137,25 @@ class SQLiteNodeMixin:
                 timestamp=node.timestamp,
             )
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+            if frame is not None:
+                self._put_runtime_event(connection, node, frame)
             self._touch_session(connection, node.session_id, node.timestamp)
 
     def update_node(self, node: TreeRuntimeState) -> None:
+        self._update_node(node, None)
+
+    def update_node_with_frame(self, node: TreeRuntimeState, frame: NodeFrame) -> None:
+        self._update_node(node, frame)
+
+    def _update_node(self, node: TreeRuntimeState, frame: NodeFrame | None) -> None:
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
             existing = self._json_object(connection, node.session_id, "runtime_node", node.id)
             if existing is None:
                 raise KeyError(node.id)
             self._put_json_object(connection, node.session_id, "runtime_node", node.id, node.to_dict(), node.timestamp)
+            if frame is not None:
+                self._put_runtime_event(connection, node, frame)
             self._set_thread_head(
                 connection,
                 session_id=node.session_id,
@@ -264,13 +281,19 @@ class SQLiteNodeMixin:
             )
             self._touch_session(connection, node.session_id, node.timestamp)
 
-    def append_turn_version(self, turn_id: str, user_item: Mapping[str, object]) -> TreeRuntimeState:
+    def append_turn_version(
+        self,
+        turn_id: str,
+        user_item: Mapping[str, object],
+        *,
+        delivery_id: str | None = None,
+    ) -> TreeRuntimeState:
         """Atomically rewind one Turn by appending a new selected version."""
 
         node = _require_runtime_turn(self.find_node(turn_id), turn_id)
         if node.status == "running":
             raise ValueError("A running Turn cannot be rewound.")
-        user = message_payload("user", [dict(user_item)])
+        user = message_payload("user", [dict(user_item)], delivery_id=delivery_id)
         assistant = message_payload("assistant", [])
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)

@@ -602,6 +602,25 @@ describe("ChatPage rewind projection", () => {
     expect(screen.getByTestId("conversation-title")).toHaveTextContent("新对话");
   });
 
+  it("keeps the composer draft when Redis rejects admission", async () => {
+    const onRun = vi.fn((request: { onAdmissionRejected?: () => void }) => {
+      request.onAdmissionRejected?.();
+    });
+    render(<Harness onRun={onRun} onRewind={vi.fn()} />);
+
+    const composer = screen.getByLabelText("聊天输入");
+    await userEvent.type(composer, "redis unavailable draft");
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
+    expect(composer).toHaveTextContent("redis unavailable draft");
+    expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
+      deliveryId: expect.any(String),
+      onAccepted: expect.any(Function),
+      onAdmissionRejected: expect.any(Function),
+    }));
+  });
+
   it("prunes descendants only when the edited message is submitted for rewind", async () => {
     const nativeGetComputedStyle = window.getComputedStyle.bind(window);
     vi.spyOn(window, "getComputedStyle").mockImplementation((element, pseudoElement) => {

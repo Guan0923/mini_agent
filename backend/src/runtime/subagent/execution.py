@@ -151,11 +151,15 @@ class _SubagentExecutionMixin:
                             control.settled.set()
                     current_thread = getattr(self._store, "get_runtime_thread")(node.session_id, node.thread_id)
                     next_turn_id = current_thread.running_turn_id if current_thread is not None else None
-                    if next_turn_id and next_turn_id != turn.id:
+                    if next_turn_id:
                         next_turn = getattr(self._store, "get_node")(node.session_id, next_turn_id)
                         next_node = getattr(self._store, "get_thread_node")(node.session_id, node.thread_id)
                         pending = getattr(self._queue, "peek_thread")(node.thread_id)
-                        if isinstance(next_turn, RuntimeState) and next_node is not None:
+                        if (
+                            isinstance(next_turn, RuntimeState)
+                            and next_turn.status == "running"
+                            and next_node is not None
+                        ):
                             delivery_id = str(next_turn.user_message.get("delivery_id") or "")
                             self._submit_turn(
                                 next_node,

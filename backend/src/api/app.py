@@ -39,8 +39,16 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
     @app.middleware("http")
     async def enforce_local_browser_origin(request: Request, call_next):
         if request.method not in {"GET", "HEAD", "OPTIONS"} and not origin_allowed(request, web_settings):
-            return JSONResponse({"detail": "不允许的请求来源。"}, status_code=403)
-        return await call_next(request)
+            return JSONResponse(
+                {"detail": "不允许的请求来源。"},
+                status_code=403,
+                headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+            )
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+        return response
 
     app.add_middleware(
         CORSMiddleware,

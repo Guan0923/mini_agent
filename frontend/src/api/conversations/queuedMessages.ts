@@ -39,6 +39,6 @@ export async function updateQueuedMessage(
 }
 
 export async function deleteQueuedMessage(threadId: string, messageId: string): Promise<void> {
-  const response = await fetch(apiUrl(queueUrl(threadId, messageId)), { method: "DELETE" });
+  const response = await fetch(apiUrl(queueUrl(threadId, messageId)), { method: "DELETE", cache: "no-store" });
   if (!response.ok) throw new ApiError(response.status, await errorFrom(response));
 }

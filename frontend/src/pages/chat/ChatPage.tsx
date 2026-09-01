@@ -337,6 +337,9 @@ export default function ChatPage({
     waitForActiveRun = false,
     onBaseline?: (turn: RuntimeStateNode) => void,
     queuedDelivery?: { deliveryId: string; messageIds: string[] },
+    deliveryId?: string,
+    onAccepted?: () => void,
+    onAdmissionRejected?: () => void,
   ) {
     if (sandboxBlocked) throw new Error("沙箱 Broker 尚未确认健康。");
     if (!onRun) throw new Error("ChatPage requires the Turn run controller.");
@@ -358,6 +361,9 @@ export default function ChatPage({
         waitForActiveRun,
         onBaseline,
         queuedDelivery,
+        deliveryId,
+        onAccepted,
+        onAdmissionRejected,
     });
   }
 
@@ -365,9 +371,11 @@ export default function ChatPage({
     prompt: string,
     target?: { conversationId: string; sessionId: string; sourceNodeId?: string; rewindTurnId?: string },
     references?: FileReference[],
+    onAccepted?: () => void,
   ) {
     const { conversationId, sessionId } = target ?? await ensureSession();
-    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [], references };
+    const deliveryId = crypto.randomUUID();
+    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: prompt, events: [], references, deliveryId, pending: true };
     const assistantMessage: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", events: [], running: true };
     onUpdate(conversationId, (current) => {
       let visibleMessages = current.messages;
@@ -402,6 +410,14 @@ export default function ChatPage({
       references,
       target?.rewindTurnId,
       Boolean(activeRuntimeNode && activeRuntimeNode.status !== "running"),
+      undefined,
+      undefined,
+      target ? undefined : deliveryId,
+      onAccepted,
+      () => onUpdate(conversationId, (current) => ({
+        ...current,
+        messages: current.messages.filter((message) => message.id !== userMessage.id && message.id !== assistantMessage.id),
+      })),
     );
   }
 
@@ -458,11 +474,14 @@ export default function ChatPage({
       await queuedMessageFlow.queueCurrentPrompt(prompt, mergedReferences);
       return;
     }
-    clearComposer();
     await runPrompt(
       prompt,
       undefined,
       mergedReferences.length > 0 ? mergedReferences : undefined,
+      () => {
+        clearComposer();
+        setPendingUploads([]);
+      },
     );
   }
 

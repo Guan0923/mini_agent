@@ -4,7 +4,7 @@ import { BrowserRouter } from "react-router-dom";
 import AppRoutes from "./app/routes";
 import { oceanTheme } from "./app/theme";
 
-export { countUnreadArchived, loadArchiveReadState, loadConversations, markArchivedAsRead } from "./app/storage";
+export { countUnreadArchived, loadArchiveReadState, markArchivedAsRead } from "./app/storage";
 
 export default function App() {
   return <ConfigProvider locale={zhCN} theme={oceanTheme}><AntApp><BrowserRouter><AppRoutes /></BrowserRouter></AntApp></ConfigProvider>;

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -1500,34 +1499,45 @@ def test_http_resume_plan_compaction_handoff_uses_one_bridge_and_fake_model(
         store = session_store(state)
         assert store.find_node(paused.turn_id).status == "paused"
 
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            response_future = executor.submit(
-                client.post,
-                f"/api/turns/{paused.turn_id}/resume",
-                json={"running_mode": "plan", "permission_mode": "read_only"},
-            )
-            decision_id = ""
-            deadline = monotonic() + 10
-            while monotonic() < deadline and not decision_id:
-                turn = store.find_node(paused.turn_id)
-                if isinstance(turn, RuntimeState):
-                    decision_id = next(
-                        (
-                            str(item.get("decision_id") or "")
-                            for item in turn.assistant_items
-                            if item.get("event") == "decision_requested"
-                        ),
-                        "",
-                    )
-                if not decision_id:
-                    sleep(0.02)
-            assert decision_id
-            decision = client.post(
-                "/api/decisions",
-                json={"decision_id": decision_id, "choice": "implement_and_compaction"},
-            )
-            assert decision.status_code == 200
-            response = response_future.result(timeout=15)
+        accepted = client.post(
+            f"/api/turns/{paused.turn_id}/resume",
+            json={"running_mode": "plan", "permission_mode": "read_only"},
+        )
+        assert accepted.status_code == 202
+        decision_id = ""
+        deadline = monotonic() + 10
+        while monotonic() < deadline:
+            turn = store.find_node(paused.turn_id)
+            if isinstance(turn, RuntimeState):
+                decision_id = next(
+                    (
+                        str(item.get("decision_id") or "")
+                        for item in turn.assistant_items
+                        if item.get("event") == "decision_requested"
+                    ),
+                    "",
+                )
+            if decision_id:
+                decision = client.post(
+                    "/api/decisions",
+                    json={"decision_id": decision_id, "choice": "implement_and_compaction"},
+                )
+                if decision.status_code == 200:
+                    break
+            sleep(0.02)
+        else:
+            pytest.fail("resumed Plan decision did not become active")
+
+        deadline = monotonic() + 15
+        while monotonic() < deadline:
+            turns = [node for node in store.load_nodes(sidebar["session_id"]) if isinstance(node, RuntimeState)]
+            if len(turns) == 3 and all(turn.status in {"success", "failed"} for turn in turns):
+                break
+            sleep(0.02)
+        response = client.get(
+            f"/api/turns/{paused.turn_id}/stream",
+            params={"session_id": sidebar["session_id"]},
+        )
 
         assert response.status_code == 200
         payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
@@ -1582,7 +1592,7 @@ def test_http_sse_surfaces_sandbox_failure_before_turn_baseline(tmp_path: Path, 
     with TestClient(create_app(state)) as client:
         sidebar = client.post("/api/sidebar-threads", json={}).json()
         turn_id = "turn_sandbox_startup_failure"
-        response = client.post(
+        accepted = client.post(
             "/api/turns",
             json={
                 "id": turn_id,
@@ -1593,6 +1603,11 @@ def test_http_sse_surfaces_sandbox_failure_before_turn_baseline(tmp_path: Path, 
                 "permission_mode": "read_only",
                 "running_mode": "agent",
             },
+        )
+        assert accepted.status_code == 202
+        response = client.get(
+            f"/api/turns/{turn_id}/stream",
+            params={"session_id": sidebar["session_id"]},
         )
 
     assert response.status_code == 200
@@ -1776,7 +1791,7 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
         sidebar = client.post("/api/sidebar-threads", json={}).json()
         assert client.get("/api/turns", params={"session_id": sidebar["session_id"]}).json() == []
         turn_id = "turn_http_sse"
-        response = client.post(
+        accepted = client.post(
             "/api/turns",
             json={
                 "id": turn_id,
@@ -1792,14 +1807,28 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
             },
         )
 
-        assert response.status_code == 200
-        payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+        assert accepted.status_code == 202
+        assert accepted.json() == {
+            "turn_id": turn_id,
+            "delivery_id": f"turn-start:{turn_id}",
+            "status": "accepted",
+        }
+        stream_response = client.get(
+            f"/api/turns/{turn_id}/stream",
+            params={"session_id": sidebar["session_id"]},
+        )
+        payloads = [
+            line.removeprefix("data: ") for line in stream_response.text.splitlines() if line.startswith("data: ")
+        ]
         assert payloads[-1] == f'<SSE id="{turn_id}" type="success"></SSE>'
         frames = [json.loads(payload) for payload in payloads[:-1]]
         assert frames[0]["type"] == "turn.snapshot" and frames[0]["revision"] == 0
         assert all(frame["type"] == "turn.delta" for frame in frames[1:])
         assert [frame["revision"] for frame in frames] == list(range(len(frames)))
-        assert frames[-1]["patch"]["status"] == "success"
+        if len(frames) == 1:
+            assert frames[0]["turn"]["status"] == "success"
+        else:
+            assert frames[-1]["patch"]["status"] == "success"
         assert all("turn" not in frame and "data" not in frame for frame in frames[1:])
 
         reconstructed = frames[0]["turn"]
@@ -1908,7 +1937,7 @@ def test_real_http_sse_progressively_loads_user_skill_through_read_file(
 
     with TestClient(create_app(state)) as client:
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        response = client.post(
+        accepted = client.post(
             "/api/turns",
             json={
                 "id": "turn_progressive_skill",
@@ -1924,6 +1953,11 @@ def test_real_http_sse_progressively_loads_user_skill_through_read_file(
             },
         )
 
+        assert accepted.status_code == 202
+        response = client.get(
+            "/api/turns/turn_progressive_skill/stream",
+            params={"session_id": sidebar["session_id"]},
+        )
         assert response.status_code == 200
         assert '<SSE id="turn_progressive_skill" type="success"></SSE>' in response.text
         assert len(model.decision_requests) == 2
@@ -1996,7 +2030,7 @@ def test_real_http_sse_generates_title_with_isolated_model_request(
 
     with TestClient(create_app(state)) as client:
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        response = client.post(
+        accepted = client.post(
             "/api/turns",
             json={
                 "id": "turn_model_title",
@@ -2012,6 +2046,11 @@ def test_real_http_sse_generates_title_with_isolated_model_request(
             },
         )
 
+        assert accepted.status_code == 202
+        response = client.get(
+            "/api/turns/turn_model_title/stream",
+            params={"session_id": sidebar["session_id"]},
+        )
         assert response.status_code == 200
         payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
         assert payloads[-1] == '<SSE id="turn_model_title" type="success"></SSE>'

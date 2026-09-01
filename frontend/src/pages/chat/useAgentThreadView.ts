@@ -105,6 +105,7 @@ export function useAgentThreadView({ canonical, enabled, onUpdate }: UseAgentThr
     const controller = new AbortController();
     const conversationId = canonical.id;
     let retryMs = 500;
+    let lastEventId = "";
 
     const commitNodes = (nodes: RuntimeTreeNode[]) => {
       updateRef.current(conversationId, (current) => ({
@@ -141,7 +142,9 @@ export function useAgentThreadView({ canonical, enabled, onUpdate }: UseAgentThr
             }
             const turn = applyRuntimeNodeFrame(accumulator, event);
             commitNodes([turn]);
-          }, controller.signal);
+          }, controller.signal, lastEventId, (cursor) => {
+            lastEventId = cursor;
+          });
           if (result === "aborted") return;
           throw new Error("Agent Thread SSE ended unexpectedly.");
         } catch (error) {

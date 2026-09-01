@@ -329,6 +329,7 @@ describe("AgentApp new conversation initialization", () => {
       "turn-running",
       expect.any(Function),
       expect.any(AbortSignal),
+      "session-running",
     );
     await act(async () => Promise.resolve());
     expect(api.streamAttachedTurn).toHaveBeenCalledTimes(1);

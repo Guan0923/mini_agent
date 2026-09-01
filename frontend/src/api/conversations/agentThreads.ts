@@ -53,12 +53,18 @@ export async function streamAgentThread(
   threadId: string,
   onEvent: (event: AgentThreadStreamEvent) => void,
   signal: AbortSignal,
+  lastEventId = "",
+  onCursor?: (eventId: string) => void,
 ): Promise<"aborted" | "ended"> {
   let response: Response;
   try {
     response = await fetch(
       apiUrl(`/api/agent-threads/${encodeURIComponent(threadId)}/stream?session_id=${encodeURIComponent(sessionId)}`),
-      { signal },
+      {
+        signal,
+        cache: "no-store",
+        headers: lastEventId ? { "Last-Event-ID": lastEventId } : undefined,
+      },
     );
   } catch (error) {
     if ((error as Error).name === "AbortError" || signal.aborted) return "aborted";
@@ -78,7 +84,12 @@ export async function streamAgentThread(
       while ((boundary = buffer.indexOf("\n\n")) >= 0) {
         const block = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
+        let blockEventId = "";
         for (const line of block.split("\n")) {
+          if (line.startsWith("id: ")) {
+            blockEventId = line.slice(4);
+            continue;
+          }
           if (!line.startsWith("data: ")) continue;
           const payload = JSON.parse(line.slice(6)) as AgentThreadStreamEvent;
           if (!["thread.ready", "turn.snapshot", "turn.delta", "turn.terminal"].includes(payload.type)) {
@@ -86,6 +97,7 @@ export async function streamAgentThread(
           }
           onEvent(payload);
         }
+        if (blockEventId) onCursor?.(blockEventId);
       }
       if (next.done) break;
     }
