@@ -12,7 +12,7 @@ from backend.mcp import client as mcp_client
 from backend.mcp.config import McpSettings, McpTrustStore, prepare_mcp_plan
 from backend.runtime import AgentRunner
 from backend.runtime.application import factory as app_factory
-from backend.runtime.subagent_bridge import ParentRuntimeBridge
+from backend.runtime.subagent.parent_bridge import ParentRuntimeBridge
 from backend.sandbox import BrokerStatus, SandboxLauncher
 from backend.tools import ToolError, ToolRegistry
 from backend.tools.filesystem import normalized_workspace_path

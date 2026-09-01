@@ -36,6 +36,7 @@ from backend.sandbox.install_helper import (
     _icacls_sid,
     _persist_sid,
     _remove_owned_accounts,
+    _remove_service_acls,
     _runtime_acl_grants,
     _secure_program_data,
     _service_sid,
@@ -44,6 +45,7 @@ from backend.sandbox.install_helper import (
     _TransactionFailure,
     run_transaction,
 )
+from backend.sandbox.installation import access_policy
 
 
 class _Result:
@@ -486,7 +488,7 @@ def test_injected_runner_uses_prefixed_sid_for_acl(monkeypatch: pytest.MonkeyPat
     assert takeown_call[-1] == "/A"
     assert "*S-1-5-21-1-2-3-500:(R)" in key_acl_call
     assert f"*{service_sid}:(M)" in key_acl_call
-    assert source_call[2:] == [service_sid, "RX", "inherit"]
+    assert source_call[2:] == [service_sid, "RX", "tree"]
     assert [call for call in calls if call[0] == "win32-acl"] == [
         ["win32-acl", str(installer.service_code_boundary_path), service_sid, "X", "direct"],
         [
@@ -1343,9 +1345,191 @@ def test_runtime_acl_requires_the_service_executable_and_grants_rx() -> None:
     grants = _runtime_acl_grants((runtime, base_runtime, runtime), executable, "MiniAgentSandboxBroker")
 
     assert [grant.path for grant in grants] == [runtime, base_runtime]
-    assert all(grant.rights == "RX" and grant.inherit for grant in grants)
+    assert all(grant.rights == "RX" and grant.inherit and grant.existing_children for grant in grants)
     with pytest.raises(ValueError):
         _runtime_acl_grants((base_runtime,), executable, "MiniAgentSandboxBroker")
+
+
+def test_acl_tree_applies_rx_to_existing_children_and_future_descendants(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "runtime").resolve()
+    package = root / "Lib" / "site-packages"
+    package.mkdir(parents=True)
+    executable = root / "pythonservice.exe"
+    module = package / "servicemanager.pyd"
+    executable.write_bytes(b"host")
+    module.write_bytes(b"module")
+    applied: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        access_policy,
+        "_apply_acl_target",
+        lambda path, _sid, _rights, *, inherit: applied.append((path, inherit)),
+    )
+
+    access_policy._apply_source_acl_grant(
+        access_policy._SourceAclGrant(root, "S-1-5-80-1-2-3-4-5", "RX", True, existing_children=True)
+    )
+
+    assert set(applied) == {
+        (root, True),
+        (root / "Lib", True),
+        (package, True),
+        (executable, False),
+        (module, False),
+    }
+
+
+def test_acl_tree_skips_reparse_entries(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = (tmp_path / "runtime").resolve()
+    skipped = root / "linked-runtime"
+    skipped.mkdir(parents=True)
+    (skipped / "outside.dll").write_bytes(b"outside")
+    kept = root / "pythonservice.exe"
+    kept.write_bytes(b"host")
+    original = access_policy._is_reparse_point
+    monkeypatch.setattr(
+        access_policy,
+        "_is_reparse_point",
+        lambda path: path == skipped or original(path),
+    )
+
+    assert list(access_policy._iter_acl_tree(root)) == [(root, True), (kept, False)]
+
+
+def test_acl_tree_rejects_reparse_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = (tmp_path / "runtime").resolve()
+    root.mkdir()
+    monkeypatch.setattr(access_policy, "_is_reparse_point", lambda _path: True)
+
+    with pytest.raises(ValueError, match="reparse point"):
+        list(access_policy._iter_acl_tree(root))
+
+
+def test_acl_target_is_idempotent_and_preserves_unrelated_aces(monkeypatch: pytest.MonkeyPatch) -> None:
+    unrelated_sid = "S-1-5-21-unrelated"
+    service_sid = "S-1-5-80-service"
+
+    class Dacl:
+        def __init__(self) -> None:
+            self.aces = [((0, 0), 0x01, unrelated_sid)]
+
+        def GetAceCount(self) -> int:
+            return len(self.aces)
+
+        def GetAce(self, index: int):
+            return self.aces[index]
+
+        def AddAccessAllowedAceEx(self, _revision: int, inheritance: int, access: int, sid: str) -> None:
+            self.aces.append(((0, inheritance), access, sid))
+
+    dacl = Dacl()
+    descriptor = types.SimpleNamespace(GetSecurityDescriptorDacl=lambda: dacl)
+    security = types.SimpleNamespace(
+        ACCESS_ALLOWED_ACE_TYPE=0,
+        ACL_REVISION_DS=4,
+        CONTAINER_INHERIT_ACE=2,
+        OBJECT_INHERIT_ACE=1,
+        INHERITED_ACE=0x10,
+        SE_FILE_OBJECT=1,
+        DACL_SECURITY_INFORMATION=4,
+        ACL=Dacl,
+        ConvertStringSidToSid=lambda value: value,
+        GetNamedSecurityInfo=lambda *_args: descriptor,
+        SetNamedSecurityInfo=lambda *_args: None,
+    )
+    monkeypatch.setitem(sys.modules, "win32security", security)
+    monkeypatch.setitem(
+        sys.modules,
+        "ntsecuritycon",
+        types.SimpleNamespace(FILE_GENERIC_READ=0x10, FILE_GENERIC_EXECUTE=0x20, FILE_TRAVERSE=0x40),
+    )
+
+    access_policy._apply_acl_target(Path("C:/runtime"), service_sid, "RX", inherit=True)
+    access_policy._apply_acl_target(Path("C:/runtime"), service_sid, "RX", inherit=True)
+
+    assert dacl.aces[0] == ((0, 0), 0x01, unrelated_sid)
+    assert [ace for ace in dacl.aces if ace[2] == service_sid] == [((0, 3), 0x30, service_sid)]
+
+
+def test_acl_target_adds_direct_rx_when_only_an_inherited_ace_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    service_sid = "S-1-5-80-service"
+
+    class Dacl:
+        def __init__(self) -> None:
+            self.aces = [((0, 0x10), 0x30, service_sid)]
+
+        def GetAceCount(self) -> int:
+            return len(self.aces)
+
+        def GetAce(self, index: int):
+            return self.aces[index]
+
+        def AddAccessAllowedAceEx(self, _revision: int, inheritance: int, access: int, sid: str) -> None:
+            self.aces.append(((0, inheritance), access, sid))
+
+    dacl = Dacl()
+    security = types.SimpleNamespace(
+        ACCESS_ALLOWED_ACE_TYPE=0,
+        ACL_REVISION_DS=4,
+        CONTAINER_INHERIT_ACE=2,
+        OBJECT_INHERIT_ACE=1,
+        INHERITED_ACE=0x10,
+        SE_FILE_OBJECT=1,
+        DACL_SECURITY_INFORMATION=4,
+        ACL=Dacl,
+        ConvertStringSidToSid=lambda value: value,
+        GetNamedSecurityInfo=lambda *_args: types.SimpleNamespace(GetSecurityDescriptorDacl=lambda: dacl),
+        SetNamedSecurityInfo=lambda *_args: None,
+    )
+    monkeypatch.setitem(sys.modules, "win32security", security)
+    monkeypatch.setitem(
+        sys.modules,
+        "ntsecuritycon",
+        types.SimpleNamespace(FILE_GENERIC_READ=0x10, FILE_GENERIC_EXECUTE=0x20, FILE_TRAVERSE=0x40),
+    )
+
+    access_policy._apply_acl_target(Path("C:/runtime/module.pyd"), service_sid, "RX", inherit=False)
+
+    assert dacl.aces == [
+        ((0, 0x10), 0x30, service_sid),
+        ((0, 0), 0x30, service_sid),
+    ]
+
+
+def test_reinstall_acl_cleanup_visits_existing_source_and_runtime_children(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    boundary = tmp_path.resolve()
+    source = boundary / "repo" / "backend" / "src"
+    source.mkdir(parents=True)
+    source_file = source / "sandbox_service_bootstrap.py"
+    source_file.write_text("", encoding="utf-8")
+    runtime = boundary / "repo" / ".venv"
+    runtime.mkdir()
+    executable = runtime / "pythonservice.exe"
+    executable.write_bytes(b"host")
+    removed: list[Path] = []
+    monkeypatch.setattr(
+        "backend.sandbox.install_helper._remove_source_acl_grant",
+        lambda path, _sid: removed.append(path),
+    )
+
+    _remove_service_acls(
+        source,
+        boundary,
+        (runtime,),
+        executable,
+        "MiniAgentSandboxBroker",
+    )
+
+    assert source_file in removed
+    assert executable in removed
+    assert source in removed
+    assert runtime in removed
+    assert len(removed) == len(set(removed))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Broker installation transaction test")

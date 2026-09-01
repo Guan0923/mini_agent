@@ -3,25 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
-from backend.domain import (
-    DeliveryConflict,
-    MessageQueueUnavailable,
-    PlanningError,
-    QueueItemConflict,
-    QueueItemNotFound,
-    QueueItemStateConflict,
-)
+from backend.domain import MessageQueueUnavailable, PlanningError
 from backend.domain.runtime_state import (
     NodeFrame,
-    RuntimeRootState,
     RuntimeState,
     RuntimeStateValidationError,
     new_node_id,
@@ -31,195 +20,27 @@ from backend.sandbox import SandboxInitializationError
 
 from ..active_turn_stream import ActiveTurnStream
 from ..agent_report_projection import project_frame, project_turn
-from ..chat import routes as chat_routes
 from ..chat.routes import (
     RuntimeModelRequest,
     _model_config_snapshot,
     _runtime_stream_lock_registry,
     _startup_failure_message,
-    _stream,
 )
 from ..session_store import require_active_session, session_store
 from ..shared.runtime import build_local_application
 from ..state import WebAppState
+from .turn_models import (
+    CreateTurnRequest,
+    CurrentDataRequest,
+    ForkTurnRequest,
+    RewindTurnRequest,
+    SteerTurnRequest,
+    TurnConfigPatch,
+    TurnExecutionConfig,
+)
+from .turn_support import _queue_http_error, _references, _stream_turn, _turn, _user_item
 
 router = APIRouter(prefix="/api/turns", tags=["turns"])
-PermissionMode = Literal["read_only", "workspace_write", "full_access"]
-RunningMode = Literal["agent", "plan"]
-
-
-class TurnExecutionConfig(BaseModel):
-    provider_name: str | None = Field(default=None, min_length=1, max_length=80)
-    model: RuntimeModelRequest | None = None
-    permission_mode: PermissionMode = "read_only"
-    running_mode: RunningMode = "agent"
-    full_access_acknowledged: StrictBool = False
-
-    @model_validator(mode="after")
-    def validate_full_access(self):
-        if self.permission_mode == "full_access" and not self.full_access_acknowledged:
-            raise ValueError("full_access requires explicit joint file and network confirmation")
-        return self
-
-
-class QueuedDeliveryRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    delivery_id: str = Field(min_length=1, max_length=200)
-    message_ids: list[str] = Field(min_length=1, max_length=100)
-
-
-class CreateTurnRequest(TurnExecutionConfig):
-    model_config = ConfigDict(extra="forbid")
-
-    id: str = Field(min_length=1, max_length=200)
-    session_id: str = Field(min_length=1, max_length=200)
-    thread_id: str = Field(min_length=1, max_length=200)
-    parent_id: str = Field(default="", max_length=200)
-    message: dict[str, object] | None = None
-    queued_delivery: QueuedDeliveryRequest | None = None
-
-    @model_validator(mode="after")
-    def validate_message_source(self):
-        if (self.message is None) == (self.queued_delivery is None):
-            raise ValueError("message and queued_delivery are mutually exclusive")
-        return self
-
-
-class RewindTurnRequest(TurnExecutionConfig):
-    message: dict[str, object]
-
-
-class CurrentDataRequest(BaseModel):
-    current_data_idx: int = Field(ge=0)
-
-
-class RuntimeModelPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
-    current_model: str | None = Field(default=None, min_length=1, max_length=500)
-    context_length: int | None = Field(default=None, gt=1)
-    output_length: int | None = Field(default=None, ge=1)
-    thinking: Literal["enable", "disable"] | None = None
-    temperature: float | None = Field(default=None, ge=0, le=2)
-
-
-class SteerTurnRequest(QueuedDeliveryRequest):
-    pass
-
-
-class TurnConfigPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    provider_name: str | None = Field(default=None, min_length=1, max_length=80)
-    model: RuntimeModelPatch | None = None
-    permission_mode: PermissionMode | None = None
-    running_mode: RunningMode | None = None
-    full_access_acknowledged: StrictBool | None = None
-
-    @model_validator(mode="after")
-    def validate_full_access(self):
-        if self.permission_mode == "full_access" and self.full_access_acknowledged is not True:
-            raise ValueError("full_access requires explicit joint file and network confirmation")
-        return self
-
-
-class ForkTurnRequest(BaseModel):
-    id: str | None = Field(default=None, min_length=1, max_length=200)
-    thread_id: str | None = Field(default=None, min_length=1, max_length=200)
-
-
-def _turn(store, turn_id: str) -> RuntimeState:
-    item = store.find_node(turn_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="未知 Turn。")
-    if isinstance(item, RuntimeRootState):
-        raise HTTPException(status_code=409, detail="根 Turn 仅作为消息树锚点，不能执行 Turn 操作。")
-    return item
-
-
-def _user_item(message: Mapping[str, object]) -> dict[str, object]:
-    if message.get("role") != "user":
-        raise HTTPException(status_code=422, detail="message.role 必须为 user。")
-    content = message.get("content")
-    if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], Mapping):
-        raise HTTPException(status_code=422, detail="user Message 必须恰好包含一个 Item。")
-    item = dict(content[0])
-    if item.get("type") != "text" or not isinstance(item.get("text"), str):
-        raise HTTPException(status_code=422, detail="当前交互要求一个 text Item。")
-    if not str(item["text"]).strip() and not item.get("references"):
-        raise HTTPException(status_code=422, detail="text 或文件引用至少需要一个。")
-    item["status"] = "success"
-    return item
-
-
-def _references(item: Mapping[str, object]) -> list[dict[str, str]]:
-    raw = item.get("references", [])
-    if not isinstance(raw, list):
-        raise HTTPException(status_code=422, detail="references 必须为 list。")
-    result: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for value in raw:
-        if not isinstance(value, Mapping) or value.get("source") not in {"project", "upload"}:
-            raise HTTPException(status_code=422, detail="无效的文件引用。")
-        path = value.get("path")
-        if not isinstance(path, str) or not path:
-            raise HTTPException(status_code=422, detail="文件引用 path 不能为空。")
-        key = (str(value["source"]), path)
-        if key not in seen:
-            seen.add(key)
-            result.append({"source": key[0], "path": key[1]})
-    return result
-
-
-def _queue_http_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, MessageQueueUnavailable):
-        return HTTPException(status_code=503, detail="message_queue_unavailable")
-    if isinstance(exc, QueueItemNotFound):
-        return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, (DeliveryConflict, QueueItemConflict, QueueItemStateConflict)):
-        return HTTPException(status_code=409, detail=str(exc))
-    return HTTPException(status_code=500, detail="message_queue_error")
-
-
-def _stream_turn(
-    state: WebAppState,
-    *,
-    session_id: str,
-    thread_id: str,
-    turn_id: str,
-    prompt: str,
-    source_id: str | None,
-    config: TurnExecutionConfig,
-    references: list[dict[str, str]] | None = None,
-    adopt_existing: bool = False,
-    operation=None,
-    initial_delivery=None,
-) -> StreamingResponse:
-    model = config.model
-    stream = _stream(
-        state,
-        prompt,
-        application_builder=chat_routes.build_local_application,
-        session_id=session_id,
-        thread_id=thread_id,
-        turn_id=turn_id,
-        source_node_id=source_id,
-        adopt_existing=adopt_existing,
-        mode=config.running_mode or "agent",
-        permission_mode=config.permission_mode or "read_only",
-        reasoning_effort=model.reasoning_effort if model is not None else "medium",
-        provider_name=config.provider_name,
-        model_snapshot=model.model_dump() if model is not None else None,
-        request_model=model,
-        user_preferences=state.agent_preferences(),
-        model_config=_model_config_snapshot(state),
-        references=references,
-        operation=operation,
-        initial_delivery=initial_delivery,
-    )
-    return StreamingResponse(stream, media_type="text/event-stream")
 
 
 @router.get("")
@@ -604,3 +425,5 @@ def patch_turn_config(turn_id: str, body: TurnConfigPatch, request: Request) -> 
 
 
 __all__ = ["router"]
+
+__all__ = ["TurnExecutionConfig", "router"]

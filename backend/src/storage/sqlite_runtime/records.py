@@ -7,6 +7,8 @@ import sqlite3
 
 from backend.domain.runtime_state import RuntimeNode, runtime_node_from_dict
 
+from ..sqlite_json import read_json_object
+
 
 class SQLiteJsonObjectMixin:
     def _touch_session(self, connection: sqlite3.Connection, session_id: str, timestamp: str) -> None:
@@ -50,14 +52,7 @@ class SQLiteJsonObjectMixin:
     def _json_object(
         connection: sqlite3.Connection, session_id: str, namespace: str, object_id: str
     ) -> dict[str, object] | None:
-        row = connection.execute(
-            "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace=? AND object_id=?",
-            (session_id, namespace, object_id),
-        ).fetchone()
-        if row is None:
-            return None
-        value = json.loads(str(row[0]))
-        return dict(value) if isinstance(value, dict) else None
+        return read_json_object(connection, session_id, namespace, object_id)
 
     @staticmethod
     def _assert_writable(_connection: sqlite3.Connection) -> None:

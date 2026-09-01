@@ -28,9 +28,9 @@ class ToolRegistry:
         self._validators: dict[str, Draft202012Validator] = {}
         if isinstance(tools, Path):
             # Compatibility for callers of the original ``ToolRegistry(workspace)`` API.
-            from .catalog import _build_tools
+            from .workspace_tools import build_workspace_tools
 
-            tools = _build_tools(tools, web_search=web_search, web_fetch=web_fetch)  # type: ignore[arg-type]
+            tools = build_workspace_tools(tools, web_search=web_search, web_fetch=web_fetch)  # type: ignore[arg-type]
         elif web_search is not None or web_fetch is not None:
             raise ValueError("web_search and web_fetch are only supported with the legacy workspace constructor.")
         for tool in tools or ():

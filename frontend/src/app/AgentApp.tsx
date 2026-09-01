@@ -6,24 +6,24 @@ import {
   getSessionNodes,
   listQueuedMessages,
   listSessions,
-  pauseTurn,
   updateProfile,
   type ProviderConfig,
-  type SessionInfo,
 } from "../api";
-import { listProjects, type ProjectInfo } from "../api/projects";
+import type { ProjectInfo } from "../api/projects";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
 import { loadArchiveReadState, loadConversations, markArchivedAsRead, countUnreadArchived, summaryToConversation, STORAGE_KEY, ARCHIVE_READ_KEY } from "./storage";
 import type { ArchiveReadState } from "./storage";
 import AgentShell from "./AgentShell";
 import { createRunController } from "./runController";
-import type { QueuedMessage } from "./types";
 import { effectiveDisplayMode } from "./displayMode";
 import { isRuntimeTurnNode } from "./runtime/runtimeNodeNormalization";
 import { withLoadedTurns } from "./conversationProjection";
 import { createConversationActions } from "./conversationActions";
 import { createProjectActions } from "./projectActions";
 import { useSandboxHealth } from "./useSandboxHealth";
+import { hydrateConversationCatalog } from "./conversationHydration";
+import { useQueuedMessages } from "./useQueuedMessages";
+import { useSandboxRunLifecycle } from "./useSandboxRunLifecycle";
 import type {
   ChatMessage,
   ChatMode,
@@ -58,9 +58,7 @@ function AgentApp() {
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const activeRunsRef = useRef(new Map<string, import("./types").ActiveRun>());
-  const pausedForSandboxOutageRef = useRef(new Set<string>());
   const sandboxHealth = useSandboxHealth();
-  const [queuedMessages, setQueuedMessages] = useState<Map<string, QueuedMessage[]>>(() => new Map());
   const [panelConversations, setPanelConversations] = useState<Record<string, Conversation>>({});
 
   useEffect(() => {
@@ -114,96 +112,17 @@ function AgentApp() {
 
   useEffect(() => {
     let disposed = false;
-
-    async function hydrate() {
-      const local = loadConversations(storageKey);
-      let summaries: SessionInfo[] = [];
-      let projectSessionIds = new Set<string>();
-      try {
-        const [active, archived, deleted, activeProjects, removedProjectItems] = await Promise.all([
-          listSessions("active").catch(() => []),
-          listSessions("archived").catch(() => []),
-          listSessions("deleted").catch(() => []),
-          listProjects("active").catch(() => []),
-          listProjects("removed").catch(() => []),
-        ]);
-        summaries = [...active, ...archived, ...deleted];
-        setProjects(activeProjects);
-        setRemovedProjects(removedProjectItems);
-        projectSessionIds = new Set(
-          [...activeProjects, ...removedProjectItems].flatMap((project) => project.session_ids ?? []),
-        );
-      } catch {
-        // The local cache remains usable while the backend is unavailable.
-      }
+    void hydrateConversationCatalog(storageKey).then((catalog) => {
       if (disposed) return;
+      setProjects(catalog.projects);
+      setRemovedProjects(catalog.removedProjects);
       setProjectsLoaded(true);
-
-      // The browser cache can predate project metadata.  The project index is
-      // authoritative for session membership, so use its binding list to
-      // prevent a hidden project session from being re-imported as an
-      // ordinary local conversation.
-      const byClient = new Map<string, SessionInfo>();
-      const bySession = new Map<string, SessionInfo>();
-      const deletedByClient = new Map<string, SessionInfo>();
-      const deletedBySession = new Map<string, SessionInfo>();
-      for (const summary of summaries) {
-        bySession.set(summary.thread_id ?? summary.session_id, summary);
-        if (summary.deleted_at) {
-          deletedBySession.set(summary.thread_id ?? summary.session_id, summary);
-          if (summary.client_id) deletedByClient.set(summary.client_id, summary);
-        } else {
-          if (summary.client_id) byClient.set(summary.client_id, summary);
-        }
-      }
-
-      const merged: Conversation[] = [];
-      for (const conversation of local) {
-        const exactDeleted = deletedBySession.get(conversation.threadId ?? conversation.sessionId ?? conversation.id);
-        if (exactDeleted) continue;
-        const summary =
-          bySession.get(conversation.threadId ?? conversation.sessionId ?? conversation.id) ??
-          byClient.get(conversation.clientId ?? conversation.id);
-        if (summary) {
-          if (summary.deleted_at) continue;
-          merged.push(summaryToConversation(summary, conversation));
-          bySession.delete(summary.thread_id ?? summary.session_id);
-          continue;
-        }
-
-        if (deletedByClient.has(conversation.clientId ?? conversation.id)) continue;
-
-        if (conversation.sessionId && projectSessionIds.has(conversation.sessionId)) continue;
-
-        // A stale browser copy of a project conversation must never be
-        // re-imported as an ordinary local conversation.
-        if (conversation.projectId || conversation.localOnly) continue;
-
-        if (conversation.messages.length > 0) {
-          try {
-            const imported = await createSession(conversation.title, conversation.clientId ?? conversation.id);
-            merged.push(summaryToConversation(imported, conversation));
-            bySession.delete(imported.thread_id ?? imported.session_id);
-            continue;
-          } catch {
-            // Preserve the legacy conversation and retry on the next operation.
-          }
-        }
-        merged.push(conversation);
-      }
-
-      for (const summary of bySession.values()) {
-        if (summary.deleted_at) continue;
-        merged.push(summaryToConversation(summary));
-      }
-      if (!disposed) setConversations(merged);
-    }
-
-    void hydrate();
+      setConversations(catalog.conversations);
+    });
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [storageKey]);
 
   const visibleProjectIds = useMemo(() => new Set(projects.map((project) => project.project_id)), [projects]);
   const activeConversations = useMemo(
@@ -251,24 +170,6 @@ function AgentApp() {
     return undefined;
   }, [current?.id, current?.sessionId, current?.messagesLoaded, current?.runtimeNodes]);
 
-  useEffect(() => {
-    if (!current?.id || !current.threadId) return;
-    let active = true;
-    void listQueuedMessages(current.threadId)
-      .then((items) => {
-        if (!active) return;
-        setQueuedMessages((previous) => {
-          const next = new Map(previous);
-          next.set(current.id, items);
-          return next;
-        });
-      })
-      .catch((error) => {
-        if (active) setActionError(String((error as Error).message ?? error));
-      });
-    return () => { active = false; };
-  }, [current?.id, current?.threadId]);
-
   function updateConversation(id: string, updater: (conversation: Conversation) => Conversation) {
     setConversations((previous) => previous.map((conversation) => (conversation.id === id ? updater(conversation) : conversation)));
     setPanelConversations((previous) => {
@@ -277,26 +178,17 @@ function AgentApp() {
     });
   }
 
-  function updateQueuedMessages(conversationId: string, updater: (items: QueuedMessage[]) => QueuedMessage[]) {
-    setQueuedMessages((previous) => {
-      const queues = new Map(previous);
-      const next = updater(previous.get(conversationId) ?? []);
-      if (next.length > 0) queues.set(conversationId, next);
-      else queues.delete(conversationId);
-      return queues;
-    });
-  }
-
-  async function refreshQueuedMessages(conversationId: string): Promise<void> {
-    const target = conversations.find((item) => item.id === conversationId) ?? panelConversations[conversationId];
-    if (!target?.threadId) return;
-    const items = await listQueuedMessages(target.threadId);
-    setQueuedMessages((previous) => {
-      const next = new Map(previous);
-      next.set(conversationId, items);
-      return next;
-    });
-  }
+  const {
+    queuedMessages,
+    setQueuedMessages,
+    updateQueuedMessages,
+    refreshQueuedMessages,
+  } = useQueuedMessages({
+    current,
+    conversations,
+    panelConversations,
+    onError: setActionError,
+  });
 
   function updateLastMessage(id: string, updater: (message: ChatMessage) => ChatMessage) {
     updateConversation(id, (conversation) => {
@@ -403,118 +295,17 @@ function AgentApp() {
     recoverConversation,
   });
 
-  useEffect(() => {
-    if (sandboxHealth.phase === "healthy") {
-      pausedForSandboxOutageRef.current.clear();
-      return;
-    }
-    if (sandboxHealth.phase !== "unhealthy") return;
-    const runningTurnIds = new Set<string>();
-    const turnSessions = new Map<string, { conversationId: string; sessionId: string }>();
-    for (const active of activeRunsRef.current.values()) {
-      if (active.turnId) runningTurnIds.add(active.turnId);
-    }
-    for (const conversation of [...conversations, ...Object.values(panelConversations)]) {
-      for (const node of conversation.runtimeNodes ?? []) {
-        if (isRuntimeTurnNode(node) && node.status === "running") {
-          runningTurnIds.add(node.id);
-          if (conversation.sessionId) {
-            turnSessions.set(node.id, { conversationId: conversation.id, sessionId: conversation.sessionId });
-          }
-        }
-      }
-    }
-    if (turnSessions.size > 0) {
-      setConversations((previous) => previous.map((conversation) => {
-        const nodes = conversation.runtimeNodes;
-        if (!nodes?.some((node) => runningTurnIds.has(node.id))) return conversation;
-        return withLoadedTurns(conversation, nodes.map((node) => (
-          isRuntimeTurnNode(node) && runningTurnIds.has(node.id) ? { ...node, status: "paused" } : node
-        )));
-      }));
-      setPanelConversations((previous) => Object.fromEntries(Object.entries(previous).map(([id, conversation]) => {
-        const nodes = conversation.runtimeNodes;
-        if (!nodes?.some((node) => runningTurnIds.has(node.id))) return [id, conversation];
-        return [id, withLoadedTurns(conversation, nodes.map((node) => (
-          isRuntimeTurnNode(node) && runningTurnIds.has(node.id) ? { ...node, status: "paused" } : node
-        )))];
-      })));
-    }
-    for (const turnId of runningTurnIds) {
-      if (pausedForSandboxOutageRef.current.has(turnId)) continue;
-      pausedForSandboxOutageRef.current.add(turnId);
-      void pauseTurn(turnId).catch(async () => {
-        pausedForSandboxOutageRef.current.delete(turnId);
-        const target = turnSessions.get(turnId);
-        if (!target) return;
-        try {
-          const nodes = await getSessionNodes(target.sessionId);
-          updateConversation(target.conversationId, (conversation) => withLoadedTurns(conversation, nodes));
-        } catch {
-          // The next health transition or session reload retries reconciliation.
-        }
-      });
-    }
-  }, [conversations, panelConversations, sandboxHealth.phase]);
-
-  useEffect(() => {
-    if (
-      sandboxHealth.phase !== "healthy"
-      || !current?.sessionId
-      || !current.runtimeNodes
-      || activeRunsRef.current.has(current.id)
-    ) return;
-    const activeTurn = current.runtimeNodes.find(
-      (node): node is RuntimeStateNode => isRuntimeTurnNode(node)
-        && node.id === current.activeTurnId
-        && node.status === "running",
-    );
-    if (!activeTurn) return;
-    void runConversation({
-      conversationId: current.id,
-      sessionId: current.sessionId,
-      threadId: activeTurn.thread_id,
-      turnId: activeTurn.id,
-      prompt: null,
-      resume: false,
-      attach: true,
-      mode: activeTurn.running_mode,
-      permissionMode: activeTurn.permission_mode,
-      reasoningEffort: activeTurn.model.reasoning_effort,
-      providerName: activeTurn.provider_name,
-      model: activeTurn.model,
-      sourceNodeId: activeTurn.id,
-    });
-  }, [current?.id, current?.sessionId, current?.activeTurnId, current?.runtimeNodes, sandboxHealth.phase]);
-
-  useEffect(() => {
-    if (sandboxHealth.phase !== "healthy") return;
-    for (const conversation of Object.values(panelConversations)) {
-      if (!conversation.sessionId || activeRunsRef.current.has(conversation.id)) continue;
-      const activeTurn = conversation.runtimeNodes?.find(
-        (node): node is RuntimeStateNode => isRuntimeTurnNode(node)
-          && node.id === conversation.activeTurnId
-          && node.thread_id === conversation.threadId
-          && node.status === "running",
-      );
-      if (!activeTurn) continue;
-      void runConversation({
-        conversationId: conversation.id,
-        sessionId: conversation.sessionId,
-        threadId: activeTurn.thread_id,
-        turnId: activeTurn.id,
-        prompt: null,
-        resume: false,
-        attach: true,
-        mode: activeTurn.running_mode,
-        permissionMode: activeTurn.permission_mode,
-        reasoningEffort: activeTurn.model.reasoning_effort,
-        providerName: activeTurn.provider_name,
-        model: activeTurn.model,
-        sourceNodeId: activeTurn.id,
-      });
-    }
-  }, [panelConversations, sandboxHealth.phase]);
+  useSandboxRunLifecycle({
+    sandboxHealth,
+    activeRunsRef,
+    conversations,
+    panelConversations,
+    current,
+    setConversations,
+    setPanelConversations,
+    updateConversation,
+    runConversation,
+  });
 
   async function runConversationWithSandbox(request: import("./types").ChatRunRequest): Promise<void> {
     if (sandboxHealth.phase !== "healthy") {

@@ -8,7 +8,9 @@
 - `runtime/`：Launcher、Manifest、监控、资源和回收。
 - `broker_service/`：Windows Service 与 named pipe 服务端。
 - `native_windows/`、`native_broker_adapter/`：OS 原语与 Broker 进程适配。
-- `install_helper.py`、`service_main.py`、`windows_broker.py`：安装/修复和服务入口。
+- `install_helper.py`：提升权限安装/repair/reinstall 的稳定 CLI 门面和 SCM 事务顺序。
+- `installation/`：payload/exit-code 合约、固定账户与凭据生命周期、source/runtime ACL 策略。
+- `service_main.py`、`windows_broker.py`：服务和 Broker 入口。
 
 `full_access` 与 Broker 模式必须显式区分；任何健康或安装失败都不得静默回退为后端用户执行。
 

@@ -1260,7 +1260,7 @@ describe("ChatPage Agent Thread navigation", () => {
 
     await selectChild(user);
     expect(screen.getByTitle("thread-child-agent")).toBeInTheDocument();
-    expect(screen.getByText("child task")).toBeInTheDocument();
+    expect(screen.getByText("child task", { selector: "p" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "暂停" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();

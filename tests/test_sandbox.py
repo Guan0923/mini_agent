@@ -611,6 +611,31 @@ def test_launcher_holds_maintenance_lease_during_admission(tmp_path: Path) -> No
     assert gate.active_commands == 0
 
 
+def test_launcher_releases_maintenance_lease_when_broker_reservation_fails(tmp_path: Path) -> None:
+    gate = SandboxMaintenanceGate()
+
+    class UnavailableBroker(_LauncherBroker):
+        @staticmethod
+        def reserve(*, policy, policy_hash: str, user_id: str):
+            del policy, policy_hash, user_id
+            raise SandboxInitializationError("Windows Broker pipe is unavailable")
+
+    launcher = SandboxLauncher(
+        broker=UnavailableBroker(),
+        is_windows=True,
+        acl_manager=_LauncherAcl(),
+        lease_store_path=tmp_path / "leases.json",
+        maintenance_gate=gate,
+    )
+
+    with pytest.raises(SandboxInitializationError, match="Windows Broker pipe is unavailable"):
+        launcher.launch(["cmd.exe", "/c", "echo ok"], SandboxPolicy((tmp_path,), "session", "job"))
+
+    assert gate.active_commands == 0
+    maintenance = gate.acquire_maintenance()
+    maintenance.close()
+
+
 def test_launcher_releases_broker_before_removing_temp_dir(tmp_path: Path) -> None:
     calls: list[str] = []
 

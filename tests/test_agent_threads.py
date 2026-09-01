@@ -2702,7 +2702,7 @@ def test_running_status_control_timeout_revokes_unclaimed_request(
         def set(self) -> None:
             return None
 
-    monkeypatch.setattr("backend.runtime.subagents.Event", ImmediateTimeoutEvent)
+    monkeypatch.setattr("backend.runtime.subagent.tool_actions.Event", ImmediateTimeoutEvent)
     parent_runner = AgentRunner(_AnswerPlanner(), ToolRegistry())
     runtime = parent_runner.new_runtime(task="parent", session_id=session.session_id)
     runtime.run.thread_id = session.session_id

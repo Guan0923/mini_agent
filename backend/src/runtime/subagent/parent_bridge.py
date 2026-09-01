@@ -8,7 +8,7 @@ from queue import Empty, Full, Queue
 from threading import Event, Lock
 from typing import Any
 
-from .core.contracts import InterruptDecision, InterruptRequest
+from ..core.contracts import InterruptDecision, InterruptRequest
 
 
 @dataclass(frozen=True)

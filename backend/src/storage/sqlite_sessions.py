@@ -13,6 +13,7 @@ from backend.domain.runtime_state import RuntimeState as TreeRuntimeState
 from backend.domain.state import utc_now
 
 from .codec import is_default_session_title, normalize_session_title
+from .sqlite_json import read_json_object
 from .sqlite_schema import SCHEMA_VERSION
 
 
@@ -87,21 +88,8 @@ class SQLiteSessionMixin:
             bool(payload.get("title_is_custom", False)),
         )
 
-    @staticmethod
-    def _json_object(
-        connection: sqlite3.Connection, session_id: str, namespace: str, object_id: str
-    ) -> dict[str, object] | None:
-        row = connection.execute(
-            "SELECT payload_json FROM json_objects WHERE session_id=? AND namespace=? AND object_id=?",
-            (session_id, namespace, object_id),
-        ).fetchone()
-        if row is None:
-            return None
-        value = json.loads(str(row[0]))
-        return dict(value) if isinstance(value, dict) else None
-
     def _session_document(self, connection: sqlite3.Connection, session_id: str) -> dict[str, object]:
-        payload = self._json_object(connection, session_id, "session", session_id)
+        payload = read_json_object(connection, session_id, "session", session_id)
         if payload is None:
             raise ValueError(f"Unknown session: {session_id}")
         return payload
@@ -118,7 +106,7 @@ class SQLiteSessionMixin:
         if not self.paths.session_db(session_id).is_file():
             return None
         with self._connection(session_id) as connection:
-            payload = self._json_object(connection, session_id, "session", session_id)
+            payload = read_json_object(connection, session_id, "session", session_id)
         return self._session_from_payload(payload) if payload is not None else None
 
     def get_session_summary(self, session_id: str) -> SessionSummary | None:
