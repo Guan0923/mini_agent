@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from backend.domain import safe_error_message
 from backend.domain.runtime_state import NodeStatus, RuntimeState, TerminalErrorCategory, terminal_error_payload
 
 
@@ -54,11 +55,10 @@ class _FinalizationMixin:
 
     def finish_exception(self, error: BaseException) -> RuntimeState | None:
         category = self.abort_category or self._exception_category(error)
+        message = safe_error_message(error)
         if category == "network" and not self.produced_item:
-            self.terminal_error = terminal_error_payload(
-                "network", str(error) or "Network unavailable.", retryable=True
-            )
+            self.terminal_error = terminal_error_payload("network", message, retryable=True)
             self.closed = True
             return self._current()
         status: NodeStatus = "paused" if category == "network" and self.produced_item else "failed"
-        return self.finish(status, str(error) or "Execution failed.", category=category, code=error.__class__.__name__)
+        return self.finish(status, message, category=category, code=error.__class__.__name__)

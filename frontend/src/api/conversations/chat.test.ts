@@ -157,13 +157,13 @@ describe("Turn SSE contract", () => {
 
   it("surfaces a matching startup failure before a Turn baseline exists", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([
-      '<SSE id="turn_1" type="failed">Sandbox 初始化失败：Windows Sandbox Broker 未安装或当前不可用。 Agent 已停止，未降级执行。</SSE>',
+      '<SSE id="turn_1" type="failed">Windows Sandbox Broker 未安装或当前不可用。</SSE>',
     ])));
 
     await expect(streamChat("hello", () => undefined, new AbortController().signal, {
       sessionId: "session_1",
       turnId: "turn_1",
-    })).rejects.toThrow("Sandbox 初始化失败：Windows Sandbox Broker 未安装或当前不可用");
+    })).rejects.toThrow("Windows Sandbox Broker 未安装或当前不可用。");
   });
 
   it("rejects a startup failure for a different Turn", async () => {

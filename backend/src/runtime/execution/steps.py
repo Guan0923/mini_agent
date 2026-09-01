@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from time import perf_counter
 
+from backend.domain import safe_error_message
 from backend.sandbox import SandboxExecutionDecision
 from backend.tools import ToolError, ToolInvocationContext
 
@@ -63,7 +64,7 @@ class ToolStepExecutor:
             if callable(validate):
                 validate(tool, tool_message.arguments)
         except ToolError as exc:
-            return self._failure(runtime, tool, str(exc))
+            return self._failure(runtime, tool, safe_error_message(exc))
 
         context = ToolHookContext(
             run=RunHookInfo(runtime.state.session_id, run.run_id, run.task, run.mode),
@@ -173,7 +174,7 @@ class ToolStepExecutor:
             return self._failure(
                 runtime,
                 tool,
-                str(exc),
+                safe_error_message(exc),
                 retryable=retryable,
                 duration_ms=round((perf_counter() - started_at) * 1000, 3),
             )
@@ -183,7 +184,7 @@ class ToolStepExecutor:
             return self._failure(
                 runtime,
                 tool,
-                f"Unexpected tool failure: {type(exc).__name__}: {exc}",
+                safe_error_message(exc),
                 retryable=retryable,
                 duration_ms=round((perf_counter() - started_at) * 1000, 3),
             )

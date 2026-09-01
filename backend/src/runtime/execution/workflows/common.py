@@ -207,9 +207,8 @@ def _truncate(value: str) -> str:
 
 
 def _tool_failure_content(tool: ToolMessage, error: str) -> str:
-    if tool.name == "run_command":
-        return error
-    return f"{tool.name} failed: {_truncate(error)}"
+    del tool
+    return _truncate(error)
 
 
 def _start_assistant(runtime: AgentRuntime, message: AssistantMessage) -> None:

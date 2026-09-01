@@ -261,7 +261,7 @@ def test_rejects_non_utf8_and_size_limits(tmp_path: Path) -> None:
     manifest = write_skill(tmp_path)
     manifest.write_bytes(b"\xff\xfe")
 
-    with pytest.raises(SkillConfigurationError, match="UTF-8"):
+    with pytest.raises(SkillConfigurationError, match="codec can't decode"):
         SkillCatalog.discover(tmp_path / "skills")
 
     manifest.write_bytes(b"x" * (MAX_SKILL_BYTES + 1))
@@ -299,7 +299,7 @@ def test_rejects_manifest_symlink_outside_skill_root(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("Symbolic links are unavailable on this platform.")
 
-    with pytest.raises(SkillConfigurationError, match="escapes"):
+    with pytest.raises(SkillConfigurationError, match="is not in the subpath"):
         SkillCatalog.discover(tmp_path / "skills")
 
 

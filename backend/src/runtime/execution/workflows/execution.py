@@ -57,7 +57,7 @@ class ExecutionWorkflow:
                 _publish_repairs(runtime, capabilities)
                 if cancel_if_requested(runtime):
                     return runtime.run
-                fail_run(runtime, f"Decision failed: {exc}", **planning_failure_data(exc, capabilities.name))
+                fail_run(runtime, exc, **planning_failure_data(exc, capabilities.name))
                 return runtime.run
             except BaseException:
                 close()

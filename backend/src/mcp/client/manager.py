@@ -11,6 +11,7 @@ from typing import Any, overload
 
 from mcp import ClientSession
 
+from backend.domain import safe_error_message
 from backend.jobs import AdmissionPolicy, JobLane, JobRegistry, JobScope, JobScopeKind, ServiceJob
 from backend.tools import Tool, ToolError
 
@@ -141,11 +142,11 @@ class ExternalMcpManager:
             self.failed_servers.pop(server_name, None)
             return (server_name, id(self._sessions[server_name]))
         except FutureTimeoutError as exc:
-            raise ToolError("MCP server initialization timed out.") from exc
+            raise ToolError(safe_error_message(exc)) from exc
         except Exception as exc:
             self.failed_servers[server_name] = type(exc).__name__
             self.server_health[server_name] = "failed"
-            raise ToolError(f"MCP server rebuild failed: {type(exc).__name__}") from exc
+            raise ToolError(safe_error_message(exc)) from exc
 
     def _stop_server(self, server_name: str) -> None:
         if self._closed:
@@ -153,7 +154,7 @@ class ExternalMcpManager:
         try:
             self._submit(self._close_server(server_name), timeout=self._settings.shutdown_timeout_seconds)
         except FutureTimeoutError as exc:
-            raise ToolError("MCP server shutdown timed out.") from exc
+            raise ToolError(safe_error_message(exc)) from exc
 
     def call(self, server_name: str, tool_name: str, arguments: dict[str, Any]) -> str:
         if server_name not in self._sessions:
@@ -168,13 +169,13 @@ class ExternalMcpManager:
             job = getattr(self, "service_jobs", {}).get(server_name)
             if job is not None:
                 job.report_failure()
-            raise ToolError(f"MCP tool {server_name}/{tool_name} timed out.") from exc
+            raise ToolError(safe_error_message(exc)) from exc
         except Exception as exc:
             getattr(self, "server_health", {})[server_name] = "degraded"
             job = getattr(self, "service_jobs", {}).get(server_name)
             if job is not None:
                 job.report_failure()
-            raise ToolError(f"MCP tool {server_name}/{tool_name} failed: {type(exc).__name__}") from exc
+            raise ToolError(safe_error_message(exc)) from exc
         rendered = _render_result(result)
         if getattr(result, "isError", False):
             job = getattr(self, "service_jobs", {}).get(server_name)

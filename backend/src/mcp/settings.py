@@ -9,6 +9,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 
 from backend.configuration import ClientPaths, ConfigurationError, atomic_write_text
+from backend.domain import safe_error_message
 
 from .config import McpServerConfig, read_server_configs
 
@@ -236,7 +237,7 @@ class McpSettingsStore:
                         keyring.set_password(KEYRING_SERVICE, account, value)
                 except Exception:
                     pass
-            raise ValueError(f"Cannot persist MCP settings: {type(exc).__name__}") from exc
+            raise ValueError(safe_error_message(exc)) from exc
 
     @contextmanager
     def _lock(self) -> Iterator[None]:

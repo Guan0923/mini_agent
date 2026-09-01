@@ -1,5 +1,10 @@
 import type { NodeFrameType, RuntimeNodeFrame, RuntimeStateNode, RuntimeTreeNode, TurnItem } from "../../types";
-import { isRuntimeTurnNode, normalizeRuntimeNode, TURN_PROTOCOL_VERSION } from "./runtimeNodeNormalization";
+import {
+  isRuntimeTurnNode,
+  normalizeRuntimeNode,
+  TURN_PROTOCOL_VERSION,
+  validateRetryItem,
+} from "./runtimeNodeNormalization";
 
 export interface RuntimeNodeAccumulator {
   nodes: Map<string, RuntimeStateNode>;
@@ -165,6 +170,7 @@ export function applyRuntimeNodeFrame(
       )) {
         throw new Error("Turn user Message delta is invalid");
       }
+      for (const item of operation.message.content) validateRetryItem(item);
       if (data === previous.data) data = [...previous.data];
       data[operation.data_idx] = [...version, structuredClone(operation.message)];
       continue;
@@ -183,6 +189,7 @@ export function applyRuntimeNodeFrame(
       ) {
         throw new Error("Turn item delta is invalid");
       }
+      validateRetryItem(operation.item);
       items.push(structuredClone(operation.item));
       continue;
     }

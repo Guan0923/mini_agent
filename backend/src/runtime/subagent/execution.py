@@ -9,6 +9,7 @@ from backend.domain import (
     CHECKPOINT_PREAMBLE,
     SystemMessage,
     ThreadNode,
+    safe_error_message,
 )
 from backend.domain.runtime_state import (
     NodeFrame,
@@ -24,9 +25,7 @@ from backend.tools import ToolError
 from ..core.context import AgentRuntime
 from ..core.context.exchange import _chat_messages_from_nodes
 from ..core.contracts import InterruptRequest
-from ..core.events import RuntimeEvent
 from ..node_bridge import RuntimeEventNodeBridge
-from ..persistence.recording import persistent_event
 from .contracts import ChildRunner, _CanonicalRuntimeStore, _SessionBinding
 from .tool_executor import LockedToolExecutor
 
@@ -435,7 +434,4 @@ class _SubagentExecutionMixin:
 
     @staticmethod
     def _safe_error(error: BaseException) -> str:
-        text, _data = persistent_event(RuntimeEvent("error", str(error)), True)
-        text = text.strip() or error.__class__.__name__
-        text = " ".join(text.split())
-        return text if len(text) <= 2_000 else f"{text[:2_000]}…"
+        return safe_error_message(error)

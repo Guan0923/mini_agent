@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from backend.domain import safe_error_message
+
 
 class ConfigurationError(ValueError):
     """The local client configuration cannot be used safely."""
@@ -170,9 +172,9 @@ def load_config(path: Path) -> dict[str, object]:
         with path.open("rb") as handle:
             values = tomllib.load(handle)
     except FileNotFoundError as exc:
-        raise ConfigurationError(f"Configuration file not found: {path}") from exc
+        raise ConfigurationError(safe_error_message(exc)) from exc
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ConfigurationError(f"Invalid configuration {path}: {exc}") from exc
+        raise ConfigurationError(safe_error_message(exc)) from exc
     if not isinstance(values, dict):
         raise ConfigurationError("TOML root must be a table.")
     return values

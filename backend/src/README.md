@@ -11,3 +11,7 @@ backend 是本地单用户 Runtime 与 HTTP/SSE 服务。`configuration.py` 提�
 - `observability/`：结构化事件与 JSONL。
 
 依赖必须向内；domain 不得导入 API/storage，provider 不得导入 storage，Sandbox Broker 不得静默降级。
+
+## 错误投影约束
+
+内部异常类型只承载 retryable、HTTP status、Broker code、Tool 分类等控制元数据。HTTP、SSE、Turn、Trace、审计与前端展示统一沿 `__cause__`/`__context__` 投影最底层异常的 `str()`；空消息才使用类名。所有外部错误文本必须经过统一的 credential 脱敏，包装异常不得添加展示前缀。

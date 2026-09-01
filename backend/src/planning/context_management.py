@@ -15,6 +15,7 @@ from backend.domain import (
     SystemMessage,
     ToolSpec,
     UserMessage,
+    safe_error_message,
 )
 from backend.runtime.core.context import AgentRuntime
 from backend.runtime.core.events import RuntimeEvent
@@ -230,13 +231,13 @@ class ContextManager:
             self._record(
                 runtime,
                 "context_compaction_failed",
-                "Conversation context compaction failed",
+                safe_error_message(exc),
                 {
                     "trigger": trigger,
                     "source_messages": len(source),
                     "estimated_tokens_before": estimated_before,
                     "target_tokens": self.target_tokens,
-                    "error": str(exc),
+                    "error": safe_error_message(exc),
                 },
             )
             runtime.save()

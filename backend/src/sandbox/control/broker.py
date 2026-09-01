@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.domain import redact_sensitive_text, safe_error_message
+
 from ..errors import (
     BrokerInstallationError,
     BrokerInstallFailureCode,
@@ -225,11 +227,11 @@ class WindowsBrokerClient:
                 token_model=str(payload.get("token_model")) if payload.get("token_model") else None,
             )
         except Exception as exc:
-            detail = str(exc) or type(exc).__name__
+            detail = safe_error_message(exc)
             return BrokerStatus(
                 installed,
                 False,
-                code=_broker_status_failure_code(detail),
+                code=_broker_status_failure_code(str(exc)),
                 detail=detail,
             )
 
@@ -449,7 +451,7 @@ class WindowsBrokerClient:
             code = SandboxFailureCode(str(raw_code))
         except ValueError as exc:
             raise SandboxInitializationError("Windows Broker returned an unknown error") from exc
-        message = "Windows Broker operation failed"
+        message = redact_sensitive_text(str(value.get("message") or "Windows Broker operation failed"))
         errors: dict[SandboxFailureCode, type[SandboxError]] = {
             SandboxFailureCode.INIT_FAILED: SandboxInitializationError,
             SandboxFailureCode.POLICY_FAILED: SandboxPolicyError,

@@ -12,7 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
-from backend.domain import AssistantMessage, ChatMessage, ModelOutputError, ToolSpec
+from backend.domain import AssistantMessage, ChatMessage, ModelOutputError, ToolSpec, safe_error_message
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.persistence.recording import model_error_data, model_request_data, model_response_data
@@ -179,7 +179,7 @@ class LLMClient:
                     publish(
                         RuntimeEvent(
                             "model_retry",
-                            str(exc),
+                            safe_error_message(exc),
                             {
                                 "attempt": attempt + 1,
                                 "max_transport_retries": max_transport_retries,
@@ -202,7 +202,7 @@ class LLMClient:
         publish(
             RuntimeEvent(
                 "model_error",
-                f"Model {runtime.exchange.operation or 'completion'} failed",
+                safe_error_message(error),
                 model_error_data(runtime.state, runtime.exchange, error),
             )
         )
@@ -273,12 +273,12 @@ class LLMClient:
             self._complete_token_usage(runtime, prepared.usage, prepared.message)
             completed = True
         except ModelRequestError as exc:
-            diagnostics.update(request_outcome="failed", request_error_message=str(exc))
+            diagnostics.update(request_outcome="failed", request_error_message=safe_error_message(exc))
             exc.diagnostics = {**diagnostics, **exc.diagnostics}
             self._last_request_diagnostics = exc.diagnostics
             raise
         except ModelOutputError as exc:
-            diagnostics.update(request_outcome="failed", request_error_message=str(exc))
+            diagnostics.update(request_outcome="failed", request_error_message=safe_error_message(exc))
             exc.diagnostics = {**diagnostics, **getattr(exc, "diagnostics", {})}
             self._last_request_diagnostics = exc.diagnostics
             raise
@@ -286,7 +286,7 @@ class LLMClient:
             publish(
                 RuntimeEvent(
                     "model_error",
-                    f"Model {runtime.exchange.operation or 'completion'} failed",
+                    safe_error_message(exc),
                     model_error_data(runtime.state, runtime.exchange, exc),
                 )
             )

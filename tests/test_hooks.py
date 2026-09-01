@@ -85,6 +85,7 @@ def test_sequential_manager_converts_operation_error_and_short_circuits() -> Non
     assert calls == ["broken"]
     assert exc_info.value.lifecycle == "model"
     assert exc_info.value.phase == "before"
+    assert str(exc_info.value) == "boom"
     assert [event.kind for event in events] == ["hook_started", "hook_failed"]
 
 

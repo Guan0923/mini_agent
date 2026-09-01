@@ -1,6 +1,6 @@
 import pytest
 
-from backend.domain import AssistantMessage, ToolMessage
+from backend.domain import AssistantMessage, PlanningError, ToolMessage
 from backend.runtime import AgentRunner, AgentRuntime
 from backend.runtime.core.contracts import InterruptDecision
 from backend.runtime.execution.steps import ToolStepResult
@@ -73,6 +73,34 @@ def test_run_finished_checkpoint_observes_archived_runtime_state() -> None:
         "status": "idle",
         "run_history": [(result.run_id, "completed")],
     }
+
+
+class RootFailurePlanner:
+    name = "root-failure"
+
+    def decide(self, runtime: AgentRuntime) -> AssistantMessage:
+        del runtime
+        try:
+            raise ConnectionError("provider socket closed")
+        except ConnectionError as exc:
+            raise PlanningError("planner wrapper") from exc
+
+
+@pytest.mark.parametrize("mode", ["agent", "plan"])
+def test_planning_workflows_publish_only_the_root_failure_message(mode: str) -> None:
+    events = []
+    runner = AgentRunner(RootFailurePlanner(), ToolRegistry())
+    runtime = runner.new_runtime(
+        task="fail",
+        mode=mode,
+        on_event=events.append,
+    )
+
+    result = runner.run(runtime)
+
+    assert result.status == "failed"
+    assert result.final_answer == "provider socket closed"
+    assert next(event.message for event in events if event.kind == "error") == "provider socket closed"
 
 
 class PlanProposalPlanner:
@@ -155,7 +183,7 @@ class RecoveringFailurePlanner:
     ("tool_name", "expected"),
     [
         ("run_command", "Command exited with code 7.\nstdout:\n0\n\nstderr:\nbad"),
-        ("inspect", "inspect failed: Command exited with code 7.\nstdout:\n0\n\nstderr:\nbad"),
+        ("inspect", "Command exited with code 7.\nstdout:\n0\n\nstderr:\nbad"),
     ],
 )
 def test_workflows_only_preserve_unwrapped_run_command_failures(

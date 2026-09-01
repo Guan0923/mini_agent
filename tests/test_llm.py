@@ -285,7 +285,7 @@ def test_prepare_response_rejects_invalid_tool_arguments_before_execution() -> N
         ]
     }
 
-    with pytest.raises(ModelRequestError, match="not valid JSON"):
+    with pytest.raises(ModelRequestError, match="Expecting value"):
         chat_completions_for_test().prepare_response(runtime)
 
 
@@ -467,7 +467,7 @@ def test_llm_client_attaches_provider_diagnostics_to_http_errors() -> None:
     )
     runtime = runtime_for()
 
-    with pytest.raises(ModelRequestError, match="Model request failed") as exc_info:
+    with pytest.raises(ModelRequestError, match="timeout") as exc_info:
         client.run(runtime)
 
     assert exc_info.value.diagnostics["provider"] == "chat_completions"

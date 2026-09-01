@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 
+from backend.domain import safe_error_message
 from backend.jobs import JobRegistry, JobScope
 from backend.tools import Tool, ToolError
 
@@ -66,9 +67,9 @@ def start_external_tools(
             else manager_type(configs, settings, **manager_kwargs)
         )
     except FutureTimeoutError as exc:
-        raise ToolError("Cannot initialize external MCP servers: initialization timed out.") from exc
+        raise ToolError(safe_error_message(exc)) from exc
     except Exception as exc:
-        raise ToolError(f"Cannot initialize external MCP servers: {type(exc).__name__}") from exc
+        raise ToolError(safe_error_message(exc)) from exc
 
     tools: list[Tool] = []
     names: set[str] = set()

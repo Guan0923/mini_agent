@@ -508,7 +508,7 @@ def test_registry_wraps_unexpected_handler_exceptions_as_tool_error() -> None:
         ]
     )
 
-    with pytest.raises(ToolError, match="RuntimeError: boom"):
+    with pytest.raises(ToolError, match="boom"):
         registry.invoke("boom_tool", {})
 
 

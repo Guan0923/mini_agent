@@ -13,6 +13,7 @@ from backend.domain import (
     UserMessage,
     new_run_id,
     new_session_id,
+    safe_error_message,
 )
 from backend.jobs import JobRegistry, JobScope, JobScopeKind
 from backend.planning.base import ContextCompactor, TitleGenerator
@@ -305,7 +306,7 @@ class AgentRunner:
         except HookExecutionError as exc:
             fail_run(
                 runtime,
-                str(exc),
+                safe_error_message(exc),
                 hook=exc.hook,
                 lifecycle=exc.lifecycle,
                 phase=exc.phase,

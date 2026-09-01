@@ -39,6 +39,16 @@ export interface TurnItem {
   [key: string]: unknown;
 }
 
+export interface RetryTurnItem extends TurnItem {
+  type: "retry";
+  event: "model_retry";
+  category: "network";
+  message: string;
+  attempt: number;
+  max_retries: number;
+  delay_seconds: number;
+}
+
 export interface TurnMessage {
   role: "user" | "assistant";
   content: TurnItem[];

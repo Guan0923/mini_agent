@@ -12,3 +12,5 @@
 - `chat/`、`routes/`、`session_files/`、`shared/`：按协议领域拆分的路由。
 
 公开入口是 `create_app` 与 `python -m backend.api`。API 层只做协议转换和编排，不承载 Provider/Storage 业务规则。
+
+异常响应保留既有 status、schema 与 code；`detail` 只展示统一脱敏后的根因原消息。未处理异常同样由统一 handler 返回 500 根因消息。

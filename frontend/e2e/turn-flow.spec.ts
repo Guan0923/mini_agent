@@ -183,6 +183,106 @@ test("Trace audit lists two real Turns oldest first and loads them independently
   expect(trace.items.filter((entry) => entry.item.type === "tool_result")).toHaveLength(1);
 });
 
+test("incomplete chunked model response exposes the raw network error in Chat and Trace", async ({ page }) => {
+  const rawError = "Response ended prematurely";
+  const removedPrefixes = ["Model stream failed", "Plan creation failed", "Decision failed"];
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Raw Chunked Error" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Raw Chunked Error", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("raw chunked error e2e");
+  const createResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await createResponse).ok()).toBeTruthy();
+
+  const assistant = page.locator(".message.assistant").last();
+  await expect(assistant).toContainText(rawError, { timeout: 15_000 });
+  for (const prefix of removedPrefixes) await expect(assistant).not.toContainText(prefix);
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible();
+
+  const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
+  expect(turns).toHaveLength(1);
+  expect(turns[0].status).toBe("failed");
+  const errorItems = turns[0].data[turns[0].current_data_idx][1].content.filter((item) => item.type === "error");
+  expect(errorItems).toEqual([expect.objectContaining({ message: rawError })]);
+
+  await page.getByRole("button", { name: "Trace", exact: true }).click();
+  const errorPreview = page.locator(".trace-preview").filter({ hasText: rawError }).first();
+  await expect(errorPreview).toHaveText(rawError);
+  const errorPanel = errorPreview.locator(
+    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' ant-collapse-item ')][1]",
+  );
+  await errorPanel.locator(":scope > .ant-collapse-header").click();
+  await expect(errorPanel.locator(".trace-value")).toHaveText(rawError);
+  for (const prefix of removedPrefixes) await expect(errorPanel).not.toContainText(prefix);
+});
+
+test("a real provider retry is visible live and remains ordered in Turn and Trace", async ({ page }) => {
+  const resetResponse = await page.request.post("/api/test/trace-model-reset");
+  expect(resetResponse.ok(), `${resetResponse.status()} ${await resetResponse.text()}`).toBeTruthy();
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Network Retry Visibility" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Network Retry Visibility", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("network retry visibility e2e");
+  const createResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await createResponse).ok()).toBeTruthy();
+
+  const assistant = page.locator(".message.assistant").last();
+  await expect(assistant.getByRole("status", { name: "网络异常，正在重试（1/5）" })).toBeVisible({ timeout: 15_000 });
+  await expect(assistant).toContainText("503 Server Error: Service Unavailable");
+  await expect(assistant).toContainText("Retry recovered from local HTTP.", { timeout: 15_000 });
+  await expect(assistant).toContainText("网络请求已重试（1/5）");
+
+  const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
+  expect(turns).toHaveLength(1);
+  expect(turns[0].status).toBe("success");
+  const items = turns[0].data[turns[0].current_data_idx][1].content;
+  expect(items.map((item) => item.type)).toEqual(["retry", "text"]);
+  expect(items[0]).toMatchObject({
+    event: "model_retry",
+    category: "network",
+    attempt: 1,
+    max_retries: 5,
+    delay_seconds: 1,
+    status: "success",
+  });
+  expect(String(items[0].message)).toContain("503 Server Error: Service Unavailable");
+  expect(items.filter((item) => item.type === "error")).toHaveLength(0);
+
+  const modelCalls = await page.request.get("/api/test/trace-model-calls");
+  expect(modelCalls.ok()).toBeTruthy();
+  expect((await modelCalls.json() as { retry_calls: number }).retry_calls).toBe(2);
+
+  await page.getByRole("button", { name: "Trace", exact: true }).click();
+  const retryTag = page.getByText("Network Retry", { exact: true });
+  await expect(retryTag).toHaveCount(1);
+  const retryPanel = retryTag.locator(
+    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' ant-collapse-item ')][1]",
+  );
+  await expect(retryPanel.locator(".trace-preview")).toContainText("503 Server Error: Service Unavailable");
+
+  const traceResponse = await page.request.get(`/api/turns/${encodeURIComponent(turns[0].id)}/trace?data_idx=0`);
+  expect(traceResponse.ok(), `${traceResponse.status()} ${await traceResponse.text()}`).toBeTruthy();
+  const trace = await traceResponse.json() as { items: Array<{ item: { type: string; message?: string } }> };
+  const retries = trace.items.filter((entry) => entry.item.type === "retry");
+  expect(retries).toHaveLength(1);
+  expect(retries[0].item.message).toContain("503 Server Error: Service Unavailable");
+});
+
 test("automatic Agent report and final answer share one Assistant reply frame", async ({ page }) => {
   test.setTimeout(60_000);
   const resetResponse = await page.request.post("/api/test/trace-model-reset");

@@ -1,6 +1,41 @@
-"""Shared errors that can cross application-layer boundaries safely."""
+"""Shared errors and safe user-visible error projection."""
 
+import re
 from typing import Any
+
+_SENSITIVE_VALUE = re.compile(
+    r"(?i)\b(api[\s_-]?(?:key|token)|authorization|cookie|password|secret|token)\b"
+    r"[\"']?\s*([=:])\s*[\"']?([^\r\n,;&\"'}]+)"
+)
+
+
+def root_error(error: BaseException) -> BaseException:
+    """Return the deepest active explicit or implicit cause without looping forever."""
+
+    current = error
+    seen = {id(current)}
+    while True:
+        candidate = current.__cause__
+        if candidate is None and not current.__suppress_context__:
+            candidate = current.__context__
+        if candidate is None or id(candidate) in seen:
+            return current
+        seen.add(id(candidate))
+        current = candidate
+
+
+def redact_sensitive_text(value: str) -> str:
+    """Redact credential-shaped values from one externally visible string."""
+
+    return _SENSITIVE_VALUE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", value)
+
+
+def safe_error_message(error: BaseException) -> str:
+    """Project one exception chain to its redacted, unwrapped root message."""
+
+    root = root_error(error)
+    message = str(root)
+    return redact_sensitive_text(message if message else root.__class__.__name__)
 
 
 class PlanningError(RuntimeError):

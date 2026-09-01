@@ -154,7 +154,7 @@ def test_broker_status_distinguishes_invalid_service_configuration() -> None:
 @pytest.mark.parametrize(
     ("marker", "expected_code", "expected_detail"),
     [
-        (None, BrokerStatusFailureCode.READY_MARKER_UNAVAILABLE, "Broker ready marker is unavailable"),
+        (None, BrokerStatusFailureCode.READY_MARKER_UNAVAILABLE, None),
         ({"invalid": True}, BrokerStatusFailureCode.READY_MARKER_INVALID, "Broker ready marker is invalid"),
     ],
 )
@@ -162,7 +162,7 @@ def test_broker_status_distinguishes_ready_marker_failures(
     tmp_path: Path,
     marker: dict[str, object] | None,
     expected_code: BrokerStatusFailureCode,
-    expected_detail: str,
+    expected_detail: str | None,
 ) -> None:
     ready_path = tmp_path / "ready.json"
     if marker is not None:
@@ -177,7 +177,10 @@ def test_broker_status_distinguishes_ready_marker_failures(
 
     assert status.installed is True
     assert status.code is expected_code
-    assert status.detail == expected_detail
+    if expected_detail is None:
+        assert status.detail is not None and ready_path.name in status.detail
+    else:
+        assert status.detail == expected_detail
 
 
 @pytest.mark.parametrize(

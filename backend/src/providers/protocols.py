@@ -7,7 +7,15 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from backend.domain import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, ToolSpec, UserMessage
+from backend.domain import (
+    AssistantMessage,
+    ChatMessage,
+    SystemMessage,
+    ToolMessage,
+    ToolSpec,
+    UserMessage,
+    safe_error_message,
+)
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 
 from .chat_completions import ChatCompletions
@@ -138,7 +146,7 @@ class ResponsesAdapter:
         try:
             parsed = self._parse_stream(runtime, raw) if not isinstance(raw, Mapping) else self._parse_json(raw)
         except ModelRequestError as exc:
-            raise ProviderOutputError(str(exc), operation=runtime.exchange.operation) from exc
+            raise ProviderOutputError(safe_error_message(exc), operation=runtime.exchange.operation) from exc
         runtime.exchange.prepared_response = parsed
         runtime.state.turn_usage = parsed.usage
         return parsed
@@ -163,7 +171,7 @@ class ResponsesAdapter:
                 try:
                     parsed_arguments = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
                 except (TypeError, ValueError) as exc:
-                    raise ModelRequestError("Responses function call arguments are invalid JSON.") from exc
+                    raise ModelRequestError(safe_error_message(exc)) from exc
                 tools.append(
                     ToolMessage(
                         name=str(item.get("name") or ""),
@@ -241,7 +249,7 @@ class ResponsesAdapter:
             try:
                 arguments = json.loads(value["arguments"] or "{}")
             except ValueError as exc:
-                raise ModelRequestError("Responses streamed function arguments are invalid JSON.") from exc
+                raise ModelRequestError(safe_error_message(exc)) from exc
             tools.append(
                 ToolMessage(name=value["name"], call_id=value["call_id"], arguments=arguments, status="pending")
             )
@@ -350,7 +358,7 @@ class MessagesAdapter:
         try:
             parsed = self._parse_stream(runtime, raw) if not isinstance(raw, Mapping) else self._parse_json(raw)
         except ModelRequestError as exc:
-            raise ProviderOutputError(str(exc), operation=runtime.exchange.operation) from exc
+            raise ProviderOutputError(safe_error_message(exc), operation=runtime.exchange.operation) from exc
         runtime.exchange.prepared_response = parsed
         runtime.state.turn_usage = parsed.usage
         return parsed
@@ -437,7 +445,7 @@ class MessagesAdapter:
             try:
                 arguments = json.loads(value["input"] or "{}")
             except ValueError as exc:
-                raise ModelRequestError("Messages streamed tool arguments are invalid JSON.") from exc
+                raise ModelRequestError(safe_error_message(exc)) from exc
             tools.append(ToolMessage(name=value["name"], call_id=value["id"], arguments=arguments, status="pending"))
         return PreparedResponse(
             AssistantMessage(content="".join(text) or None, reasoning="".join(reasoning) or None, tool_messages=tools),

@@ -120,6 +120,8 @@ function itemEvents(items: TurnItem[], compactionNotice: boolean, completed: boo
       events.push({ kind: "tool_call", message: String(item.name ?? "工具"), data: { ...item } });
     } else if (item.type === "tool_result") {
       events.push({ kind: item.status === "failed" ? "tool_failed" : "tool_result", message: text(item.content), data: { ...item } });
+    } else if (item.type === "retry") {
+      events.push({ kind: "model_retry", message: text(item.message), data: { ...item } });
     } else if (["approval", "question", "plan", "subagent", "skill_snapshot"].includes(item.type)) {
       events.push({ kind: item.type, message: text(item.text), data: { ...item } });
     }

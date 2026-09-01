@@ -8,6 +8,8 @@ from backend.domain import (
     AssistantMessage,
     RunStopReason,
     UserMessage,
+    redact_sensitive_text,
+    safe_error_message,
 )
 
 from ...core.context import AgentRuntime
@@ -43,25 +45,28 @@ def complete_run(
 
 def fail_run(
     runtime: AgentRuntime,
-    message: str,
+    message: str | BaseException,
     *,
     stop_reason: RunStopReason = "execution_failed",
     **data: object,
 ) -> None:
+    visible_message = (
+        safe_error_message(message) if isinstance(message, BaseException) else redact_sensitive_text(message)
+    )
     run = runtime.run
     boundary = min(max(run.turn_start_index, 0), len(runtime.state.messages))
     already_recorded = any(
-        isinstance(existing, AssistantMessage) and not existing.tool_messages and existing.content == message
+        isinstance(existing, AssistantMessage) and not existing.tool_messages and existing.content == visible_message
         for existing in runtime.state.messages[boundary:]
     )
     if not already_recorded:
-        runtime.state.messages.append(AssistantMessage(content=message))
+        runtime.state.messages.append(AssistantMessage(content=visible_message))
     run.history = runtime.state.messages
     run.status = "failed"
     run.stop_reason = stop_reason
-    run.final_answer = message
+    run.final_answer = visible_message
     publish = runtime.services.publish or (lambda _event: None)
-    publish(RuntimeEvent("error", message, dict(data)))
+    publish(RuntimeEvent("error", visible_message, dict(data)))
 
 
 def cancel_run(

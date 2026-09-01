@@ -164,7 +164,7 @@ def test_mcp_initialization_timeout_has_stable_error(monkeypatch) -> None:
     monkeypatch.setattr(mcp_client, "ExternalMcpManager", TimeoutManager)
     config = mcp_client.McpServerConfig("demo", "demo-server")
 
-    with pytest.raises(ToolError, match="initialization timed out"):
+    with pytest.raises(ToolError, match="TimeoutError"):
         mcp_client.start_external_tools((config,))
 
 
@@ -178,7 +178,7 @@ def test_mcp_call_timeout_has_stable_error(monkeypatch) -> None:
 
     monkeypatch.setattr(manager, "_submit", timeout)
 
-    with pytest.raises(ToolError, match="demo/echo timed out"):
+    with pytest.raises(ToolError, match="TimeoutError"):
         manager.call("demo", "echo", {})
 
 

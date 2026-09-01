@@ -9,7 +9,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
-from backend.domain import ToolSpec
+from backend.domain import ToolSpec, safe_error_message
 
 from .base import ConfirmationRequired, Tool, ToolError, ToolInvocationContext
 
@@ -113,11 +113,11 @@ class ToolRegistry:
         except ToolError:
             raise
         except (OSError, TypeError, ValueError) as exc:
-            raise ToolError(str(exc)) from exc
+            raise ToolError(safe_error_message(exc)) from exc
         except Exception as exc:
             # Never let an unexpected handler exception escape the tool boundary:
             # it would abort the whole run instead of failing this one tool call.
-            raise ToolError(f"{type(exc).__name__}: {exc}") from exc
+            raise ToolError(safe_error_message(exc)) from exc
 
     def validate_arguments(self, name: str, arguments: dict[str, Any]) -> None:
         """Validate one call without executing its handler."""

@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from backend.domain import AssistantMessage, ToolMessage
+from backend.domain import AssistantMessage, ToolMessage, safe_error_message
 
 from ..errors import ModelRequestError
 from .common import _PROVIDER
@@ -21,7 +21,7 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ModelRequestError("Chat Completions tool-call arguments are not valid JSON.") from exc
+        raise ModelRequestError(safe_error_message(exc)) from exc
     if not isinstance(parsed, dict):
         raise ModelRequestError("Chat Completions tool-call arguments must decode to an object.")
     return parsed
@@ -92,7 +92,7 @@ def _parse_choice(
             name = function["name"]
             arguments = _parse_arguments(function["arguments"])
         except (KeyError, TypeError) as exc:
-            raise ModelRequestError("Chat Completions tool call does not match the function-call schema.") from exc
+            raise ModelRequestError(safe_error_message(exc)) from exc
         if call_type != "function":
             raise ModelRequestError("Chat Completions tool call type must be 'function'.")
         if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:

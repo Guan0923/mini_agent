@@ -106,21 +106,26 @@ TRACE_MODEL_CONFIG = ModelConfig(
 )
 TRACE_MODEL_CALLS = 0
 TRACE_MODEL_LAST_REQUEST: dict[str, object] = {}
+RETRY_MODEL_CALLS = 0
 TRACE_MCP_TOOL_NAME = ""
 AGENT_THREAD_NAV_TASK = "agent thread navigation e2e"
 AGENT_THREAD_DIRECT_TASK = "agent thread direct e2e"
 AGENT_THREAD_NESTED_TASK = "agent thread nested e2e"
 AGENT_THREAD_RESPONSE = "Agent Thread response from local HTTP."
+RAW_CHUNKED_ERROR_TASK = "raw chunked error e2e"
+RETRY_VISIBILITY_TASK = "network retry visibility e2e"
 
 
 class TraceModelHandler(BaseHTTPRequestHandler):
     """Deterministic loopback Chat Completions endpoint with streaming support."""
 
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, _format: str, *_args: object) -> None:
         return
 
     def do_POST(self) -> None:  # noqa: N802
-        global TRACE_MODEL_CALLS, TRACE_MODEL_LAST_REQUEST
+        global RETRY_MODEL_CALLS, TRACE_MODEL_CALLS, TRACE_MODEL_LAST_REQUEST
 
         length = int(self.headers.get("Content-Length") or 0)
         payload = json.loads(self.rfile.read(length) or b"{}")
@@ -131,10 +136,78 @@ class TraceModelHandler(BaseHTTPRequestHandler):
         TRACE_MODEL_LAST_REQUEST = payload
         serialized_messages = json.dumps(payload.get("messages", []), ensure_ascii=False).lower()
         agent_thread_request = AGENT_THREAD_NESTED_TASK in serialized_messages
+        raw_chunked_error_request = RAW_CHUNKED_ERROR_TASK in serialized_messages
+        retry_visibility_request = RETRY_VISIBILITY_TASK in serialized_messages
+        if retry_visibility_request:
+            RETRY_MODEL_CALLS += 1
         has_tool_result = any(
             isinstance(message, dict) and message.get("role") == "tool" for message in payload.get("messages", [])
         )
+        if retry_visibility_request and RETRY_MODEL_CALLS == 1:
+            body = json.dumps({"error": {"message": "temporary local provider outage"}}).encode("utf-8")
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Retry-After", "1")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if retry_visibility_request and payload.get("stream"):
+            events = [
+                {
+                    "id": "retry-visibility-e2e",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "trace-e2e-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": "Retry recovered from local HTTP."},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": None,
+                },
+                {"choices": [], "usage": {"input_tokens": 5, "output_tokens": 6, "total_tokens": 11}},
+            ]
+            body = ("".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if payload.get("stream"):
+            if raw_chunked_error_request:
+                event = {
+                    "id": "raw-chunked-error-e2e",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "trace-e2e-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "reasoning_content": "Partial event before the connection drops.",
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                    "usage": None,
+                }
+                encoded = f"data: {json.dumps(event)}\n\n".encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(f"{len(encoded):X}\r\n".encode("ascii"))
+                self.wfile.write(encoded)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+                self.close_connection = True
+                return
             events = (
                 [
                     {
@@ -465,6 +538,10 @@ class CooperativePausePlanner(LLMPlanner):
             )
         if "trace audit e2e" in task:
             return self._trace_planner.decide(runtime)
+        if task == RAW_CHUNKED_ERROR_TASK:
+            return self._trace_planner.decide(runtime)
+        if task == RETRY_VISIBILITY_TASK:
+            return self._trace_planner.decide(runtime)
         if runtime.run.mode == "plan" and task == PLAN_REVIEW_TASK:
             return AssistantMessage(
                 tool_messages=[
@@ -684,16 +761,17 @@ app = create_app(state)
 
 @app.post("/api/test/trace-model-reset")
 def reset_trace_model_calls() -> dict[str, int]:
-    global TRACE_MODEL_CALLS, TRACE_MODEL_LAST_REQUEST
+    global RETRY_MODEL_CALLS, TRACE_MODEL_CALLS, TRACE_MODEL_LAST_REQUEST
 
     TRACE_MODEL_CALLS = 0
+    RETRY_MODEL_CALLS = 0
     TRACE_MODEL_LAST_REQUEST = {}
-    return {"calls": TRACE_MODEL_CALLS}
+    return {"calls": TRACE_MODEL_CALLS, "retry_calls": RETRY_MODEL_CALLS}
 
 
 @app.get("/api/test/trace-model-calls")
 def get_trace_model_calls() -> dict[str, int]:
-    return {"calls": TRACE_MODEL_CALLS}
+    return {"calls": TRACE_MODEL_CALLS, "retry_calls": RETRY_MODEL_CALLS}
 
 
 @app.get("/api/test/trace-model-last-request")

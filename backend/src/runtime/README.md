@@ -13,3 +13,7 @@
 - 根文件 `executor.py`、`state_tree.py`、`job_events.py` 提供 Runtime 组合入口；`subagents.py` 保留 `SubagentCoordinator` 稳定门面并组合 `subagent/` mixin。
 
 Runtime 发布事件而不渲染；跨层依赖通过 ports/contracts，Sandbox 不可用时必须 fail closed。
+
+Runtime 的 error event、Turn error Item、Trace 与恢复终态统一保存脱敏后的根因原消息；类别、code 与 retryable 独立保存，不能拼入 `message`。
+
+活动 Turn 的 Provider 网络重试使用 `retry` Item 进入既有 Turn/SSE 流，不另建事件协议；Item 保持顺序并在下一次模型请求或 Turn 终结时结算。Trace 仅审计其初始化之后完成的 Retry，Turn 结束后的 Title 请求不回写聊天。

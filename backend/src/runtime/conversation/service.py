@@ -6,7 +6,6 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from backend.domain import (
-    FAILED_TERMINAL_MESSAGE,
     AssistantMessage,
     MessageQueueUnavailable,
     ResumePreview,
@@ -19,6 +18,7 @@ from backend.domain import (
     UserMessage,
     new_run_id,
     new_session_id,
+    safe_error_message,
 )
 
 from ..core.context import text_messages
@@ -26,7 +26,6 @@ from ..core.contracts import CancellationHandler, EventHandler, InterruptHandler
 from ..core.events import RuntimeEvent
 from ..execution import RuntimeRunner
 from ..node_bridge import RuntimeEventNodeBridge
-from ..persistence.recording import persistent_event
 from .bridge_support import ConversationNodeBridgeMixin
 from .ports import SessionStore
 from .recovery.resuming import prepare_resume
@@ -133,8 +132,7 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
                     self.runtime.state.messages = self.runtime.model_messages()
                     self.runtime.save()
             except Exception as exc:
-                safe_detail, _ = persistent_event(RuntimeEvent("error", str(exc)), True)
-                safe_message = f"Context compaction failed: {safe_detail or exc.__class__.__name__}"
+                safe_message = safe_error_message(exc)
                 self.runtime.state.running_mode = "plan"
                 state.mode = "plan"
                 if bridge is not None and not bridge.closed:
@@ -252,11 +250,7 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
                 on_started()
             state = self.runner.run(runtime)
         except MessageQueueUnavailable as exc:
-            self._record_unexpected_failure(
-                exc,
-                message="消息队列连接中断，Turn 已失败。",
-                publish_error=False,
-            )
+            self._record_unexpected_failure(exc, publish_error=False)
             raise
         except Exception as exc:
             bridge = self.runtime_node_bridge
@@ -338,13 +332,11 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         self,
         error: Exception,
         *,
-        message: str = FAILED_TERMINAL_MESSAGE,
         publish_error: bool = True,
     ) -> None:
         if self.runtime is None or self.runtime.state.current_run is None:
             return
-        if message == FAILED_TERMINAL_MESSAGE:
-            message = f"{FAILED_TERMINAL_MESSAGE} ({error.__class__.__name__})"
+        message = safe_error_message(error)
         run = self.runtime.state.current_run
         run.status = "failed"
         boundary = min(max(run.turn_start_index, 0), len(self.runtime.state.messages))

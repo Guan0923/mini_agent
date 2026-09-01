@@ -248,6 +248,70 @@ def test_tool_call_result_and_steering_are_appended_in_canonical_order(tmp_path:
     assert duplicate is not None and duplicate.last_sequence == trace.last_sequence
 
 
+def test_model_retry_is_audited_after_the_next_attempt_starts(tmp_path: Path) -> None:
+    runtime, store, turn = bound_runtime(tmp_path)
+    bridge = bound_bridge(runtime, store, turn)
+    initialize_trace(runtime)
+
+    bridge.handle(
+        RuntimeEvent(
+            "model_retry",
+            "connection reset by peer",
+            {"attempt": 1, "max_transport_retries": 2, "delay_seconds": 0.25},
+        )
+    )
+    during_delay = store.load_turn_trace(turn.session_id, turn.id, 0)
+    assert during_delay is not None
+    assert [item.item["type"] for item in during_delay.items] == ["text"]
+
+    bridge.handle(RuntimeEvent("model_request", "Model decision request"))
+    trace = store.load_turn_trace(turn.session_id, turn.id, 0)
+    assert trace is not None
+    assert trace.items[-1].item == {
+        "type": "retry",
+        "event": "model_retry",
+        "category": "network",
+        "message": "connection reset by peer",
+        "attempt": 1,
+        "max_retries": 2,
+        "delay_seconds": 0.25,
+        "status": "success",
+    }
+
+
+def test_model_retry_finalization_redacts_and_audits_once(tmp_path: Path) -> None:
+    runtime, store, turn = bound_runtime(tmp_path)
+    bridge = bound_bridge(runtime, store, turn)
+    initialize_trace(runtime)
+
+    bridge.handle(
+        RuntimeEvent(
+            "model_retry",
+            "connection failed; Token:super-secret",
+            {"attempt": 1, "max_transport_retries": 2, "delay_seconds": 0.25},
+        )
+    )
+    completed = bridge.finish("success", "recovered")
+    assert completed is not None and completed.status == "success"
+    bridge.finish("success", "must not duplicate")
+
+    trace = store.load_turn_trace(turn.session_id, turn.id, 0)
+    assert trace is not None
+    retry_items = [item.item for item in trace.items if item.item.get("type") == "retry"]
+    assert retry_items == [
+        {
+            "type": "retry",
+            "event": "model_retry",
+            "category": "network",
+            "message": "connection failed; Token:[REDACTED]",
+            "attempt": 1,
+            "max_retries": 2,
+            "delay_seconds": 0.25,
+            "status": "success",
+        }
+    ]
+
+
 def test_resumed_bridge_rebinds_existing_trace_before_projecting_items(tmp_path: Path) -> None:
     runtime, store, turn = bound_runtime(tmp_path)
     initialize_trace(runtime)
@@ -336,7 +400,7 @@ def test_trace_initialization_failure_marks_canonical_turn_failed(tmp_path: Path
     turn = store.find_node(state.current_run.turn_id)
     assert turn is not None and turn.status == "failed"
     assert any(
-        item.get("type") == "error" and "Local trace persistence failed" in str(item.get("message"))
+        item.get("type") == "error" and item.get("message") == "disk unavailable"
         for message in turn.data[state.current_run.data_idx]
         for item in message["content"]
     )

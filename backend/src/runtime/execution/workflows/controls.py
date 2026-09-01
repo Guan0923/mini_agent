@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from backend.domain import AssistantMessage, ToolMessage
+from backend.domain import AssistantMessage, ToolMessage, safe_error_message
 
 from ...conversation.user_input import (
     format_user_input_answers,
@@ -49,9 +49,9 @@ class PlanControlMixin:
             plan = parse_plan_review(tool.arguments)
         except ValueError as exc:
             tool.status = "failed"
-            tool.content = str(exc)
+            tool.content = safe_error_message(exc)
             tool.retryable = True
-            _publish_tool_failure(runtime, tool, str(exc))
+            _publish_tool_failure(runtime, tool, safe_error_message(exc))
             _finish_assistant(runtime)
             return None
 
@@ -84,7 +84,7 @@ class PlanControlMixin:
         try:
             questions = parse_user_input_questions(tool.arguments)
         except ValueError as exc:
-            PlanControlMixin._fail_user_input(runtime, tool, str(exc), retryable=True)
+            PlanControlMixin._fail_user_input(runtime, tool, safe_error_message(exc), retryable=True)
             return False
 
         question_data = [
@@ -134,7 +134,7 @@ class PlanControlMixin:
         try:
             answers = validate_user_input_answers(questions, decision.answers)
         except ValueError as exc:
-            PlanControlMixin._fail_user_input(runtime, tool, str(exc), retryable=True)
+            PlanControlMixin._fail_user_input(runtime, tool, safe_error_message(exc), retryable=True)
             return False
 
         tool.status = "succeeded"

@@ -1414,7 +1414,7 @@ def test_agent_thread_message_returns_503_when_redis_is_unavailable(tmp_path: Pa
                 json={"session_id": sidebar["session_id"], "content": "must fail closed"},
             )
             assert response.status_code == 503
-            assert response.json() == {"detail": "message_queue_unavailable"}
+            assert response.json() == {"detail": "redis unavailable"}
     finally:
         state.close()
 
@@ -1521,7 +1521,7 @@ def test_legacy_schema_is_rejected_without_mutating_or_deleting_database(tmp_pat
     assert database.read_bytes() == before
 
 
-def test_persistent_delegate_has_no_automatic_result_delivery_and_accepts_follow_up(tmp_path: Path) -> None:
+def test_persistent_delegate_settles_automatic_result_delivery_and_accepts_follow_up(tmp_path: Path) -> None:
     session_workspace = tmp_path / "session-workspace"
     project_workspace = tmp_path / "project-workspace"
     session_workspace.mkdir()
@@ -1610,6 +1610,9 @@ def test_persistent_delegate_has_no_automatic_result_delivery_and_accepts_follow
     assert isinstance(first_turn, RuntimeState)
     assert first_turn.cwd == str(session_workspace.resolve())
     assert first_turn.project_cwd == str(project_workspace.resolve())
+    deadline = monotonic() + 5
+    while monotonic() < deadline and queue.pending_deliveries():
+        sleep(0.01)
     assert queue.pending_deliveries() == []
     assert json.loads(coordinator.invoke(runtime, "get_thread_node", {})) == [
         {

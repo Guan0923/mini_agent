@@ -7,7 +7,14 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Protocol
 
-from backend.domain import ToolSpec, TracePersistenceError, TurnTrace, TurnTraceContext, TurnTraceItem
+from backend.domain import (
+    ToolSpec,
+    TracePersistenceError,
+    TurnTrace,
+    TurnTraceContext,
+    TurnTraceItem,
+    safe_error_message,
+)
 from backend.domain.runtime_state import RuntimeState as TurnState
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 from backend.runtime.core.contracts import WorkflowModeChanged
@@ -193,7 +200,7 @@ class ModelRequestExecutor:
             publish(
                 RuntimeEvent(
                     "model_error",
-                    f"Model {exchange.operation} failed",
+                    safe_error_message(exc),
                     model_error_data(runtime.state, exchange, exc),
                 )
             )

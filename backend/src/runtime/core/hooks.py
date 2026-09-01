@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
+from backend.domain import safe_error_message
+
 from .events import RuntimeEvent
 from .hook_contracts import (
     HookErrorInfo,
@@ -37,7 +39,7 @@ class HookExecutionError(RuntimeError):
         operation: str,
         error: Exception,
     ) -> None:
-        super().__init__(f"Hook operation {operation!r} failed during {phase}_{lifecycle}.")
+        super().__init__(safe_error_message(error))
         self.lifecycle = lifecycle
         self.phase = phase
         self.operation = operation
@@ -107,8 +109,12 @@ class SequentialHookManager(HookManager):
                 emit(
                     RuntimeEvent(
                         "hook_failed",
-                        event_name,
-                        {**event_data, "error_type": error.__class__.__name__},
+                        safe_error_message(error),
+                        {
+                            **event_data,
+                            "error_type": error.__class__.__name__,
+                            "error": safe_error_message(error),
+                        },
                     )
                 )
                 raise HookExecutionError(self.lifecycle, self.phase, name, error) from error

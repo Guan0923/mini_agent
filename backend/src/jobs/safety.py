@@ -1,14 +1,10 @@
-"""Error formatting protocol and the default safe formatting policy.
-
-The job core model never persists raw exceptions, command lines, environment
-values, or credentials.  ``JobInfo.error`` only ever holds text produced by an
-:class:`ErrorFormatter`; later runtime integration injects the existing
-redaction pipeline through this same port.
-"""
+"""Error formatting protocol and the default safe root-message policy."""
 
 from __future__ import annotations
 
 from typing import Protocol
+
+from backend.domain import safe_error_message
 
 
 class ErrorFormatter(Protocol):
@@ -18,12 +14,7 @@ class ErrorFormatter(Protocol):
 
 
 class ClassNameErrorFormatter:
-    """Default policy: emit only the exception class name.
-
-    ``str(exception)`` may embed command lines, secrets, or file paths, so the
-    default formatter deliberately discards the message entirely: a
-    ``TimeoutError`` stays ``"TimeoutError"``.
-    """
+    """Project the redacted root message, using its class only when empty."""
 
     def format_error(self, exception: BaseException) -> str:
-        return type(exception).__name__
+        return safe_error_message(exception)

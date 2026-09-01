@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from threading import RLock
 from typing import Any
 
+from backend.domain import root_error, safe_error_message
+
 from ..errors import (
     SandboxCleanupPending,
     SandboxError,
@@ -143,7 +145,7 @@ class WindowsBrokerService:
         except Exception as exc:
             self._audit(operation, "failed", body, error=exc)
             code = exc.code if isinstance(exc, SandboxError) else SandboxFailureCode.INIT_FAILED
-            result = {"error": {"code": str(code)}}
+            result = {"error": {"code": str(code), "message": safe_error_message(exc)}}
         else:
             self._audit(operation, "succeeded", body)
         response = {"nonce": nonce, **result}
@@ -172,10 +174,10 @@ class WindowsBrokerService:
             "job_id": str(job_id or ""),
         }
         if error is not None:
-            cause = error.__cause__
+            cause = root_error(error)
             winerror = getattr(cause, "winerror", None)
-            record["failure"] = str(error) if isinstance(error, SandboxError) else "unexpected broker failure"
-            record["failure_type"] = type(cause or error).__name__
+            record["failure"] = safe_error_message(error)
+            record["failure_type"] = type(cause).__name__
             if isinstance(winerror, int):
                 record["winerror"] = winerror
         encoded = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True)

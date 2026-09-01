@@ -14,7 +14,7 @@ interface TracePageProps {
   turns: RuntimeStateNode[];
 }
 
-type SemanticKind = "system" | "skill" | "mcp" | "user" | "reasoning" | "assistant" | "tool";
+type SemanticKind = "system" | "skill" | "mcp" | "user" | "reasoning" | "assistant" | "retry" | "tool";
 
 const TRACE_TAGS: Record<SemanticKind, { label: string; color?: string }> = {
   system: { label: "System", color: "purple" },
@@ -23,6 +23,7 @@ const TRACE_TAGS: Record<SemanticKind, { label: string; color?: string }> = {
   user: { label: "User Message", color: "green" },
   reasoning: { label: "Assistant Reasoning", color: "gold" },
   assistant: { label: "Assistant Response", color: "blue" },
+  retry: { label: "Network Retry", color: "volcano" },
   tool: { label: "Tool" },
 };
 
@@ -99,6 +100,7 @@ function itemKind(entry: TurnTraceItem): SemanticKind {
   if (entry.item.type === "reasoning") return "reasoning";
   if (entry.item.type === "text") return "assistant";
   if (entry.item.type === "skill_snapshot") return "skill";
+  if (entry.item.type === "retry") return "retry";
   return "tool";
 }
 
@@ -203,7 +205,7 @@ function TurnTraceContent({ turn, dataIdx, active }: {
 
   return (
     <div className="trace-turn-content">
-      {error ? <Alert type="error" showIcon title={`Trace 加载失败：${error}`} /> : null}
+      {error ? <Alert type="error" showIcon title={error} /> : null}
       {loading && !response ? <div className="trace-loading"><Spin /></div> : null}
       {response && innerItems.length > 0
         ? <Collapse

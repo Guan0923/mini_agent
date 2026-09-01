@@ -15,6 +15,7 @@ from backend.domain import (
     RuntimeThread,
     ThreadContext,
     ThreadNode,
+    safe_error_message,
 )
 from backend.domain.runtime_state import (
     NodeFrame,
@@ -165,7 +166,7 @@ class _SubagentToolActionsMixin:
                 AgentThreadCreate(runtime_thread, node, context, turn, source_id),
             )
         except Exception as exc:
-            raise ToolError(str(exc)) from exc
+            raise ToolError(safe_error_message(exc)) from exc
 
         channel = runtime.services.interrupt
         if channel is not None:
