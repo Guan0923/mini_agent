@@ -10,7 +10,7 @@ from .schema import object_schema
 def command_tool(commands: WorkspaceCommand) -> Tool:
     return Tool(
         "run_command",
-        "Executes a shell command from the workspace using the configured terminal and returns its output.",
+        "Executes a shell command from the workspace and returns its raw standard output on success.",
         commands.run,
         object_schema(
             {

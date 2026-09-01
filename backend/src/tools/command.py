@@ -25,6 +25,7 @@ from backend.jobs import (
     SlotMode,
     SubprocessJob,
     TreeTerminator,
+    format_command_output,
 )
 from backend.sandbox import (
     SandboxExecutionDecision,
@@ -102,8 +103,9 @@ class WorkspaceCommand:
                 JobScopeKind.TASK,
                 parent_job_id=parent_scope.parent_job_id,
             )
+            max_output_chars = self._MAX_OUTPUT_CHARS
             job_options: dict[str, Any] = {
-                "max_output_chars": self._MAX_OUTPUT_CHARS,
+                "max_output_chars": max_output_chars,
                 "tree_terminator": self._tree_terminator,
                 "is_windows": self._is_windows,
                 "error_formatter": MessageErrorFormatter(),
@@ -121,7 +123,8 @@ class WorkspaceCommand:
                 if self._terminal_type == "wsl":
                     raise ToolError("WSL is disabled for sandboxed run_command execution.")
                 policy = decision.command_policy(job_id, TerminalKind(self._terminal_type))
-                job_options["max_output_chars"] = decision.limits.output_chars
+                max_output_chars = decision.limits.output_chars
+                job_options["max_output_chars"] = max_output_chars
                 effective_timeout = min(timeout_seconds, decision.limits.wall_seconds)
                 sandbox_user_id = decision.user_id or "local"
                 job_options["popen_factory"] = decision.launcher.popen_factory(
@@ -146,7 +149,7 @@ class WorkspaceCommand:
                 admission=AdmissionPolicy(slot_mode=SlotMode.INHERIT),
             )
             self._wait_for_job(job, context)
-            return self._result(job)
+            return self._result(job, max_output_chars=max_output_chars)
         except FileNotFoundError as exc:
             shell = TERMINAL_LABELS.get(self._terminal_type, "Bash") if self._is_windows else "Bash"
             raise ToolError(f"{shell} is not available on this system.") from exc
@@ -180,18 +183,38 @@ class WorkspaceCommand:
             if not cancel_sent and context.cancel_requested is not None and context.cancel_requested():
                 cancel_sent = job.cancel("tool invocation cancelled")
 
-    @staticmethod
-    def _result(job: SubprocessJob) -> str:
+    @classmethod
+    def _result(cls, job: SubprocessJob, *, max_output_chars: int) -> str:
         info = job.info()
-        output = job.output
         if info.state is JobState.SUCCEEDED:
-            return output or "Command completed successfully."
+            return cls._truncate_stdout(job.stdout, max_chars=max_output_chars)
         if info.state is JobState.CANCELLED:
-            suffix = f"\n{output}" if output else ""
-            raise ToolError(f"Command was cancelled.{suffix}")
-        error = info.error or "Command failed."
-        suffix = f"\n{output}" if output else ""
-        raise ToolError(f"{error}{suffix}")
+            raise ToolError(cls._failure_output("Command was cancelled.", job, max_chars=max_output_chars))
+        raise ToolError(cls._failure_output(info.error or "Command failed.", job, max_chars=max_output_chars))
+
+    @staticmethod
+    def _truncate_stdout(stdout: str, *, max_chars: int) -> str:
+        if len(stdout) <= max_chars:
+            return stdout
+
+        marker = ""
+        payload_chars = max_chars
+        for _ in range(8):
+            payload_chars = max(0, max_chars - len(marker))
+            omitted = len(stdout) - payload_chars
+            updated_marker = f"\n… output truncated ({omitted} characters omitted)"
+            if updated_marker == marker:
+                break
+            marker = updated_marker
+        return stdout[:payload_chars] + marker
+
+    @staticmethod
+    def _failure_output(status: str, job: SubprocessJob, *, max_chars: int) -> str:
+        if not job.stdout and not job.stderr:
+            return status
+        output_budget = max(0, max_chars - len(status) - 1)
+        output = format_command_output(job.stdout, job.stderr, max_chars=output_budget)
+        return f"{status}\n{output}"
 
     def _command_line(self, command: str) -> list[str]:
         if not self._is_windows:

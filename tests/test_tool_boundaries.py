@@ -168,6 +168,6 @@ def test_workspace_command_filters_sensitive_environment_variables(tmp_path: Pat
         environment=environment,
     ).run("true")
 
-    assert output == "Command completed successfully."
+    assert output == ""
     assert calls[0]["env"] == {"PATH": "tools", "VISIBLE_SETTING": "visible"}
     assert environment["API_KEY"] == "generic-key"

@@ -27,7 +27,7 @@ from .common import (
     _publish_repairs,
     _publish_tool_recovery,
     _start_assistant,
-    _truncate,
+    _tool_failure_content,
 )
 from .controls import PlanControlMixin
 
@@ -159,7 +159,7 @@ class PlanProposalWorkflow(PlanControlMixin):
                     break
                 if not outcome.success:
                     error = outcome.error or "Tool failed."
-                    tool.content = f"{tool.name} failed: {_truncate(error)}"
+                    tool.content = _tool_failure_content(tool, error)
                     _publish_tool_recovery(runtime, tool, error)
             if steered or denied:
                 continue

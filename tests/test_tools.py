@@ -79,7 +79,7 @@ def test_command_tool_uses_powershell_on_windows_and_workspace_cwd(tmp_path: Pat
         environment={"PATH": "C:\\Windows\\System32", "API_KEY": "secret"},
     ).run("New-Item -ItemType Directory demo")
 
-    assert output == "stdout:\ncreated\n"
+    assert output == "created\n"
     assert calls[0][0] == [
         "powershell.exe",
         "-NoLogo",
@@ -197,6 +197,43 @@ def test_command_tool_uses_bash_on_unix_and_reports_command_failures(tmp_path: P
     assert "creationflags" not in calls[0][1]
 
 
+def test_command_failure_reports_status_and_labeled_streams(tmp_path: Path) -> None:
+    process = FakeProcess(stdout="0\n", stderr="bad", returncode=7)
+    command = WorkspaceCommand(
+        tmp_path,
+        popen_factory=lambda _args, **_kwargs: process,
+        environment={},
+    )
+
+    with pytest.raises(ToolError) as exc_info:
+        command.run("failing command")
+
+    assert str(exc_info.value) == "Command exited with code 7.\nstdout:\n0\n\nstderr:\nbad"
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        ("0\r\n", "", "0\r\n"),
+        ("", "warning", ""),
+        (" \r\n", "warning", " \r\n"),
+    ],
+)
+def test_command_success_returns_raw_stdout(
+    tmp_path: Path,
+    stdout: str,
+    stderr: str,
+    expected: str,
+) -> None:
+    command = WorkspaceCommand(
+        tmp_path,
+        popen_factory=lambda _args, **_kwargs: FakeProcess(stdout=stdout, stderr=stderr),
+        environment={},
+    )
+
+    assert command.run("successful command") == expected
+
+
 @pytest.mark.parametrize("is_windows", [False, True])
 def test_command_timeout_terminates_the_process_tree(tmp_path: Path, is_windows: bool) -> None:
     process = FakeProcess(stdout="partial", times_out=True)
@@ -221,7 +258,7 @@ def test_command_timeout_terminates_the_process_tree(tmp_path: Path, is_windows:
     assert process.communicate_calls == [2, 30.0]
 
 
-def test_command_output_uses_one_shared_limit_and_preserves_both_streams(tmp_path: Path) -> None:
+def test_command_success_output_limits_raw_stdout_and_ignores_stderr(tmp_path: Path) -> None:
     process = FakeProcess(stdout="x" * 30_000, stderr="y" * 30_000)
     command = WorkspaceCommand(
         tmp_path,
@@ -232,7 +269,27 @@ def test_command_output_uses_one_shared_limit_and_preserves_both_streams(tmp_pat
     output = command.run("large output")
 
     assert len(output) <= 20_000
-    assert output.startswith("stdout:\n")
+    assert output.startswith("x")
+    assert "stdout:" not in output
+    assert "stderr:" not in output
+    assert "y" not in output
+    assert "output truncated" in output
+
+
+def test_command_failure_output_limit_includes_status_and_stream_labels(tmp_path: Path) -> None:
+    process = FakeProcess(stdout="x" * 30_000, stderr="y" * 30_000, returncode=7)
+    command = WorkspaceCommand(
+        tmp_path,
+        popen_factory=lambda _args, **_kwargs: process,
+        environment={},
+    )
+
+    with pytest.raises(ToolError) as exc_info:
+        command.run("large failing output")
+
+    output = str(exc_info.value)
+    assert len(output) <= 20_000
+    assert output.startswith("Command exited with code 7.\nstdout:\n")
     assert "\nstderr:\n" in output
     assert "output truncated" in output
 
@@ -278,7 +335,7 @@ def test_command_job_reuses_parent_slot_and_is_visible_in_shared_registry(tmp_pa
 
     assert parent_job.wait(2.0)
     assert parent_job.info().state is JobState.SUCCEEDED
-    assert result["output"] == "stdout:\nmanaged\n"
+    assert result["output"] == "managed\n"
     command_records = [
         item for item in registry.list(JobQuery(session_id="session-1")) if item.info.kind is JobKind.SUBPROCESS
     ]

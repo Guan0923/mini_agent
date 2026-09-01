@@ -1,6 +1,11 @@
+import pytest
+
 from backend.domain import AssistantMessage, ToolMessage
 from backend.runtime import AgentRunner, AgentRuntime
 from backend.runtime.core.contracts import InterruptDecision
+from backend.runtime.execution.steps import ToolStepResult
+from backend.runtime.execution.workflows import execution as execution_workflow
+from backend.runtime.execution.workflows import proposal as proposal_workflow
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME
 from backend.tools import Tool, ToolRegistry
 
@@ -128,3 +133,60 @@ def test_plan_proposal_tool_interrupt_clears_active_tool_state() -> None:
     assert result.status == "cancelled"
     assert runtime.state.active_message is None
     assert runtime.state.active_tool_index is None
+
+
+class RecoveringFailurePlanner:
+    name = "recovering-failure"
+
+    def __init__(self, tool_name: str) -> None:
+        self.tool_name = tool_name
+        self.calls = 0
+
+    def decide(self, runtime: AgentRuntime) -> AssistantMessage:
+        del runtime
+        self.calls += 1
+        if self.calls == 1:
+            return AssistantMessage(tool_messages=[ToolMessage(name=self.tool_name, call_id="failure_1")])
+        return AssistantMessage(content="Recovered.")
+
+
+@pytest.mark.parametrize("mode", ["agent", "plan"])
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        ("run_command", "Command exited with code 7.\nstdout:\n0\n\nstderr:\nbad"),
+        ("inspect", "inspect failed: Command exited with code 7.\nstdout:\n0\n\nstderr:\nbad"),
+    ],
+)
+def test_workflows_only_preserve_unwrapped_run_command_failures(
+    mode: str,
+    tool_name: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = "Command exited with code 7.\nstdout:\n0\n\nstderr:\nbad"
+
+    def fail_without_invoking_hooks(runtime: AgentRuntime, index: int, _executor: object) -> ToolStepResult:
+        message = runtime.state.active_message
+        assert message is not None
+        tool = message.tool_messages[index]
+        tool.status = "failed"
+        tool.content = error
+        runtime.state.active_tool_index = index
+        runtime.run.actions.append(tool)
+        return ToolStepResult(success=False, error=error)
+
+    workflow = execution_workflow if mode == "agent" else proposal_workflow
+    monkeypatch.setattr(workflow, "_execute_tool", fail_without_invoking_hooks)
+
+    planner = RecoveringFailurePlanner(tool_name)
+    runner = AgentRunner(planner, ToolRegistry([Tool(tool_name, "Unused", lambda: "unused")]))
+    runtime = runner.new_runtime(task="Recover from the failure", mode=mode)
+
+    result = runner.run(runtime)
+
+    assert result.status == "completed"
+    failed_message = next(
+        message for message in runtime.state.messages if isinstance(message, AssistantMessage) and message.tool_messages
+    )
+    assert failed_message.tool_messages[0].content == expected

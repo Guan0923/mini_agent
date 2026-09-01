@@ -206,6 +206,12 @@ def _truncate(value: str) -> str:
     return f"{value[:_MAX_TOOL_CONTEXT_CHARS]}… ({omitted} characters omitted)"
 
 
+def _tool_failure_content(tool: ToolMessage, error: str) -> str:
+    if tool.name == "run_command":
+        return error
+    return f"{tool.name} failed: {_truncate(error)}"
+
+
 def _start_assistant(runtime: AgentRuntime, message: AssistantMessage) -> None:
     runtime.state.active_message = message
     runtime.state.active_tool_index = None
