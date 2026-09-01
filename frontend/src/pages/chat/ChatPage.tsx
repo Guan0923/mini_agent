@@ -186,7 +186,7 @@ export default function ChatPage({
     providerConfig,
     mode,
     onModeChange: changeViewMode,
-    onFailure: (error) => setLast({ error: `运行配置更新失败：${String((error as Error).message ?? error)}` }),
+    onFailure: (error) => setLast({ error: String((error as Error).message ?? error) }),
   });
   const {
     permissionMode,
@@ -466,7 +466,7 @@ export default function ChatPage({
         clearComposer();
         setPendingUploads([]);
       } catch (error) {
-        void message.error(`Agent 消息发送失败：${String((error as Error).message ?? error)}`);
+        void message.error(String((error as Error).message ?? error));
       }
       return;
     }
@@ -490,7 +490,7 @@ export default function ChatPage({
       await submitDecision(request.decision_id, choice, options);
       setLast({ decision: undefined });
     } catch (error) {
-      setLast({ error: `决策提交失败：${String((error as Error).message ?? error)}` });
+      setLast({ error: String((error as Error).message ?? error) });
     }
   }
 

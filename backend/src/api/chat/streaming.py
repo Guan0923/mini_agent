@@ -10,12 +10,18 @@ from typing import Any, Literal
 
 from fastapi import HTTPException
 
-from backend.domain import FAILED_TERMINAL_MESSAGE, ClaimedEnvelope, MessageQueueUnavailable, terminal_error_text
+from backend.domain import (
+    FAILED_TERMINAL_MESSAGE,
+    ClaimedEnvelope,
+    MessageQueueUnavailable,
+    safe_error_message,
+    terminal_error_text,
+)
 from backend.domain.runtime_state import NodeFrame
 from backend.jobs import AdmissionPolicy, JobLane, JobScopeKind, ThreadJob
 from backend.providers import ModelConfig, ModelConfigurationError
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
-from backend.sandbox import ApprovalStore, SandboxInitializationError
+from backend.sandbox import ApprovalStore
 from backend.storage.message_queue import RedisAgentMailbox
 from backend.storage.settings.crypto import SecretDecryptionError
 
@@ -40,10 +46,7 @@ def _terminal_type_for_status(status: str, category: str | None) -> Literal["suc
 def _startup_failure_message(error: Exception) -> str:
     """Render failures raised before a persisted Turn baseline exists."""
 
-    if isinstance(error, SandboxInitializationError):
-        detail = str(error).strip() or "Windows Sandbox Broker 无法初始化。"
-        return f"Sandbox 初始化失败：{detail} Agent 已停止，未降级执行。"
-    return str(error) or FAILED_TERMINAL_MESSAGE
+    return safe_error_message(error)
 
 
 def _runtime_stream_lock_registry(state: object) -> dict[str, Any]:
@@ -259,7 +262,7 @@ def _stream(
                 try:
                     selected_model_config = state.model_config(provider_name)
                 except (SecretDecryptionError, ModelConfigurationError) as exc:
-                    raise ModelConfigurationError(str(exc)) from exc
+                    raise ModelConfigurationError(safe_error_message(exc)) from exc
             app = application_builder(
                 state,
                 session_id=session_id,
@@ -440,27 +443,28 @@ def _stream(
                     )
             else:
                 enqueue_terminal("failed", turn_id or "unknown", "Turn persistence is unavailable.")
-        except MessageQueueUnavailable:
+        except MessageQueueUnavailable as exc:
             bridge = bridge_ref["bridge"]
+            error_message = safe_error_message(exc)
             if bridge is not None:
                 final_node = bridge.finish(
                     "failed",
-                    "消息队列连接中断，Turn 已失败。",
+                    error_message,
                     category="server",
                     code="message_queue_unavailable",
                 )
                 terminal_id = final_node.id if final_node is not None else turn_id or "unknown"
-                enqueue_terminal("failed", terminal_id, "message_queue_unavailable")
+                enqueue_terminal("failed", terminal_id, error_message)
             else:
-                enqueue_terminal("failed", turn_id or "unknown", "message_queue_unavailable")
+                enqueue_terminal("failed", turn_id or "unknown", error_message)
         except ModelConfigurationError as exc:
             if bridge_ref["bridge"] is not None:
-                error_message = f"模型未配置：{exc}"
+                error_message = safe_error_message(exc)
                 bridge_ref["bridge"].finish("failed", error_message, category="agent", code="model_configuration_error")
                 rendered_error = terminal_error_text(bridge_ref["bridge"].terminal_error or {})
                 enqueue_terminal("failed", turn_id or bridge_ref["bridge"].turn_id or "unknown", rendered_error)
             else:
-                enqueue_terminal("failed", turn_id or "unknown", f"模型未配置：{exc}")
+                enqueue_terminal("failed", turn_id or "unknown", safe_error_message(exc))
         except Exception as exc:
             bridge = bridge_ref["bridge"]
             if bridge is not None:
@@ -470,7 +474,7 @@ def _stream(
                 if bridge.abort_category == "network" and not bridge.produced_item:
                     enqueue_terminal("network", terminal_id)
                 else:
-                    enqueue_terminal("failed", terminal_id, rendered_error or str(exc))
+                    enqueue_terminal("failed", terminal_id, rendered_error or safe_error_message(exc))
             else:
                 enqueue_terminal("failed", turn_id or "unknown", _startup_failure_message(exc))
         finally:

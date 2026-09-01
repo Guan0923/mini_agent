@@ -711,7 +711,7 @@ describe("ChatPage rewind projection", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     await waitFor(() => expect(screen.queryByText("正在执行compaction操作中")).toBeNull());
-    expect(screen.getByText("⚠️ 压缩失败：summary provider failed", { selector: "p" })).toBeVisible();
+    expect(screen.getByText("summary provider failed", { selector: "p" })).toBeVisible();
   });
 });
 
@@ -800,7 +800,7 @@ describe("ChatPage running Turn configuration", () => {
 
     await waitFor(() => expect(screen.getByRole("combobox", { name: "运行模式" })).not.toBeDisabled());
     expect(screen.getByTestId("selected-mode")).toHaveTextContent("agent");
-    expect(screen.getByText(/运行配置更新失败：config write failed/)).toBeVisible();
+    expect(screen.getByText("config write failed")).toBeVisible();
     expect(screen.getByRole("combobox", { name: "权限模式" })).not.toBeDisabled();
   });
 
@@ -1317,7 +1317,7 @@ describe("ChatPage Agent Thread navigation", () => {
     await user.type(composer, "keep this draft");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
-    expect(await screen.findByText("Agent 消息发送失败：redis offline")).toBeInTheDocument();
+    expect(await screen.findByText("redis offline")).toBeInTheDocument();
     expect(composer).toHaveTextContent("keep this draft");
   });
 

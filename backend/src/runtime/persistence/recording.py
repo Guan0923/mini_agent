@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from backend.domain import ToolSpec, message_to_dict
+from backend.domain import ToolSpec, message_to_dict, redact_sensitive_text, safe_error_message
 
 from ..core.context import PreparedResponse, RuntimeExchange, RuntimeState
 from ..core.events import RuntimeEvent
@@ -15,9 +15,6 @@ from ..core.events import RuntimeEvent
 _SENSITIVE_KEY = re.compile(
     r"(?:api[_-]?key|authorization|cookie|password|secret|token)",
     re.IGNORECASE,
-)
-_SENSITIVE_VALUE = re.compile(
-    r"(?i)\b(api[_-]?(?:key|token)|authorization|cookie|password|secret|token)\b\s*([=:])\s*([^\r\n,;]+)"
 )
 _IDENTIFIER_KEYS = frozenset(
     {
@@ -141,7 +138,7 @@ def model_error_data(state: RuntimeState, exchange: RuntimeExchange, error: Exce
         "model": state.model,
         "operation": exchange.operation,
         "error_type": error.__class__.__name__,
-        "error": str(error),
+        "error": safe_error_message(error),
         "diagnostics": dict(diagnostics) if isinstance(diagnostics, dict) else {},
     }
     if exchange.wire_request is not None:
@@ -236,7 +233,7 @@ def _persistent_value(value: Any, include_full_messages: bool, key: str | None =
 
 
 def _redact_text(value: str) -> str:
-    return _SENSITIVE_VALUE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", value)
+    return redact_sensitive_text(value)
 
 
 def _summary_label(value: str) -> str:

@@ -9,7 +9,7 @@ from typing import Any
 from mcp import types
 from mcp.server import Server
 
-from backend.domain import ToolSpec
+from backend.domain import ToolSpec, safe_error_message
 from backend.tools import ToolError, ToolExecutor, build_tool_registry
 
 
@@ -40,7 +40,7 @@ class McpToolAdapter:
         try:
             text = self._tools.invoke(name, arguments or {})
         except ToolError as exc:
-            return self._error(str(exc))
+            return self._error(safe_error_message(exc))
         return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
 
     @staticmethod

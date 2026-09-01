@@ -117,8 +117,7 @@ def test_startup_failure_when_probe_never_passes_within_init_timeout() -> None:
     assert job.wait(timeout=5) is True
     info = job.info()
     assert info.state is JobState.FAILED
-    # Default ClassNameErrorFormatter: only the class name, never a message.
-    assert info.error == "ServiceStartupError"
+    assert info.error == "service failed to become healthy during initialisation"
     assert info.kind is JobKind.SERVICE
     # The initial instance was stopped once; no leak.
     assert driver.stopped == ["h1"]
@@ -207,7 +206,7 @@ def test_rebuild_exhaustion_marks_failed() -> None:
     assert job.wait(timeout=5) is True
     info = job.info()
     assert info.state is JobState.FAILED
-    assert info.error == "ServiceRebuildError"
+    assert info.error == "service exhausted its rebuild budget without recovering health"
     # Initial instance plus max_restarts rebuilds, each stopped exactly once.
     assert driver.started == ["h1", "h2", "h3"]
     assert driver.stopped == ["h1", "h2", "h3"]

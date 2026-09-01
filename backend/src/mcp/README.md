@@ -9,3 +9,5 @@
 - `cli.py`：本地 stdio server 命令入口；`client/`：外部 server 管理与 Tool 适配。
 
 配置和输出一律视为不可信；明文 secret、无限输出和绕过审批的调用均不允许。
+
+MCP 生命周期和 Tool 包装异常仅承载控制分类；向 HTTP、Tool、Turn 或审计输出的文本必须使用统一脱敏后的根因原消息。

@@ -1,7 +1,14 @@
 """Stable domain types with no dependency on the UI, tools, or providers."""
 
 from .agent_threads import ContextStrategy, RuntimeThread, ThreadContext, ThreadNode, ThreadOrigin, ThreadStatus
-from .errors import ModelOutputError, PlanningError, TracePersistenceError
+from .errors import (
+    ModelOutputError,
+    PlanningError,
+    TracePersistenceError,
+    redact_sensitive_text,
+    root_error,
+    safe_error_message,
+)
 from .message_queue import (
     ClaimedEnvelope,
     DeliveryConflict,
@@ -186,6 +193,9 @@ __all__ = [
     "ThreadOrigin",
     "ThreadStatus",
     "TracePersistenceError",
+    "redact_sensitive_text",
+    "root_error",
+    "safe_error_message",
     "TurnTrace",
     "TurnTraceContext",
     "TurnTraceItem",

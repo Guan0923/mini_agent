@@ -146,6 +146,31 @@ describe("TracePage", () => {
     expect(screen.getByText("User Message").closest(".ant-tag")).toHaveClass("ant-tag-green");
   });
 
+  it("labels retry trace Items as network retries instead of tools", async () => {
+    const value = turn("turn-retry", "2026-08-28T00:00:00Z");
+    vi.mocked(getTurnTrace).mockResolvedValue(response(value, 1, {
+      items: [
+        traceItem(1, 0, 0, "user", { type: "text", text: "retry", status: "success" }),
+        traceItem(2, 1, 0, "assistant", {
+          type: "retry",
+          event: "model_retry",
+          category: "network",
+          message: "connection reset by peer",
+          attempt: 1,
+          max_retries: 3,
+          delay_seconds: 0.5,
+          status: "success",
+        }),
+      ],
+    }));
+
+    render(<AntApp><TracePage turns={[value]} /></AntApp>);
+
+    await waitFor(() => expect(screen.getByText("Network Retry", { exact: true })).toBeInTheDocument());
+    expect(screen.getByText("Network Retry", { exact: true }).closest(".ant-tag")).toHaveClass("ant-tag-volcano");
+    expect(screen.getByTitle("connection reset by peer")).toBeInTheDocument();
+  });
+
   it("switches each Turn data version independently without toggling its panel", async () => {
     const older = turn("turn-old", "2026-08-27T00:00:00Z");
     const latest = turn("turn-new", "2026-08-28T00:00:00Z");
@@ -238,13 +263,13 @@ describe("TracePage", () => {
     });
     render(<AntApp><TracePage turns={[older, latest]} /></AntApp>);
 
-    expect(await screen.findByText("Trace 加载失败：latest unavailable")).toBeInTheDocument();
+    expect(await screen.findByText("latest unavailable")).toBeInTheDocument();
     clickTurnHeader("turn-old");
     await waitFor(() => expect(getTurnTrace).toHaveBeenCalledWith(
       "turn-old", 1, expect.any(AbortSignal), undefined,
     ));
     expect(screen.getByText("System")).toBeInTheDocument();
-    expect(screen.getByText("Trace 加载失败：latest unavailable")).toBeInTheDocument();
+    expect(screen.getByText("latest unavailable")).toBeInTheDocument();
   });
 
   it("marks outer and inner Collapse titles for single-line truncation", async () => {

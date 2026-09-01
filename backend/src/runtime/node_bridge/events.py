@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from math import isfinite
 from typing import Any
 
+from backend.domain import redact_sensitive_text
 from backend.domain.runtime_state import RuntimeState, RuntimeStateTree, TerminalErrorCategory
 
 _NETWORK_ERROR_TYPES = frozenset(
@@ -19,7 +21,7 @@ _NETWORK_ERROR_TYPES = frozenset(
     }
 )
 _TOOL_ERROR_TYPES = frozenset({"ToolError", "ConfirmationRequired"})
-_HIDDEN_RECOVERABLE_EVENTS = frozenset({"tool_recovery", "model_repair", "model_retry"})
+_HIDDEN_RECOVERABLE_EVENTS = frozenset({"tool_recovery", "model_repair"})
 
 
 class _EventProjectionMixin:
@@ -98,6 +100,58 @@ class _EventProjectionMixin:
             self._record_completed_item(message_idx, item_idx)
         self.last_node = self.assistant
 
+    def _settle_running_retry(self) -> None:
+        if self.assistant is None or self.assistant_message_idx is None:
+            return
+        for item_idx in range(len(self.assistant_blocks) - 1, -1, -1):
+            item = self.assistant_blocks[item_idx]
+            if item.get("type") != "retry" or item.get("status") != "running":
+                continue
+            self.assistant = self.writer.set_item_status(
+                self.assistant,
+                data_idx=self.assistant.current_data_idx,
+                message_idx=self.assistant_message_idx,
+                item_idx=item_idx,
+                status="success",
+            )
+            item["status"] = "success"
+            self.last_node = self.assistant
+            self._record_completed_item(self.assistant_message_idx, item_idx)
+            return
+
+    def _model_retry(self, message: str, data: Mapping[str, Any]) -> None:
+        attempt = data.get("attempt")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            attempt = 1
+        max_retries = data.get("max_transport_retries")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < attempt:
+            max_retries = attempt
+        delay_seconds = data.get("delay_seconds")
+        if (
+            isinstance(delay_seconds, bool)
+            or not isinstance(delay_seconds, (int, float))
+            or not isfinite(delay_seconds)
+            or delay_seconds < 0
+        ):
+            delay_seconds = 0
+        visible_message = redact_sensitive_text(message)
+        if not visible_message:
+            visible_message = redact_sensitive_text(str(data.get("error_type") or "NetworkError"))
+        self._start_assistant_after_report()
+        self._append_item(
+            {
+                "type": "retry",
+                "event": "model_retry",
+                "category": "network",
+                "message": visible_message,
+                "attempt": attempt,
+                "max_retries": max_retries,
+                "delay_seconds": delay_seconds,
+                "status": "running",
+            },
+            produces_output=False,
+        )
+
     def _tool_result(self, message: str, data: Mapping[str, Any], *, status: str) -> None:
         tool = str(data.get("tool") or data.get("name") or "")
         call_id = str(data.get("call_id") or "call_unknown")
@@ -139,7 +193,11 @@ class _EventProjectionMixin:
         usage = data.get("node_usage") if isinstance(data.get("node_usage"), Mapping) else data.get("usage")
         if isinstance(usage, Mapping):
             self._apply_usage(usage)
-        if kind == "thinking_start":
+        if kind == "model_request":
+            self._settle_running_retry()
+        elif kind == "model_retry":
+            self._model_retry(message, data)
+        elif kind == "thinking_start":
             self._start_assistant_after_report()
             self._begin_stream_item("reasoning")
         elif kind == "thinking_delta":

@@ -30,6 +30,18 @@
   margin: 4px 0 8px;
 }
 
+.runtime-retry-item {
+  margin: 2px 0 6px;
+  color: #a8a9aa;
+  font-size: 12.5px;
+}
+
+.runtime-retry-message {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .runtime-agent-report {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

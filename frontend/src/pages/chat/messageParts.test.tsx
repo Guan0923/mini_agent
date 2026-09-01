@@ -168,8 +168,74 @@ describe("assistant Item presentation", () => {
     message.error = "Turn execution failed";
     const { container } = render(renderAssistant(message));
 
-    expect(screen.getByText("⚠️ Turn execution failed")).toBeInTheDocument();
+    expect(screen.getByText("Turn execution failed")).toBeInTheDocument();
     expect(container.querySelector(".message.assistant .bubble .ant-alert-error")).toBeInTheDocument();
+  });
+
+  it.each<DisplayMode>(["minimal", "medium", "verbose", "developer"])(
+    "shows a live network retry and retains the raw backend message after recovery in %s mode",
+    (display) => {
+    const retry: TurnItem = {
+      type: "retry",
+      event: "model_retry",
+      category: "network",
+      message: "connection reset by peer",
+      attempt: 1,
+      max_retries: 3,
+      delay_seconds: 0.5,
+      status: "running",
+    };
+      const view = render(renderAssistant(assistant([retry], true), display));
+
+      expect(screen.getByRole("status", { name: /网络异常，正在重试（1\/3）/ })).toBeInTheDocument();
+      expect(screen.getByText("connection reset by peer")).toBeVisible();
+      expect(view.container.querySelector('[data-item-type="retry"]')).toHaveClass("is-active");
+
+      view.rerender(renderAssistant(assistant([{ ...retry, status: "success" }], true), display));
+      expect(screen.queryByRole("status", { name: /网络异常，正在重试/ })).not.toBeInTheDocument();
+      expect(screen.getByText("网络请求已重试（1/3）")).toBeVisible();
+
+      view.rerender(renderAssistant(assistant([
+        { ...retry, status: "success" },
+        { type: "text", text: "recovered", status: "success" },
+      ]), display));
+      expect(screen.getByText("网络请求已重试（1/3）")).toBeVisible();
+      expect(screen.getByText("connection reset by peer")).toBeVisible();
+      expect(screen.getByText("recovered")).toBeVisible();
+    },
+  );
+
+  it("keeps multiple network retries in canonical order", () => {
+    const retries: TurnItem[] = [
+      {
+        type: "retry",
+        event: "model_retry",
+        category: "network",
+        message: "first failure",
+        attempt: 1,
+        max_retries: 5,
+        delay_seconds: 0.5,
+        status: "success",
+      },
+      {
+        type: "retry",
+        event: "model_retry",
+        category: "network",
+        message: "second failure",
+        attempt: 2,
+        max_retries: 5,
+        delay_seconds: 1,
+        status: "running",
+      },
+    ];
+    const { container } = render(renderAssistant(assistant(retries, true), "developer"));
+
+    const rendered = [...container.querySelectorAll<HTMLElement>('[data-item-type="retry"]')];
+    expect(rendered.map((item) => item.textContent)).toEqual([
+      "网络请求已重试（1/5）first failure",
+      "网络异常，正在重试（2/5）second failure",
+    ]);
+    expect(screen.getByRole("status", { name: "网络异常，正在重试（2/5）" })).toBe(rendered[1]);
   });
 
   it("hides Skill metadata and shows the running indicator instead of none", () => {

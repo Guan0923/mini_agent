@@ -61,7 +61,7 @@ class PlanProposalWorkflow(PlanControlMixin):
                 _publish_repairs(runtime, capabilities)
                 if cancel_if_requested(runtime):
                     return None
-                fail_run(runtime, f"Plan creation failed: {exc}", **planning_failure_data(exc, capabilities.name))
+                fail_run(runtime, exc, **planning_failure_data(exc, capabilities.name))
                 return None
             except BaseException:
                 close()

@@ -25,3 +25,5 @@ Broker readiness 使用 `token_model=capability_sid_v3`；旧 Token 模型必须
 
 系统其他位置能否写入由低权限账户原有 DACL 决定；这里不声称对整台 Windows 提供
 “绝对不可写”证明。
+
+Sandbox/Broker failure code 与异常类型继续作为控制元数据；状态、API、Turn 和审计中的可见 `detail`/`message` 只使用统一脱敏后的根因原消息。

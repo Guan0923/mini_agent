@@ -325,6 +325,27 @@ function MinimalRuntimeStatus({ item }: { item: TurnItem }) {
   );
 }
 
+function RetryItem({ item, active }: { item: TurnItem; active: boolean }) {
+  const attempt = typeof item.attempt === "number" ? item.attempt : 1;
+  const maxRetries = typeof item.max_retries === "number" ? item.max_retries : attempt;
+  const label = active
+    ? `网络异常，正在重试（${attempt}/${maxRetries}）`
+    : `网络请求已重试（${attempt}/${maxRetries}）`;
+  const message = String(item.message ?? "");
+  return (
+    <div
+      className={`runtime-retry-item${active ? " is-active" : ""}`}
+      data-item-type="retry"
+      role={active ? "status" : undefined}
+      aria-label={label}
+      aria-live={active ? "polite" : undefined}
+    >
+      {active ? <RuntimeStatusLabel text={label} shimmer /> : <span className="runtime-static-label">{label}</span>}
+      {message ? <div className="runtime-retry-message">{message}</div> : null}
+    </div>
+  );
+}
+
 const HIDDEN_ASSISTANT_ITEM_TYPES = new Set(["skill_snapshot"]);
 
 function visibleAssistantItems(items: TurnItem[] | undefined): TurnItem[] {
@@ -350,6 +371,9 @@ function OrderedAssistantItems({
       {items.map((item, index) => {
         const identity = `${msg.id}:${version}:${index}`;
         const active = Boolean(msg.running && index === items.length - 1);
+        if (item.type === "retry") {
+          return <RetryItem key={identity} item={item} active={active && item.status === "running"} />;
+        }
         if (["reasoning", "tool_call", "tool_result"].includes(item.type)) {
           if (display === "minimal") return active ? <MinimalRuntimeStatus key={identity} item={item} /> : null;
           return <RuntimeItemCollapse key={identity} item={item} itemKey={identity} display={display} active={active} />;
@@ -359,7 +383,7 @@ function OrderedAssistantItems({
           return value ? <div className="runtime-item-response" data-item-type={item.type} key={identity}><MarkdownContent text={value} /></div> : null;
         }
         if (item.type === "error") {
-          return <Alert key={identity} className="error-text" type="error" showIcon title={`⚠️ ${String(item.message ?? "Execution failed.")}`} />;
+          return <Alert key={identity} className="error-text" type="error" showIcon title={String(item.message ?? "Execution failed.")} />;
         }
         if (item.type === "subagent" && item.event === "agent_report") {
           const value = String(item.text ?? "");
@@ -419,7 +443,7 @@ export function AssistantMessage({
     <div className={msg.running ? "assistant-run-frame is-running" : "assistant-run-frame"}>
       {hasItems ? <OrderedAssistantItems msg={msg} items={visibleItems} configuredDisplay={display} onDecision={onDecision} /> : null}
       {!hasDecisionItem && msg.decision ? <DecisionCard request={msg.decision} onSubmit={(choice, options) => onDecision(msg.decision!, choice, options)} /> : null}
-      {!hasErrorItem && msg.error ? <Alert className="error-text" type="error" showIcon title={`⚠️ ${msg.error}`} /> : null}
+      {!hasErrorItem && msg.error ? <Alert className="error-text" type="error" showIcon title={msg.error} /> : null}
       {!hasItems && msg.content ? <MarkdownContent text={msg.content} /> : null}
       {!msg.error && (!hasItems || visibleItems.length === 0) && !msg.content && msg.running && !msg.decision ? <div className="thinking" role="status" aria-label="思考中" data-state="thinking" aria-live="polite"><span className="dot" /><span className="dot" /><span className="dot" /></div> : null}
       {display !== "minimal" && (msg.status || (msg.metrics && msg.metrics.duration_ms != null)) ? <div className="meta">{msg.status ?? ""}{msg.status && msg.metrics && msg.metrics.duration_ms != null ? " · " : ""}{msg.metrics && msg.metrics.duration_ms != null ? `${(msg.metrics.duration_ms / 1000).toFixed(1)}s · ${msg.metrics.model_calls ?? 0} 次模型调用 · ${msg.metrics.tool_calls ?? 0} 次工具调用` : null}</div> : null}

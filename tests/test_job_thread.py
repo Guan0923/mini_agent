@@ -84,9 +84,7 @@ def test_target_raises_marks_failed_with_formatted_error() -> None:
     info = job.info()
     assert info.state is JobState.FAILED
     assert info.error is not None
-    # The default ClassNameErrorFormatter reports only the class name, never
-    # the exception message.
-    assert info.error == "ValueError"
+    assert info.error == "boom"
 
 
 def test_exception_after_cancel_is_failed_not_cancelled() -> None:
@@ -112,7 +110,7 @@ def test_exception_after_cancel_is_failed_not_cancelled() -> None:
     info = job.info()
     assert info.state is JobState.FAILED
     assert info.cancel_requested_at is not None  # the cancel was still recorded
-    assert info.error == "ValueError"  # class name via the default formatter
+    assert info.error == "boom"
 
 
 # ---------------------------------------------------------------------------

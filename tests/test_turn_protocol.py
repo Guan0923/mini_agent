@@ -35,6 +35,7 @@ from backend.domain.runtime_state import (
     RuntimeState,
     RuntimeStateTree,
     RuntimeStateValidationError,
+    normalize_content,
 )
 from backend.planning.context_management import ContextCompactionResult
 from backend.planning.llm import LLMPlanner
@@ -67,6 +68,38 @@ def make_turn(
         user_content=[{"type": "text", "text": "hello"}],
         provider_name="local",
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("event", "retry", "retry.event"),
+        ("category", "provider", "retry.category"),
+        ("message", "", "retry.message"),
+        ("attempt", 0, "retry.attempt"),
+        ("attempt", True, "retry.attempt"),
+        ("max_retries", 0, "retry.max_retries"),
+        ("delay_seconds", -0.1, "retry.delay_seconds"),
+        ("delay_seconds", float("inf"), "retry.delay_seconds"),
+        ("delay_seconds", float("nan"), "retry.delay_seconds"),
+        ("delay_seconds", True, "retry.delay_seconds"),
+    ],
+)
+def test_retry_item_validates_protocol_fields(field: str, value: object, error: str) -> None:
+    retry = {
+        "type": "retry",
+        "event": "model_retry",
+        "category": "network",
+        "message": "connection reset by peer",
+        "attempt": 1,
+        "max_retries": 5,
+        "delay_seconds": 0.5,
+        "status": "running",
+    }
+    retry[field] = value
+
+    with pytest.raises(RuntimeStateValidationError, match=error):
+        normalize_content([retry])
 
 
 def test_first_main_turn_persistence_leaves_sidebar_title_for_post_run_model_request(
@@ -997,6 +1030,160 @@ def test_streamed_items_keep_canonical_order_across_model_and_tool_rounds() -> N
     assert [frame.revision for frame in frames] == list(range(len(frames)))
 
 
+def test_model_retry_streams_a_nonterminal_item_and_settles_on_the_next_request() -> None:
+    frames: list[NodeFrame] = []
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(
+        store,
+        session_id="session_1",
+        thread_id="session_1",
+        turn_id="turn_retry",
+        prompt="retry locally",
+        provider_name="local",
+        emit=frames.append,
+    )
+    bridge.start()
+
+    bridge.handle(
+        RuntimeEvent(
+            "model_retry",
+            "connection reset by peer",
+            {
+                "attempt": 1,
+                "max_transport_retries": 3,
+                "delay_seconds": 0.5,
+                "status_code": 503,
+            },
+        )
+    )
+
+    running = store.get_node("session_1", "turn_retry")
+    assert running is not None and running.status == "running"
+    assert running.assistant_items == [
+        {
+            "type": "retry",
+            "event": "model_retry",
+            "category": "network",
+            "message": "connection reset by peer",
+            "attempt": 1,
+            "max_retries": 3,
+            "delay_seconds": 0.5,
+            "status": "running",
+        }
+    ]
+    assert frames[-1].operations[0]["op"] == "append_item"
+    assert frames[-1].operations[0]["item"]["type"] == "retry"
+    assert "status_code" not in frames[-1].operations[0]["item"]
+    assert bridge.produced_item is False
+
+    bridge.handle(RuntimeEvent("model_request", "Model decision request"))
+    settled = store.get_node("session_1", "turn_retry")
+    assert settled is not None and settled.assistant_items[0]["status"] == "success"
+    assert frames[-1].operations == (
+        {
+            "op": "set_item_status",
+            "data_idx": 0,
+            "message_idx": 1,
+            "item_idx": 0,
+            "status": "success",
+        },
+    )
+
+    bridge.handle(RuntimeEvent("response_start"))
+    bridge.handle(RuntimeEvent("response_delta", "recovered"))
+    bridge.handle(RuntimeEvent("response_end"))
+    completed = bridge.finish("success")
+    assert completed is not None and completed.status == "success"
+    assert [item["type"] for item in completed.assistant_items] == ["retry", "text"]
+    assert all(item["type"] != "error" for item in completed.assistant_items)
+
+
+def test_multiple_model_retries_keep_order_and_reconnect_snapshot() -> None:
+    stream = ActiveTurnStream("turn_retry_order")
+    store = InMemoryNodeStore()
+
+    def emit(frame: NodeFrame) -> None:
+        current = store.get_node(frame.session_id, frame.turn_id)
+        assert isinstance(current, RuntimeState)
+        stream.publish_frame(frame, current)
+
+    bridge = RuntimeEventNodeBridge(
+        store,
+        session_id="session_1",
+        thread_id="session_1",
+        turn_id="turn_retry_order",
+        prompt="retry twice",
+        provider_name="local",
+        emit=emit,
+    )
+    original = stream.subscribe("turn_retry_order")
+    bridge.start()
+    assert original.next_event()["revision"] == 0
+
+    bridge.handle(
+        RuntimeEvent(
+            "model_retry",
+            "first connection failure",
+            {"attempt": 1, "max_transport_retries": 5, "delay_seconds": 0.5},
+        )
+    )
+    first_delta = original.next_event()
+    assert first_delta["operations"][0]["item"]["attempt"] == 1
+
+    reconnected = stream.subscribe("turn_retry_order")
+    snapshot = reconnected.next_event()
+    retry_items = snapshot["turn"]["data"][0][1]["content"]
+    assert [(item["attempt"], item["status"]) for item in retry_items] == [(1, "running")]
+
+    bridge.handle(RuntimeEvent("model_request", "Model decision request"))
+    bridge.handle(
+        RuntimeEvent(
+            "model_retry",
+            "second connection failure",
+            {"attempt": 2, "max_transport_retries": 5, "delay_seconds": 1.0},
+        )
+    )
+    bridge.handle(RuntimeEvent("model_request", "Model decision request"))
+    completed = bridge.finish("success", "recovered")
+
+    assert completed is not None and completed.status == "success"
+    assert [item["type"] for item in completed.assistant_items] == ["retry", "retry", "text"]
+    assert [item["attempt"] for item in completed.assistant_items[:2]] == [1, 2]
+    assert [item["status"] for item in completed.assistant_items[:2]] == ["success", "success"]
+
+
+def test_exhausted_retry_finishes_without_duplicate_terminal_errors() -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(
+        store,
+        session_id="session_1",
+        thread_id="session_1",
+        turn_id="turn_retry_failed",
+        prompt="exhaust retry",
+        provider_name="local",
+        emit=lambda _frame: None,
+    )
+    bridge.start()
+    bridge.handle(
+        RuntimeEvent(
+            "model_retry",
+            "provider unavailable",
+            {"attempt": 1, "max_transport_retries": 1, "delay_seconds": 0.5},
+        )
+    )
+    bridge.handle(RuntimeEvent("model_error", "provider unavailable", {"error_type": "ModelTransportError"}))
+    bridge.handle(RuntimeEvent("error", "provider unavailable", {"error_type": "ModelTransportError"}))
+    bridge.handle(RuntimeEvent("error", "must not duplicate", {"error_type": "ModelTransportError"}))
+
+    failed = store.get_node("session_1", "turn_retry_failed")
+    assert isinstance(failed, RuntimeState) and failed.status == "failed"
+    assert [item["type"] for item in failed.assistant_items] == ["retry", "error"]
+    assert failed.assistant_items[0]["status"] == "failed"
+    errors = [item for item in failed.assistant_items if item["type"] == "error"]
+    assert len(errors) == 1 and errors[0]["message"] == "provider unavailable"
+    assert not any(item["status"] == "running" for item in failed.assistant_items)
+
+
 def test_tool_approval_persists_only_the_interactive_decision_item() -> None:
     store = InMemoryNodeStore()
     bridge = RuntimeEventNodeBridge(
@@ -1575,7 +1762,7 @@ def test_sse_terminal_mapping_distinguishes_user_pause_from_network_pause() -> N
 def test_sandbox_startup_failure_message_explains_fail_closed_behavior() -> None:
     message = _startup_failure_message(SandboxInitializationError("Windows Sandbox Broker 未安装或当前不可用。"))
 
-    assert message == ("Sandbox 初始化失败：Windows Sandbox Broker 未安装或当前不可用。 Agent 已停止，未降级执行。")
+    assert message == "Windows Sandbox Broker 未安装或当前不可用。"
 
 
 def test_http_sse_surfaces_sandbox_failure_before_turn_baseline(tmp_path: Path, monkeypatch) -> None:
@@ -1612,9 +1799,7 @@ def test_http_sse_surfaces_sandbox_failure_before_turn_baseline(tmp_path: Path, 
 
     assert response.status_code == 200
     payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
-    assert payloads == [
-        f'<SSE id="{turn_id}" type="failed">Sandbox 初始化失败：Windows Sandbox Broker 已安装，但健康检查未通过。 Agent 已停止，未降级执行。</SSE>'
-    ]
+    assert payloads == [f'<SSE id="{turn_id}" type="failed">Windows Sandbox Broker 已安装，但健康检查未通过。</SSE>']
 
 
 class HttpCompactionClient:
@@ -1733,7 +1918,7 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
         monkeypatch.setattr(turn_routes, "build_local_application", failing_application)
         failed = client.post(f"/api/turns/{compacted['id']}/compact")
         assert failed.status_code == 502
-        assert failed.json()["detail"] == "上下文压缩失败，请稍后重试。"
+        assert failed.json()["detail"] == "summary provider failed"
         assert len(store.load_nodes(source.session_id)) == node_count
 
         state.active_runtime_stream_locks = {
@@ -1753,7 +1938,7 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
         state.model_config = missing_model
         missing = client.post(f"/api/turns/{source.id}/compact")
         assert missing.status_code == 422
-        assert missing.json()["detail"] == "模型未配置：model is missing"
+        assert missing.json()["detail"] == "model is missing"
         assert len(store.load_nodes(source.session_id)) == node_count
 
         state.model_config = resolve_provider
@@ -1764,7 +1949,7 @@ def test_http_compact_uses_llm_bridge_and_never_accepts_a_supplied_summary(tmp_p
         monkeypatch.setattr(turn_routes, "build_local_application", sandbox_failure)
         unavailable = client.post(f"/api/turns/{source.id}/compact")
         assert unavailable.status_code == 503
-        assert unavailable.json()["detail"] == ("Sandbox 初始化失败：Broker unavailable Agent 已停止，未降级执行。")
+        assert unavailable.json()["detail"] == "Broker unavailable"
         assert len(store.load_nodes(source.session_id)) == node_count
 
 

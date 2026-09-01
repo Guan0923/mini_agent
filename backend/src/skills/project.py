@@ -14,6 +14,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.domain import safe_error_message
 from backend.domain.skills import SkillSnapshot
 
 from .catalog import (
@@ -100,7 +101,7 @@ def discover_project_skills(workspace: Path, project_id: str) -> tuple[ProjectSk
             resolved = directory.resolve(strict=True)
             resolved.relative_to(skills_root)
         except (OSError, ValueError) as exc:
-            raise SkillConfigurationError(f"Project Skill directory escapes its root: {directory}") from exc
+            raise SkillConfigurationError(safe_error_message(exc)) from exc
         definition = _scan_skill_directory(resolved, project_id)
         if definition is not None:
             definitions.append(definition)
@@ -131,7 +132,7 @@ def _scan_skill_directory(directory: Path, project_id: str) -> ProjectSkillDefin
             try:
                 file_stat = path.stat()
             except OSError as exc:
-                raise SkillConfigurationError(f"Cannot stat project Skill file: {path}") from exc
+                raise SkillConfigurationError(safe_error_message(exc)) from exc
             if not stat.S_ISREG(file_stat.st_mode):
                 raise SkillConfigurationError(f"Project Skill contains a non-regular file: {path}")
             relative = path.relative_to(directory).as_posix()
@@ -146,7 +147,7 @@ def _scan_skill_directory(directory: Path, project_id: str) -> ProjectSkillDefin
                 raise SkillConfigurationError(f"Project Skill exceeds {MAX_TREE_BYTES} bytes: {directory}")
             entries.append((relative, len(data), data))
     except OSError as exc:
-        raise SkillConfigurationError(f"Cannot read project Skill tree: {directory}") from exc
+        raise SkillConfigurationError(safe_error_message(exc)) from exc
 
     tree_hasher = hashlib.sha256()
     for relative, size, data in sorted(entries, key=lambda item: item[0]):

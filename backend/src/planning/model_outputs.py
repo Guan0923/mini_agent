@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from backend.domain import ModelOutputError
+from backend.domain import ModelOutputError, safe_error_message
 
 
 def parse_json_object(raw: str, operation: str | None = None) -> dict[str, Any]:
@@ -18,7 +18,7 @@ def parse_json_object(raw: str, operation: str | None = None) -> dict[str, Any]:
     try:
         payload = json.loads(normalized)
     except json.JSONDecodeError as exc:
-        raise ModelOutputError("Model did not return valid JSON.", operation=operation, invalid_output=raw) from exc
+        raise ModelOutputError(safe_error_message(exc), operation=operation, invalid_output=raw) from exc
     if not isinstance(payload, dict):
         raise ModelOutputError("Model JSON must be an object.", operation=operation, invalid_output=raw)
     return payload

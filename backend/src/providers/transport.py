@@ -10,6 +10,8 @@ from typing import Any
 
 import requests
 
+from backend.domain import safe_error_message
+
 from .errors import ModelTransportError
 
 _TERMINAL_EVENTS = frozenset(
@@ -61,11 +63,11 @@ class JsonHttpTransport:
         except requests.RequestException as exc:
             if cancel_requested is not None and cancel_requested():
                 raise _paused_error(stream_started=False) from exc
-            raise _transport_error(exc, "Model request failed") from exc
+            raise _transport_error(exc) from exc
         except ValueError as exc:
             if cancel_requested is not None and cancel_requested():
                 raise _paused_error(stream_started=False) from exc
-            raise ModelTransportError("Model response is not valid JSON.", retryable=True) from exc
+            raise ModelTransportError(safe_error_message(exc), retryable=True) from exc
         except Exception as exc:
             if cancel_requested is not None and cancel_requested():
                 raise _paused_error(stream_started=False) from exc
@@ -124,7 +126,7 @@ class JsonHttpTransport:
                         line = line.decode("utf-8")
                     except UnicodeDecodeError as exc:
                         raise ModelTransportError(
-                            "Stream event is not valid UTF-8.",
+                            safe_error_message(exc),
                             retryable=not saw_event,
                             stream_started=saw_event,
                         ) from exc
@@ -143,7 +145,7 @@ class JsonHttpTransport:
                     event = json.loads(raw_event)
                 except json.JSONDecodeError as exc:
                     raise ModelTransportError(
-                        "Stream event is not valid JSON.",
+                        safe_error_message(exc),
                         retryable=not saw_event,
                         stream_started=saw_event,
                     ) from exc
@@ -173,7 +175,7 @@ class JsonHttpTransport:
         except requests.RequestException as exc:
             if cancel_requested is not None and cancel_requested():
                 raise _paused_error(stream_started=saw_event) from exc
-            raise _transport_error(exc, "Model stream failed", stream_started=saw_event) from exc
+            raise _transport_error(exc, stream_started=saw_event) from exc
         except Exception as exc:
             if cancel_requested is not None and cancel_requested():
                 raise _paused_error(stream_started=saw_event) from exc
@@ -232,9 +234,7 @@ def _response_detail(response: Any) -> str:
     return detail[:500].replace("\n", " ").strip()
 
 
-def _transport_error(
-    error: requests.RequestException, label: str, *, stream_started: bool = False
-) -> ModelTransportError:
+def _transport_error(error: requests.RequestException, *, stream_started: bool = False) -> ModelTransportError:
     response = getattr(error, "response", None)
     status_code = getattr(response, "status_code", None)
     headers = getattr(response, "headers", None)
@@ -248,24 +248,24 @@ def _transport_error(
     if headers is not None:
         request_id = str(headers.get("x-request-id") or headers.get("request-id") or "")
     detail = _response_detail(response)
-    suffix = []
-    if isinstance(status_code, int):
-        suffix.append(f"status={status_code}")
-    if request_id:
-        suffix.append(f"request_id={request_id}")
-    if detail:
-        suffix.append(f"detail={detail}")
-    context = f" ({'; '.join(suffix)})" if suffix else ""
     retryable = (
-        isinstance(error, (requests.Timeout, requests.ConnectionError)) or status_code in _RETRYABLE_STATUS_CODES
+        isinstance(
+            error,
+            (requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError),
+        )
+        or status_code in _RETRYABLE_STATUS_CODES
     )
     return ModelTransportError(
-        f"{label}: {error.__class__.__name__}{context}",
+        safe_error_message(error),
         retryable=retryable and not stream_started,
         status_code=status_code if isinstance(status_code, int) else None,
         retry_after=retry_after,
         stream_started=stream_started,
-        diagnostics={"request_id": request_id} if request_id else None,
+        diagnostics={
+            **({"request_id": request_id} if request_id else {}),
+            **({"response_detail": detail} if detail else {}),
+        }
+        or None,
     )
 
 

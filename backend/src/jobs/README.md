@@ -10,3 +10,5 @@
 - `processes/`：进程组和子进程 Job。
 
 `jobs.__init__` 是公开入口。Runtime/MCP/Sandbox 通过 registry 使用 Job，不直接共享可变进程表。
+
+Job 异常类型和状态字段保留调度、取消与资源回收所需的控制语义；`JobInfo.error` 统一展示脱敏后的最底层异常原消息，原消息为空时才回退为异常类名，不添加 Job 包装前缀。

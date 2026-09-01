@@ -14,6 +14,7 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from math import isfinite
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 from uuid import uuid4
@@ -42,6 +43,7 @@ ContentBlockType: TypeAlias = Literal[
     "subagent",
     "skill_snapshot",
     "compaction",
+    "retry",
     "error",
 ]
 TerminalErrorCategory: TypeAlias = Literal["user", "network", "tool", "provider", "server", "billing", "agent"]
@@ -66,6 +68,7 @@ CONTENT_BLOCK_TYPES = frozenset(
         "subagent",
         "skill_snapshot",
         "compaction",
+        "retry",
         "error",
     }
 )
@@ -214,6 +217,27 @@ def normalize_content(content: str | Mapping[str, Any] | Sequence[Mapping[str, A
             count = item.get("kept_item_count")
             if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                 raise RuntimeStateValidationError("compaction.kept_item_count must be non-negative.")
+        if kind == "retry":
+            if item.get("event") != "model_retry":
+                raise RuntimeStateValidationError("retry.event must be model_retry.")
+            if item.get("category") != "network":
+                raise RuntimeStateValidationError("retry.category must be network.")
+            if not isinstance(item.get("message"), str) or not item["message"]:
+                raise RuntimeStateValidationError("retry.message must be a non-empty string.")
+            attempt = item.get("attempt")
+            max_retries = item.get("max_retries")
+            if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+                raise RuntimeStateValidationError("retry.attempt must be a positive integer.")
+            if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < attempt:
+                raise RuntimeStateValidationError("retry.max_retries must include the current attempt.")
+            delay_seconds = item.get("delay_seconds")
+            if (
+                isinstance(delay_seconds, bool)
+                or not isinstance(delay_seconds, (int, float))
+                or not isfinite(delay_seconds)
+                or delay_seconds < 0
+            ):
+                raise RuntimeStateValidationError("retry.delay_seconds must be finite and non-negative.")
         if kind == "error":
             if not isinstance(item.get("category"), str) or not item["category"]:
                 raise RuntimeStateValidationError("error.category must be a non-empty string.")

@@ -75,7 +75,7 @@ export function useChatCommands({
         const skills = await listSkills();
         await onInsert(`# 已发现技能（${skills.length} 个）\n\n${skills.map((skill) => `- \`${skill.name}\` — ${skill.description}`).join("\n") || "（无）"}`);
       } catch (error) {
-        await onInsert(`⚠️ 获取技能失败：${String((error as Error).message ?? error)}`);
+        await onInsert(String((error as Error).message ?? error));
       }
       return;
     }
@@ -90,7 +90,7 @@ export function useChatCommands({
       const compacted = await compactTurn(activeRuntimeNode.id);
       await onReload(conversation.id, compacted.id);
     } catch (error) {
-      await onInsert(`⚠️ 压缩失败：${String((error as Error).message ?? error)}`);
+      await onInsert(String((error as Error).message ?? error));
     } finally {
       setCompactionPending(false);
     }

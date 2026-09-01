@@ -46,7 +46,7 @@ class SkillActivator:
             merged = self._merged_catalog(catalog, gate_result.usable)
             explicit = set(merged.explicit_names(run.task))
         except SkillConfigurationError as exc:
-            fail_run(runtime, f"Skill activation failed: {exc}")
+            fail_run(runtime, exc)
             return False
 
         project_names = {skill.name for skill in gate_result.usable}
@@ -72,7 +72,7 @@ class SkillActivator:
                 project_catalog = SkillCatalog(tuple(skill for skill in gate_result.usable))
                 run.active_skills = project_catalog.snapshots(explicit_project)
             except SkillConfigurationError as exc:
-                fail_run(runtime, f"Skill activation failed: {exc}")
+                fail_run(runtime, exc)
                 return False
             names = [skill.name for skill in run.active_skills]
             self._publish(runtime, names, names, [], source="explicit")
@@ -106,7 +106,7 @@ class SkillActivator:
             _publish_repairs(runtime, capabilities)
             fail_run(
                 runtime,
-                f"Skill selection failed: {exc}",
+                exc,
                 **planning_failure_data(exc, capabilities.name),
             )
             return False

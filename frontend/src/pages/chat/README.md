@@ -18,3 +18,7 @@
 - `todoPanel.tsx`：从最新 todo Item 投影任务列表。
 
 API/SSE 由 `api/` 和 `app/runController` 提供；本包必须保持 pause/steer、rewind 和 `Message[][]` 协议语义。
+
+HTTP `detail`、SSE terminal error 与 Turn error Item 的消息直接展示 backend 提供的脱敏根因文本；Chat、Trace、Compact、运行配置和 Agent Thread 交互不得再附加业务失败前缀。
+
+`retry` Item 在所有 Runtime 展示级别可见：running 时用 polite live status 显示“网络异常，正在重试（n/N）”及 backend 根因消息，结算后保留紧凑的“网络请求已重试”历史；Trace 将其归类为 `Network Retry`，不得按 Tool 展示。

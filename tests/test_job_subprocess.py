@@ -130,12 +130,11 @@ def test_start_failure_marks_failed_with_formatted_error(tmp_path) -> None:
         raise FileNotFoundError(f"no such executable: {args[0][0]}")
 
     job = make_job(tmp_path, popen_factory=failing_factory)
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError) as raised:
         job.start()
     info = job.info()
     assert info.state is JobState.FAILED
-    # Default ClassNameErrorFormatter: only the class name, never the message.
-    assert info.error == "FileNotFoundError"
+    assert info.error == str(raised.value)
     assert info.kind is JobKind.SUBPROCESS
 
 
@@ -207,11 +206,11 @@ def test_timeout_terminates_tree_and_marks_failed(tmp_path) -> None:
     wait_until(lambda: not _pid_alive(grandchild), timeout=5.0)
 
 
-def test_timeout_default_formatter_only_reports_class_name(tmp_path) -> None:
+def test_timeout_default_formatter_reports_original_message(tmp_path) -> None:
     job = make_job(tmp_path, argv=_sleep_cmd(300), timeout_seconds=0.3)
     job.start()
     wait_until(lambda: job.info().state is JobState.FAILED)
-    assert job.info().error == "CommandError"
+    assert job.info().error == "Command timed out after 0.3 seconds."
 
 
 # ---------------------------------------------------------------------------
@@ -299,23 +298,18 @@ def test_output_formatter_sections_both_streams() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_launch_failure_with_message_formatter_never_leaks_command_line(tmp_path) -> None:
+def test_launch_failure_with_message_formatter_reports_original_message(tmp_path) -> None:
     executable = str(tmp_path / "no-such-tool.exe")
 
     def failing_factory(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
         raise FileNotFoundError(f"no such executable: {args[0][0]}")
 
     job = make_job(tmp_path, argv=[executable, "--flag"], error_formatter=MessageErrorFormatter())
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError) as raised:
         job.start()
     info = job.info()
     assert info.state is JobState.FAILED
-    # MessageErrorFormatter may only pass through crafted CommandError texts;
-    # any other exception must fall back to a bare class name (global
-    # constraint 4: command lines/executable paths never enter JobInfo.error).
-    assert info.error == "FileNotFoundError"
-    assert executable not in (info.error or "")
-    assert "no-such-tool" not in (info.error or "")
+    assert info.error == str(raised.value)
 
 
 def test_cancel_landing_on_timeout_boundary_is_cancelled_not_failed(tmp_path) -> None:

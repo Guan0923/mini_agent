@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from backend.domain import safe_error_message
 from backend.sandbox import (
     BrokerConfiguration,
     SandboxMaintenanceBusy,
@@ -40,13 +41,13 @@ def install(request: Request) -> dict[str, object] | JSONResponse:
         logger.warning("sandbox broker install failed code=%s", exc.broker_code.value, exc_info=False)
         return JSONResponse(
             status_code=503,
-            content={"detail": exc.safe_message, "code": exc.broker_code.value},
+            content={"detail": safe_error_message(exc), "code": exc.broker_code.value},
         )
     except Exception as exc:
         logger.warning("sandbox broker install failed code=%s", type(exc).__name__, exc_info=False)
         return JSONResponse(
             status_code=503,
-            content={"detail": "沙箱 Broker 安装失败，请查看后端日志。", "code": "broker_install_failed"},
+            content={"detail": safe_error_message(exc), "code": "broker_install_failed"},
         )
 
 
@@ -61,13 +62,13 @@ def repair(request: Request) -> dict[str, object] | JSONResponse:
         logger.warning("sandbox broker repair failed code=%s", exc.broker_code.value, exc_info=False)
         return JSONResponse(
             status_code=503,
-            content={"detail": exc.safe_message, "code": exc.broker_code.value},
+            content={"detail": safe_error_message(exc), "code": exc.broker_code.value},
         )
     except Exception as exc:
         logger.warning("sandbox broker repair failed code=%s", type(exc).__name__, exc_info=False)
         return JSONResponse(
             status_code=503,
-            content={"detail": "沙箱 Broker 修复失败，请查看后端日志。", "code": "broker_install_failed"},
+            content={"detail": safe_error_message(exc), "code": "broker_install_failed"},
         )
 
 
@@ -103,13 +104,13 @@ def reinstall(request: Request) -> dict[str, object] | JSONResponse:
         logger.warning("sandbox broker reinstall failed code=%s", exc.broker_code.value, exc_info=False)
         return JSONResponse(
             status_code=503,
-            content={"detail": exc.safe_message, "code": exc.broker_code.value},
+            content={"detail": safe_error_message(exc), "code": exc.broker_code.value},
         )
     except Exception as exc:
         logger.warning("sandbox broker reinstall failed code=%s", type(exc).__name__, exc_info=False)
         return JSONResponse(
             status_code=503,
-            content={"detail": "沙箱 Broker 重装失败，请查看后端日志。", "code": "broker_install_failed"},
+            content={"detail": safe_error_message(exc), "code": "broker_install_failed"},
         )
 
 

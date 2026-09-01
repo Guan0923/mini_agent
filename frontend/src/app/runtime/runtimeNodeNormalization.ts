@@ -8,6 +8,7 @@ import type {
   RuntimeStateNode,
   RuntimeTreeNode,
   ThinkingMode,
+  TurnItem,
 } from "../../types";
 
 export const DEFAULT_RUNTIME_NODE_MODEL: RuntimeNodeModel = {
@@ -46,6 +47,32 @@ function positiveInteger(value: unknown, fallback: number): number {
 
 function tokenCount(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+export function validateRetryItem(value: unknown): void {
+  const item = objectValue(value);
+  if (item.type !== "retry") return;
+  const attempt = item.attempt;
+  const maxRetries = item.max_retries;
+  const delaySeconds = item.delay_seconds;
+  if (
+    item.event !== "model_retry"
+    || item.category !== "network"
+    || typeof item.message !== "string"
+    || item.message.length === 0
+    || typeof attempt !== "number"
+    || !Number.isInteger(attempt)
+    || attempt < 1
+    || typeof maxRetries !== "number"
+    || !Number.isInteger(maxRetries)
+    || maxRetries < attempt
+    || typeof delaySeconds !== "number"
+    || !Number.isFinite(delaySeconds)
+    || delaySeconds < 0
+    || !["running", "failed", "success"].includes(String(item.status))
+  ) {
+    throw new Error("Invalid retry Item");
+  }
 }
 
 /**
@@ -126,6 +153,7 @@ export function normalizeRuntimeNode(node: RuntimeTreeNode): RuntimeTreeNode {
       if (message.role === "user" && (message.content.length !== 1 || message.content[0]?.type !== "text" || typeof message.content[0]?.text !== "string")) {
         throw new Error("A user Message must contain one text Item");
       }
+      for (const item of message.content as TurnItem[]) validateRetryItem(item);
     }
     if (turn.status !== "running" && version[version.length - 1]?.role !== "assistant") throw new Error("A non-running Turn must end with assistant");
   }

@@ -7,3 +7,5 @@
 - `index.ts`：对上层公开 transport API。
 
 业务 API 只能通过这里发普通 HTTP 请求；SSE 的流读取仍由 `../conversations/chat.ts` 组织，但复用这里的 URL 与错误类型。
+
+错误响应继续由 `ApiError.status` 和 `ApiError.code` 承载控制元数据；`detail` 作为 backend 已脱敏的根因消息原样传给展示层，不在 transport 添加业务前缀。

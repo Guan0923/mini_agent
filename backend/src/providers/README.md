@@ -10,3 +10,5 @@
 - `chat_completions/`：Chat Completions 兼容协议实现。
 
 Provider 不得导入 storage；API key 只通过已解析配置进入 transport，日志不得回显 secret/header。
+
+Provider 异常类型可以保存重试、HTTP、request id 与流状态元数据，但异常文本必须保持底层 transport/JSON 根因原消息并在外部投影时脱敏。

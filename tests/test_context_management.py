@@ -344,7 +344,7 @@ def test_chat_completions_tokenizer_load_failure_is_actionable() -> None:
         tokenizer_loader=fail,
     )
 
-    with pytest.raises(ModelConfigurationError, match="TOKENIZER_MODEL"):
+    with pytest.raises(ModelConfigurationError, match="offline"):
         chat_completions.estimate_tokens([UserMessage(content="hello")], [], {})
 
 

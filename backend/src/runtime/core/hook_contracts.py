@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Generic, Literal, TypeVar
 
-from backend.domain import ChatMessage, ToolSpec
+from backend.domain import ChatMessage, ToolSpec, safe_error_message
 
 from .contracts import InterruptHandler
 from .events import RuntimeEvent
@@ -41,7 +41,7 @@ class HookErrorInfo:
 
     @classmethod
     def from_exception(cls, error: Exception) -> HookErrorInfo:
-        return cls(error.__class__.__name__, str(error))
+        return cls(error.__class__.__name__, safe_error_message(error))
 
 
 @dataclass(frozen=True)

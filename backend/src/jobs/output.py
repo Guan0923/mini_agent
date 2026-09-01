@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from backend.domain import safe_error_message
+
 __all__ = ["CommandError", "ErrorFormatter", "MessageErrorFormatter", "format_command_output"]
 
 #: Hardware-independent default: a per-stream budget shared by both sections.
@@ -35,20 +37,10 @@ class CommandError(RuntimeError):
 
 
 class MessageErrorFormatter:
-    """Pass crafted command-result messages through; everything else stays safe.
-
-    Intended for job result messages produced by :class:`CommandError`, so a
-    caller can align ``JobInfo.error`` with the exact strings
-    :class:`~backend.tools.command.WorkspaceCommand` emits. For any other
-    exception it falls back to emitting only the class name, so raw launch
-    ``OSError``/``FileNotFoundError`` strings (which embed command lines and
-    executable paths — global constraint 4) never leak into ``JobInfo.error``.
-    """
+    """Project the same safe root message used by every other boundary."""
 
     def format_error(self, exception: BaseException) -> str:
-        if isinstance(exception, CommandError):
-            return str(exception)
-        return type(exception).__name__
+        return safe_error_message(exception)
 
 
 def format_command_output(

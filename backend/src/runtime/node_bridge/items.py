@@ -100,7 +100,13 @@ class _ItemProjectionMixin:
         self._stream_item_type = None
         self._stream_text = ""
 
-    def _append_item(self, item: Mapping[str, Any], *, persist: bool = True) -> RuntimeState:
+    def _append_item(
+        self,
+        item: Mapping[str, Any],
+        *,
+        persist: bool = True,
+        produces_output: bool = True,
+    ) -> RuntimeState:
         self._finish_stream_item()
         self._ensure_assistant_message()
         normalized = {str(key): self._json_value(value) for key, value in item.items()}
@@ -118,7 +124,8 @@ class _ItemProjectionMixin:
         self.assistant = updated
         self.last_node = updated
         if persist:
-            self.produced_item = True
+            if produces_output:
+                self.produced_item = True
             if normalized.get("status") in {"success", "failed"}:
                 assert self.assistant_message_idx is not None
                 self._record_completed_item(self.assistant_message_idx, item_idx)

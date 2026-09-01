@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .error_handlers import install_error_handlers
 from .security import LocalWebSettings, origin_allowed
 from .state import DEFAULT_DATA_ROOT, WebAppState
 
@@ -33,6 +34,7 @@ def create_app(state: WebAppState | None = None) -> FastAPI:
             resolved.close()
 
     app = FastAPI(title="Mini-Agent Web", version="0.0.1", lifespan=lifespan)
+    install_error_handlers(app)
     app.state.web = resolved
     web_settings = LocalWebSettings.from_env()
 

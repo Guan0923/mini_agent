@@ -11,3 +11,5 @@
 - `prompts/`：Agent/Plan/Title 模板组合。
 
 Planning 依赖 domain 和 Provider 协议，不负责持久化或 HTTP 展示。
+
+Plan、Agent、Compact、Title、Skill 等流程不得为捕获到的异常添加展示前缀；分类与 repair 诊断放在结构化元数据，展示文本使用统一安全根因投影。

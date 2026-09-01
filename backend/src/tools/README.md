@@ -12,3 +12,5 @@
 - `filesystem/`、`web/`：路径边界和 SSRF 安全实现。
 
 所有 tool_call 在 Handler 前经过 Runtime Hook/Sandbox 决策；资源语义校验仍必须保留在具体 Handler。
+
+`ToolError` 可以保留工具失败分类，但捕获底层异常时不得添加工具名或 unexpected 前缀；Tool result/error 展示统一使用脱敏后的根因原消息。

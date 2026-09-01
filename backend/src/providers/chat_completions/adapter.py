@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from backend.domain import AssistantMessage, ChatMessage, ToolSpec
+from backend.domain import AssistantMessage, ChatMessage, ToolSpec, safe_error_message
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
 
 from ..config import ModelConfig
@@ -32,7 +32,7 @@ def _prepare_response(runtime: AgentRuntime) -> PreparedResponse:
         if isinstance(raw, Mapping):
             invalid_output = json.dumps(raw, ensure_ascii=False, default=str)
         raise ProviderOutputError(
-            str(exc),
+            safe_error_message(exc),
             operation=runtime.exchange.operation,
             invalid_output=invalid_output,
             diagnostics=exc.diagnostics,
@@ -113,10 +113,7 @@ class ChatCompletions:
         try:
             self._tokenizer = self._tokenizer_loader(self.config.tokenizer_model)
         except Exception as exc:
-            raise ModelConfigurationError(
-                "Unable to load tokenizer "
-                f"{self.config.tokenizer_model!r}. Check network/cache access or set TOKENIZER_MODEL."
-            ) from exc
+            raise ModelConfigurationError(safe_error_message(exc)) from exc
         return self._tokenizer
 
     def _estimate_serialized(self, serialized: str) -> int:

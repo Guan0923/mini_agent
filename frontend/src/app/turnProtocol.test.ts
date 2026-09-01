@@ -470,6 +470,69 @@ describe("Turn protocol projection", () => {
     expect(projected[1].content).toBe("回答一回答二");
   });
 
+  it("keeps retry Items visible and projects their canonical runtime event", () => {
+    const retry = {
+      type: "retry",
+      event: "model_retry",
+      category: "network",
+      message: "connection reset by peer",
+      attempt: 1,
+      max_retries: 3,
+      delay_seconds: 0.5,
+      status: "running" as const,
+    };
+    const projected = projectTurnPath(new Map([["session_1:turn_1", turn({
+      status: "running",
+      data: [[
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
+        { role: "assistant", content: [retry] },
+      ]],
+    })]]), "turn_1");
+
+    expect(projected[1].items).toEqual([retry]);
+    expect(projected[1].events).toContainEqual({
+      kind: "model_retry",
+      message: "connection reset by peer",
+      data: retry,
+    });
+  });
+
+  it("rejects malformed retry Items in snapshots and deltas", () => {
+    const retry = {
+      type: "retry",
+      event: "model_retry",
+      category: "network",
+      message: "connection reset by peer",
+      attempt: 1,
+      max_retries: 3,
+      delay_seconds: 0.5,
+      status: "running" as const,
+    };
+    expect(() => normalizeRuntimeNode(turn({
+      status: "running",
+      data: [[
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
+        { role: "assistant", content: [{ ...retry, delay_seconds: -1 }] },
+      ]],
+    }))).toThrow("Invalid retry Item");
+
+    const accumulator = runtimeNodeAccumulator();
+    applyRuntimeNodeFrame(accumulator, { type: "turn.snapshot", revision: 0, turn: turn({ status: "running" }) });
+    expect(() => applyRuntimeNodeFrame(accumulator, {
+      type: "turn.delta",
+      session_id: "session_1",
+      turn_id: "turn_1",
+      revision: 1,
+      operations: [{
+        op: "append_item",
+        data_idx: 0,
+        message_idx: 1,
+        item_idx: 1,
+        item: { ...retry, attempt: 0 },
+      }],
+    })).toThrow("Invalid retry Item");
+  });
+
   it("keeps Skill selection metadata out of assistant presentation", () => {
     const projected = projectTurnPath(new Map([["session_1:turn_1", turn({
       status: "running",

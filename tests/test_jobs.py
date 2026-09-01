@@ -366,9 +366,8 @@ class TestErrorSafety:
         job.start()
         job._mark_failed(ValueError("api_key=super-secret"))
         error = job.info().error
-        assert error == "ValueError"
+        assert error == "api_key=[REDACTED]"
         assert "super-secret" not in (error or "")
-        assert "api_key" not in (error or "")
 
     def test_error_is_always_formatted_text_not_exception(self) -> None:
         job = make_job()

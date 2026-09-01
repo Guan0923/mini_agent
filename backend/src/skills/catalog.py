@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 
+from backend.domain import safe_error_message
 from backend.domain.skills import SkillSnapshot
 
 MAX_SKILL_BYTES = 64 * 1024
@@ -27,13 +28,13 @@ def read_manifest_bytes(path: Path) -> bytes:
     try:
         raw = path.read_bytes()
     except OSError as exc:
-        raise SkillConfigurationError(f"Cannot read Skill manifest {path}: {exc}") from exc
+        raise SkillConfigurationError(safe_error_message(exc)) from exc
     if len(raw) > MAX_SKILL_BYTES:
         raise SkillConfigurationError(f"Skill manifest exceeds {MAX_SKILL_BYTES} bytes: {path}")
     try:
         raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise SkillConfigurationError(f"Skill manifest must be UTF-8: {path}") from exc
+        raise SkillConfigurationError(safe_error_message(exc)) from exc
     return raw
 
 
@@ -46,12 +47,12 @@ def parse_manifest(raw: bytes, path: Path) -> tuple[dict[str, object], list[str]
     try:
         closing = lines.index("---", 1)
     except ValueError as exc:
-        raise SkillConfigurationError(f"Skill manifest has unclosed YAML frontmatter: {path}") from exc
+        raise SkillConfigurationError(safe_error_message(exc)) from exc
     frontmatter_text = "\n".join(lines[1:closing])
     try:
         frontmatter = yaml.safe_load(frontmatter_text)
     except yaml.YAMLError as exc:
-        raise SkillConfigurationError(f"Invalid YAML frontmatter in {path}: {exc}") from exc
+        raise SkillConfigurationError(safe_error_message(exc)) from exc
     if not isinstance(frontmatter, dict):
         raise SkillConfigurationError(f"Skill frontmatter must be a mapping: {path}")
     return frontmatter, lines[closing + 1 :]
@@ -211,7 +212,7 @@ class SkillCatalog:
             resolved = path.resolve(strict=True)
             resolved.relative_to(root)
         except (OSError, ValueError) as exc:
-            raise SkillConfigurationError(f"{label} escapes its allowed root: {path}") from exc
+            raise SkillConfigurationError(safe_error_message(exc)) from exc
         return resolved
 
     @classmethod

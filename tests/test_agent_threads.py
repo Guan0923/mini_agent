@@ -1414,7 +1414,7 @@ def test_agent_thread_message_returns_503_when_redis_is_unavailable(tmp_path: Pa
                 json={"session_id": sidebar["session_id"], "content": "must fail closed"},
             )
             assert response.status_code == 503
-            assert response.json() == {"detail": "message_queue_unavailable"}
+            assert response.json() == {"detail": "redis unavailable"}
     finally:
         state.close()
 
@@ -1610,7 +1610,6 @@ def test_persistent_delegate_reports_result_and_accepts_follow_up(tmp_path: Path
     assert isinstance(first_turn, RuntimeState)
     assert first_turn.cwd == str(session_workspace.resolve())
     assert first_turn.project_cwd == str(project_workspace.resolve())
-
     deadline = monotonic() + 5
     while monotonic() < deadline:
         reports = store.list_agent_turn_reports(session.session_id, states=("queued",))

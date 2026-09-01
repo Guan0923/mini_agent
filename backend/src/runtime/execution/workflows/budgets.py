@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from backend.domain import AssistantMessage, PlanningError
+from backend.domain import AssistantMessage, PlanningError, safe_error_message
 from backend.planning import PlannerCapabilities
 
 from ...core.context import AgentRuntime
@@ -44,7 +44,7 @@ def _fail_for_budget(runtime: AgentRuntime, limit_type: str, reason: str) -> Non
             answer = message.content.strip()
             source = "planner"
         except Exception as exc:
-            finalization_error = _truncate(str(exc) or exc.__class__.__name__)
+            finalization_error = _truncate(safe_error_message(exc))
             _publish_repairs(runtime, capabilities)
     if not answer:
         answer = _budget_fallback(runtime, reason)

@@ -27,6 +27,7 @@ from backend.sandbox import (
     ResourceUsage,
     SandboxAdmission,
     SandboxAdmissionTimeout,
+    SandboxFailureCode,
     SandboxInitializationError,
     SandboxJobContext,
     SandboxLauncher,
@@ -429,6 +430,26 @@ def test_broker_service_rejects_expired_signed_request(tmp_path: Path) -> None:
     }
     with pytest.raises(SandboxInitializationError, match="expired"):
         service.handle(json.dumps(request).encode())
+
+
+def test_broker_remote_error_and_audit_keep_code_but_project_safe_root_message(tmp_path: Path) -> None:
+    with pytest.raises(SandboxInitializationError, match="disk unavailable") as raised:
+        WindowsBrokerClient._raise_remote_error(
+            {"code": SandboxFailureCode.INIT_FAILED.value, "message": "disk unavailable"}
+        )
+    assert raised.value.code is SandboxFailureCode.INIT_FAILED
+
+    configuration = BrokerConfiguration.create(program_data=tmp_path)
+    service = WindowsBrokerService(configuration, adapter=types.SimpleNamespace(), is_windows=False)
+    root = OSError("Token=private-value")
+    wrapper = SandboxInitializationError("Broker operation failed")
+    wrapper.__cause__ = root
+    service._audit("launch", "failed", {}, error=wrapper)
+
+    record = json.loads(configuration.audit_path.read_text(encoding="ascii"))
+    assert record["failure"] == "Token=[REDACTED]"
+    assert record["failure_type"] == "OSError"
+    assert "private-value" not in json.dumps(record)
 
 
 def test_resource_monitor_rejects_memory() -> None:

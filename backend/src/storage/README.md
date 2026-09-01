@@ -17,3 +17,5 @@
 - `codec.py`：RuntimeState/消息 JSON 编解码。
 
 存储层不发布 UI 事件；Redis 投递是 FIFO at-least-once，SQLite 幂等持久化成功后才 ACK。事务边界由 repository 明确控制，secret 不得写入 `config.toml`。
+
+Storage 包装类型只保留队列/事务等控制语义；任何向 HTTP、Runtime、Job 或审计传播的错误文本都必须统一投影并脱敏最底层异常消息。

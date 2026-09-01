@@ -47,6 +47,19 @@ class FakeStreamSession:
         return self.response
 
 
+class BrokenChunkedResponse(FakeStreamResponse):
+    def iter_lines(self, decode_unicode: bool = False):
+        assert decode_unicode is False
+        raise requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+
+
+class BrokenChunkedAfterEventResponse(FakeStreamResponse):
+    def iter_lines(self, decode_unicode: bool = False):
+        assert decode_unicode is False
+        yield 'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}'
+        raise requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+
+
 class UnexpectedSession:
     def post(self, url: str, **kwargs: object) -> None:
         raise AssertionError("Transport must not run when request preparation fails.")
@@ -221,8 +234,12 @@ def runtime_for_custom(*, max_transport_retries: int = 2):
     return runtime
 
 
-def runtime_for_stream():
-    runtime = AgentRunner(RuleBasedPlanner(), ToolRegistry()).new_runtime(task="hello")
+def runtime_for_stream(*, max_transport_retries: int = 5):
+    runtime = AgentRunner(
+        RuleBasedPlanner(),
+        ToolRegistry(),
+        max_transport_retries=max_transport_retries,
+    ).new_runtime(task="hello")
     runtime.exchange.messages = [UserMessage(content="hello")]
     runtime.exchange.stream = True
     return runtime
@@ -512,7 +529,7 @@ def test_wire_messages_merges_duplicate_canonical_tool_calls() -> None:
     assert [item["tool_call_id"] for item in tools] == ["call_a", "call_b"]
 
 
-@pytest.mark.parametrize("status_code", [429, 503])
+@pytest.mark.parametrize("status_code", [408, 429, 500, 502, 503, 504])
 def test_transient_http_status_retries_with_retry_after(monkeypatch, status_code: int) -> None:
     session = SequencedSession(
         [
@@ -544,6 +561,10 @@ def test_transient_http_status_retries_with_retry_after(monkeypatch, status_code
     ]
     assert events[0].data["transport"]["attempt"] == 1
     assert events[2].data["transport"]["attempt"] == 2
+    assert events[1].message == f"HTTP {status_code}"
+    assert events[1].data["attempt"] == 1
+    assert events[1].data["max_transport_retries"] == 2
+    assert events[1].data["delay_seconds"] == 0.0
     assert events[1].data["status_code"] == status_code
 
 
@@ -562,7 +583,7 @@ def test_non_retryable_http_status_fails_immediately(monkeypatch) -> None:
     runtime = runtime_for_custom()
     monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
 
-    with pytest.raises(ModelRequestError, match="HTTPError"):
+    with pytest.raises(ModelRequestError, match="HTTP 401"):
         client.run(runtime)
 
     assert session.calls == 1
@@ -581,12 +602,16 @@ def test_invalid_json_http_body_retries(monkeypatch) -> None:
         adapter=CustomAdapter(),
     )
     runtime = runtime_for_custom()
+    events = []
+    runtime.services.publish = events.append
     monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
 
     response = client.run(runtime)
 
     assert response.message.content == "recovered"
     assert session.calls == 2
+    assert [event.kind for event in events] == ["model_request", "model_retry", "model_request", "model_response"]
+    assert events[1].message == "invalid JSON"
 
 
 def test_stream_retries_only_before_the_first_event(monkeypatch) -> None:
@@ -608,6 +633,53 @@ def test_stream_retries_only_before_the_first_event(monkeypatch) -> None:
     assert session.calls == 2
     assert first.closed is True
     assert second.closed is True
+
+
+def test_chunked_encoding_failure_retries_before_the_first_event(monkeypatch) -> None:
+    first = BrokenChunkedResponse([])
+    second = FakeStreamResponse(
+        [
+            'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+    )
+    session = SequencedStreamSession([first, second])
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
+    runtime = runtime_for_stream(max_transport_retries=1)
+    events = []
+    runtime.services.publish = events.append
+    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
+
+    response = client.run(runtime)
+
+    assert response.message.content == "done"
+    assert session.calls == 2
+    assert first.closed is True and second.closed is True
+    assert [event.kind for event in events] == ["model_request", "model_retry", "model_request", "model_response"]
+    assert events[1].message == "Response ended prematurely"
+
+
+def test_chunked_encoding_failure_does_not_retry_after_stream_output(monkeypatch) -> None:
+    first = BrokenChunkedAfterEventResponse([])
+    second = FakeStreamResponse(
+        [
+            'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"must not run"},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+    )
+    session = SequencedStreamSession([first, second])
+    client = LLMClient(ModelConfig("secret", "https://example.test/v1", "demo"), session=session)
+    runtime = runtime_for_stream(max_transport_retries=1)
+    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
+
+    with pytest.raises(ModelTransportError) as exc_info:
+        client.run(runtime)
+
+    assert str(exc_info.value) == "Response ended prematurely"
+    assert exc_info.value.retryable is False
+    assert exc_info.value.stream_started is True
+    assert session.calls == 1
+    assert first.closed is True
 
 
 def test_chat_completions_invalid_tool_arguments_are_regenerated_before_execution() -> None:
@@ -667,10 +739,14 @@ def test_chat_completions_invalid_tool_arguments_are_regenerated_before_executio
     assert planner.consume_output_repairs()[0]["outcome"] == "repaired"
 
 
-def test_connection_timeout_retries(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [requests.Timeout("timed out"), requests.ConnectionError("connection reset by peer")],
+)
+def test_connection_failure_retries(monkeypatch, failure: requests.RequestException) -> None:
     session = SequencedSession(
         [
-            requests.Timeout("timed out"),
+            failure,
             FakeJsonResponse(200, {"answer": "recovered"}),
         ]
     )
@@ -688,3 +764,55 @@ def test_connection_timeout_retries(monkeypatch) -> None:
     assert response.message.content == "recovered"
     assert session.calls == 2
     assert delays == [0.5]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        requests.Timeout("connect timed out"),
+        requests.ConnectionError("connection reset by peer"),
+    ],
+)
+def test_transport_failure_exposes_the_raw_requests_message(failure: requests.RequestException) -> None:
+    client = LLMClient(
+        ModelConfig("secret", "https://unused.test", "custom-model", provider="custom"),
+        session=SequencedSession([failure]),
+        adapter=CustomAdapter(),
+    )
+    runtime = runtime_for_custom(max_transport_retries=0)
+
+    with pytest.raises(ModelTransportError) as exc_info:
+        client.run(runtime)
+
+    assert str(exc_info.value) == str(failure)
+    assert exc_info.value.retryable is True
+
+
+def test_invalid_json_exposes_the_raw_decoder_message() -> None:
+    client = LLMClient(
+        ModelConfig("secret", "https://unused.test", "custom-model", provider="custom"),
+        session=SequencedSession([FakeJsonResponse(200, ValueError("Expecting value: line 1 column 1"))]),
+        adapter=CustomAdapter(),
+    )
+    runtime = runtime_for_custom(max_transport_retries=0)
+
+    with pytest.raises(ModelTransportError) as exc_info:
+        client.run(runtime)
+
+    assert str(exc_info.value) == "Expecting value: line 1 column 1"
+
+
+def test_incomplete_chunked_stream_exposes_raw_error_and_closes_response() -> None:
+    response = BrokenChunkedResponse([])
+    client = LLMClient(
+        ModelConfig("secret", "https://example.test/v1", "demo"),
+        session=SequencedStreamSession([response]),
+    )
+    runtime = runtime_for_stream(max_transport_retries=0)
+
+    with pytest.raises(ModelTransportError) as exc_info:
+        client.run(runtime)
+
+    assert str(exc_info.value) == "Response ended prematurely"
+    assert exc_info.value.stream_started is False
+    assert response.closed is True

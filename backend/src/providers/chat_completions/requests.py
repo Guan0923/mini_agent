@@ -7,6 +7,7 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from backend.domain import safe_error_message
 from backend.runtime.core.context import AgentRuntime
 
 from ..errors import ModelRequestError
@@ -54,7 +55,7 @@ def _validate_tool_choice(value: Any, tool_names: set[str]) -> str | dict[str, A
         choice_type = value["type"]
         name = value["function"]["name"]
     except (KeyError, TypeError) as exc:
-        raise ModelRequestError("Chat Completions named tool_choice does not match the function schema.") from exc
+        raise ModelRequestError(safe_error_message(exc)) from exc
     if choice_type != "function" or not isinstance(name, str) or name not in tool_names:
         raise ModelRequestError("Chat Completions named tool_choice must reference one of the supplied functions.")
     return {"type": "function", "function": {"name": name}}
