@@ -646,6 +646,89 @@ test("chat stays bottom-anchored and exposes a centered translucent return butto
   await expect(returnButton).toHaveCount(0);
 });
 
+test("desktop timeline exposes more than 30 user Messages including steering in its own scroll viewport", async ({ page }) => {
+  test.setTimeout(300_000);
+  await page.setViewportSize({ width: 1280, height: 360 });
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", { data: { title: "Timeline Long Session" } });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Timeline Long Session", exact: true }).click();
+  await expect(page.getByLabel("聊天输入")).toBeVisible();
+  for (let index = 0; index < 29; index += 1) {
+    await send(page, `timeline history ${index}`);
+    await expect(page.locator(".message.user")).toHaveCount(index + 1);
+    await expect(page.locator(".message.assistant")).toHaveCount(index + 1);
+  }
+
+  await page.getByLabel("聊天输入").fill("steering fifo");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByRole("button", { name: "暂停" })).toBeVisible();
+  await page.getByLabel("聊天输入").fill("timeline redirect one");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  const firstSteer = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/steer"));
+  await page.getByRole("button", { name: "发送第 1 条待发送消息" }).click();
+  expect((await firstSteer).status()).toBe(202);
+  await expect(page.locator(".message.user")).toHaveCount(31, { timeout: 15_000 });
+  await expect(page.locator(".message.assistant").last()).toContainText("FIFO steering complete.", { timeout: 15_000 });
+  await expect(page.locator(".message.assistant").last().getByRole("button", { name: "Fork" })).toBeVisible();
+
+  const timeline = page.getByRole("navigation", { name: "消息时间轴" });
+  const viewport = page.getByRole("region", { name: "消息时间轴刻度" });
+  const ticks = timeline.getByRole("button");
+  await expect(ticks).toHaveCount(31);
+  await expect(ticks.first()).toHaveAccessibleName("跳转到消息：timeline history 0");
+  await expect(ticks.last()).toHaveAccessibleName("跳转到消息：timeline redirect one");
+  expect(await timeline.evaluate((element) =>
+    element.parentElement?.classList.contains("chat-content") === true
+      && element.closest(".chat-scroll") === null
+  )).toBe(true);
+  expect(await timeline.evaluate((element) => getComputedStyle(element).pointerEvents)).toBe("none");
+  expect(await viewport.evaluate((element) => ({
+    overflowY: getComputedStyle(element).overflowY,
+    pointerEvents: getComputedStyle(element).pointerEvents,
+    scrollbarWidth: getComputedStyle(element).scrollbarWidth,
+    scrollable: element.scrollHeight > element.clientHeight,
+    distanceToBottom: element.scrollHeight - element.clientHeight - element.scrollTop,
+  }))).toEqual({
+    overflowY: "auto",
+    pointerEvents: "auto",
+    scrollbarWidth: "none",
+    scrollable: true,
+    distanceToBottom: 0,
+  });
+
+  await viewport.evaluate((element) => { element.scrollTop = 0; });
+  await viewport.press("PageDown");
+  await expect.poll(() => viewport.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await viewport.evaluate((element) => { element.scrollTop = 0; });
+  await ticks.first().hover();
+  const firstTip = page.getByRole("tooltip");
+  await expect(firstTip).toContainText("timeline history 0");
+  const firstBounds = await firstTip.boundingBox();
+  const timelineBounds = await timeline.boundingBox();
+  expect(firstBounds).not.toBeNull();
+  expect(timelineBounds).not.toBeNull();
+  expect(firstBounds!.y).toBeGreaterThanOrEqual(timelineBounds!.y);
+  expect(firstBounds!.y + firstBounds!.height).toBeLessThanOrEqual(timelineBounds!.y + timelineBounds!.height);
+
+  await viewport.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await ticks.last().hover();
+  const lastTip = page.getByRole("tooltip");
+  await expect(lastTip).toContainText("timeline redirect one");
+  const lastBounds = await lastTip.boundingBox();
+  expect(lastBounds).not.toBeNull();
+  expect(lastBounds!.y).toBeGreaterThanOrEqual(timelineBounds!.y);
+  expect(lastBounds!.y + lastBounds!.height).toBeLessThanOrEqual(timelineBounds!.y + timelineBounds!.height);
+
+  const timelineScrollTop = await viewport.evaluate((element) => element.scrollTop);
+  const chatScrollTop = await page.locator("[data-conversation-scroll]").evaluate((element) => element.scrollTop);
+  await lastTip.hover();
+  await page.mouse.wheel(0, 160);
+  expect(await viewport.evaluate((element) => element.scrollTop)).toBe(timelineScrollTop);
+  expect(await page.locator("[data-conversation-scroll]").evaluate((element) => element.scrollTop)).toBe(chatScrollTop);
+});
+
 test("first main Turn receives a dedicated model-generated title", async ({ page }) => {
   const sidebar = await page.request.post("/api/sidebar-threads", { data: {} });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();
@@ -728,20 +811,28 @@ test("real Turn SSE flow supports tools, rewind versions, fork, and compact", as
   expect((await rewindResponse).ok()).toBeTruthy();
   await expect(page.locator(".message.user")).toHaveCount(1);
   await expect(page.locator(".message.user").first()).toContainText("rewound hello");
+  await expect(page.getByRole("button", { name: "跳转到消息：rewound hello" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "跳转到消息：hello" })).toHaveCount(0);
   await page.locator(".message.user").first().getByRole("button", { name: "上一个消息版本" }).click();
   await expect(page.locator(".message.user")).toHaveCount(1);
   await expect(page.locator(".message.user").first()).toContainText("hello");
+  await expect(page.getByRole("button", { name: "跳转到消息：hello" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "跳转到消息：rewound hello" })).toHaveCount(0);
   await page.locator(".message.user").first().getByRole("button", { name: "下一个消息版本" }).click();
   await expect(page.locator(".message.user")).toHaveCount(1);
   await expect(page.locator(".message.user").first()).toContainText("rewound hello");
+  await expect(page.getByRole("button", { name: "跳转到消息：rewound hello" })).toBeVisible();
 
   await send(page, "next turn");
   await expect(page.locator(".message.user").last()).toContainText("next turn");
   await page.locator(".message.user").first().getByRole("button", { name: "上一个消息版本" }).click();
   await expect(page.locator(".message.user").first()).toContainText("hello");
   await expect(page.locator(".message.user").last()).toContainText("next turn");
+  await expect(page.getByRole("button", { name: "跳转到消息：hello" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "跳转到消息：next turn" })).toBeVisible();
   await page.locator(".message.user").first().getByRole("button", { name: "下一个消息版本" }).click();
   await expect(page.locator(".message.user").first()).toContainText("rewound hello");
+  await expect(page.getByRole("button", { name: "跳转到消息：rewound hello" })).toBeVisible();
 
   await page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }).click();
   await expect(page.getByRole("button", { name: "Playwright Turn", exact: true })).toHaveCount(1);

@@ -7,7 +7,9 @@
  * transcript projection instead of provider-specific session faces.
  */
 import {
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -17,7 +19,6 @@ import {
 import type { ChatMessage } from "../../types";
 import css from "./TimelineTicks.module.css";
 
-export const MAX_TICKS = 30;
 export const ROW_H = 12;
 export const TICK_BASE_W = 18;
 export const TICK_AMP = 24;
@@ -27,7 +28,7 @@ export const TIP_MAX_H = 280;
 
 interface TimelineEntry {
   key: string;
-  seq: number;
+  fingerprint: string;
   time: number;
   text: string;
 }
@@ -79,19 +80,16 @@ export function timelineTextOf(content: readonly unknown[], fallback = ""): stri
 
 export function buildTimelineEntries(messages: readonly ChatMessage[]): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
-  let fallbackSeq = 0;
   for (const message of messages) {
-    if (message.role !== "user" || message.timelineSource === "steering") continue;
-    fallbackSeq += 1;
+    if (message.role !== "user") continue;
     entries.push({
       key: message.id,
-      seq: Number.isFinite(message.timelineSeq) ? Number(message.timelineSeq) : fallbackSeq,
+      fingerprint: JSON.stringify([message.id, message.content, message.deliveryId ?? ""]),
       time: Number.isFinite(message.timelineTime) ? Number(message.timelineTime) : 0,
       text: message.timelineText || message.content || "",
     });
   }
-  entries.sort((a, b) => a.seq - b.seq || a.key.localeCompare(b.key));
-  return entries.slice(-MAX_TICKS);
+  return entries;
 }
 
 function gaussWeight(distance: number): number {
@@ -109,9 +107,16 @@ function hitTarget(key: string): void {
 
 export default function ConversationTimeline({ messages, scrollContainerRef }: ConversationTimelineProps) {
   const entries = useMemo(() => buildTimelineEntries(messages), [messages]);
+  const fingerprints = useMemo(() => entries.map((entry) => entry.fingerprint), [entries]);
   const [rect, setRect] = useState<StripRect | null>(null);
-  const [hover, setHover] = useState(-1);
+  const [hoverKey, setHoverKey] = useState<string | null>(null);
+  const [tipTop, setTipTop] = useState(4);
   const aliveRef = useRef(true);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const tipRef = useRef<HTMLDivElement | null>(null);
+  const previousFingerprintsRef = useRef<readonly string[] | null>(null);
+  const atBottomRef = useRef(true);
 
   useEffect(() => {
     // React StrictMode intentionally re-runs mount effects in development.
@@ -129,7 +134,6 @@ export default function ConversationTimeline({ messages, scrollContainerRef }: C
       return;
     }
     const owner = scrollEl.parentElement;
-    const composer = document.querySelector<HTMLElement>("[data-composer-seat]");
     if (!owner) {
       setRect(null);
       return;
@@ -142,12 +146,7 @@ export default function ConversationTimeline({ messages, scrollContainerRef }: C
         setRect(null);
         return;
       }
-      let bottom = scrollBox.bottom - 12;
-      if (composer) {
-        const composerBox = composer.getBoundingClientRect();
-        if (composerBox.height > 0) bottom = Math.min(bottom, composerBox.top - 12);
-      }
-      const height = Math.max(0, bottom - (scrollBox.top + 12));
+      const height = Math.max(0, scrollBox.height - 24);
       if (height <= 0) {
         setRect(null);
         return;
@@ -163,7 +162,6 @@ export default function ConversationTimeline({ messages, scrollContainerRef }: C
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
     observer?.observe(scrollEl);
     observer?.observe(owner);
-    if (composer) observer?.observe(composer);
     window.addEventListener("resize", measure);
     return () => {
       observer?.disconnect();
@@ -171,18 +169,53 @@ export default function ConversationTimeline({ messages, scrollContainerRef }: C
     };
   }, [entries.length, scrollContainerRef]);
 
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const previous = previousFingerprintsRef.current;
+    if (!viewport) return;
+    previousFingerprintsRef.current = fingerprints;
+
+    const isTrueAppend = previous !== null
+      && fingerprints.length > previous.length
+      && previous.every((fingerprint, index) => fingerprints[index] === fingerprint);
+    const isSameProjection = previous !== null
+      && fingerprints.length === previous.length
+      && previous.every((fingerprint, index) => fingerprints[index] === fingerprint);
+    if (previous === null || ((isTrueAppend || isSameProjection) && atBottomRef.current)) {
+      viewport.scrollTop = viewport.scrollHeight;
+    }
+    atBottomRef.current = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2;
+  }, [fingerprints, rect]);
+
+  useEffect(() => {
+    if (hoverKey !== null && !entries.some((entry) => entry.key === hoverKey)) {
+      setHoverKey(null);
+    }
+  }, [entries, hoverKey]);
+
+  const updateTooltipPosition = useCallback(() => {
+    if (!rect || hoverKey === null) return;
+    const viewport = viewportRef.current;
+    const row = rowRefs.current.get(hoverKey);
+    const tip = tipRef.current;
+    if (!viewport || !row || !tip) return;
+    const tipHeight = Math.min(tip.offsetHeight || tip.scrollHeight || TIP_MAX_H, Math.max(0, rect.height - 8));
+    const tickCenter = row.offsetTop - viewport.scrollTop + ROW_H / 2;
+    const minTop = 4;
+    const maxTop = Math.max(minTop, rect.height - tipHeight - 4);
+    const nextTop = Math.max(minTop, Math.min(tickCenter - tipHeight / 2, maxTop));
+    setTipTop((current) => current === nextTop ? current : nextTop);
+  }, [hoverKey, rect]);
+
+  useLayoutEffect(() => {
+    updateTooltipPosition();
+  }, [entries, updateTooltipPosition]);
+
   if (!rect || entries.length === 0) return null;
 
-  const totalHeight = entries.length * ROW_H;
-  const stripTop = rect.top + Math.max(0, (rect.height - totalHeight) / 2);
-  const tipMax = Math.max(120, Math.min(TIP_MAX_H, totalHeight - 16));
-  let tipTop = 0;
-  if (hover >= 0) {
-    const tickCenter = stripTop + (hover + 0.5) * ROW_H;
-    const minTop = rect.top + 4;
-    const maxTop = Math.max(minTop, rect.top + rect.height - tipMax - 4);
-    tipTop = Math.max(minTop, Math.min(tickCenter - tipMax / 2, maxTop)) - stripTop;
-  }
+  const hover = hoverKey === null ? -1 : entries.findIndex((entry) => entry.key === hoverKey);
+  const activeEntry = hover < 0 ? undefined : entries[hover];
+  const tipMax = Math.max(0, Math.min(TIP_MAX_H, rect.height - 8));
 
   const tickStyle = (index: number): CSSProperties => {
     const weight = hover < 0 ? 0 : gaussWeight(Math.abs(index - hover));
@@ -200,36 +233,59 @@ export default function ConversationTimeline({ messages, scrollContainerRef }: C
   return (
     <div
       className={css.strip}
-      style={{ top: `${stripTop}px`, left: `${rect.left}px`, height: `${totalHeight}px` }}
+      style={{ top: `${rect.top}px`, left: `${rect.left}px`, height: `${rect.height}px` }}
+      role="navigation"
       aria-label="消息时间轴"
-      onMouseLeave={() => setHover(-1)}
+      onMouseLeave={() => setHoverKey(null)}
     >
-      {entries.map((entry, index) => (
-        <button
-          key={entry.key}
-          type="button"
-          className={css.row}
-          aria-label={`跳转到消息：${entry.text || "空消息"}`}
-          onMouseEnter={() => setHover(index)}
-          onFocus={() => setHover(index)}
-          onClick={() => {
-            if (aliveRef.current) hitTarget(entry.key);
-          }}
-        >
-          <span className={css.tick} style={tickStyle(index)} />
-          {hover === index ? (
-            <span
-              className={css.tip}
-              style={{ top: `${tipTop}px`, maxHeight: `${tipMax}px` }}
-              role="tooltip"
-              onWheelCapture={(event) => event.stopPropagation()}
+      <div
+        className={css.viewport}
+        ref={viewportRef}
+        tabIndex={0}
+        role="region"
+        aria-label="消息时间轴刻度"
+        onScroll={() => {
+          const viewport = viewportRef.current;
+          if (viewport) {
+            atBottomRef.current = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2;
+          }
+          updateTooltipPosition();
+        }}
+      >
+        <div className={css.rows}>
+          {entries.map((entry, index) => (
+            <button
+              key={entry.key}
+              ref={(node) => {
+                if (node) rowRefs.current.set(entry.key, node);
+                else rowRefs.current.delete(entry.key);
+              }}
+              type="button"
+              className={css.row}
+              aria-label={`跳转到消息：${entry.text || "空消息"}`}
+              onMouseEnter={() => setHoverKey(entry.key)}
+              onFocus={() => setHoverKey(entry.key)}
+              onClick={() => {
+                if (aliveRef.current) hitTarget(entry.key);
+              }}
             >
-              <span className={css.tipTime}>{fmtTime(entry.time)}</span>
-              <span className={css.tipText}>{entry.text || "（空消息）"}</span>
-            </span>
-          ) : null}
-        </button>
-      ))}
+              <span className={css.tick} style={tickStyle(index)} />
+            </button>
+          ))}
+        </div>
+      </div>
+      {activeEntry ? (
+        <div
+          ref={tipRef}
+          className={css.tip}
+          style={{ top: `${tipTop}px`, maxHeight: `${tipMax}px` }}
+          role="tooltip"
+          onWheelCapture={(event) => event.stopPropagation()}
+        >
+          <span className={css.tipTime}>{fmtTime(activeEntry.time)}</span>
+          <span className={css.tipText}>{activeEntry.text || "（空消息）"}</span>
+        </div>
+      ) : null}
     </div>
   );
 }

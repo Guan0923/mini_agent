@@ -2,13 +2,35 @@
   position: absolute;
   width: 46px;
   display: block;
-  pointer-events: auto;
+  pointer-events: none;
   z-index: 5;
+}
+
+.viewport {
+  width: 46px;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  pointer-events: auto;
+  scrollbar-width: none;
+}
+
+.viewport::-webkit-scrollbar {
+  display: none;
+}
+
+.rows {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .row {
   position: relative;
   display: flex;
+  flex: 0 0 12px;
   width: 46px;
   height: 12px;
   align-items: center;

@@ -19,6 +19,7 @@ import type {
   RuntimeStateNode,
 } from "../../types";
 import { ChatMessageList } from "./ChatMessageList";
+import ConversationTimeline from "./ConversationTimeline";
 import TracePage from "./TracePage";
 import { composerAction, type ChatPageProps } from "./contracts";
 import { useComposerFiles } from "./useComposerFiles";
@@ -538,7 +539,6 @@ export default function ChatPage({
           sessionId={conversation?.sessionId}
           display={display}
           interactionBusy={interactionBusy}
-          isMobile={isMobile}
           compactionPending={compactionPending}
           chatScrollRef={chatScrollRef}
           onScroll={handleChatScroll}
@@ -559,6 +559,13 @@ export default function ChatPage({
           onFork={!agentThreadView.isSubagent && onFork ? forkMessage : undefined}
           sandboxFailure={sandboxHealth.phase === "unhealthy" ? sandboxHealth.detail ?? "健康检查未通过。" : null}
         />
+        {!isMobile ? (
+          <ConversationTimeline
+            key={currentThreadId ?? "no-thread"}
+            messages={messages}
+            scrollContainerRef={chatScrollRef}
+          />
+        ) : null}
         {!isAtBottom ? (
           <FloatButton
             className="chat-scroll-bottom-button"

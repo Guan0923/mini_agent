@@ -5,7 +5,7 @@ import type { MouseEvent as ReactMouseEvent, RefObject, UIEventHandler } from "r
 import MarkdownContent from "../../components/MarkdownContent";
 import ShimmerText from "../../components/ShimmerText";
 import type { ChatMessage, DecisionRequest, DisplayMode } from "../../types";
-import ConversationTimeline, { conversationTurnId } from "./ConversationTimeline";
+import { conversationTurnId } from "./ConversationTimeline";
 import { AssistantMessage, MessageActions, MessageReferenceChip } from "./messageParts";
 
 interface ChatMessageListProps {
@@ -13,7 +13,6 @@ interface ChatMessageListProps {
   sessionId?: string;
   display: DisplayMode;
   interactionBusy: boolean;
-  isMobile: boolean;
   compactionPending: boolean;
   chatScrollRef: RefObject<HTMLDivElement>;
   onScroll: UIEventHandler<HTMLDivElement>;
@@ -40,7 +39,6 @@ export function ChatMessageList({
   sessionId,
   display,
   interactionBusy,
-  isMobile,
   compactionPending,
   chatScrollRef,
   onScroll,
@@ -158,7 +156,6 @@ export function ChatMessageList({
           ) : null}
         </div>
       </div>
-      {!isMobile ? <ConversationTimeline messages={messages} scrollContainerRef={chatScrollRef} /> : null}
     </div>
   );
 }

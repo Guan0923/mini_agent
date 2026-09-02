@@ -616,6 +616,66 @@ describe("Turn protocol projection", () => {
     expect(projectTurnPath(map, "turn_2").map((message) => message.content)).toEqual(["v1", "a1", "child", "answer"]);
   });
 
+  it("reprojects different user-message counts when current or ancestor versions change", () => {
+    const parent = turn({
+      current_data_idx: 1,
+      data: [
+        [
+          { role: "user", content: [{ type: "text", text: "parent-v1", status: "success" }] },
+          { role: "assistant", content: [{ type: "text", text: "parent-answer-v1", status: "success" }] },
+        ],
+        [
+          { role: "user", content: [{ type: "text", text: "parent-v2", status: "success" }] },
+          { role: "assistant", content: [{ type: "text", text: "parent-answer-v2", status: "success" }] },
+          { role: "user", delivery_id: "parent-steering", content: [{ type: "text", text: "parent-steering-v2", status: "success" }] },
+          { role: "assistant", content: [{ type: "text", text: "parent-steering-answer-v2", status: "success" }] },
+        ],
+      ],
+    });
+    const child = turn({
+      id: "turn_2",
+      parent_id: parent.id,
+      parent_session_id: parent.session_id,
+      parent_thread_id: parent.thread_id,
+      compactionId: parent.id,
+      current_data_idx: 1,
+      data: [
+        [
+          { role: "user", content: [{ type: "text", text: "child-v1", status: "success" }] },
+          { role: "assistant", content: [{ type: "text", text: "child-answer-v1", status: "success" }] },
+        ],
+        [
+          { role: "user", content: [{ type: "text", text: "child-v2", status: "success" }] },
+          { role: "assistant", content: [{ type: "text", text: "child-answer-v2", status: "success" }] },
+          { role: "user", delivery_id: "child-steering", content: [{ type: "text", text: "child-steering-v2", status: "success" }] },
+          { role: "assistant", content: [{ type: "text", text: "child-steering-answer-v2", status: "success" }] },
+        ],
+      ],
+    });
+    const map = new Map([["session_1:turn_1", parent], ["session_1:turn_2", child]]);
+    const userProjection = () => projectTurnPath(map, child.id)
+      .filter((message) => message.role === "user")
+      .map((message) => [message.content, message.timelineSource]);
+
+    expect(userProjection()).toEqual([
+      ["parent-v2", "user"],
+      ["parent-steering-v2", "steering"],
+      ["child-v2", "user"],
+      ["child-steering-v2", "steering"],
+    ]);
+    parent.current_data_idx = 0;
+    expect(userProjection()).toEqual([
+      ["parent-v1", "user"],
+      ["child-v2", "user"],
+      ["child-steering-v2", "steering"],
+    ]);
+    child.current_data_idx = 0;
+    expect(userProjection()).toEqual([
+      ["parent-v1", "user"],
+      ["child-v1", "user"],
+    ]);
+  });
+
   it("prunes only same-Thread descendants when rewind is submitted", () => {
     const root = turn();
     const target = turn({

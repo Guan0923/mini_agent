@@ -132,6 +132,79 @@ describe("run controller incremental batching", () => {
     expect(updateConversation).toHaveBeenCalledTimes(1);
   });
 
+  it("forces a full path projection on the next frame for an SSE current_data_idx patch", async () => {
+    let releaseSnapshot!: () => void;
+    let releasePatch!: () => void;
+    const snapshotGate = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    const patchGate = new Promise<void>((resolve) => { releasePatch = resolve; });
+    vi.mocked(streamChat).mockImplementation(async (_prompt, onMessage) => {
+      const versioned = turn();
+      versioned.data = [
+        [
+          { role: "user", content: [{ type: "text", text: "old user", status: "success" }] },
+          { role: "assistant", content: [{ type: "text", text: "old answer", status: "success" }] },
+        ],
+        [
+          { role: "user", content: [{ type: "text", text: "new user", status: "success" }] },
+          { role: "assistant", content: [{ type: "text", text: "new answer", status: "success" }] },
+          { role: "user", delivery_id: "steering-delivery", content: [{ type: "text", text: "new steering", status: "success" }] },
+          { role: "assistant", content: [{ type: "text", text: "steering answer", status: "running" }] },
+        ],
+      ];
+      onMessage({ type: "turn.snapshot", revision: 0, turn: versioned });
+      await snapshotGate;
+      onMessage({
+        type: "turn.delta",
+        session_id: versioned.session_id,
+        turn_id: versioned.id,
+        revision: 1,
+        patch: { current_data_idx: 1 },
+      });
+      await patchGate;
+      return "completed";
+    });
+
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    let conversation: Conversation = { id: "conversation_1", title: "x", messages: [], runtimeNodes: [] };
+    const updateConversation = vi.fn((_id: string, updater: (value: Conversation) => Conversation) => {
+      conversation = updater(conversation);
+    });
+    const controller = createRunController({
+      activeRuns: new Map(),
+      updateLastMessage: vi.fn(),
+      rebindRunSession: vi.fn().mockResolvedValue(undefined),
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+      updateConversation,
+      recoverConversation: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const running = controller.runConversation(request());
+    expect(frames).toHaveLength(1);
+    frames.shift()?.(0);
+    expect(conversation.messages.map((message) => message.content)).toEqual(["old user", "old answer"]);
+
+    releaseSnapshot();
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    frames.shift()?.(1);
+    expect(conversation.messages.map((message) => message.content)).toEqual([
+      "new user",
+      "new answer",
+      "new steering",
+      "steering answer",
+    ]);
+    expect(conversation.messages.filter((message) => message.role === "user").map((message) => message.timelineSource))
+      .toEqual(["user", "steering"]);
+
+    releasePatch();
+    await running;
+  });
+
   it("rebases the same Turn from a repeated authoritative reconnect snapshot", async () => {
     vi.mocked(streamChat).mockImplementation(async (_prompt, onMessage) => {
       onMessage({ type: "turn.snapshot", revision: 0, turn: turn() });
