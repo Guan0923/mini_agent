@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from time import monotonic, sleep
 
 import pytest
 
@@ -21,10 +26,11 @@ from backend.planning.context_management import ContextManager
 from backend.planning.llm import LLMPlanner
 from backend.planning.llm.requests import COMPACTION_INSTRUCTION
 from backend.planning.rule_based import RuleBasedPlanner
-from backend.providers import ChatCompletions, ModelConfig, ModelConfigurationError
+from backend.providers import ChatCompletions, LLMClient, ModelConfig, ModelConfigurationError, ModelTransportError
 from backend.runtime import AgentRunner, ConversationService
+from backend.runtime.core.config import RunnerSettings
 from backend.runtime.core.context import AgentRuntime, PreparedResponse
-from backend.runtime.core.events import CHECKPOINT_EVENT_KINDS
+from backend.runtime.core.events import CHECKPOINT_EVENT_KINDS, RuntimeEvent
 from backend.storage.sqlite import SQLiteSessionStore
 from backend.tools import ToolRegistry
 
@@ -355,6 +361,8 @@ class ContextAwareClient:
         self.operations: list[tuple[str | None, bool]] = []
         self.estimates = [100, 20]
         self.summary_prompt: str | None = None
+        self.summary_callbacks: tuple[object, object] | None = None
+        self.decision_callbacks: tuple[object, object] | None = None
 
     def estimate_tokens(self, messages, tools, request_parameters) -> int:
         if len(self.estimates) > 1:
@@ -365,13 +373,15 @@ class ContextAwareClient:
         self.operations.append((runtime.exchange.operation, runtime.exchange.stream))
         if runtime.exchange.operation == "summarize":
             self.summary_prompt = runtime.exchange.messages[0].content
+            self.summary_callbacks = (runtime.exchange.on_reasoning, runtime.exchange.on_content)
             runtime.state.turn_usage = {"total_tokens": 5}
             return PreparedResponse(AssistantMessage(content="compressed history"), {"total_tokens": 5})
+        self.decision_callbacks = (runtime.exchange.on_reasoning, runtime.exchange.on_content)
         runtime.state.turn_usage = {"total_tokens": 9}
         return PreparedResponse(AssistantMessage(content="final"), {"total_tokens": 9})
 
 
-def test_llm_planner_runs_non_streaming_summary_before_normal_request() -> None:
+def test_llm_planner_streams_internal_summary_without_forwarding_chunks() -> None:
     client = ContextAwareClient()
     planner = LLMPlanner(client, [], [])
     runtime = runtime_for(
@@ -384,14 +394,195 @@ def test_llm_planner_runs_non_streaming_summary_before_normal_request() -> None:
     )
     runtime.services.planner = planner
     runtime.state.usage = {"total_tokens": 80}
-    runtime.exchange.on_reasoning = lambda _chunk: None
+
+    def on_reasoning(_chunk: str) -> None:
+        return
+
+    def on_content(_chunk: str) -> None:
+        return
+
+    runtime.exchange.on_reasoning = on_reasoning
+    runtime.exchange.on_content = on_content
 
     response = planner.decide(runtime)
 
     assert response.content == "final"
-    assert client.operations == [("summarize", False), ("decision", True)]
+    assert client.operations == [("summarize", True), ("decision", True)]
+    assert client.summary_callbacks == (None, None)
+    assert client.decision_callbacks == (on_reasoning, on_content)
+    assert runtime.exchange.on_reasoning is on_reasoning
+    assert runtime.exchange.on_content is on_content
     assert client.summary_prompt is not None and "acting as a compaction engine" in client.summary_prompt
     assert runtime.state.turn_usage == {"total_tokens": 9}
+
+
+class _CompactionSseServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(
+        self,
+        chunks: list[str],
+        *,
+        chunk_interval_seconds: float = 0.0,
+        silent_seconds: float = 0.0,
+    ) -> None:
+        self.chunks = chunks
+        self.chunk_interval_seconds = chunk_interval_seconds
+        self.silent_seconds = silent_seconds
+        self.request_payloads: list[dict[str, object]] = []
+        super().__init__(("127.0.0.1", 0), _CompactionSseHandler)
+
+    def handle_error(self, _request: object, _client_address: object) -> None:
+        return
+
+
+class _CompactionSseHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def _write_chunk(self, payload: bytes) -> None:
+        self.wfile.write(f"{len(payload):X}\r\n".encode("ascii") + payload + b"\r\n")
+        self.wfile.flush()
+
+    def do_POST(self) -> None:  # noqa: N802
+        server = self.server
+        assert isinstance(server, _CompactionSseServer)
+        content_length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(content_length) if content_length else b"{}"
+        payload = json.loads(body.decode("utf-8"))
+        assert isinstance(payload, dict)
+        server.request_payloads.append(payload)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if server.silent_seconds:
+            sleep(server.silent_seconds)
+            return
+
+        for index, chunk in enumerate(server.chunks):
+            event = {
+                "id": "local-compaction",
+                "model": "local-compaction-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            **({"role": "assistant"} if index == 0 else {}),
+                            "content": chunk,
+                        },
+                        "finish_reason": "stop" if index == len(server.chunks) - 1 else None,
+                    }
+                ],
+            }
+            self._write_chunk(f"data: {json.dumps(event)}\n\n".encode())
+            if index < len(server.chunks) - 1:
+                sleep(server.chunk_interval_seconds)
+        self._write_chunk(b"data: [DONE]\n\n")
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+
+@contextmanager
+def _local_compaction_sse_server(
+    chunks: list[str],
+    *,
+    chunk_interval_seconds: float = 0.0,
+    silent_seconds: float = 0.0,
+) -> Iterator[_CompactionSseServer]:
+    server = _CompactionSseServer(
+        chunks,
+        chunk_interval_seconds=chunk_interval_seconds,
+        silent_seconds=silent_seconds,
+    )
+    worker = threading.Thread(target=server.serve_forever, name="compaction-sse-test", daemon=True)
+    worker.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(3.0)
+
+
+def _real_compaction_planner(server: _CompactionSseServer) -> LLMPlanner:
+    config = ModelConfig(
+        "local-test-key",
+        f"http://127.0.0.1:{server.server_port}/v1",
+        "local-compaction-model",
+        timeout_seconds=1,
+        max_tokens=128,
+        context_size=100_000,
+    )
+    return LLMPlanner(LLMClient(config), [], [])
+
+
+def test_real_compaction_sse_can_run_longer_than_the_read_timeout() -> None:
+    part_count = 6
+    chunks = [
+        STRUCTURED_CHECKPOINT[
+            len(STRUCTURED_CHECKPOINT) * index // part_count : len(STRUCTURED_CHECKPOINT) * (index + 1) // part_count
+        ]
+        for index in range(part_count)
+    ]
+    with _local_compaction_sse_server(chunks, chunk_interval_seconds=0.25) as server:
+        planner = _real_compaction_planner(server)
+        runtime = runtime_for(
+            [UserMessage(content="old question"), AssistantMessage(content="old answer")],
+            turn_start_index=2,
+        )
+
+        def on_reasoning(chunk: str) -> None:
+            runtime.services.publish(RuntimeEvent("thinking_delta", chunk))
+
+        def on_content(chunk: str) -> None:
+            runtime.services.publish(RuntimeEvent("response_delta", chunk))
+
+        runtime.exchange.on_reasoning = on_reasoning
+        runtime.exchange.on_content = on_content
+
+        started = monotonic()
+        result = planner.compact_context(runtime)
+        elapsed = monotonic() - started
+
+    assert elapsed > 1.0
+    assert len(server.request_payloads) == 1
+    assert server.request_payloads[0]["stream"] is True
+    assert result.compacted is True
+    assert result.summary == STRUCTURED_CHECKPOINT
+    assert runtime.state.messages == [
+        SystemMessage(name="context_summary", content=f"{CHECKPOINT_PREAMBLE}\n\n{STRUCTURED_CHECKPOINT}")
+    ]
+    assert runtime.exchange.on_reasoning is on_reasoning
+    assert runtime.exchange.on_content is on_content
+    assert [event.kind for event in runtime_events(runtime) if event.kind.startswith("context_compaction")] == [
+        "context_compaction_started",
+        "context_compaction_completed",
+    ]
+    assert not any(event.kind in {"thinking_delta", "response_delta"} for event in runtime_events(runtime))
+
+
+def test_real_compaction_sse_still_times_out_when_the_server_is_silent() -> None:
+    original = [UserMessage(content="old question"), AssistantMessage(content="old answer")]
+    with _local_compaction_sse_server([], silent_seconds=1.5) as server:
+        planner = _real_compaction_planner(server)
+        runtime = runtime_for(original, turn_start_index=2)
+        runtime.state.runner_settings = RunnerSettings(max_transport_retries=0)
+
+        with pytest.raises(ModelTransportError, match="timed out"):
+            planner.compact_context(runtime)
+
+    assert len(server.request_payloads) == 1
+    assert server.request_payloads[0]["stream"] is True
+    assert runtime.state.messages == original
+    assert runtime.run.handoff is None
+    assert [event.kind for event in runtime_events(runtime) if event.kind.startswith("context_compaction")] == [
+        "context_compaction_started",
+        "context_compaction_failed",
+    ]
 
 
 def test_compaction_instruction_requires_every_checkpoint_section_in_order() -> None:
