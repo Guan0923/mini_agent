@@ -14,11 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
       - name: Install locked development dependencies
@@ -36,8 +36,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -70,11 +70,11 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
       - name: Install locked development dependencies
@@ -87,11 +87,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
       - name: Install locked development dependencies
