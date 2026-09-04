@@ -292,9 +292,9 @@ class _EventProjectionMixin:
         elif kind == "error":
             self.finish(
                 "failed",
-                message or "Execution failed.",
+                message,
                 category=self.abort_category or self._error_category(data),
-                code=str(data.get("error_type") or ""),
+                code=str(data.get("error_type") or self.abort_code),
             )
 
     def _begin_compact_turn(self, summary: str) -> RuntimeState:

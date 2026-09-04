@@ -66,6 +66,69 @@ afterEach(() => {
 });
 
 describe("run controller incremental batching", () => {
+  it("silently settles an empty pre-baseline failure and reloads the conversation", async () => {
+    vi.mocked(streamChat).mockResolvedValue("silent_failed");
+    const recoverConversation = vi.fn().mockResolvedValue(undefined);
+    const updateLastMessage = vi.fn();
+    const checkSandboxHealth = vi.fn().mockResolvedValue(undefined);
+    const controller = createRunController({
+      activeRuns: new Map(),
+      updateLastMessage,
+      rebindRunSession: vi.fn().mockResolvedValue(undefined),
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+      updateConversation: vi.fn(),
+      recoverConversation,
+      checkSandboxHealth,
+    });
+
+    await controller.runConversation(request());
+
+    expect(recoverConversation).toHaveBeenCalledWith("conversation_1", "session_1", "turn_1");
+    expect(checkSandboxHealth).not.toHaveBeenCalled();
+    const updater = updateLastMessage.mock.calls[0]?.[1] as (message: Record<string, unknown>) => Record<string, unknown>;
+    expect(updater({ error: "stale", status: "running", running: true, decision: {} })).toMatchObject({
+      error: undefined,
+      status: "failed",
+      running: false,
+      decision: undefined,
+    });
+  });
+
+  it("clears a model transport error from the final Turn projection", async () => {
+    const failed = turn();
+    failed.status = "failed";
+    failed.data[0][1].content = [{
+      type: "error",
+      category: "network",
+      code: "ModelTransportError",
+      message: "Response ended prematurely",
+      retryable: false,
+      status: "failed",
+    }];
+    vi.mocked(streamChat).mockImplementation(async (_prompt, onMessage) => {
+      onMessage({ type: "turn.snapshot", revision: 0, turn: failed });
+      return "completed";
+    });
+    const updateLastMessage = vi.fn();
+    const controller = createRunController({
+      activeRuns: new Map(),
+      updateLastMessage,
+      rebindRunSession: vi.fn().mockResolvedValue(undefined),
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+      updateConversation: vi.fn(),
+      recoverConversation: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await controller.runConversation(request());
+
+    const updater = updateLastMessage.mock.calls[0]?.[1] as (message: Record<string, unknown>) => Record<string, unknown>;
+    expect(updater({ error: "stale", status: "running", running: true })).toMatchObject({
+      error: undefined,
+      status: "failed",
+      running: false,
+    });
+  });
+
   it("rechecks sandbox health when a Turn fails before its baseline", async () => {
     vi.mocked(streamChat).mockRejectedValue(new Error("Windows Sandbox Broker unavailable"));
     const checkSandboxHealth = vi.fn().mockResolvedValue(undefined);

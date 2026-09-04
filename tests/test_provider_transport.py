@@ -682,6 +682,36 @@ def test_chunked_encoding_failure_does_not_retry_after_stream_output(monkeypatch
     assert first.closed is True
 
 
+def test_pause_wins_over_chunked_failure_without_publishing_model_error(monkeypatch) -> None:
+    pause_requested = threading.Event()
+
+    class PausedChunkedResponse(BrokenChunkedAfterEventResponse):
+        def iter_lines(self, decode_unicode: bool = False):
+            assert decode_unicode is False
+            yield 'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}'
+            pause_requested.set()
+            raise requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+
+    response = PausedChunkedResponse([])
+    client = LLMClient(
+        ModelConfig("secret", "https://example.test/v1", "demo"),
+        session=SequencedStreamSession([response]),
+    )
+    runtime = runtime_for_stream(max_transport_retries=0)
+    runtime.services.suspend_requested = pause_requested.is_set
+    events = []
+    runtime.services.publish = events.append
+    monkeypatch.setattr("backend.providers.client.time", SimpleNamespace(sleep=lambda _delay: None))
+
+    with pytest.raises(ModelTransportError) as exc_info:
+        client.run(runtime)
+
+    assert str(exc_info.value) == "Model request paused by user."
+    assert exc_info.value.__cause__ is None
+    assert [event.kind for event in events] == ["model_request"]
+    assert response.closed is True
+
+
 def test_chat_completions_invalid_tool_arguments_are_regenerated_before_execution() -> None:
     invalid = {
         "choices": [
@@ -786,6 +816,25 @@ def test_transport_failure_exposes_the_raw_requests_message(failure: requests.Re
 
     assert str(exc_info.value) == str(failure)
     assert exc_info.value.retryable is True
+
+
+def test_final_transport_failure_logs_one_redacted_warning(caplog) -> None:
+    client = LLMClient(
+        ModelConfig("secret", "https://unused.test", "custom-model", provider="custom"),
+        session=SequencedSession([requests.ConnectionError("connection reset; api_key=super-secret")]),
+        adapter=CustomAdapter(),
+    )
+    runtime = runtime_for_custom(max_transport_retries=0)
+
+    with caplog.at_level("WARNING", logger="backend.providers.client"):
+        with pytest.raises(ModelTransportError):
+            client.run(runtime)
+
+    warnings = [record.getMessage() for record in caplog.records if "model transport failed" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "ModelTransportError" in warnings[0]
+    assert "super-secret" not in warnings[0]
+    assert "[REDACTED]" in warnings[0]
 
 
 def test_invalid_json_exposes_the_raw_decoder_message() -> None:

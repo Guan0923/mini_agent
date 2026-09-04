@@ -22,7 +22,6 @@ from uuid import uuid4
 APP_VERSION = "0.0.2"
 DEFAULT_FIRST_KEPT_ITEM_SIZE = 8
 DEFAULT_COMPACTION_RETENTION = DEFAULT_FIRST_KEPT_ITEM_SIZE
-FAILED_TERMINAL_MESSAGE = "An unknown error caused the system to encounter an exception."
 
 NodeStatus: TypeAlias = Literal["running", "success", "paused", "failed"]
 ItemStatus: TypeAlias = Literal["running", "failed", "success"]
@@ -297,7 +296,7 @@ def terminal_error_payload(
 
 
 def terminal_error_text(error: Mapping[str, Any]) -> str:
-    return str(error.get("message") or "Execution failed.")
+    return str(error.get("message") or "")
 
 
 def validate_data(value: Any) -> list[list[dict[str, Any]]]:

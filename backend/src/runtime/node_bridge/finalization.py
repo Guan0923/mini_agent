@@ -30,11 +30,11 @@ class _FinalizationMixin:
         ):
             self._append_item({"type": "text", "text": final_answer, "status": "success"})
         self._settle_running_items("success" if status == "success" else "failed")
-        if status == "failed" or (status == "paused" and category != "user"):
+        if final_answer and (status == "failed" or (status == "paused" and category != "user")):
             retryable = status == "paused"
             self.terminal_error = terminal_error_payload(
                 category or ("user" if retryable else "agent"),
-                final_answer or "Execution did not complete.",
+                final_answer,
                 retryable=retryable,
                 code=code,
             )
@@ -51,14 +51,9 @@ class _FinalizationMixin:
         return self.last_node
 
     def preserve_placeholder(self, *, code: str = "runtime_exception") -> RuntimeState | None:
-        return self.finish("failed", "Execution failed.", category="agent", code=code)
+        return self.finish("failed", "", category="agent", code=code)
 
     def finish_exception(self, error: BaseException) -> RuntimeState | None:
         category = self.abort_category or self._exception_category(error)
         message = safe_error_message(error)
-        if category == "network" and not self.produced_item:
-            self.terminal_error = terminal_error_payload("network", message, retryable=True)
-            self.closed = True
-            return self._current()
-        status: NodeStatus = "paused" if category == "network" and self.produced_item else "failed"
-        return self.finish(status, message, category=category, code=error.__class__.__name__)
+        return self.finish("failed", message, category=category, code=error.__class__.__name__)

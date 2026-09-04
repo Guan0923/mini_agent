@@ -369,9 +369,15 @@ test("Trace audit lists two real Turns oldest first and loads them independently
   expect(trace.items.filter((entry) => entry.item.type === "tool_result")).toHaveLength(1);
 });
 
-test("incomplete chunked model response exposes the raw network error in Chat and Trace", async ({ page }) => {
+test("incomplete chunked model response is silent in Chat and remains visible in Trace", async ({ page }) => {
   const rawError = "Response ended prematurely";
-  const removedPrefixes = ["Model stream failed", "Plan creation failed", "Decision failed"];
+  const hiddenChatErrors = [
+    rawError,
+    "Model stream failed",
+    "Plan creation failed",
+    "Decision failed",
+    "An unknown error caused the system to encounter an exception.",
+  ];
   const sidebarResponse = await page.request.post("/api/sidebar-threads", {
     data: { title: "Raw Chunked Error" },
   });
@@ -379,7 +385,8 @@ test("incomplete chunked model response exposes the raw network error in Chat an
   const sidebar = await sidebarResponse.json() as { session_id: string };
 
   await page.goto("/app");
-  await page.getByRole("button", { name: "Raw Chunked Error", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Raw Chunked Error", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByLabel("聊天输入")).toBeEnabled();
   await page.getByLabel("聊天输入").fill("raw chunked error e2e");
   const createResponse = page.waitForResponse((response) =>
     response.request().method() === "POST" && response.url().endsWith("/api/turns"),
@@ -388,15 +395,18 @@ test("incomplete chunked model response exposes the raw network error in Chat an
   expect((await createResponse).ok()).toBeTruthy();
 
   const assistant = page.locator(".message.assistant").last();
-  await expect(assistant).toContainText(rawError, { timeout: 15_000 });
-  for (const prefix of removedPrefixes) await expect(assistant).not.toContainText(prefix);
-  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible({ timeout: 15_000 });
+  for (const error of hiddenChatErrors) await expect(assistant).not.toContainText(error);
 
+  await expect.poll(async () => {
+    const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
+    return turns.map((turn) => turn.status);
+  }, { timeout: 15_000 }).toEqual(["failed"]);
   const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
   expect(turns).toHaveLength(1);
   expect(turns[0].status).toBe("failed");
   const errorItems = turns[0].data[turns[0].current_data_idx][1].content.filter((item) => item.type === "error");
-  expect(errorItems).toEqual([expect.objectContaining({ message: rawError })]);
+  expect(errorItems).toEqual([expect.objectContaining({ message: rawError, code: "ModelTransportError" })]);
 
   await page.getByRole("button", { name: "Trace", exact: true }).click();
   const errorPreview = page.locator(".trace-preview").filter({ hasText: rawError }).first();
@@ -406,7 +416,67 @@ test("incomplete chunked model response exposes the raw network error in Chat an
   );
   await errorPanel.locator(":scope > .ant-collapse-header").click();
   await expect(errorPanel.locator(".trace-value")).toHaveText(rawError);
-  for (const prefix of removedPrefixes) await expect(errorPanel).not.toContainText(prefix);
+  for (const prefix of ["Model stream failed", "Plan creation failed", "Decision failed"]) {
+    await expect(errorPanel).not.toContainText(prefix);
+  }
+});
+
+test("pausing a real chunked model stream does not record its transport close as an error", async ({ page }) => {
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Paused Chunked Stream" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Paused Chunked Stream", exact: true }).click();
+  await page.getByLabel("聊天输入").fill("pause chunked stream e2e");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  const assistant = page.locator(".message.assistant").last();
+  await expect(assistant).toContainText("Partial output before pausing the HTTP stream.", { timeout: 15_000 });
+  await page.getByRole("button", { name: "暂停", exact: true }).click();
+  await expect(page.getByRole("button", { name: "继续", exact: true })).toBeVisible({ timeout: 15_000 });
+
+  await expect.poll(async () => {
+    const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
+    return turns.map((turn) => turn.status);
+  }, { timeout: 15_000 }).toEqual(["paused"]);
+  const turns = (await fetchRuntimeNodes(page, sidebar.session_id)).filter(isRuntimeTurnResponse);
+  expect(turns).toHaveLength(1);
+  expect(turns[0].status).toBe("paused");
+  const serializedTurn = JSON.stringify(turns[0]);
+  expect(serializedTurn).not.toContain("ChunkedEncodingError");
+  expect(serializedTurn).not.toContain("Response ended prematurely");
+  expect(turns[0].data[turns[0].current_data_idx][1].content.some((item) => item.type === "error")).toBe(false);
+
+  const traceResponse = await page.request.get(
+    `/api/turns/${encodeURIComponent(turns[0].id)}/trace?data_idx=${turns[0].current_data_idx}`,
+  );
+  expect(traceResponse.ok(), `${traceResponse.status()} ${await traceResponse.text()}`).toBeTruthy();
+  const serializedTrace = await traceResponse.text();
+  expect(serializedTrace).not.toContain("ChunkedEncodingError");
+  expect(serializedTrace).not.toContain("Response ended prematurely");
+  expect(serializedTrace).not.toContain("Model request paused by user.");
+});
+
+test("legacy unknown failure is hidden in Chat but remains available in Trace", async ({ page }) => {
+  const legacyError = "An unknown error caused the system to encounter an exception.";
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Legacy Unknown Error" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+  const seeded = await page.request.post("/api/test/legacy-unknown-error", {
+    data: { session_id: sidebar.session_id },
+  });
+  expect(seeded.ok(), `${seeded.status()} ${await seeded.text()}`).toBeTruthy();
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Legacy Unknown Error", exact: true }).click();
+  await expect(page.locator(".message.assistant").filter({ hasText: legacyError })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Trace", exact: true }).click();
+  await expect(page.locator(".trace-preview").filter({ hasText: legacyError }).first()).toHaveText(legacyError);
 });
 
 test("a real provider retry is visible live and remains ordered in Turn and Trace", async ({ page }) => {

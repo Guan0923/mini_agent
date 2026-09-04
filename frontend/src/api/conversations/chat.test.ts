@@ -87,6 +87,18 @@ describe("Turn SSE contract", () => {
     });
   });
 
+  it("treats a failed terminal after the Turn baseline as stream completion", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(accepted()).mockResolvedValueOnce(response([
+      JSON.stringify({ type: "turn.snapshot", revision: 0, turn: turn("failed") }),
+      '<SSE id="turn_1" type="failed">Response ended prematurely</SSE>',
+    ])));
+
+    await expect(streamChat("hello", () => undefined, new AbortController().signal, {
+      sessionId: "session_1",
+      turnId: "turn_1",
+    })).resolves.toBe("completed");
+  });
+
   it("reconnects an interrupted stream with Last-Event-ID and accepts the rebased snapshot", async () => {
     const first = new Response([
       "id: 10-0",
@@ -217,6 +229,17 @@ describe("Turn SSE contract", () => {
       sessionId: "session_1",
       turnId: "turn_1",
     })).rejects.toThrow("Windows Sandbox Broker 未安装或当前不可用。");
+  });
+
+  it("silently completes an empty startup failure before a Turn baseline exists", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(accepted()).mockResolvedValueOnce(response([
+      '<SSE id="turn_1" type="failed"></SSE>',
+    ])));
+
+    await expect(streamChat("hello", () => undefined, new AbortController().signal, {
+      sessionId: "session_1",
+      turnId: "turn_1",
+    })).resolves.toBe("silent_failed");
   });
 
   it("rejects a startup failure for a different Turn", async () => {

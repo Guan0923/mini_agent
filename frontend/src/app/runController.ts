@@ -160,6 +160,18 @@ export function createRunController(callbacks: RunControllerCallbacks) {
             : await streamChat(request.prompt ?? "", onMessage, controller.signal, options);
       flushPendingFrames();
       if (result === "aborted") return;
+      if (result === "silent_failed") {
+        const recoveryTurnId = active.turnId ?? request.turnId ?? request.sourceNodeId;
+        await callbacks.recoverConversation(request.conversationId, request.sessionId, recoveryTurnId).catch(() => undefined);
+        callbacks.updateLastMessage(request.conversationId, (item) => ({
+          ...item,
+          error: undefined,
+          status: "failed",
+          running: false,
+          decision: undefined,
+        }));
+        return;
+      }
       if (request.attach && finalTurn?.status === "running") {
         await callbacks.recoverConversation(
           request.conversationId,
@@ -173,7 +185,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
         callbacks.updateLastMessage(request.conversationId, (item) => ({
           ...item,
           content: projection.content || item.content,
-          error: projection.error,
+          error: projection.errorSuppressed ? undefined : projection.error,
           status: finalTurn?.status,
           running: false,
           decision: undefined,

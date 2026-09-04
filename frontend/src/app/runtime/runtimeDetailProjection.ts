@@ -2,6 +2,7 @@ import type { ChatMessage, Conversation, DecisionRequest, FileReference, Runtime
 import { isRuntimeTurnNode, normalizeRuntimeNode } from "./runtimeNodeNormalization";
 
 const keyOf = (turn: RuntimeTreeNode) => `${turn.session_id}:${turn.id}`;
+const LEGACY_UNKNOWN_ERROR = "An unknown error caused the system to encounter an exception.";
 
 function text(value: unknown): string {
   if (typeof value === "string") return value;
@@ -59,6 +60,11 @@ function isToolApproval(item: TurnItem): boolean {
   return item.type === "approval" && typeof item.tool === "string" && item.tool.length > 0;
 }
 
+function isHiddenChatError(item: TurnItem): boolean {
+  return item.type === "error"
+    && (item.code === "ModelTransportError" || item.message === LEGACY_UNKNOWN_ERROR);
+}
+
 function displayAssistantItems(turn: RuntimeStateNode, items: TurnItem[]): TurnItem[] {
   const toolResults = new Map<string, TurnItem>();
   for (const item of items) {
@@ -68,7 +74,7 @@ function displayAssistantItems(turn: RuntimeStateNode, items: TurnItem[]): TurnI
   const displayed: TurnItem[] = [];
   for (let index = 0; index < items.length;) {
     const item = items[index];
-    if (item.type === "skill_snapshot") {
+    if (item.type === "skill_snapshot" || isHiddenChatError(item)) {
       index += 1;
       continue;
     }
@@ -165,6 +171,7 @@ export interface ProjectedNodeDetails {
   items: TurnItem[];
   compactionNotice: boolean;
   error?: string;
+  errorSuppressed: boolean;
   references?: FileReference[];
   status?: RuntimeStateNode["status"];
   decision?: DecisionRequest;
@@ -190,6 +197,7 @@ export function projectRuntimeNode(turn: RuntimeStateNode, messageIdx = assistan
     items,
     compactionNotice,
     error: errorItem ? text(errorItem.message) : undefined,
+    errorSuppressed: errorItem === undefined && sourceItems.some(isHiddenChatError),
     status: turn.status,
     decision: pendingDecision(items, turn.status),
   };

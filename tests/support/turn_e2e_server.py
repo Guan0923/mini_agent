@@ -23,7 +23,8 @@ from backend.api.chat import routes as chat_routes  # noqa: E402
 from backend.api.routes import turns as turn_routes  # noqa: E402
 from backend.api.session_store import session_store  # noqa: E402
 from backend.api.state import WebAppState  # noqa: E402
-from backend.domain import AssistantMessage, ToolMessage  # noqa: E402
+from backend.domain import AssistantMessage, ToolMessage, TurnTrace, TurnTraceContext, TurnTraceItem  # noqa: E402
+from backend.domain.runtime_state import NodeWriter, RuntimeState, terminal_error_payload  # noqa: E402
 from backend.mcp.client import start_external_tools  # noqa: E402
 from backend.mcp.config import McpServerConfig  # noqa: E402
 from backend.planning import LLMPlanner, RuleBasedPlanner  # noqa: E402
@@ -139,6 +140,7 @@ AGENT_THREAD_DIRECT_TASK = "agent thread direct e2e"
 AGENT_THREAD_NESTED_TASK = "agent thread nested e2e"
 AGENT_THREAD_RESPONSE = "Agent Thread response from local HTTP."
 RAW_CHUNKED_ERROR_TASK = "raw chunked error e2e"
+PAUSED_CHUNKED_TASK = "pause chunked stream e2e"
 RETRY_VISIBILITY_TASK = "network retry visibility e2e"
 
 
@@ -163,6 +165,7 @@ class TraceModelHandler(BaseHTTPRequestHandler):
         serialized_messages = json.dumps(payload.get("messages", []), ensure_ascii=False).lower()
         agent_thread_request = AGENT_THREAD_NESTED_TASK in serialized_messages
         raw_chunked_error_request = RAW_CHUNKED_ERROR_TASK in serialized_messages
+        paused_chunked_request = PAUSED_CHUNKED_TASK in serialized_messages
         retry_visibility_request = RETRY_VISIBILITY_TASK in serialized_messages
         if retry_visibility_request:
             RETRY_MODEL_CALLS += 1
@@ -204,7 +207,7 @@ class TraceModelHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if payload.get("stream"):
-            if raw_chunked_error_request:
+            if raw_chunked_error_request or paused_chunked_request:
                 event = {
                     "id": "raw-chunked-error-e2e",
                     "object": "chat.completion.chunk",
@@ -215,7 +218,11 @@ class TraceModelHandler(BaseHTTPRequestHandler):
                             "index": 0,
                             "delta": {
                                 "role": "assistant",
-                                "reasoning_content": "Partial event before the connection drops.",
+                                ("content" if paused_chunked_request else "reasoning_content"): (
+                                    "Partial output before pausing the HTTP stream."
+                                    if paused_chunked_request
+                                    else "Partial event before the connection drops."
+                                ),
                             },
                             "finish_reason": None,
                         }
@@ -232,6 +239,14 @@ class TraceModelHandler(BaseHTTPRequestHandler):
                 self.wfile.write(encoded)
                 self.wfile.write(b"\r\n")
                 self.wfile.flush()
+                if paused_chunked_request:
+                    sleep(5.0)
+                    try:
+                        self.wfile.write(b"0\r\n\r\n")
+                        self.wfile.flush()
+                    except OSError:
+                        pass
+                    return
                 self.close_connection = True
                 return
             events = (
@@ -582,6 +597,8 @@ class CooperativePausePlanner(LLMPlanner):
             return self._trace_planner.decide(runtime)
         if task == RAW_CHUNKED_ERROR_TASK:
             return self._trace_planner.decide(runtime)
+        if task == PAUSED_CHUNKED_TASK:
+            return self._trace_planner.decide(runtime)
         if task == RETRY_VISIBILITY_TASK:
             return self._trace_planner.decide(runtime)
         if runtime.run.mode == "plan" and task == PLAN_REVIEW_TASK:
@@ -864,6 +881,64 @@ def get_trace_model_calls() -> dict[str, int]:
 @app.get("/api/test/trace-model-last-request")
 def get_trace_model_last_request() -> dict[str, object]:
     return TRACE_MODEL_LAST_REQUEST
+
+
+@app.post("/api/test/legacy-unknown-error")
+def create_legacy_unknown_error(values: dict[str, object]) -> dict[str, str]:
+    session_id = str(values.get("session_id") or "")
+    if not session_id:
+        raise ValueError("session_id is required")
+    store = session_store(state)
+    root = store.ensure_root_node(session_id, id=f"legacy-root-{uuid4()}")
+    writer = NodeWriter(store)
+    turn = writer.create(
+        RuntimeState.create(
+            session_id=session_id,
+            thread_id=session_id,
+            id=f"legacy-turn-{uuid4()}",
+            parent=root,
+            user_content=[{"type": "text", "text": "legacy unknown error"}],
+            provider_name="local",
+        )
+    )
+    turn = writer.append_item(
+        turn,
+        terminal_error_payload(
+            "agent",
+            "An unknown error caused the system to encounter an exception.",
+            retryable=False,
+        ),
+    )
+    turn = writer.finalize(turn, "failed")
+    assistant_idx = len(turn.data[turn.current_data_idx]) - 1
+    error_item = turn.data[turn.current_data_idx][assistant_idx]["content"][0]
+    store.initialize_turn_trace(
+        session_id,
+        TurnTrace(
+            turn_id=turn.id,
+            thread_id=turn.thread_id,
+            data_idx=turn.current_data_idx,
+            context=TurnTraceContext(
+                system_message="Legacy diagnostic record",
+                active_skills=[],
+                tools=[],
+                initialized_at=turn.timestamp,
+            ),
+            items=[
+                TurnTraceItem(
+                    sequence=1,
+                    message_idx=assistant_idx,
+                    item_idx=0,
+                    role="assistant",
+                    item=error_item,
+                    completed_at=turn.timestamp,
+                )
+            ],
+            last_sequence=1,
+            updated_at=turn.timestamp,
+        ),
+    )
+    return {"turn_id": turn.id}
 
 
 @app.post("/api/test/session-file")

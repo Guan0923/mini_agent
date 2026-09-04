@@ -21,6 +21,7 @@ export interface StreamOptions {
 
 const terminalPattern = /^<SSE id="([^"]+)" type="(success|network|failed)">([\s\S]*)<\/SSE>$/;
 const MAX_STREAM_RECONNECTS = 12;
+type StreamResult = "completed" | "aborted" | "silent_failed";
 
 export class SseProtocolError extends Error {
   constructor(message: string) {
@@ -45,7 +46,7 @@ async function streamEndpoint(
   expectedTurnId: string,
   onMessage: (message: StreamMessage) => void,
   signal: AbortSignal,
-): Promise<"completed" | "aborted"> {
+): Promise<StreamResult> {
   let lastEventId = "";
   let reconnects = 0;
 
@@ -160,11 +161,13 @@ async function streamEndpoint(
       throw new SseProtocolError("SSE terminal id does not match the active Turn");
     }
     if (!receivedFrame) {
-      if (terminal[2] === "failed") throw new Error(terminal[3] || "Turn failed");
+      if (terminal[2] === "failed") {
+        if (terminal[3]) throw new Error(terminal[3]);
+        return "silent_failed";
+      }
       throw new SseProtocolError("SSE stream completed without a Turn baseline");
     }
     if (terminal[2] === "network") throw new Error("network");
-    if (terminal[2] === "failed") throw new Error(terminal[3] || "Turn failed");
     return "completed";
   }
 }
@@ -174,7 +177,7 @@ export async function streamChat(
   onMessage: (message: StreamMessage) => void,
   signal: AbortSignal,
   options: StreamOptions,
-): Promise<"completed" | "aborted"> {
+): Promise<StreamResult> {
   const turnId = options.turnId ?? crypto.randomUUID();
   const body = {
       id: turnId,
@@ -216,7 +219,7 @@ export async function streamRewind(
   onMessage: (message: StreamMessage) => void,
   signal: AbortSignal,
   options: StreamOptions,
-): Promise<"completed" | "aborted"> {
+): Promise<StreamResult> {
   const receipt = await requestJson<{ turn_id: string; delivery_id: string; status: "accepted" }>(
     `/api/turns/${encodeURIComponent(turnId)}/rewind`,
     { ...jsonBody({
@@ -244,7 +247,7 @@ export async function streamResume(
   model?: RuntimeConfigModel,
   mode: ChatMode = "agent",
   fullAccessAcknowledged = false,
-): Promise<"completed" | "aborted"> {
+): Promise<StreamResult> {
   if (!sourceNodeId) throw new Error("resume requires a Turn id");
   await requestJson<{ turn_id: string; status: "accepted" }>(
     `/api/turns/${encodeURIComponent(sourceNodeId)}/resume`,
@@ -270,7 +273,7 @@ export async function streamAttachedTurn(
   onMessage: (message: StreamMessage) => void,
   signal: AbortSignal,
   sessionId?: string,
-): Promise<"completed" | "aborted"> {
+): Promise<StreamResult> {
   return streamEndpoint(
     `/api/turns/${encodeURIComponent(turnId)}/stream${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`,
     undefined,

@@ -62,15 +62,15 @@ class JsonHttpTransport:
             _raise_if_cancelled(cancel_requested, stream_started=False)
         except requests.RequestException as exc:
             if cancel_requested is not None and cancel_requested():
-                raise _paused_error(stream_started=False) from exc
+                raise _paused_error(stream_started=False) from None
             raise _transport_error(exc) from exc
         except ValueError as exc:
             if cancel_requested is not None and cancel_requested():
-                raise _paused_error(stream_started=False) from exc
+                raise _paused_error(stream_started=False) from None
             raise ModelTransportError(safe_error_message(exc), retryable=True) from exc
-        except Exception as exc:
+        except Exception:
             if cancel_requested is not None and cancel_requested():
-                raise _paused_error(stream_started=False) from exc
+                raise _paused_error(stream_started=False) from None
             raise
         finally:
             if unregister is not None:
@@ -174,11 +174,11 @@ class JsonHttpTransport:
                 )
         except requests.RequestException as exc:
             if cancel_requested is not None and cancel_requested():
-                raise _paused_error(stream_started=saw_event) from exc
+                raise _paused_error(stream_started=saw_event) from None
             raise _transport_error(exc, stream_started=saw_event) from exc
-        except Exception as exc:
+        except Exception:
             if cancel_requested is not None and cancel_requested():
-                raise _paused_error(stream_started=saw_event) from exc
+                raise _paused_error(stream_started=saw_event) from None
             raise
         finally:
             if unregister is not None:

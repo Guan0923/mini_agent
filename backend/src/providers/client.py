@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import time
 from collections.abc import Callable, Iterator
 from time import perf_counter
@@ -23,6 +24,8 @@ from .errors import ModelConfigurationError, ModelRequestError, ModelTransportEr
 from .protocols import ChatCompletionsAdapter, MessagesAdapter, ResponsesAdapter
 from .token_usage import TokenUsageTracker
 from .transport import JsonHttpTransport, _RecordedStream
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -174,6 +177,8 @@ class LLMClient:
                 self._publish_request_failure(runtime, exc, publish)
                 raise
             except ModelTransportError as exc:
+                if runtime.stop_requested():
+                    raise
                 if exc.retryable and attempt < max_transport_retries:
                     delay = exc.retry_after if exc.retry_after is not None else 0.5 * (2**attempt)
                     publish(
@@ -190,6 +195,15 @@ class LLMClient:
                     )
                     time.sleep(delay)
                     continue
+                logger.warning(
+                    "model transport failed provider=%s model=%s operation=%s status_code=%s error_type=%s message=%s",
+                    runtime.state.provider,
+                    runtime.state.model,
+                    runtime.exchange.operation,
+                    exc.status_code,
+                    type(exc).__name__,
+                    safe_error_message(exc),
+                )
                 self._publish_request_failure(runtime, exc, publish)
                 raise
             except ModelRequestError as exc:

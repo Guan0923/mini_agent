@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Conversation, RuntimeNodeFrame, RuntimeRootNode, RuntimeStateNode } from "../types";
-import { integrateRuntimeNodeUpdates, messagesBeforeRewind, projectTurnPath, pruneTurnDescendants } from "./runtime/runtimeDetailProjection";
+import { integrateRuntimeNodeUpdates, messagesBeforeRewind, projectRuntimeNode, projectTurnPath, pruneTurnDescendants } from "./runtime/runtimeDetailProjection";
 import { applyRuntimeNodeFrame, runtimeNodeAccumulator } from "./runtime/runtimeNodeReducer";
 import { isRuntimeRootNode, normalizeRuntimeNode, normalizeRuntimeNodeModel, TURN_PROTOCOL_VERSION } from "./runtime/runtimeNodeNormalization";
 
@@ -82,6 +82,83 @@ describe("Turn protocol projection", () => {
     expect(projectTurnPath(map, first.id).map((message) => message.content)).toEqual(["hello", "world"]);
     expect(projectTurnPath(map, fork.id).map((message) => message.content)).toEqual(["forked", "branch"]);
     expect(projectTurnPath(map, root.id)).toEqual([]);
+  });
+
+  it("hides model transport and legacy unknown errors only from Chat projection", () => {
+    const modelTransport = turn({
+      status: "failed",
+      data: [[
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
+        { role: "assistant", content: [{
+          type: "error",
+          category: "network",
+          code: "ModelTransportError",
+          message: "Response ended prematurely",
+          retryable: false,
+          status: "failed",
+        }] },
+      ]],
+    });
+    const legacyUnknown = turn({
+      status: "failed",
+      data: [[
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
+        { role: "assistant", content: [{
+          type: "error",
+          category: "agent",
+          message: "An unknown error caused the system to encounter an exception.",
+          retryable: false,
+          status: "failed",
+        }] },
+      ]],
+    });
+
+    expect(projectRuntimeNode(modelTransport)).toMatchObject({
+      items: [],
+      error: undefined,
+      errorSuppressed: true,
+      status: "failed",
+    });
+    expect(projectRuntimeNode(legacyUnknown)).toMatchObject({
+      items: [],
+      error: undefined,
+      errorSuppressed: true,
+      status: "failed",
+    });
+  });
+
+  it("keeps ordinary errors visible even when an earlier transport error was hidden", () => {
+    const node = turn({
+      status: "failed",
+      data: [[
+        { role: "user", content: [{ type: "text", text: "hello", status: "success" }] },
+        { role: "assistant", content: [
+          {
+            type: "error",
+            category: "network",
+            code: "ModelTransportError",
+            message: "Response ended prematurely",
+            retryable: false,
+            status: "failed",
+          },
+          {
+            type: "error",
+            category: "tool",
+            code: "ToolError",
+            message: "工具执行失败",
+            retryable: false,
+            status: "failed",
+          },
+        ] },
+      ]],
+    });
+
+    expect(projectRuntimeNode(node)).toMatchObject({
+      items: [expect.objectContaining({ code: "ToolError" })],
+      error: "工具执行失败",
+      errorSuppressed: false,
+      status: "failed",
+    });
   });
 
   it("projects consecutive Assistant messages and preserves a plain-text agent report", () => {

@@ -5,14 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import HTTPException
 
 from backend.domain import (
-    FAILED_TERMINAL_MESSAGE,
     ClaimedEnvelope,
     MessageQueueUnavailable,
     safe_error_message,
@@ -50,6 +49,29 @@ def _startup_failure_message(error: Exception) -> str:
     """Render failures raised before a persisted Turn baseline exists."""
 
     return safe_error_message(error)
+
+
+def _terminal_message_for_turn(
+    terminal_type: str,
+    terminal_error: Mapping[str, Any] | None,
+    *,
+    turn_id: str,
+    status: str,
+    category: str | None,
+    code: str,
+) -> str:
+    if terminal_type != "failed":
+        return ""
+    rendered = terminal_error_text(terminal_error) if terminal_error is not None else ""
+    if not rendered:
+        logger.warning(
+            "Turn failed without terminal error turn_id=%s status=%s category=%s code=%s",
+            turn_id,
+            status,
+            category or "",
+            code,
+        )
+    return rendered
 
 
 def _runtime_stream_lock_registry(state: object) -> dict[str, Any]:
@@ -417,54 +439,48 @@ def _stream(
             if bridge is not None:
                 old_status = str(run_state.status if run_state is not None else "abort")
                 stop_reason = str(getattr(run_state, "stop_reason", "") or "")
-                if old_status in {"completed", "success"}:
+                if pause_controller.is_requested():
+                    requested_status = "paused"
+                    category = "user"
+                elif old_status in {"completed", "success"}:
                     requested_status = "success"
                     category = None
                 elif old_status == "cancelled":
                     requested_status = "paused"
                     category = "user"
                 elif bridge.abort_category is not None:
-                    requested_status = (
-                        "paused" if bridge.abort_category == "network" and bridge.produced_item else "failed"
-                    )
+                    requested_status = "failed"
                     category = bridge.abort_category
                 else:
                     requested_status = "failed"
                     category = bridge.abort_category or "agent"
                 final_answer = (run_state.final_answer if run_state is not None else "") or ""
-                if category == "network" and not bridge.produced_item:
-                    final_node = bridge._current()
-                    bridge.closed = True
-                    enqueue_terminal("network", turn_id or bridge.turn_id or "unknown")
-                    requested_status = "running"
-                else:
-                    final_node = bridge.finish(
-                        requested_status,
-                        final_answer,
-                        category=category,
-                        code=stop_reason or bridge.abort_code,
-                    )
+                final_node = bridge.finish(
+                    requested_status,
+                    final_answer,
+                    category=category,
+                    code=bridge.abort_code or stop_reason,
+                )
                 terminal_status = final_node.status if final_node is not None else "failed"
                 terminal_id = final_node.id if final_node is not None else turn_id or bridge.turn_id or "unknown"
-                terminal_error = bridge.terminal_error
-                rendered_error = terminal_error_text(terminal_error) if terminal_error is not None else ""
-                if requested_status == "running":
-                    pass
-                else:
-                    if conversation is not None and final_node is not None:
-                        _auto_title_main_thread(
-                            conversation,
-                            node_store,
-                            session_id=final_node.session_id,
-                            thread_id=final_node.thread_id,
-                            turn_id=final_node.id,
-                        )
-                    terminal_type = _terminal_type_for_status(terminal_status, category)
-                    enqueue_terminal(
-                        terminal_type,
-                        terminal_id,
-                        "" if terminal_type == "success" else rendered_error or FAILED_TERMINAL_MESSAGE,
+                if conversation is not None and final_node is not None:
+                    _auto_title_main_thread(
+                        conversation,
+                        node_store,
+                        session_id=final_node.session_id,
+                        thread_id=final_node.thread_id,
+                        turn_id=final_node.id,
                     )
+                terminal_type = _terminal_type_for_status(terminal_status, category)
+                terminal_message = _terminal_message_for_turn(
+                    terminal_type,
+                    bridge.terminal_error,
+                    turn_id=terminal_id,
+                    status=terminal_status,
+                    category=category,
+                    code=bridge.abort_code or stop_reason,
+                )
+                enqueue_terminal(terminal_type, terminal_id, terminal_message)
             else:
                 enqueue_terminal("failed", turn_id or "unknown", "Turn persistence is unavailable.")
         except MessageQueueUnavailable as exc:
@@ -492,11 +508,15 @@ def _stream(
         except Exception as exc:
             bridge = bridge_ref["bridge"]
             if bridge is not None:
-                final_node = bridge.finish_exception(exc)
-                rendered_error = terminal_error_text(bridge.terminal_error or {}) if bridge.terminal_error else ""
+                if pause_controller.is_requested():
+                    final_node = bridge.finish("paused", "", category="user", code="user_paused")
+                    rendered_error = ""
+                else:
+                    final_node = bridge.finish_exception(exc)
+                    rendered_error = terminal_error_text(bridge.terminal_error or {}) if bridge.terminal_error else ""
                 terminal_id = final_node.id if final_node is not None else turn_id or bridge.turn_id or "unknown"
-                if bridge.abort_category == "network" and not bridge.produced_item:
-                    enqueue_terminal("network", terminal_id)
+                if pause_controller.is_requested():
+                    enqueue_terminal("success", terminal_id)
                 else:
                     enqueue_terminal("failed", terminal_id, rendered_error or safe_error_message(exc))
             else:

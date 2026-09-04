@@ -13,6 +13,7 @@ from backend.api.active_turn_stream import ActiveTurnStream
 from backend.api.app import create_app
 from backend.api.chat import routes as chat_routes
 from backend.api.chat.routes import _auto_title_main_thread, _startup_failure_message, _terminal_type_for_status
+from backend.api.chat.streaming import _terminal_message_for_turn
 from backend.api.pause_control import TurnPauseController
 from backend.api.routes import turns as turn_routes
 from backend.api.session_store import session_store
@@ -1187,7 +1188,28 @@ def test_exhausted_retry_finishes_without_duplicate_terminal_errors() -> None:
     assert failed.assistant_items[0]["status"] == "failed"
     errors = [item for item in failed.assistant_items if item["type"] == "error"]
     assert len(errors) == 1 and errors[0]["message"] == "provider unavailable"
+    assert errors[0]["code"] == "ModelTransportError"
     assert not any(item["status"] == "running" for item in failed.assistant_items)
+
+
+def test_failed_turn_without_detail_has_no_fallback_error_item() -> None:
+    store = InMemoryNodeStore()
+    bridge = RuntimeEventNodeBridge(
+        store,
+        session_id="session_1",
+        thread_id="session_1",
+        turn_id="turn_empty_failure",
+        prompt="fail silently",
+        provider_name="local",
+        emit=lambda _frame: None,
+    )
+    bridge.start()
+
+    failed = bridge.finish("failed", "", category="agent", code="runtime_failed")
+
+    assert failed is not None and failed.status == "failed"
+    assert bridge.terminal_error is None
+    assert not any(item["type"] == "error" for item in failed.assistant_items)
 
 
 def test_tool_approval_persists_only_the_interactive_decision_item() -> None:
@@ -1806,6 +1828,25 @@ def test_http_sse_surfaces_sandbox_failure_before_turn_baseline(tmp_path: Path, 
     assert response.status_code == 200
     payloads = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
     assert payloads == [f'<SSE id="{turn_id}" type="failed">Windows Sandbox Broker 已安装，但健康检查未通过。</SSE>']
+
+
+def test_failed_terminal_without_error_is_empty_and_warns(caplog) -> None:
+    with caplog.at_level("WARNING", logger="backend.api.chat.streaming"):
+        message = _terminal_message_for_turn(
+            "failed",
+            None,
+            turn_id="turn_empty_terminal",
+            status="failed",
+            category="agent",
+            code="runtime_failed",
+        )
+
+    assert message == ""
+    warnings = [
+        record.getMessage() for record in caplog.records if "Turn failed without terminal error" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "turn_empty_terminal" in warnings[0]
 
 
 class HttpCompactionClient:
