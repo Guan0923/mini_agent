@@ -78,7 +78,13 @@ class SQLiteSidebarThreadMixin:
     ) -> SidebarThread:
         now = utc_now()
         item = SidebarThread(
-            thread_id, session_id, title.strip() or "新对话", now, now, title_is_custom=title_is_custom
+            thread_id,
+            session_id,
+            title.strip() or "新对话",
+            now,
+            now,
+            now,
+            title_is_custom=title_is_custom,
         )
         with self._connection(session_id) as connection:
             self._assert_writable(connection)
@@ -121,6 +127,24 @@ class SQLiteSidebarThreadMixin:
             self._assert_writable(connection)
             self._put_json_object(
                 connection, item.session_id, "sidebar_thread", item.thread_id, next_item.to_dict(), next_item.updated_at
+            )
+        return next_item
+
+    def touch_sidebar_thread_activity(self, thread_id: str, *, timestamp: str | None = None) -> SidebarThread:
+        item = self.get_sidebar_thread(thread_id)
+        if item is None:
+            raise KeyError(thread_id)
+        activity_at = timestamp or utc_now()
+        next_item = replace(item, last_activity_at=activity_at)
+        with self._connection(item.session_id) as connection:
+            self._assert_writable(connection)
+            self._put_json_object(
+                connection,
+                item.session_id,
+                "sidebar_thread",
+                item.thread_id,
+                next_item.to_dict(),
+                activity_at,
             )
         return next_item
 

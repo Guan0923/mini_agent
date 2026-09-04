@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -28,6 +29,14 @@ class CreateSidebarThreadRequest(BaseModel):
 
 class RenameSidebarThreadRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
+
+
+class SidebarThreadOrderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = Field(default=None, max_length=200)
+    ordered_thread_ids: list[str] | None = Field(default=None, max_length=10_000)
+    sort_by: Literal["created_at", "recent_activity"] | None = None
 
 
 class QueuedMessageBody(BaseModel):
@@ -72,8 +81,57 @@ def _validate_queue_content(content: str, references: tuple[dict[str, str], ...]
     return normalized
 
 
-def _payload(store, item) -> dict[str, object]:
-    return store.sidebar_thread_summary(item).to_dict()
+def _project_id(state: WebAppState, session_id: str) -> str | None:
+    project = state.projects.session_project(session_id)
+    return project.project_id if project is not None else None
+
+
+def _summary_payload(summary, state: WebAppState) -> dict[str, object]:
+    payload = summary.to_dict()
+    project = state.projects.session_project(summary.thread.session_id)
+    payload["project_id"] = project.project_id if project is not None else None
+    payload["project_available"] = project.available if project is not None else None
+    return payload
+
+
+def _payload(store, item, state: WebAppState) -> dict[str, object]:
+    return _summary_payload(store.sidebar_thread_summary(item), state)
+
+
+def _scope_items(state: WebAppState, items: list[Any], project_id: str | None) -> list[Any]:
+    return [item for item in items if _project_id(state, item.thread.session_id) == project_id]
+
+
+def _complete_scope_order(state: WebAppState, items: list[Any], project_id: str | None) -> list[str]:
+    known = {item.thread.thread_id for item in items}
+    stored = [item for item in state.projects.sidebar_thread_order(project_id) if item in known]
+    stored_ids = set(stored)
+    missing = sorted(
+        (item for item in items if item.thread.thread_id not in stored_ids),
+        key=lambda item: (item.thread.created_at, item.thread.thread_id),
+        reverse=True,
+    )
+    return [item.thread.thread_id for item in missing] + stored
+
+
+def _active_scope_order(state: WebAppState, store, project_id: str | None) -> tuple[list[Any], list[str], list[str]]:
+    scope_items = _scope_items(state, store.list_sidebar_thread_summaries(state="all"), project_id)
+    active = [item for item in scope_items if item.thread.state == "active"]
+    full_order = _complete_scope_order(state, scope_items, project_id)
+    active_ids = {item.thread.thread_id for item in active}
+    return active, full_order, [thread_id for thread_id in full_order if thread_id in active_ids]
+
+
+def _save_active_scope_order(
+    state: WebAppState,
+    project_id: str | None,
+    full_order: list[str],
+    active_order: list[str],
+) -> None:
+    active_ids = set(active_order)
+    replacements = iter(active_order)
+    merged = [next(replacements) if thread_id in active_ids else thread_id for thread_id in full_order]
+    state.projects.save_sidebar_thread_order(project_id, merged)
 
 
 def _require(store, thread_id: str):
@@ -153,8 +211,22 @@ def list_sidebar_threads(
 ) -> list[dict[str, object]]:
     if state not in {"active", "archived", "deleted", "all"}:
         raise HTTPException(status_code=422, detail="无效的 SidebarThread 状态。")
-    store = session_store(request.app.state.web)
-    return [item.to_dict() for item in store.list_sidebar_thread_summaries(state=state)]
+    web: WebAppState = request.app.state.web
+    store = session_store(web)
+    items = store.list_sidebar_thread_summaries(state=state)
+    if state in {"active", "all"}:
+        all_items = store.list_sidebar_thread_summaries(state="all")
+        groups: dict[str | None, list[Any]] = {}
+        for item in items:
+            groups.setdefault(_project_id(web, item.thread.session_id), []).append(item)
+        ordered: list[Any] = []
+        for project_id, group in groups.items():
+            by_id = {item.thread.thread_id: item for item in group}
+            scope_items = _scope_items(web, all_items, project_id)
+            full_order = _complete_scope_order(web, scope_items, project_id)
+            ordered.extend(by_id[thread_id] for thread_id in full_order if thread_id in by_id)
+        items = ordered
+    return [_summary_payload(item, web) for item in items]
 
 
 @router.post("", status_code=201)
@@ -172,7 +244,45 @@ def create_sidebar_thread(
         title=session.title,
         title_is_custom=session.title_is_custom,
     )
-    return _payload(store, item)
+    return _payload(store, item, state)
+
+
+@router.put("/order")
+def update_sidebar_thread_order(
+    body: SidebarThreadOrderRequest,
+    request: Request,
+) -> dict[str, list[str]]:
+    if (body.ordered_thread_ids is None) == (body.sort_by is None):
+        raise HTTPException(status_code=422, detail="ordered_thread_ids 与 sort_by 必须且只能提供一个。")
+    web: WebAppState = request.app.state.web
+    store = session_store(web)
+    active, full_order, current_order = _active_scope_order(web, store, body.project_id)
+    current_ids = {item.thread.thread_id for item in active}
+    if body.ordered_thread_ids is not None:
+        requested = body.ordered_thread_ids
+        if len(requested) != len(set(requested)) or set(requested) != current_ids:
+            raise HTTPException(status_code=409, detail="对话顺序必须完整且只能包含当前分组中的活动对话。")
+        next_order = requested
+    else:
+        by_id = {item.thread.thread_id: item for item in active}
+        if body.sort_by == "created_at":
+            next_order = sorted(
+                current_order,
+                key=lambda thread_id: (by_id[thread_id].thread.created_at, thread_id),
+                reverse=True,
+            )
+        else:
+            next_order = sorted(
+                current_order,
+                key=lambda thread_id: (
+                    by_id[thread_id].thread.last_activity_at,
+                    by_id[thread_id].thread.created_at,
+                    thread_id,
+                ),
+                reverse=True,
+            )
+    _save_active_scope_order(web, body.project_id, full_order, next_order)
+    return {"ordered_thread_ids": next_order}
 
 
 @router.patch("/{thread_id}")
@@ -181,37 +291,42 @@ def rename_sidebar_thread(
     body: RenameSidebarThreadRequest,
     request: Request,
 ) -> dict[str, object]:
-    store = session_store(request.app.state.web)
+    web: WebAppState = request.app.state.web
+    store = session_store(web)
     _require(store, thread_id)
     return _payload(
         store,
         store.update_sidebar_thread(thread_id, title=body.title.strip(), title_is_custom=True),
+        web,
     )
 
 
 @router.post("/{thread_id}/archive")
 def archive_sidebar_thread(thread_id: str, request: Request) -> dict[str, object]:
-    store = session_store(request.app.state.web)
+    web: WebAppState = request.app.state.web
+    store = session_store(web)
     _require(store, thread_id)
     from backend.domain.state import utc_now
 
-    return _payload(store, store.update_sidebar_thread(thread_id, archived_at=utc_now(), deleted_at=None))
+    return _payload(store, store.update_sidebar_thread(thread_id, archived_at=utc_now(), deleted_at=None), web)
 
 
 @router.post("/{thread_id}/restore")
 def restore_sidebar_thread(thread_id: str, request: Request) -> dict[str, object]:
-    store = session_store(request.app.state.web)
+    web: WebAppState = request.app.state.web
+    store = session_store(web)
     _require(store, thread_id)
-    return _payload(store, store.update_sidebar_thread(thread_id, archived_at=None, deleted_at=None))
+    return _payload(store, store.update_sidebar_thread(thread_id, archived_at=None, deleted_at=None), web)
 
 
 @router.delete("/{thread_id}")
 def delete_sidebar_thread(thread_id: str, request: Request) -> dict[str, object]:
-    store = session_store(request.app.state.web)
+    web: WebAppState = request.app.state.web
+    store = session_store(web)
     _require(store, thread_id)
     from backend.domain.state import utc_now
 
-    return _payload(store, store.update_sidebar_thread(thread_id, deleted_at=utc_now()))
+    return _payload(store, store.update_sidebar_thread(thread_id, deleted_at=utc_now()), web)
 
 
 __all__ = ["router"]

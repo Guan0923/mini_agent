@@ -59,9 +59,20 @@
   z-index: 1;
 }
 
+.history-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
 .history-list-item {
   display: block;
   width: 100%;
+}
+
+.history-list-item.is-dragging {
+  opacity: 0.72;
+  filter: drop-shadow(0 5px 8px rgba(0, 0, 0, 0.16));
 }
 
 .history-item {
@@ -70,6 +81,19 @@
   gap: 2px;
   width: 100%;
   min-width: 0;
+  cursor: grab;
+  touch-action: manipulation;
+}
+
+.history-list-item:focus-visible .history-item {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+  border-radius: 8px;
+}
+
+.history-list-item.is-dragging .history-item,
+.history-list-item.is-dragging .history-entry-button {
+  cursor: grabbing;
 }
 
 .history-entry-button {
@@ -83,6 +107,15 @@
   padding: 5px 8px;
   overflow: hidden;
   text-align: left;
+  cursor: grab;
+}
+
+.sidebar-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 32px;
+  margin: 8px 4px 4px 8px;
 }
 
 .history-entry-button.selected {
