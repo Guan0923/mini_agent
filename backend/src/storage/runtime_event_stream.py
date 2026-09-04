@@ -91,6 +91,27 @@ class RedisRuntimeEventStream:
             raise self._unavailable(exc) from exc
         return str(entries[0][0]) if entries else "0-0"
 
+    def latest_turn_event(self, turn_id: str) -> RuntimeStreamEntry | None:
+        """Return the newest retained event for one Turn without blocking."""
+
+        try:
+            entries = self.client.xrevrange(self._turn_key(turn_id), count=1)
+        except RedisError as exc:
+            raise self._unavailable(exc) from exc
+        if not entries:
+            return None
+        stream_id, fields = entries[0]
+        raw = fields.get("payload")
+        payload = json.loads(raw) if raw else None
+        if not isinstance(payload, dict):
+            return None
+        return RuntimeStreamEntry(
+            str(stream_id),
+            str(fields.get("event_id") or ""),
+            int(fields.get("sequence") or 0),
+            dict(payload),
+        )
+
     def has_event(self, event_id: str) -> bool:
         try:
             return bool(self.client.exists(self._receipt_key(event_id)))
@@ -168,6 +189,13 @@ class MemoryRuntimeEventStream:
         with self._lock:
             entries = self._turns.get(turn_id, [])
             return entries[-1].stream_id if entries else "0-0"
+
+    def latest_turn_event(self, turn_id: str) -> RuntimeStreamEntry | None:
+        """Return the newest retained event for one Turn without blocking."""
+
+        with self._lock:
+            entries = self._turns.get(turn_id, [])
+            return entries[-1] if entries else None
 
     def has_event(self, event_id: str) -> bool:
         with self._lock:

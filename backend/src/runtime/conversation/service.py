@@ -353,6 +353,9 @@ class ConversationService(ConversationNodeBridgeMixin, ConversationSessionContro
         self.runtime.state.status = "idle"
         self.runtime.state.usage = self.runtime.state.turn_usage
         self.runtime.state.turn_usage = None
+        todo_store = self.runtime.services.todo_store
+        if todo_store is not None and run.turn_id:
+            todo_store.expire_turn(self.runtime.state.session_id, run.turn_id)
         publish = self.runtime.services.publish
         if publish is not None:
             publish(RuntimeEvent("thinking_end", data={"interrupted": True}))

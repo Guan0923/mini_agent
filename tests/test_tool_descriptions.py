@@ -9,7 +9,7 @@ from backend.tools import WorkspaceFiles, build_tool_registry, delegation_tools
 
 EXPECTED_LOCAL_TOOLS = [
     "get_current_time",
-    "todo_write",
+    "update_todo_list",
     "read_file",
     "glob",
     "grep",

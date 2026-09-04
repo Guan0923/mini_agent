@@ -11,6 +11,7 @@ from backend.domain import (
     AssistantMessage,
     ChatMessage,
     RunState,
+    TodoListStore,
     ToolSpec,
     UserMessage,
 )
@@ -41,6 +42,7 @@ class RuntimeServices:
 
     planner: object
     tools: object
+    todo_store: TodoListStore | None = None
     skill_catalog: object | None = None
     skills_enabled: bool = True
     skill_auto_select: bool = False
@@ -77,6 +79,7 @@ class RuntimeServices:
     # can replace a failed placeholder immediately before every model request.
     runtime_node_context: Callable[[], Sequence[RuntimeTreeNode]] | None = None
     context_prefix_messages: list[ChatMessage] = field(default_factory=list)
+    context_suffix_messages: list[ChatMessage] = field(default_factory=list)
     # Set only by pause_current_turn. The tool result is persisted before the
     # next safe-boundary check consumes this one-shot request.
     pause_after_tool: bool = False
@@ -157,9 +160,10 @@ class AgentRuntime:
         else:
             messages = [*self.services.context_prefix_messages, *_chat_messages_from_nodes(nodes)]
         if not current_turn_only or not nodes:
+            messages.extend(self.services.context_suffix_messages)
             return messages
         boundary = max((index for index, item in enumerate(messages) if isinstance(item, UserMessage)), default=0)
-        return messages[boundary:]
+        return [*messages[boundary:], *self.services.context_suffix_messages]
 
     def request_config(self) -> dict[str, Any]:
         """Return the immutable configuration captured for this model call."""

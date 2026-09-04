@@ -14,6 +14,8 @@ def finish_run(runtime: AgentRuntime, *, started_at: float) -> RunState:
     """Finalize usage, history, telemetry, and persistence for one attempt."""
 
     run = runtime.run
+    if runtime.services.todo_store is not None and run.turn_id and run.status in {"completed", "failed"}:
+        runtime.services.todo_store.expire_turn(runtime.state.session_id, run.turn_id)
     runtime.state.usage = runtime.state.turn_usage
     runtime.state.turn_usage = None
     runtime.state.status = "idle"

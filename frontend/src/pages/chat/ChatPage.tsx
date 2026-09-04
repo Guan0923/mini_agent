@@ -128,7 +128,6 @@ export default function ChatPage({
     collectedReferences,
     clearComposer,
   } = composerFiles;
-  const todo = useMemo(() => latestTodoList(messages), [messages]);
   const filteredCommands = commandSuggestions(input).filter(
     (command) => !agentThreadView.isSubagent || command.name !== "/compact",
   );
@@ -157,7 +156,9 @@ export default function ChatPage({
     const sorted = [...sessionLeaves].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
     return sorted[sorted.length - 1];
   })();
-  const todoPanelKey = `${conversation?.id ?? "draft"}:${activeRuntimeNode?.id ?? conversation?.activeTurnId ?? "no-turn"}`;
+  const todoTurnId = conversation?.activeTurnId ?? activeRuntimeNode?.id;
+  const todo = useMemo(() => latestTodoList(messages, todoTurnId), [messages, todoTurnId]);
+  const todoPanelKey = `${conversation?.id ?? "draft"}:${todoTurnId ?? "no-turn"}`;
   const todoCompleted = todo !== null && todo.length > 0 && todo.every((item) => item.status === "completed");
   const visibleTodo = todo?.length && !todoCompleted && !dismissedTodoPanels.has(todoPanelKey) ? todo : null;
   const todoClosable = Boolean(visibleTodo) && !busy;

@@ -770,6 +770,9 @@ test("Todo panel auto-finishes and offers cleanup only for an incomplete termina
   await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(todoPanel.locator(".ant-collapse-item")).not.toHaveClass(/ant-collapse-item-active/);
   await expect(page.getByRole("button", { name: "关闭任务清单", exact: true })).toBeVisible();
+  await expect(page.getByText("Discard this first Todo final answer.")).toHaveCount(0);
+  await expect(page.locator(".message.assistant").last()).toContainText("Unfinished Todo items:");
+  await expect(page.locator(".message.assistant").last()).toContainText(/todo_[0-9a-f]{32} \[pending\]/);
   await page.getByRole("button", { name: "关闭任务清单", exact: true }).click();
   await expect(todoPanel).toHaveCount(0);
   await expect(page.locator(".composer")).not.toHaveClass(/has-todo/);
@@ -785,6 +788,16 @@ test("Todo panel auto-finishes and offers cleanup only for an incomplete termina
   await expect(todoPanel).toHaveCount(0, { timeout: 15_000 });
   await expect(page.locator(".composer")).not.toHaveClass(/has-todo/);
   await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible({ timeout: 15_000 });
+
+  await editor.fill("todo rejected update");
+  const rejectedResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await rejectedResponse).ok()).toBeTruthy();
+  await expect(page.getByText("The rejected Todo update was not applied.")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Must never render")).toHaveCount(0);
+  await expect(todoPanel).toHaveCount(0);
 });
 
 test("real Turn SSE flow supports tools, rewind versions, fork, and compact", async ({ page }) => {

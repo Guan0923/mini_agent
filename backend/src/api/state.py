@@ -25,6 +25,7 @@ from backend.storage.message_queue import MemoryMessageQueue, RedisMessageQueue
 from backend.storage.projects import ProjectStore
 from backend.storage.runtime_event_stream import MemoryRuntimeEventStream, RedisRuntimeEventStream
 from backend.storage.settings import LocalSettingsStore
+from backend.storage.todo_list import MemoryTodoListStore, RedisTodoListStore
 from backend.tools.terminal import available_terminal_executables, effective_terminal_type
 
 from .agent_report_projection import project_frame
@@ -72,6 +73,11 @@ class WebAppState:
             RedisRuntimeEventStream(redis_client, key_prefix=self.message_queue.key_prefix)
             if redis_client is not None
             else MemoryRuntimeEventStream()
+        )
+        self.todo_store = (
+            RedisTodoListStore(redis_client, key_prefix=self.message_queue.key_prefix)
+            if redis_client is not None
+            else MemoryTodoListStore()
         )
         self.mailbox = self.message_queue
         from .terminal_manager import TerminalManager
@@ -188,6 +194,7 @@ class WebAppState:
         return repaired
 
     def _reconcile_message_queue(self) -> None:
+        from backend.runtime.conversation.recovery.todo_receipts import reconcile_todo_receipts
         from backend.storage.sqlite import SQLiteSessionStore
 
         store = SQLiteSessionStore(self.paths, self.agent_thread_index)
@@ -195,7 +202,7 @@ class WebAppState:
         for summary in store.list_sessions(state="all"):
             for node in store.load_nodes(summary.session_id):
                 if isinstance(node, RuntimeState) and node.status == "running":
-                    running_nodes.append(node)
+                    running_nodes.append(reconcile_todo_receipts(store, self.todo_store, node))
         try:
             pending = self.message_queue.pending_deliveries()
         except MessageQueueUnavailable:
@@ -252,6 +259,7 @@ class WebAppState:
                 and (runtime_thread is None or runtime_thread.origin_kind != "subagent")
             ):
                 self._fail_interrupted_node(store, current)
+                self.todo_store.expire_turn(current.session_id, current.id)
 
         for turn_id in released_turns:
             try:
