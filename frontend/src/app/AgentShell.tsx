@@ -114,30 +114,34 @@ export default function AgentShell(props: AgentShellProps) {
     rawPanelWidthRef.current = width;
     setPreviewPanelWidth(width);
   }, [props.current?.sessionId, panel.payload?.state.width]);
+  const userBackendRequest = <T,>(request: () => T): T => {
+    props.sandboxHealth.notifyUserBackendRequest();
+    return request();
+  };
   const closeMobile = () => setMobileSidebarOpen(false);
   const navigate = (page: Page) => {
     props.onNavigate(page);
     closeMobile();
   };
   const select = (id: string) => {
-    props.onSelect(id);
+    userBackendRequest(() => props.onSelect(id));
     closeMobile();
   };
   const create = async (title?: string) => {
-    const id = await props.onNew(title);
+    const id = await userBackendRequest(() => props.onNew(title));
     closeMobile();
     return id;
   };
   const createProject = async () => {
-    await props.onNewProject();
+    await userBackendRequest(() => props.onNewProject());
     closeMobile();
   };
   const createProjectConversation = async (projectId: string) => {
-    await props.onNewProjectConversation(projectId);
+    await userBackendRequest(() => props.onNewProjectConversation(projectId));
     closeMobile();
   };
   const useSession = async (sessionId: string) => {
-    const id = await props.onSelectSession(sessionId);
+    const id = await userBackendRequest(() => props.onSelectSession(sessionId));
     closeMobile();
     return id;
   };
@@ -154,19 +158,19 @@ export default function AgentShell(props: AgentShellProps) {
       onNew={create}
       onNewProject={createProject}
       onNewProjectConversation={createProjectConversation}
-      onRemoveProject={props.onRemoveProject}
-      onRenameProject={props.onRenameProject}
-      onChangeProjectPath={props.onChangeProjectPath}
-      onRevokeSkillTrust={props.onRevokeSkillTrust}
+      onRemoveProject={(projectId) => userBackendRequest(() => props.onRemoveProject(projectId))}
+      onRenameProject={(projectId, name) => userBackendRequest(() => props.onRenameProject(projectId, name))}
+      onChangeProjectPath={(projectId) => userBackendRequest(() => props.onChangeProjectPath(projectId))}
+      onRevokeSkillTrust={(projectId) => userBackendRequest(() => props.onRevokeSkillTrust(projectId))}
       onSelect={select}
       onNavigate={navigate}
-      onRename={props.onRename}
-      onArchive={props.onArchive}
-      onDelete={props.onDelete}
-      onReorder={props.onReorderSidebar}
-      onSort={props.onSortSidebar}
-      onProfileUpdate={props.onProfileUpdate}
-      onOpenSettings={() => props.setSettingsOpen(true)}
+      onRename={(id, title) => userBackendRequest(() => props.onRename(id, title))}
+      onArchive={(id) => userBackendRequest(() => props.onArchive(id))}
+      onDelete={(id) => userBackendRequest(() => props.onDelete(id))}
+      onReorder={(projectId, orderedThreadIds) => userBackendRequest(() => props.onReorderSidebar(projectId, orderedThreadIds))}
+      onSort={(projectId, sortBy) => userBackendRequest(() => props.onSortSidebar(projectId, sortBy))}
+      onProfileUpdate={(profile) => userBackendRequest(() => props.onProfileUpdate(profile))}
+      onOpenSettings={() => userBackendRequest(() => props.setSettingsOpen(true))}
       collapsed={sidebarCollapsed}
       onToggleCollapse={() => {
         if (isMobile) closeMobile();
@@ -199,21 +203,29 @@ export default function AgentShell(props: AgentShellProps) {
           onUpdate={props.onUpdate}
           onNew={create}
           onNavigate={navigate}
-          onEnsureSession={props.onEnsureSession}
-          onFork={props.onFork}
-          onRewind={props.onRewind}
+          onEnsureSession={(id) => userBackendRequest(() => props.onEnsureSession(id))}
+          onFork={(conversationId, messageId) => userBackendRequest(() => props.onFork(conversationId, messageId))}
+          onRewind={(conversationId, messageId) => userBackendRequest(() => props.onRewind(conversationId, messageId))}
           onSelectSession={useSession}
-          onReload={props.onReload}
-          onRefresh={props.onRefresh}
+          onReload={(id, turnId) => userBackendRequest(() => props.onReload(id, turnId))}
+          onRefresh={() => userBackendRequest(() => props.onRefresh())}
           running={Boolean(props.current?.messages.some((message) => message.running))}
-          onRun={props.onRun}
-          onStopRun={props.onStopRun}
+          onRun={(request) => userBackendRequest(() => props.onRun(request))}
+          onStopRun={(id) => userBackendRequest(() => props.onStopRun(id))}
           queuedMessages={props.queuedMessages?.get(props.current?.id ?? "") ?? []}
           onQueuedMessagesChange={props.onQueuedMessagesChange}
           onQueuedMessagesRefresh={props.onQueuedMessagesRefresh}
           sandboxHealth={props.sandboxHealth}
         />
-      ) : props.page === "trash" ? <TrashPage conversations={props.archivedConversations} projects={props.removedProjects} onRestore={props.onRestore} onDelete={props.onDelete} onRestoreProject={props.onRestoreProject} /> : <BenchmarkPage />}
+      ) : props.page === "trash" ? (
+        <TrashPage
+          conversations={props.archivedConversations}
+          projects={props.removedProjects}
+          onRestore={(id) => userBackendRequest(() => props.onRestore(id))}
+          onDelete={(id) => userBackendRequest(() => props.onDelete(id))}
+          onRestoreProject={(id) => userBackendRequest(() => props.onRestoreProject(id))}
+        />
+      ) : <BenchmarkPage />}
     </>
   );
   const renderSideChat = (window: RightPanelWindow) => {
@@ -230,13 +242,13 @@ export default function AgentShell(props: AgentShellProps) {
           onNew={create}
           onNavigate={navigate}
           onEnsureSession={async () => window.session_id}
-          onRewind={props.onRewindPanel}
+          onRewind={(conversationId, messageId) => userBackendRequest(() => props.onRewindPanel(conversationId, messageId))}
           onSelectSession={useSession}
-          onReload={props.onReloadPanel}
-          onRefresh={() => props.onHydratePanelConversation(window)}
+          onReload={(id, turnId) => userBackendRequest(() => props.onReloadPanel(id, turnId))}
+          onRefresh={() => userBackendRequest(() => props.onHydratePanelConversation(window))}
           running={Boolean(conversation?.messages.some((message) => message.running))}
-          onRun={props.onRun}
-          onStopRun={props.onStopRun}
+          onRun={(request) => userBackendRequest(() => props.onRun(request))}
+          onStopRun={(id) => userBackendRequest(() => props.onStopRun(id))}
           queuedMessages={props.queuedMessages?.get(window.id) ?? []}
           onQueuedMessagesChange={props.onQueuedMessagesChange}
           onQueuedMessagesRefresh={props.onQueuedMessagesRefresh}

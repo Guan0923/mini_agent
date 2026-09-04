@@ -66,6 +66,45 @@ afterEach(() => {
 });
 
 describe("run controller incremental batching", () => {
+  it("rechecks sandbox health when a Turn fails before its baseline", async () => {
+    vi.mocked(streamChat).mockRejectedValue(new Error("Windows Sandbox Broker unavailable"));
+    const checkSandboxHealth = vi.fn().mockResolvedValue(undefined);
+    const controller = createRunController({
+      activeRuns: new Map(),
+      updateLastMessage: vi.fn(),
+      rebindRunSession: vi.fn().mockResolvedValue(undefined),
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+      updateConversation: vi.fn(),
+      recoverConversation: vi.fn().mockResolvedValue(undefined),
+      checkSandboxHealth,
+    });
+
+    await controller.runConversation(request());
+
+    expect(checkSandboxHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not recheck sandbox health after a Turn baseline was received", async () => {
+    vi.mocked(streamChat).mockImplementation(async (_prompt, onMessage) => {
+      onMessage({ type: "turn.snapshot", revision: 0, turn: turn() });
+      throw new Error("model stream failed");
+    });
+    const checkSandboxHealth = vi.fn().mockResolvedValue(undefined);
+    const controller = createRunController({
+      activeRuns: new Map(),
+      updateLastMessage: vi.fn(),
+      rebindRunSession: vi.fn().mockResolvedValue(undefined),
+      refreshSessions: vi.fn().mockResolvedValue(undefined),
+      updateConversation: vi.fn(),
+      recoverConversation: vi.fn().mockResolvedValue(undefined),
+      checkSandboxHealth,
+    });
+
+    await controller.runConversation(request());
+
+    expect(checkSandboxHealth).not.toHaveBeenCalled();
+  });
+
   it("reports admission rejection without clearing an unaccepted composer draft", async () => {
     vi.mocked(streamChat).mockRejectedValue(new Error("message_queue_unavailable"));
     const onAccepted = vi.fn();

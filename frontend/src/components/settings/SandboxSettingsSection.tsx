@@ -1,6 +1,8 @@
+import { useEffect, useState } from "react";
 import { Alert, Button, Col, Form, Input, InputNumber, Popconfirm, Row, Select, Space, Tag, Typography } from "antd";
 import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import type { SandboxLimits, SandboxNetworkRule } from "../../api";
+import type { SandboxHealthState } from "../../app/useSandboxHealth";
 import type { UserSettingsState } from "./useUserSettingsState";
 
 type SectionProps = { state: UserSettingsState };
@@ -41,6 +43,25 @@ export function brokerErrorTitle(code: string | null, installed: boolean): strin
   return (code && brokerErrorTitles[code]) || (installed ? "沙箱 Broker 异常" : "沙箱 Broker 未安装");
 }
 
+function AutoRecoveryStatus({ health }: { health: SandboxHealthState }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (health.autoRecoveryPhase !== "waiting" || health.nextRetryAt === null) return undefined;
+    setNow(Date.now());
+    const timer = globalThis.setInterval(() => setNow(Date.now()), 1_000);
+    return () => globalThis.clearInterval(timer);
+  }, [health.autoRecoveryPhase, health.nextRetryAt]);
+
+  if (health.autoRecoveryPhase === "repairing") return <Tag color="processing">正在自动修复</Tag>;
+  if (health.autoRecoveryPhase === "paused") return <Tag color="error">自动修复已暂停</Tag>;
+  if (health.autoRecoveryPhase === "waiting" && health.nextRetryAt !== null) {
+    const seconds = Math.max(0, Math.ceil((health.nextRetryAt - now) / 1_000));
+    return <Tag color="warning">{seconds} 秒后自动重试</Tag>;
+  }
+  return null;
+}
+
 const limitFields: Array<{
   key: keyof SandboxLimits;
   label: string;
@@ -78,36 +99,29 @@ export function SandboxSettingsSection({ state }: SectionProps) {
       <Space align="center" style={{ marginBottom: 16 }} wrap>
         <Button
           loading={state.sandboxHealth.checking}
-          disabled={state.sandboxHealth.repairing || state.sandboxHealth.reinstalling}
-          onClick={() => void state.sandboxHealth.check()}
+          disabled={state.sandboxHealth.autoRecoveryPhase === "repairing" || state.sandboxHealth.reinstalling}
+          onClick={() => {
+            state.sandboxHealth.notifyUserBackendRequest();
+            void state.sandboxHealth.check();
+          }}
         >
           检查
         </Button>
         {state.sandboxHealth.phase === "healthy" ? <Tag color="success">沙箱已就绪</Tag> : null}
-        {state.sandboxHealth.phase === "unhealthy" ? (
-          <Button
-            type="primary"
-            danger
-            loading={state.sandboxHealth.repairing}
-            disabled={state.sandboxHealth.checking || state.sandboxHealth.reinstalling}
-            onClick={() => void state.sandboxHealth.repair()}
-          >
-            修复
-          </Button>
-        ) : null}
+        <AutoRecoveryStatus health={state.sandboxHealth} />
         <Popconfirm
           title="卸载并重装 Sandbox Broker？"
           description="需要 UAC 管理员授权；将删除 Mini-Agent 沙箱安装数据。仅在没有运行或等待启动的沙箱命令时执行。"
           okText="卸载并重装"
           cancelText="取消"
           okType="danger"
-          disabled={state.sandboxHealth.checking || state.sandboxHealth.repairing || state.sandboxHealth.reinstalling}
+          disabled={state.sandboxHealth.checking || state.sandboxHealth.autoRecoveryPhase === "repairing" || state.sandboxHealth.reinstalling}
           onConfirm={() => state.sandboxHealth.reinstall()}
         >
           <Button
             danger
             loading={state.sandboxHealth.reinstalling}
-            disabled={state.sandboxHealth.checking || state.sandboxHealth.repairing}
+            disabled={state.sandboxHealth.checking || state.sandboxHealth.autoRecoveryPhase === "repairing"}
           >
             卸载并重装
           </Button>

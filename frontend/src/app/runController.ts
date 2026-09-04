@@ -11,6 +11,7 @@ export interface RunControllerCallbacks {
   refreshSessions: () => Promise<void>;
   updateConversation?: (conversationId: string, updater: (conversation: import("../types").Conversation) => import("../types").Conversation) => void;
   recoverConversation: (conversationId: string, sessionId: string, turnId?: string) => Promise<void>;
+  checkSandboxHealth?: () => Promise<unknown>;
 }
 
 export function createRunController(callbacks: RunControllerCallbacks) {
@@ -181,6 +182,9 @@ export function createRunController(callbacks: RunControllerCallbacks) {
     } catch (error) {
       flushPendingFrames();
       if (!admissionAccepted) request.onAdmissionRejected?.();
+      if (!finalTurn && !request.attach && !controller.signal.aborted) {
+        await callbacks.checkSandboxHealth?.().catch(() => undefined);
+      }
       const protocolError = error instanceof SseProtocolError;
       if (protocolError) {
         controller.abort();

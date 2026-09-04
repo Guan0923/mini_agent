@@ -24,9 +24,10 @@ vi.mock("../api", async (importOriginal) => ({
 }));
 
 vi.mock("../components/AppSidebar", () => ({
-  default: (props: { collapsed?: boolean; onToggleCollapse?: () => void }) => (
+  default: (props: { collapsed?: boolean; onToggleCollapse?: () => void; onNew?: () => Promise<string> }) => (
     <div data-testid="mock-sidebar">
       {!props.collapsed ? <button type="button" aria-label="折叠侧边栏" onClick={props.onToggleCollapse}>侧边栏</button> : null}
+      <button type="button" aria-label="测试新建对话" onClick={() => void props.onNew?.()}>新建</button>
     </div>
   ),
 }));
@@ -107,10 +108,11 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
       code: null,
       detail: null,
       checking: false,
-      repairing: false,
+      autoRecoveryPhase: "idle",
+      nextRetryAt: null,
       reinstalling: false,
       check: vi.fn().mockResolvedValue({ installed: true, healthy: true }),
-      repair: vi.fn().mockResolvedValue(undefined),
+      notifyUserBackendRequest: vi.fn(),
       reinstall: vi.fn().mockResolvedValue(undefined),
     },
     ...overrides,
@@ -118,6 +120,16 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
 }
 
 describe("AgentShell sidebar collapse", () => {
+  it("signals user backend activity before a user action", async () => {
+    const props = makeProps();
+    render(<AgentShell {...props} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "测试新建对话" }));
+
+    expect(props.sandboxHealth.notifyUserBackendRequest).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(props.onNew).toHaveBeenCalledTimes(1));
+  });
+
   it("collapses the desktop sidebar to zero width and restores it", () => {
     const { container } = render(<AgentShell {...makeProps()} />);
     const sider = container.querySelector(".ant-layout-sider");

@@ -93,10 +93,11 @@ const sandboxHealth = {
   code: null,
   detail: null,
   checking: false,
-  repairing: false,
+  autoRecoveryPhase: "idle" as const,
+  nextRetryAt: null,
   reinstalling: false,
   check: vi.fn().mockResolvedValue({ installed: true, healthy: true }),
-  repair: vi.fn().mockResolvedValue(undefined),
+  notifyUserBackendRequest: vi.fn(),
   reinstall: vi.fn().mockResolvedValue(undefined),
 };
 

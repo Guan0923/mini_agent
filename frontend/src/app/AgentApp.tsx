@@ -319,6 +319,7 @@ function AgentApp() {
     refreshSessions: () => refreshSessions(),
     updateConversation,
     recoverConversation,
+    checkSandboxHealth: sandboxHealth.check,
   });
 
   useSandboxRunLifecycle({
@@ -334,6 +335,7 @@ function AgentApp() {
   });
 
   async function runConversationWithSandbox(request: import("./types").ChatRunRequest): Promise<void> {
+    sandboxHealth.notifyUserBackendRequest();
     if (sandboxHealth.phase !== "healthy") {
       throw new Error(sandboxHealth.phase === "checking"
         ? "正在检查沙箱 Broker，暂时无法运行 Agent。"

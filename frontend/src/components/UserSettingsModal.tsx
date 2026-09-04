@@ -27,7 +27,10 @@ export default function UserSettingsModal(props: UserSettingsModalProps) {
   const body = state.loading || !state.settings ? (
     <div className="user-settings-loading"><Spin /></div>
   ) : (
-    <div className="user-settings-layout">
+    <div
+      className="user-settings-layout"
+      onClickCapture={props.sandboxHealth.notifyUserBackendRequest}
+    >
       <nav className="user-settings-nav" aria-label="设置目录">
         <Menu
           mode="inline"
@@ -67,7 +70,10 @@ export default function UserSettingsModal(props: UserSettingsModalProps) {
             aria-label="保存"
             loading={state.saving}
             disabled={state.loading || !state.settings}
-            onClick={() => void state.saveCurrent()}
+            onClick={() => {
+              props.sandboxHealth.notifyUserBackendRequest();
+              void state.saveCurrent();
+            }}
           >
             保存
           </Button>
