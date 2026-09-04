@@ -10,6 +10,7 @@ export interface SessionInfo {
   title: string;
   created_at: string;
   updated_at: string;
+  conversation_updated_at: string;
   message_count: number;
   last_run_status: string | null;
   client_id?: string | null;
@@ -30,7 +31,8 @@ function summary(item: SidebarThread): SessionInfo {
     title: item.title,
     created_at: item.created_at,
     updated_at: item.updated_at,
-    message_count: 0,
+    message_count: item.message_count,
+    conversation_updated_at: item.conversation_updated_at,
     last_run_status: null,
     archived_at: item.archived_at,
     deleted_at: item.deleted_at,

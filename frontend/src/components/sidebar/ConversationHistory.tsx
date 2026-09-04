@@ -134,9 +134,8 @@ interface HistoryRowProps extends HistoryMutationProps {
 export function HistoryRow({ conversation, selected, onSelect, onRename, onArchive, onDelete }: HistoryRowProps) {
   const title = conversation.title || "新对话";
   const running = conversation.messages.some((message) => message.running);
-  const messageCount = conversation.messages.length > 0
-    ? conversation.messages.filter((message) => message.role === "user" || message.role === "assistant").length
-    : conversation.messageCount ?? 0;
+  const messageCount = conversation.messageCount
+    ?? conversation.messages.filter((message) => message.role === "user" || message.role === "assistant").length;
   const updatedAt = formatHistoryUpdatedAt(conversation.updatedAt);
   const meta = `${messageCount} 条消息${updatedAt ? ` · ${updatedAt}` : ""}`;
   const { viewportRef, textRef, overflow, measure } = useHorizontalOverflow(title);

@@ -353,7 +353,7 @@ def fork_turn(turn_id: str, body: ForkTurnRequest, request: Request) -> dict[str
         )
     except (ValueError, RuntimeStateValidationError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"turn": forked.to_dict(), "sidebar_thread": sidebar.to_dict()}
+    return {"turn": forked.to_dict(), "sidebar_thread": store.sidebar_thread_summary(sidebar).to_dict()}
 
 
 @router.post("/{turn_id}/compact", status_code=201)

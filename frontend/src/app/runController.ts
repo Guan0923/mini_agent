@@ -165,7 +165,6 @@ export function createRunController(callbacks: RunControllerCallbacks) {
           request.sessionId,
           finalTurn.id,
         ).catch(() => undefined);
-        await callbacks.refreshSessions().catch(() => undefined);
         return;
       }
       if (finalTurn) {
@@ -179,7 +178,6 @@ export function createRunController(callbacks: RunControllerCallbacks) {
           decision: undefined,
         }));
       }
-      await callbacks.refreshSessions().catch(() => undefined);
     } catch (error) {
       flushPendingFrames();
       if (!admissionAccepted) request.onAdmissionRejected?.();
@@ -210,6 +208,7 @@ export function createRunController(callbacks: RunControllerCallbacks) {
       if (callbacks.activeRuns.get(request.conversationId)?.controller === controller) {
         callbacks.activeRuns.delete(request.conversationId);
       }
+      await callbacks.refreshSessions().catch(() => undefined);
       releaseSettled();
     }
   }

@@ -8,6 +8,8 @@ export interface SidebarThread {
   title: string;
   created_at: string;
   updated_at: string;
+  message_count: number;
+  conversation_updated_at: string;
   archived_at?: string | null;
   deleted_at?: string | null;
   title_is_custom: boolean;

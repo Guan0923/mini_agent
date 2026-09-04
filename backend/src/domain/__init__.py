@@ -97,7 +97,7 @@ from .session import (
     new_session_id,
     validate_time_zone,
 )
-from .sidebar_thread import SidebarThread
+from .sidebar_thread import SidebarThread, SidebarThreadSummary
 from .skills import SkillSelection, SkillSnapshot
 from .state import (
     RecoveryCheckpoint,
@@ -189,6 +189,7 @@ __all__ = [
     "Session",
     "SessionSummary",
     "SidebarThread",
+    "SidebarThreadSummary",
     "RightPanelState",
     "RightPanelWindow",
     "RightPanelWindowKind",

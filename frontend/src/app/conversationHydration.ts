@@ -14,14 +14,12 @@ export async function hydrateConversationCatalog(): Promise<HydratedConversation
   let projects: ProjectInfo[] = [];
   let removedProjects: ProjectInfo[] = [];
   try {
-    const [active, archived, deleted, activeProjects, removedProjectItems] = await Promise.all([
-      listSessions("active").catch(() => []),
-      listSessions("archived").catch(() => []),
-      listSessions("deleted").catch(() => []),
+    const [allSessions, activeProjects, removedProjectItems] = await Promise.all([
+      listSessions("all").catch(() => []),
       listProjects("active").catch(() => []),
       listProjects("removed").catch(() => []),
     ]);
-    summaries = [...active, ...archived, ...deleted];
+    summaries = allSessions;
     projects = activeProjects;
     removedProjects = removedProjectItems;
   } catch {

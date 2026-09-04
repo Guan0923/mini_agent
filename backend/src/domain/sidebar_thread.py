@@ -50,4 +50,20 @@ class SidebarThread:
         )
 
 
-__all__ = ["SidebarThread"]
+@dataclass(frozen=True)
+class SidebarThreadSummary:
+    """Sidebar metadata plus durable conversation activity for one Thread."""
+
+    thread: SidebarThread
+    message_count: int
+    conversation_updated_at: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **self.thread.to_dict(),
+            "message_count": self.message_count,
+            "conversation_updated_at": self.conversation_updated_at,
+        }
+
+
+__all__ = ["SidebarThread", "SidebarThreadSummary"]

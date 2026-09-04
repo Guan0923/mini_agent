@@ -397,6 +397,7 @@ export default function ChatPage({
       return {
         ...current,
         messageCount: messages.filter((message) => message.role === "user" || message.role === "assistant").length,
+        updatedAt: new Date().toISOString(),
         messages,
         runtimeNodes,
         activeTurnId: target?.rewindTurnId ?? current.activeTurnId,

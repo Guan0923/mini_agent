@@ -69,7 +69,7 @@ export function summaryToConversation(summary: SessionInfo, existing?: Conversat
       (existing?.messages.length
         ? existing.messages.filter((message) => message.role === "user" || message.role === "assistant").length
         : existing?.messageCount ?? 0),
-    updatedAt: summary.updated_at ?? existing?.updatedAt,
+    updatedAt: summary.conversation_updated_at,
     sessionId: summary.session_id,
     threadId: summary.thread_id ?? existing?.threadId ?? summary.session_id,
     clientId: summary.client_id ?? existing?.clientId ?? existing?.id ?? summary.session_id,
@@ -88,4 +88,39 @@ export function summaryToConversation(summary: SessionInfo, existing?: Conversat
     projectAvailable: summary.project_available !== undefined ? summary.project_available ?? undefined : existing?.projectAvailable,
     titleIsCustom: summary.title_is_custom !== undefined ? summary.title_is_custom : existing?.titleIsCustom,
   };
+}
+
+export function mergeConversationSummaries(
+  previous: Conversation[],
+  summaries: SessionInfo[],
+  runningConversationIds: ReadonlySet<string> = new Set(),
+): Conversation[] {
+  const byThread = new Map(previous.map((conversation) => [
+    conversation.threadId ?? conversation.sessionId ?? conversation.id,
+    conversation,
+  ]));
+  const byClient = new Map(
+    previous
+      .filter((conversation) => conversation.clientId)
+      .map((conversation) => [conversation.clientId!, conversation]),
+  );
+  return summaries
+    .filter((summary) => !summary.deleted_at)
+    .map((summary) => {
+      const existing = byThread.get(summary.thread_id ?? summary.session_id)
+        ?? (summary.client_id ? byClient.get(summary.client_id) : undefined);
+      const merged = summaryToConversation(summary, existing);
+      if (!existing || !runningConversationIds.has(existing.id)) return merged;
+      const existingCount = existing.messageCount ?? 0;
+      const mergedCount = merged.messageCount ?? 0;
+      const existingTime = existing.updatedAt ? Date.parse(existing.updatedAt) : Number.NaN;
+      const mergedTime = merged.updatedAt ? Date.parse(merged.updatedAt) : Number.NaN;
+      return {
+        ...merged,
+        messageCount: Math.max(existingCount, mergedCount),
+        updatedAt: Number.isNaN(existingTime) || existingTime <= mergedTime
+          ? merged.updatedAt
+          : existing.updatedAt,
+      };
+    });
 }

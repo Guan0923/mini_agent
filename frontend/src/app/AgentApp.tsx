@@ -11,7 +11,14 @@ import {
 } from "../api";
 import type { ProjectInfo } from "../api/projects";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
-import { loadArchiveReadState, markArchivedAsRead, countUnreadArchived, summaryToConversation, ARCHIVE_READ_KEY } from "./storage";
+import {
+  loadArchiveReadState,
+  markArchivedAsRead,
+  countUnreadArchived,
+  mergeConversationSummaries,
+  summaryToConversation,
+  ARCHIVE_READ_KEY,
+} from "./storage";
 import type { ArchiveReadState } from "./storage";
 import AgentShell from "./AgentShell";
 import { createRunController } from "./runController";
@@ -24,6 +31,7 @@ import { useSandboxHealth } from "./useSandboxHealth";
 import { hydrateConversationCatalog } from "./conversationHydration";
 import { useQueuedMessages } from "./useQueuedMessages";
 import { useSandboxRunLifecycle } from "./useSandboxRunLifecycle";
+import { subscribeVisibleSidebarRefresh } from "./sidebarRefresh";
 import type {
   ChatMessage,
   ChatMode,
@@ -57,8 +65,25 @@ function AgentApp() {
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const activeRunsRef = useRef(new Map<string, import("./types").ActiveRun>());
+  const refreshPromiseRef = useRef<Promise<void> | null>(null);
   const sandboxHealth = useSandboxHealth();
   const [panelConversations, setPanelConversations] = useState<Record<string, Conversation>>({});
+
+  const refreshSessions = useCallback((): Promise<void> => {
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+    const request = Promise.resolve().then(() => listSessions("all")).then((summaries) => {
+      setConversations((previous) => mergeConversationSummaries(
+        previous,
+        summaries,
+        new Set(activeRunsRef.current.keys()),
+      ));
+    });
+    const tracked = request.finally(() => {
+      if (refreshPromiseRef.current === tracked) refreshPromiseRef.current = null;
+    });
+    refreshPromiseRef.current = tracked;
+    return tracked;
+  }, []);
 
   useEffect(() => {
     if (!actionError) return;
@@ -118,6 +143,10 @@ function AgentApp() {
       disposed = true;
     };
   }, []);
+
+  useEffect(() => {
+    return subscribeVisibleSidebarRefresh(refreshSessions);
+  }, [refreshSessions]);
 
   const visibleProjectIds = useMemo(() => new Set(projects.map((project) => project.project_id)), [projects]);
   const activeConversations = useMemo(
@@ -353,22 +382,6 @@ function AgentApp() {
     setCurrentId(conversation.id);
     setPage("chat");
     return conversation.id;
-  }
-
-  async function refreshSessions(): Promise<void> {
-    const summaries = await listSessions("active");
-    setConversations((previous) => {
-      const next = [...previous];
-      for (const summary of summaries) {
-        const index = next.findIndex((item) =>
-          item.threadId === (summary.thread_id ?? summary.session_id)
-          || Boolean(summary.client_id && item.clientId === summary.client_id),
-        );
-        if (index >= 0) next[index] = summaryToConversation(summary, next[index]);
-        else next.push(summaryToConversation(summary));
-      }
-      return next;
-    });
   }
 
   const {

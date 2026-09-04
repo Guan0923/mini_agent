@@ -148,6 +148,7 @@ class SQLiteNodeMixin:
         self._update_node(node, frame)
 
     def _update_node(self, node: TreeRuntimeState, frame: NodeFrame | None) -> None:
+        activity_at = utc_now()
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
             existing = self._json_object(connection, node.session_id, "runtime_node", node.id)
@@ -161,10 +162,10 @@ class SQLiteNodeMixin:
                 session_id=node.session_id,
                 thread_id=node.thread_id,
                 turn_id=node.id,
-                timestamp=node.timestamp,
+                timestamp=activity_at,
                 clear_running=node.status in {"success", "paused", "failed"},
             )
-            self._touch_session(connection, node.session_id, utc_now())
+            self._touch_session(connection, node.session_id, activity_at)
 
     def create_finalized_nodes(self, nodes: list[TreeRuntimeState] | tuple[TreeRuntimeState, ...]) -> None:
         """Atomically append an ordered batch of terminal canonical nodes."""
@@ -261,6 +262,7 @@ class SQLiteNodeMixin:
         )
 
     def finalize_node(self, node: TreeRuntimeState) -> None:
+        activity_at = utc_now()
         with self._connection(node.session_id) as connection:
             self._assert_writable(connection)
             existing = self._json_object(connection, node.session_id, "runtime_node", node.id)
@@ -276,10 +278,10 @@ class SQLiteNodeMixin:
                 session_id=node.session_id,
                 thread_id=node.thread_id,
                 turn_id=node.id,
-                timestamp=node.timestamp,
+                timestamp=activity_at,
                 clear_running=True,
             )
-            self._touch_session(connection, node.session_id, node.timestamp)
+            self._touch_session(connection, node.session_id, activity_at)
 
     def append_turn_version(
         self,

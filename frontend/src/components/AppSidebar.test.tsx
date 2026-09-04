@@ -363,7 +363,12 @@ describe("AppSidebar utility navigation", () => {
   it("renders history metadata and scrolls only the hovered overflowing item", () => {
     const second: Conversation = { id: "c2", title: "第二个会话", messages: [] };
     const longTitle = "这是一个足够长的历史会话摘要，用于验证悬浮时只滚动当前条目";
-    renderSidebar(0, [{ ...conversation, title: longTitle, messageCount: 12 }, second]);
+    renderSidebar(0, [{
+      ...conversation,
+      title: longTitle,
+      messageCount: 12,
+      messages: [{ id: "loaded-message", role: "user", content: "已打开", events: [] }],
+    }, second]);
 
     expect(screen.getByText(/12 条消息/)).toBeInTheDocument();
     expect(document.querySelector(".history-meta")?.textContent).toMatch(/12 条消息 ·/);

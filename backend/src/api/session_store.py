@@ -43,6 +43,7 @@ def summary_payload(state: WebAppState, summary) -> dict[str, object]:
         "title": summary.title,
         "created_at": summary.created_at,
         "updated_at": summary.updated_at,
+        "conversation_updated_at": summary.updated_at,
         "message_count": summary.message_count,
         "last_node_id": summary.last_node_id,
         "last_run_id": summary.last_run_id,

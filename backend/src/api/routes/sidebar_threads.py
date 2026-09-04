@@ -72,8 +72,8 @@ def _validate_queue_content(content: str, references: tuple[dict[str, str], ...]
     return normalized
 
 
-def _payload(item) -> dict[str, object]:
-    return item.to_dict()
+def _payload(store, item) -> dict[str, object]:
+    return store.sidebar_thread_summary(item).to_dict()
 
 
 def _require(store, thread_id: str):
@@ -154,7 +154,7 @@ def list_sidebar_threads(
     if state not in {"active", "archived", "deleted", "all"}:
         raise HTTPException(status_code=422, detail="无效的 SidebarThread 状态。")
     store = session_store(request.app.state.web)
-    return [_payload(item) for item in store.list_sidebar_threads(state=state)]
+    return [item.to_dict() for item in store.list_sidebar_thread_summaries(state=state)]
 
 
 @router.post("", status_code=201)
@@ -172,7 +172,7 @@ def create_sidebar_thread(
         title=session.title,
         title_is_custom=session.title_is_custom,
     )
-    return _payload(item)
+    return _payload(store, item)
 
 
 @router.patch("/{thread_id}")
@@ -183,7 +183,10 @@ def rename_sidebar_thread(
 ) -> dict[str, object]:
     store = session_store(request.app.state.web)
     _require(store, thread_id)
-    return _payload(store.update_sidebar_thread(thread_id, title=body.title.strip(), title_is_custom=True))
+    return _payload(
+        store,
+        store.update_sidebar_thread(thread_id, title=body.title.strip(), title_is_custom=True),
+    )
 
 
 @router.post("/{thread_id}/archive")
@@ -192,14 +195,14 @@ def archive_sidebar_thread(thread_id: str, request: Request) -> dict[str, object
     _require(store, thread_id)
     from backend.domain.state import utc_now
 
-    return _payload(store.update_sidebar_thread(thread_id, archived_at=utc_now(), deleted_at=None))
+    return _payload(store, store.update_sidebar_thread(thread_id, archived_at=utc_now(), deleted_at=None))
 
 
 @router.post("/{thread_id}/restore")
 def restore_sidebar_thread(thread_id: str, request: Request) -> dict[str, object]:
     store = session_store(request.app.state.web)
     _require(store, thread_id)
-    return _payload(store.update_sidebar_thread(thread_id, archived_at=None, deleted_at=None))
+    return _payload(store, store.update_sidebar_thread(thread_id, archived_at=None, deleted_at=None))
 
 
 @router.delete("/{thread_id}")
@@ -208,7 +211,7 @@ def delete_sidebar_thread(thread_id: str, request: Request) -> dict[str, object]
     _require(store, thread_id)
     from backend.domain.state import utc_now
 
-    return _payload(store.update_sidebar_thread(thread_id, deleted_at=utc_now()))
+    return _payload(store, store.update_sidebar_thread(thread_id, deleted_at=utc_now()))
 
 
 __all__ = ["router"]

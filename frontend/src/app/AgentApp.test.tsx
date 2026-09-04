@@ -58,6 +58,7 @@ function session(sessionId: string, projectId?: string): SessionInfo {
     title: "新对话",
     created_at: "2026-08-21T00:00:00Z",
     updated_at: "2026-08-21T00:00:00Z",
+    conversation_updated_at: "2026-08-21T00:00:00Z",
     message_count: 0,
     last_run_status: null,
     client_id: `${sessionId}-client`,
@@ -150,6 +151,42 @@ describe("AgentApp new conversation initialization", () => {
     api.pauseTurn.mockResolvedValue(undefined);
     api.streamAttachedTurn.mockResolvedValue("completed");
     projectsApi.listProjects.mockResolvedValue([]);
+  });
+
+  it("hydrates all Sidebar summaries through one backend listing", async () => {
+    await renderReady();
+
+    expect(api.listSessions).toHaveBeenCalledTimes(1);
+    expect(api.listSessions).toHaveBeenCalledWith("all");
+  });
+
+  it("shares one in-flight Sidebar refresh request", async () => {
+    await renderReady();
+    api.listSessions.mockClear();
+    let resolve!: (value: SessionInfo[]) => void;
+    api.listSessions.mockReturnValue(new Promise<SessionInfo[]>((done) => { resolve = done; }));
+
+    const first = shell.props!.onRefresh();
+    const second = shell.props!.onRefresh();
+    await Promise.resolve();
+    expect(api.listSessions).toHaveBeenCalledTimes(1);
+    resolve([session("session-refreshed")]);
+    await act(async () => {
+      await Promise.all([first, second]);
+    });
+
+    expect(shell.props?.current?.id).toBe("session-refreshed");
+  });
+
+  it("keeps the last successful Sidebar summaries when refresh fails", async () => {
+    api.listSessions.mockResolvedValue([session("session-stable")]);
+    await renderReady();
+    await waitFor(() => expect(shell.props?.current?.id).toBe("session-stable"));
+    api.listSessions.mockRejectedValue(new Error("refresh failed"));
+
+    await expect(shell.props!.onRefresh()).rejects.toThrow("refresh failed");
+
+    expect(shell.props?.current?.id).toBe("session-stable");
   });
 
   it("marks an ordinary new conversation as having a known empty runtime tree", async () => {

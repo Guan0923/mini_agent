@@ -749,6 +749,36 @@ test("first main Turn receives a dedicated model-generated title", async ({ page
   await expect(page.locator(".trace-toolbar-thread-id")).toHaveAttribute("title", firstTurn!.thread_id);
 });
 
+test("Sidebar shows durable message summary without opening the older conversation", async ({ page }) => {
+  const olderResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Sidebar Summary Older" },
+  });
+  expect(olderResponse.ok(), `${olderResponse.status()} ${await olderResponse.text()}`).toBeTruthy();
+  const older = await olderResponse.json() as { session_id: string };
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Sidebar Summary Older", exact: true }).click();
+  await send(page, "hello");
+
+  const newerResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Sidebar Summary Newer" },
+  });
+  expect(newerResponse.ok(), `${newerResponse.status()} ${await newerResponse.text()}`).toBeTruthy();
+
+  const olderTurnsUrl = `/api/turns?session_id=${encodeURIComponent(older.session_id)}`;
+  const olderTurnRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes(olderTurnsUrl)) olderTurnRequests.push(request.url());
+  });
+
+  await page.reload();
+  const newerButton = page.getByRole("button", { name: "Sidebar Summary Newer", exact: true });
+  await expect(newerButton).toHaveAttribute("aria-current", "page");
+  const olderButton = page.getByRole("button", { name: "Sidebar Summary Older", exact: true });
+  await expect(olderButton.locator(".history-meta")).toHaveText(/^2 条消息 · /);
+  expect(olderTurnRequests).toEqual([]);
+});
+
 test("Todo panel auto-finishes and offers cleanup only for an incomplete terminal Turn", async ({ page }) => {
   const sidebar = await page.request.post("/api/sidebar-threads", { data: { title: "Todo Lifecycle" } });
   expect(sidebar.ok(), `${sidebar.status()} ${await sidebar.text()}`).toBeTruthy();

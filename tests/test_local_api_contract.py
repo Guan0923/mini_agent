@@ -61,7 +61,10 @@ def test_health_stays_live_while_ready_and_queue_mutations_fail_when_redis_is_un
         assert client.get("/api/health").status_code == 200
         assert client.get("/api/ready").status_code == 503
         sidebar = client.post("/api/sidebar-threads", json={}).json()
-        assert client.get("/api/sidebar-threads").status_code == 200
+        sidebar_list = client.get("/api/sidebar-threads")
+        assert sidebar_list.status_code == 200
+        assert sidebar_list.json()[0]["message_count"] == 0
+        assert sidebar_list.json()[0]["conversation_updated_at"] == sidebar["created_at"]
         assert client.get(f"/api/sidebar-threads/{sidebar['thread_id']}/queued-messages").status_code == 503
         create_turn = client.post(
             "/api/turns",

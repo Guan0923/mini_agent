@@ -110,8 +110,9 @@ export function createConversationActions(context: ConversationActionsContext) {
         activeTurnId: forked.turn.id,
         title: sidebar.title,
         messages: [],
+        messageCount: sidebar.message_count,
         messagesLoaded: false,
-        updatedAt: sidebar.updated_at,
+        updatedAt: sidebar.conversation_updated_at,
       }, await getSessionNodes(sidebar.session_id));
       setConversations((previous) => [branch, ...previous]);
       setCurrentId(branch.id);
