@@ -144,6 +144,9 @@ class ToolStepExecutor:
                         tool_message.arguments,
                         ToolInvocationContext(
                             session_id=runtime.state.session_id,
+                            turn_id=run.turn_id,
+                            call_id=tool_message.call_id,
+                            todo_store=runtime.services.todo_store,
                             timezone=runtime.state.timezone,
                             clock=runtime.services.clock,
                             job_scope=runtime.services.job_scope,

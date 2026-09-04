@@ -458,6 +458,19 @@ def _agent_reported(runtime, thread_path: str) -> bool:
     )
 
 
+def _todo_id_from_result(runtime, call_id: str) -> str:
+    for tool in reversed(runtime.run.actions):
+        if tool.call_id != call_id or tool.name != "update_todo_list" or tool.status != "succeeded":
+            continue
+        result = json.loads(tool.content or "{}")
+        todos = result.get("todos")
+        if isinstance(todos, list) and todos and isinstance(todos[0], dict):
+            todo_id = todos[0].get("id")
+            if isinstance(todo_id, str):
+                return todo_id
+    raise RuntimeError(f"Missing successful Todo result for {call_id}.")
+
+
 class AgentThreadE2EPlanner:
     """Create one nested Agent, then use the real loopback model for its Turns."""
 
@@ -664,28 +677,61 @@ class CooperativePausePlanner(LLMPlanner):
                 return AssistantMessage(
                     tool_messages=[
                         ToolMessage(
-                            name="todo_write",
+                            name="update_todo_list",
                             call_id="todo_abnormal_pending",
                             arguments={
-                                "todos": [
-                                    {"content": "Inspect the abnormal Turn", "status": "in_progress"},
-                                    {"content": "Finish the interrupted work", "status": "pending"},
-                                ]
+                                "expected_revision": 0,
+                                "operations": [
+                                    {
+                                        "op": "add",
+                                        "content": "Inspect the abnormal Turn",
+                                        "status": "in_progress",
+                                    },
+                                    {
+                                        "op": "add",
+                                        "content": "Finish the interrupted work",
+                                        "status": "pending",
+                                    },
+                                ],
                             },
                         )
                     ]
                 )
+            if runtime.run.model_turns == 2:
+                return AssistantMessage(content="Discard this first Todo final answer.")
             sleep(1.5)
             return AssistantMessage(content="The Turn ended before its Todo list completed.")
+        if task == "todo rejected update":
+            if runtime.run.model_turns == 1:
+                return AssistantMessage(
+                    tool_messages=[
+                        ToolMessage(
+                            name="update_todo_list",
+                            call_id="todo_rejected_stale",
+                            arguments={
+                                "expected_revision": 1,
+                                "operations": [{"op": "add", "content": "Must never render", "status": "pending"}],
+                            },
+                        )
+                    ]
+                )
+            return AssistantMessage(content="The rejected Todo update was not applied.")
         if task == "todo completed auto close":
             if runtime.run.model_turns == 1:
                 return AssistantMessage(
                     tool_messages=[
                         ToolMessage(
-                            name="todo_write",
+                            name="update_todo_list",
                             call_id="todo_complete_running",
                             arguments={
-                                "todos": [{"content": "Complete the browser lifecycle", "status": "in_progress"}]
+                                "expected_revision": 0,
+                                "operations": [
+                                    {
+                                        "op": "add",
+                                        "content": "Complete the browser lifecycle",
+                                        "status": "in_progress",
+                                    }
+                                ],
                             },
                         )
                     ]
@@ -695,9 +741,18 @@ class CooperativePausePlanner(LLMPlanner):
                 return AssistantMessage(
                     tool_messages=[
                         ToolMessage(
-                            name="todo_write",
+                            name="update_todo_list",
                             call_id="todo_complete_done",
-                            arguments={"todos": [{"content": "Complete the browser lifecycle", "status": "completed"}]},
+                            arguments={
+                                "expected_revision": 1,
+                                "operations": [
+                                    {
+                                        "op": "update",
+                                        "id": _todo_id_from_result(runtime, "todo_complete_running"),
+                                        "status": "completed",
+                                    }
+                                ],
+                            },
                         )
                     ]
                 )
@@ -734,6 +789,7 @@ def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
         sandbox_session_id=session_id,
         agent_thread_index=state.agent_thread_index,
         subagent_coordinator=state.subagent_coordinator,
+        todo_store=state.todo_store,
     )
     application.runner.planner = CooperativePausePlanner()
 

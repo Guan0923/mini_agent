@@ -69,9 +69,11 @@ class AgentRunner:
         sandbox_launcher: object | None = None,
         sandbox_config: dict[str, object] | None = None,
         sandbox_user_id: str | None = None,
+        todo_store=None,
     ) -> None:
         self.planner = planner
         self.tools = tools
+        self.todo_store = todo_store
         self.skill_catalog = skill_catalog
         self.skills_enabled = skills_enabled
         self.skill_auto_select = skill_auto_select
@@ -175,6 +177,7 @@ class AgentRunner:
         services = RuntimeServices(
             planner=self.planner,
             tools=self.tools,
+            todo_store=self.todo_store,
             skill_catalog=self.skill_catalog,
             skills_enabled=self.skills_enabled,
             skill_auto_select=self.skill_auto_select,
@@ -195,6 +198,7 @@ class AgentRunner:
 
         runtime.services.planner = self.planner
         runtime.services.tools = self.tools
+        runtime.services.todo_store = self.todo_store
         runtime.services.checkpoint_store = self.checkpoints
         runtime.services.skill_catalog = self.skill_catalog
         runtime.services.skills_enabled = self.skills_enabled
@@ -262,6 +266,8 @@ class AgentRunner:
         runtime.services.publish = RunEventPublisher(runtime)
         runtime.services.interrupt = runtime.services.interrupt or self._default_interrupt(runtime)
         run = runtime.run
+        if runtime.services.todo_store is not None and run.turn_id:
+            runtime.services.todo_store.persist_turn(runtime.state.session_id, run.turn_id)
         # The active dynamic node is the authoritative workflow mode.  A
         # running PATCH may change it between model/tool decision boundaries;
         # refresh the RunState mode before routing so prompt/tool selection

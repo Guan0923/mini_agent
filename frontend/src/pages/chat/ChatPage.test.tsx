@@ -388,23 +388,60 @@ function ScrollHarness({
   );
 }
 
-function TodoHarness({ status, running }: { status: TodoStatus; running: boolean }) {
-  const todoEvent: ToolEvent = {
+function TodoHarness({
+  status,
+  running,
+  activeTurnId = "turn-todo",
+  includePersistedTodoTurn = false,
+}: {
+  status: TodoStatus;
+  running: boolean;
+  activeTurnId?: string;
+  includePersistedTodoTurn?: boolean;
+}) {
+  const todoId = "todo_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const todoCall: ToolEvent = {
     kind: "tool_call",
-    message: "todo_write",
+    message: "update_todo_list",
     data: {
-      tool: "todo_write",
+      name: "update_todo_list",
       call_id: "todo-call",
-      arguments: { todos: [{ content: "完成 Todo 面板", status }] },
+      status: "success",
+      arguments: { expected_revision: 0, operations: [{ op: "add", content: "完成 Todo 面板", status }] },
     },
+  };
+  const todoResult: ToolEvent = {
+    kind: "tool_result",
+    message: JSON.stringify({
+      turn_id: "turn-todo",
+      revision: 1,
+      applied_operations: [{ op: "add", id: todoId, content: "完成 Todo 面板", status }],
+      counts: {
+        pending: status === "pending" ? 1 : 0,
+        in_progress: status === "in_progress" ? 1 : 0,
+        completed: status === "completed" ? 1 : 0,
+      },
+      todos: [{ id: todoId, content: "完成 Todo 面板", status }],
+    }),
+    data: { tool: "update_todo_list", call_id: "todo-call", status: "success" },
   };
   const conversation: Conversation = {
     id: "session-todo",
     sessionId: "session-todo",
     threadId: "session-todo",
+    activeTurnId,
     title: "todo",
+    runtimeNodes: includePersistedTodoTurn
+      ? [{ ...turn("turn-todo", "old Todo Turn"), session_id: "session-todo", thread_id: "session-todo" }]
+      : [],
     messagesLoaded: true,
-    messages: [{ id: "assistant-todo", role: "assistant", content: "", events: [todoEvent] }],
+    messages: [{
+      id: "assistant-todo",
+      role: "assistant",
+      content: "",
+      events: [todoCall, todoResult],
+      sourceNodeId: "turn-todo",
+    }],
   };
   return (
     <AntApp>
@@ -581,6 +618,19 @@ describe("ChatPage Todo panel lifecycle", () => {
 
     expect(screen.queryByText("任务清单")).not.toBeInTheDocument();
     expect(document.querySelector(".composer")).not.toHaveClass("has-todo");
+  });
+
+  it("does not fall back to a stale Todo Turn while a new active Turn is loading", () => {
+    render(
+      <TodoHarness
+        status="in_progress"
+        running
+        activeTurnId="turn-next"
+        includePersistedTodoTurn
+      />,
+    );
+
+    expect(screen.queryByText("任务清单")).not.toBeInTheDocument();
   });
 });
 

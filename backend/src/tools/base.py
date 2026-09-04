@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from backend.domain import DEFAULT_TIME_ZONE, ToolSpec
+from backend.domain import DEFAULT_TIME_ZONE, TodoListStore, ToolSpec
 from backend.domain.state import utc_now
 from backend.sandbox import SandboxExecutionDecision
 
@@ -24,6 +24,9 @@ class ToolInvocationContext:
     """Runtime facts supplied only while executing a tool call."""
 
     session_id: str | None = None
+    turn_id: str | None = None
+    call_id: str | None = None
+    todo_store: TodoListStore | None = None
     timezone: str = DEFAULT_TIME_ZONE
     clock: Callable[[], str] = utc_now
     job_scope: object | None = None

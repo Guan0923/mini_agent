@@ -19,7 +19,11 @@ from backend.api.runtime_event_transport import (
 from backend.configuration import ClientPaths
 from backend.domain.runtime_state import NodeFrame, RuntimeState, utc_iso
 from backend.storage import runtime_event_stream as event_stream_module
-from backend.storage.runtime_event_stream import EVENT_STREAM_TTL_SECONDS, RedisRuntimeEventStream
+from backend.storage.runtime_event_stream import (
+    EVENT_STREAM_TTL_SECONDS,
+    MemoryRuntimeEventStream,
+    RedisRuntimeEventStream,
+)
 from backend.storage.sqlite import SQLiteSessionStore
 
 
@@ -61,6 +65,28 @@ def _canonical_turn(tmp_path: Path) -> tuple[ClientPaths, SQLiteSessionStore, Ru
     frame = NodeFrame.snapshot(node)
     store.create_node_with_frame(node, frame)
     return paths, store, node, frame
+
+
+def _empty_turn_state(tmp_path: Path, stream) -> tuple[SimpleNamespace, str, str]:
+    paths = ClientPaths(tmp_path / "data")
+    paths.ensure()
+    store = SQLiteSessionStore(paths)
+    session = store.create_session("events")
+    store.create_sidebar_thread(
+        session_id=session.session_id,
+        thread_id=session.session_id,
+        title="events",
+    )
+    return (
+        SimpleNamespace(
+            paths=paths,
+            agent_thread_index=None,
+            runtime_event_stream=stream,
+            active_turn_streams={},
+        ),
+        session.session_id,
+        session.session_id,
+    )
 
 
 def test_real_redis_outbox_publish_is_idempotent_across_relay_race_and_terminal(
@@ -126,6 +152,110 @@ def test_real_redis_event_stream_enforces_exact_maxlen(
         )
     assert client.xlen(stream._turn_key("turn-maxlen")) == 3
     assert client.xlen(stream._thread_key("thread-maxlen")) == 3
+
+
+def test_turn_sse_replays_terminal_published_before_sqlite_baseline(
+    tmp_path: Path,
+    redis_event_stream: tuple[RedisRuntimeEventStream, Redis, str],
+) -> None:
+    stream, _client, _prefix = redis_event_stream
+    state, session_id, thread_id = _empty_turn_state(tmp_path, stream)
+    turn_id = "turn-before-baseline"
+    publish_terminal(
+        state,
+        session_id=session_id,
+        thread_id=thread_id,
+        turn_id=turn_id,
+        terminal_type="failed",
+        message="startup failed",
+    )
+
+    async def receive() -> list[str]:
+        return [item async for item in turn_sse(state, session_id, thread_id, turn_id)]
+
+    events = asyncio.run(receive())
+    assert len(events) == 1
+    assert events[0].startswith(f"id: {stream.latest_thread_id(thread_id)}\ndata: <SSE")
+    assert f'id="{turn_id}" type="failed">startup failed</SSE>' in events[0]
+
+
+def test_turn_sse_catches_terminal_published_during_initial_catch_up(tmp_path: Path) -> None:
+    turn_id = "turn-during-catch-up"
+
+    class PublishingStream(MemoryRuntimeEventStream):
+        def __init__(self) -> None:
+            super().__init__()
+            self.session_id = ""
+            self.thread_id = ""
+            self.published = False
+
+        def latest_turn_event(self, candidate_turn_id: str):
+            if candidate_turn_id == turn_id and not self.published:
+                self.published = True
+                self.publish(
+                    event_id="terminal-during-catch-up",
+                    turn_id=turn_id,
+                    thread_id=self.thread_id,
+                    sequence=1,
+                    payload={
+                        "type": "turn.terminal",
+                        "session_id": self.session_id,
+                        "thread_id": self.thread_id,
+                        "turn_id": turn_id,
+                        "terminal_type": "failed",
+                        "message": "startup failed",
+                    },
+                )
+            return super().latest_turn_event(candidate_turn_id)
+
+    stream = PublishingStream()
+    state, session_id, thread_id = _empty_turn_state(tmp_path, stream)
+    stream.session_id = session_id
+    stream.thread_id = thread_id
+
+    async def receive() -> list[str]:
+        return [item async for item in turn_sse(state, session_id, thread_id, turn_id)]
+
+    events = asyncio.run(receive())
+    assert len(events) == 1
+    assert 'type="failed">startup failed</SSE>' in events[0]
+
+
+def test_turn_sse_ignores_other_turn_terminal_while_waiting_for_target(tmp_path: Path) -> None:
+    stream = MemoryRuntimeEventStream()
+    state, session_id, thread_id = _empty_turn_state(tmp_path, stream)
+    turn_id = "turn-target"
+
+    async def receive() -> str:
+        generator = turn_sse(state, session_id, thread_id, turn_id)
+        pending = asyncio.create_task(anext(generator))
+        await asyncio.sleep(0.1)
+        publish_terminal(
+            state,
+            session_id=session_id,
+            thread_id=thread_id,
+            turn_id="turn-other",
+            terminal_type="failed",
+            message="other failure",
+        )
+        await asyncio.sleep(0.1)
+        assert not pending.done()
+        publish_terminal(
+            state,
+            session_id=session_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            terminal_type="failed",
+            message="target failure",
+        )
+        try:
+            return await asyncio.wait_for(pending, timeout=2.0)
+        finally:
+            await generator.aclose()
+
+    event = asyncio.run(receive())
+    assert f'id="{turn_id}" type="failed">target failure</SSE>' in event
+    assert "other failure" not in event
 
 
 def test_sse_reconnect_rebases_from_sqlite_and_emits_standard_cursor_ids(
@@ -208,6 +338,13 @@ def test_turn_sse_waits_for_the_accepted_rewind_delivery_before_using_existing_t
         agent_thread_index=None,
         runtime_event_stream=stream,
         active_turn_streams={},
+    )
+    publish_terminal(
+        state,
+        session_id=final.session_id,
+        thread_id=final.thread_id,
+        turn_id=final.id,
+        terminal_type="success",
     )
 
     async def receive_after_admission() -> str:

@@ -153,3 +153,14 @@ def test_completed_turn_overwrites_session_usage(tmp_path: Path) -> None:
     assert service.runtime.state.usage == {"total_tokens": 2}
     restored = store.load_runtime(service.runtime.state.session_id)
     assert restored is not None and restored.usage == {"total_tokens": 2}
+
+
+def test_model_messages_appends_context_suffix_once_without_runtime_nodes() -> None:
+    runtime = AgentRunner(RuleBasedPlanner(), ToolRegistry()).empty_runtime(session_id="session_suffix")
+    runtime.state.messages = [UserMessage(content="task")]
+    suffix = UserMessage(content="internal finalization instruction")
+    runtime.services.context_suffix_messages = [suffix]
+
+    projected = runtime.model_messages()
+
+    assert projected == [runtime.state.messages[0], suffix]

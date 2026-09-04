@@ -11,6 +11,11 @@ from ...core.contracts import WorkflowModeChanged
 from ..lifecycle.cancellation import cancel_if_requested
 from ..lifecycle.outcomes import cancel_run, complete_run, fail_run, planning_failure_data, record_plan_feedback
 from ..steps import USER_DENIED_BATCH_FAILURE_CODE, ToolStepExecutor
+from ..todo_finalization import (
+    check_todo_finalization,
+    refresh_todo_finalization_context,
+    should_defer_todo_content,
+)
 from .budgets import _claim_model_turn, _ensure_tool_budget, _reject_over_budget_tools, _tool_batch_fits
 from .common import (
     _apply_tool_batch_reports,
@@ -40,6 +45,7 @@ class ExecutionWorkflow:
             return runtime.run
         while True:
             runtime.apply_pending_runtime_config()
+            refresh_todo_finalization_context(runtime)
             if runtime.run.mode != "agent":
                 raise WorkflowModeChanged("Agent workflow changed to Plan mode.")
             _consume_agent_reports(runtime)
@@ -49,23 +55,34 @@ class ExecutionWorkflow:
                 return runtime.run
             if not _claim_model_turn(runtime, "decision"):
                 return runtime.run
-            close = _model_text_stream(runtime, stream_content=True)
+            defer_todo_content = should_defer_todo_content(runtime)
+            close = _model_text_stream(
+                runtime,
+                stream_content=True,
+                defer_content=defer_todo_content,
+            )
             try:
                 response = planner.decide(runtime)
             except PlanningError as exc:
-                close()
+                close(publish_deferred_content=False)
                 _publish_repairs(runtime, capabilities)
                 if cancel_if_requested(runtime):
                     return runtime.run
                 fail_run(runtime, exc, **planning_failure_data(exc, capabilities.name))
                 return runtime.run
             except BaseException:
-                close()
+                close(publish_deferred_content=False)
                 raise
             else:
-                streamed = close()
+                streamed = close(publish_deferred_content=bool(response.tool_messages) or not defer_todo_content)
             _publish_repairs(runtime, capabilities)
-            _publish_assistant_message(runtime, response, streamed)
+            todo_retry = not response.tool_messages and check_todo_finalization(
+                runtime,
+                response,
+                content_streamed=streamed.content,
+            )
+            if not todo_retry:
+                _publish_assistant_message(runtime, response, streamed)
 
             if cancel_if_requested(runtime):
                 _fail_pending_tools(runtime, response, "Not executed because the run was cancelled.")
@@ -80,6 +97,8 @@ class ExecutionWorkflow:
                 continue
 
             if not response.tool_messages:
+                if todo_retry:
+                    continue
                 complete_run(runtime, response, response_streamed=streamed.content)
                 return runtime.run
             if not _tool_batch_fits(runtime, response):

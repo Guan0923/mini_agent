@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from backend.configuration import ClientPaths, LocalConfigStore, initialize_config, load_config, section
-from backend.domain import DEFAULT_TIME_ZONE
+from backend.domain import DEFAULT_TIME_ZONE, TodoListStore
 from backend.domain.terminal import DEFAULT_TERMINAL_TYPE
 from backend.jobs import JobRegistry, JobScope, JobScopeKind
 from backend.mcp.client import ExternalMcpResources, start_external_tools
@@ -64,6 +64,7 @@ def build_application(
     agent_thread_index: object | None = None,
     subagent_coordinator: SubagentCoordinator | None = None,
     sandbox_maintenance_gate: SandboxMaintenanceGate | None = None,
+    todo_store: TodoListStore | None = None,
 ) -> AgentApplication:
     resolved_paths = paths or client_paths()
     base_config = initialize_config(resolved_paths, workspace)
@@ -99,6 +100,7 @@ def build_application(
             **({"sandbox_session_id": sandbox_session_id} if sandbox_session_id is not None else {}),
             **({"subagent_coordinator": subagent_coordinator} if subagent_coordinator is not None else {}),
             **({"sandbox_maintenance_gate": sandbox_maintenance_gate} if sandbox_maintenance_gate is not None else {}),
+            **({"todo_store": todo_store} if todo_store is not None else {}),
         )
     else:
         runner = _build_subagent_runner(
@@ -111,6 +113,7 @@ def build_application(
             **({"sandbox_session_id": sandbox_session_id} if sandbox_session_id is not None else {}),
             **({"subagent_coordinator": subagent_coordinator} if subagent_coordinator is not None else {}),
             **({"sandbox_maintenance_gate": sandbox_maintenance_gate} if sandbox_maintenance_gate is not None else {}),
+            **({"todo_store": todo_store} if todo_store is not None else {}),
         )
     return AgentApplication(
         runner,
@@ -161,6 +164,7 @@ def _build_subagent_runner(
     sandbox_session_id: str | None = None,
     subagent_coordinator: SubagentCoordinator | None = None,
     sandbox_maintenance_gate: SandboxMaintenanceGate | None = None,
+    todo_store: TodoListStore | None = None,
 ) -> AgentRunner:
     terminal_type = terminal_type or _terminal_type_for_config(config)
     resolved_paths = paths or client_paths()
@@ -212,6 +216,7 @@ def _build_subagent_runner(
             job_parent_id=job_parent_id,
             sandbox_launcher=sandbox_launcher,
             sandbox_config=sandbox_config,
+            todo_store=todo_store,
         )
 
     mcp_scope: JobScope | None = None
@@ -252,6 +257,7 @@ def _build_subagent_runner(
             job_parent_id=job_parent_id,
             sandbox_launcher=sandbox_launcher,
             sandbox_config=sandbox_config,
+            todo_store=todo_store,
         )
         if sandbox_session_id is not None:
             coordinator.bind_session(sandbox_session_id, child_factory, workspace, project_cwd)
@@ -280,6 +286,7 @@ def _build_runner(
     job_parent_id: str | None = None,
     sandbox_launcher: SandboxLauncher | None = None,
     sandbox_config: dict[str, object] | None = None,
+    todo_store: TodoListStore | None = None,
 ) -> AgentRunner:
     skills = _user_skill_catalog(paths, skill_settings)
     project_skill_gate = (
@@ -306,6 +313,7 @@ def _build_runner(
     return AgentRunner(
         planner=planner,
         tools=tools,
+        todo_store=todo_store,
         max_transport_retries=settings.max_transport_retries,
         max_tool_calls=settings.max_tool_calls,
         log_full_messages=settings.log_full_messages,

@@ -1287,13 +1287,15 @@ def test_running_agent_inserts_report_at_safe_boundary_and_continues(tmp_path: P
     registry = JobRegistry()
     session = store.create_session("running report")
     source = _finished_source(store, session.session_id)
+    release_quick_child = Event()
 
     class RunningReportPlanner:
         name = "running-report"
 
         def decide(self, child_runtime):
             if child_runtime.run.task == "quick child":
-                sleep(0.05)
+                if not release_quick_child.wait(timeout=5):
+                    raise RuntimeError("parent Agent did not reach the report boundary")
                 return AssistantMessage(content="quick result")
             messages = child_runtime.model_messages()
             if any(isinstance(message, AssistantMessage) and message.name == "subagent_report" for message in messages):
@@ -1305,7 +1307,21 @@ def test_running_agent_inserts_report_at_safe_boundary_and_continues(tmp_path: P
                 for tool in message.tool_messages
             )
             if delegated:
-                sleep(0.15)
+                release_quick_child.set()
+                deadline = monotonic() + 5
+                while monotonic() < deadline:
+                    queued_reports = store.list_agent_turn_reports(
+                        session.session_id,
+                        states=("queued",),
+                    )
+                    if any(
+                        report.recipient_thread_id == child_runtime.run.thread_id and report.thread_status == "success"
+                        for report in queued_reports
+                    ):
+                        break
+                    sleep(0.01)
+                else:
+                    raise RuntimeError("completed child report was not queued at the tool boundary")
                 return AssistantMessage(
                     tool_messages=[ToolMessage(name="get_thread_node", call_id="boundary_tool", arguments={})]
                 )

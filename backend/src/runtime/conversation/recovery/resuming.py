@@ -130,9 +130,13 @@ def resume_session(
     run = state.current_run
     turn = None
     if run is not None and run.turn_id:
+        from .todo_receipts import reconcile_todo_receipts
+
         settle = getattr(store, "settle_indeterminate_tool_calls", None)
         finder = getattr(store, "find_node", None)
         turn = finder(run.turn_id) if callable(finder) else None
+        if isinstance(turn, RuntimeTreeState):
+            turn = reconcile_todo_receipts(store, getattr(conversation.runner, "todo_store", None), turn)
         if callable(settle):
             settle(run.turn_id)
     source, resumed = reconstruct_attempt(state, turn if isinstance(turn, RuntimeTreeState) else None)

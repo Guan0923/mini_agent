@@ -39,11 +39,13 @@ def _model_text_stream(
     runtime: AgentRuntime,
     *,
     stream_content: bool = False,
+    defer_content: bool = False,
 ) -> Callable[[], _TextStreamResult]:
     reasoning_open = False
     response_open = False
     reasoning_streamed = False
     content_streamed = False
+    deferred_content: list[str] = []
 
     def close_reasoning() -> None:
         nonlocal reasoning_open
@@ -72,6 +74,9 @@ def _model_text_stream(
         nonlocal response_open, content_streamed
         if not chunk:
             return
+        if defer_content:
+            deferred_content.append(chunk)
+            return
         close_reasoning()
         if not response_open:
             _publish(runtime, RuntimeEvent("response_start"))
@@ -82,11 +87,18 @@ def _model_text_stream(
     runtime.exchange.on_reasoning = on_reasoning
     runtime.exchange.on_content = on_content if stream_content else None
 
-    def close() -> _TextStreamResult:
+    def close(*, publish_deferred_content: bool = True) -> _TextStreamResult:
+        nonlocal content_streamed
         runtime.exchange.on_reasoning = None
         runtime.exchange.on_content = None
         close_reasoning()
         close_response()
+        if defer_content and publish_deferred_content and deferred_content:
+            _publish(runtime, RuntimeEvent("response_start"))
+            for chunk in deferred_content:
+                _publish(runtime, RuntimeEvent("response_delta", chunk))
+            _publish(runtime, RuntimeEvent("response_end"))
+            content_streamed = True
         return _TextStreamResult(reasoning_streamed, content_streamed)
 
     return close

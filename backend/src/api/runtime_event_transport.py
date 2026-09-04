@@ -159,6 +159,26 @@ def _node_has_delivery(node: RuntimeState, delivery_id: str) -> bool:
     )
 
 
+def _matching_terminal(
+    payload: dict[str, object],
+    *,
+    session_id: str,
+    thread_id: str,
+    turn_id: str,
+) -> tuple[str, str] | None:
+    if (
+        payload.get("type") != "turn.terminal"
+        or payload.get("session_id") != session_id
+        or payload.get("thread_id") != thread_id
+        or payload.get("turn_id") != turn_id
+    ):
+        return None
+    return (
+        str(payload.get("terminal_type") or "failed"),
+        str(payload.get("message") or ""),
+    )
+
+
 def _turn_continuation(store: SQLiteSessionStore, session_id: str, thread_id: str, turn_id: str) -> list[RuntimeState]:
     turns = [
         node for node in store.load_nodes(session_id) if isinstance(node, RuntimeState) and node.thread_id == thread_id
@@ -201,14 +221,31 @@ async def turn_sse(
         # still between claim and SQLite admission.
         if node is not None and (not delivery_id or _node_has_delivery(node, delivery_id)):
             break
+        latest_turn_event = await asyncio.to_thread(stream.latest_turn_event, turn_id) if node is None else None
+        if latest_turn_event is not None:
+            terminal = _matching_terminal(
+                latest_turn_event.payload,
+                session_id=session_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+            if terminal is not None:
+                terminal_cursor = await asyncio.to_thread(stream.latest_thread_id, thread_id)
+                yield _terminal_envelope(turn_id, *terminal, event_id=terminal_cursor)
+                return
         entries = await asyncio.to_thread(stream.read_thread, thread_id, cursor, block_ms=50)
         for entry in entries:
             cursor = entry.stream_id
-            if entry.payload.get("type") == "turn.terminal":
+            terminal = _matching_terminal(
+                entry.payload,
+                session_id=session_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+            if terminal is not None:
                 yield _terminal_envelope(
                     turn_id,
-                    str(entry.payload.get("terminal_type") or "failed"),
-                    str(entry.payload.get("message") or ""),
+                    *terminal,
                     event_id=cursor,
                 )
                 return
