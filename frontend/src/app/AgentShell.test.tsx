@@ -80,6 +80,8 @@ function makeProps(overrides: Partial<AgentShellProps> = {}): AgentShellProps {
     onRename: vi.fn().mockResolvedValue(undefined),
     onArchive: vi.fn().mockResolvedValue(undefined),
     onDelete: vi.fn().mockResolvedValue(undefined),
+    onReorderSidebar: vi.fn().mockResolvedValue(undefined),
+    onSortSidebar: vi.fn().mockResolvedValue(undefined),
     onRestore: vi.fn().mockResolvedValue(undefined),
     onProfileUpdate: vi.fn().mockResolvedValue(undefined),
     onUpdate: vi.fn(),

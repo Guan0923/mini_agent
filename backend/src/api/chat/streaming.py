@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from collections.abc import Callable
@@ -35,6 +36,8 @@ from ..state import WebAppState
 from .interrupts import make_interactive_interrupt
 from .models import ReasoningEffort, RuntimeModelRequest, _model_request_parameters
 from .titles import _auto_title_main_thread
+
+logger = logging.getLogger(__name__)
 
 
 def _terminal_type_for_status(status: str, category: str | None) -> Literal["success", "failed"]:
@@ -147,6 +150,16 @@ def _stream(
     job_registry = getattr(state, "job_registry", None)
     job_holder: dict[str, ThreadJob | None] = {"job": None}
     bridge_ref: dict[str, RuntimeEventNodeBridge | None] = {"bridge": None}
+    initial_user_activity_recorded = False
+
+    def record_sidebar_activity(active_thread_id: str) -> None:
+        try:
+            stream_store.touch_sidebar_thread_activity(active_thread_id)
+        except KeyError:
+            # Right-panel side chats are Threads but do not have sidebar rows.
+            return
+        except Exception as exc:
+            logger.warning("Failed to update sidebar activity for thread %s: %s", active_thread_id, type(exc).__name__)
 
     def cancellation_requested() -> bool:
         job = job_holder["job"]
@@ -212,6 +225,7 @@ def _stream(
                 reserved_stream_keys.add(new_stream_key)
 
     def publish_frame(frame: NodeFrame) -> None:
+        nonlocal initial_user_activity_recorded
         bridge = bridge_ref["bridge"]
         if bridge is None:
             return
@@ -220,6 +234,14 @@ def _stream(
             active_turn_streams[alias] = active_stream
             active_stream_aliases.add(alias)
         current = bridge.writer.current(frame.session_id, frame.turn_id)
+        if frame.type == "turn.snapshot" and operation is None and not initial_user_activity_recorded:
+            record_sidebar_activity(current.thread_id)
+            initial_user_activity_recorded = True
+        elif frame.type == "turn.delta" and any(
+            change.get("op") == "append_message" and change.get("message", {}).get("role") == "user"
+            for change in frame.operations
+        ):
+            record_sidebar_activity(current.thread_id)
         publish_runtime_frame(state, frame, current)
         active_stream.publish_frame(frame, current)
 
@@ -227,6 +249,8 @@ def _stream(
         active_stream.publish_terminal(terminal_type, terminal_id, message)
         bridge = bridge_ref["bridge"]
         current = bridge._current() if bridge is not None else None
+        if current is not None:
+            record_sidebar_activity(current.thread_id)
         publish_runtime_terminal(
             state,
             session_id=current.session_id if current is not None else session_id,

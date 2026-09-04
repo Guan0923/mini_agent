@@ -2,7 +2,7 @@ import { Button, Drawer, Grid, Layout, Splitter } from "antd";
 import { MenuOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
 import type { LocalProfile, RightPanelWindow } from "../types";
-import type { AgentConfig, ProviderConfig } from "../api";
+import type { AgentConfig, ProviderConfig, SidebarThreadSort } from "../api";
 import type { ChatRunRequest } from "./types";
 import type { ChatMode, Conversation, DisplayMode, Page } from "../types";
 import type { ProjectInfo } from "../api";
@@ -61,6 +61,8 @@ export interface AgentShellProps {
   onRename: (id: string, title: string) => Promise<void>;
   onArchive: (id: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  onReorderSidebar: (projectId: string | null, orderedThreadIds: string[]) => Promise<void>;
+  onSortSidebar: (projectId: string | null, sortBy: SidebarThreadSort) => Promise<void>;
   onRestore: (id: string) => Promise<void>;
   onProfileUpdate: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
   onUpdate: (id: string, updater: (conversation: Conversation) => Conversation) => void;
@@ -161,6 +163,8 @@ export default function AgentShell(props: AgentShellProps) {
       onRename={props.onRename}
       onArchive={props.onArchive}
       onDelete={props.onDelete}
+      onReorder={props.onReorderSidebar}
+      onSort={props.onSortSidebar}
       onProfileUpdate={props.onProfileUpdate}
       onOpenSettings={() => props.setSettingsOpen(true)}
       collapsed={sidebarCollapsed}

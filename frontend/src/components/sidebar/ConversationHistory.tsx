@@ -1,6 +1,7 @@
 import { DeleteOutlined, EditOutlined, InboxOutlined, LoadingOutlined, MessageOutlined, MoreOutlined } from "@ant-design/icons";
-import { App as AntApp, Button, Dropdown, Form, Input, List, Modal, Spin, type MenuProps } from "antd";
+import { App as AntApp, Button, Dropdown, Form, Input, Modal, Spin, type MenuProps } from "antd";
 import { useState, type CSSProperties } from "react";
+import { useSortable } from "@dnd-kit/sortable";
 import type { Conversation } from "../../types";
 import type { HistoryMutationProps } from "./types";
 import { useHorizontalOverflow } from "./useHorizontalOverflow";
@@ -129,9 +130,10 @@ interface HistoryRowProps extends HistoryMutationProps {
   conversation: Conversation;
   selected: boolean;
   onSelect: (id: string) => void;
+  dragDisabled?: boolean;
 }
 
-export function HistoryRow({ conversation, selected, onSelect, onRename, onArchive, onDelete }: HistoryRowProps) {
+export function HistoryRow({ conversation, selected, onSelect, onRename, onArchive, onDelete, dragDisabled = false }: HistoryRowProps) {
   const title = conversation.title || "新对话";
   const running = conversation.messages.some((message) => message.running);
   const messageCount = conversation.messages.length > 0
@@ -142,14 +144,33 @@ export function HistoryRow({ conversation, selected, onSelect, onRename, onArchi
   const { viewportRef, textRef, overflow, measure } = useHorizontalOverflow(title);
   const [scrolling, setScrolling] = useState(false);
   const textStyle = { "--history-shift": `-${overflow}px` } as CSSProperties;
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: conversation.id,
+    disabled: dragDisabled,
+  });
+  const rowStyle: CSSProperties = {
+    padding: "2px 0",
+    border: 0,
+    transform: transform ? `translate3d(0, ${Math.round(transform.y)}px, 0)` : undefined,
+    transition,
+    zIndex: isDragging ? 2 : undefined,
+  };
 
   return (
-    <List.Item className="history-list-item" style={{ padding: "2px 0", border: 0 }}>
-      <div
-        className="history-item"
-        onMouseEnter={() => setScrolling(measure() > 1)}
-        onMouseLeave={() => setScrolling(false)}
-      >
+    <li
+      ref={setNodeRef}
+      className={`history-list-item${isDragging ? " is-dragging" : ""}`}
+      style={rowStyle}
+      {...attributes}
+      {...listeners}
+      role="listitem"
+      tabIndex={dragDisabled ? -1 : 0}
+      aria-label={`拖动排序：${title}`}
+      aria-roledescription="可排序对话"
+      onMouseEnter={() => setScrolling(measure() > 1)}
+      onMouseLeave={() => setScrolling(false)}
+    >
+      <div className="history-item">
         <Button
           className={`history-entry-button${selected ? " selected" : ""}`}
           type="text"
@@ -174,10 +195,15 @@ export function HistoryRow({ conversation, selected, onSelect, onRename, onArchi
             <span className="history-meta">{meta}</span>
           </span>
         </Button>
-        <div className="history-actions">
+        <div
+          className="history-actions"
+          onMouseDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+          onTouchStart={(event) => event.stopPropagation()}
+        >
           <HistoryActions conversation={conversation} onRename={onRename} onArchive={onArchive} onDelete={onDelete} />
         </div>
       </div>
-    </List.Item>
+    </li>
   );
 }

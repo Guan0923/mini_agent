@@ -8,9 +8,12 @@ export interface SidebarThread {
   title: string;
   created_at: string;
   updated_at: string;
+  last_activity_at: string;
   archived_at?: string | null;
   deleted_at?: string | null;
   title_is_custom: boolean;
+  project_id?: string | null;
+  project_available?: boolean | null;
 }
 
 export interface Metrics {
@@ -55,7 +58,9 @@ export interface Conversation {
   messages: ChatMessage[];
   /** Number of persisted user and assistant messages shown in history. */
   messageCount?: number;
+  createdAt?: string;
   updatedAt?: string;
+  lastActivityAt?: string;
   sessionId?: string;
   clientId?: string;
   archivedAt?: string;

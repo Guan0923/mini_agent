@@ -6,6 +6,7 @@ workspaces without opening every session database.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -34,7 +35,14 @@ CREATE TABLE IF NOT EXISTS project_sessions (
 );
 CREATE INDEX IF NOT EXISTS project_sessions_project_idx
     ON project_sessions(project_id, created_at, session_id);
+CREATE TABLE IF NOT EXISTS sidebar_thread_orders (
+    scope_key TEXT PRIMARY KEY,
+    ordered_thread_ids_json TEXT NOT NULL CHECK (json_valid(ordered_thread_ids_json)),
+    updated_at TEXT NOT NULL
+);
 """
+
+UNASSIGNED_SIDEBAR_SCOPE = "__unassigned__"
 
 
 @dataclass(frozen=True)
@@ -281,3 +289,34 @@ class ProjectStore:
                 (project_id,),
             ).fetchall()
         return [str(row[0]) for row in rows]
+
+    @staticmethod
+    def sidebar_scope_key(project_id: str | None) -> str:
+        return project_id or UNASSIGNED_SIDEBAR_SCOPE
+
+    def sidebar_thread_order(self, project_id: str | None) -> list[str]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT ordered_thread_ids_json FROM sidebar_thread_orders WHERE scope_key=?",
+                (self.sidebar_scope_key(project_id),),
+            ).fetchone()
+        if row is None:
+            return []
+        value = json.loads(str(row[0]))
+        if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+            raise ValueError("Stored sidebar thread order is invalid.")
+        return list(dict.fromkeys(value))
+
+    def save_sidebar_thread_order(self, project_id: str | None, thread_ids: list[str]) -> None:
+        if len(thread_ids) != len(set(thread_ids)) or any(not item for item in thread_ids):
+            raise ValueError("Sidebar thread order contains invalid or duplicate ids.")
+        now = utc_now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """INSERT INTO sidebar_thread_orders(scope_key,ordered_thread_ids_json,updated_at)
+                VALUES (?,?,?) ON CONFLICT(scope_key) DO UPDATE SET
+                ordered_thread_ids_json=excluded.ordered_thread_ids_json,
+                updated_at=excluded.updated_at""",
+                (self.sidebar_scope_key(project_id), json.dumps(thread_ids, separators=(",", ":")), now),
+            )

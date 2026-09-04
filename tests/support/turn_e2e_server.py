@@ -10,6 +10,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from time import monotonic, sleep
+from uuid import uuid4
 
 import uvicorn
 from redis import ConnectionPool
@@ -20,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from backend.api.app import create_app  # noqa: E402
 from backend.api.chat import routes as chat_routes  # noqa: E402
 from backend.api.routes import turns as turn_routes  # noqa: E402
+from backend.api.session_store import session_store  # noqa: E402
 from backend.api.state import WebAppState  # noqa: E402
 from backend.domain import AssistantMessage, ToolMessage  # noqa: E402
 from backend.mcp.client import start_external_tools  # noqa: E402
@@ -880,9 +882,37 @@ def set_redis_available(values: dict[str, object]) -> dict[str, bool]:
     return {"available": available}
 
 
-# create_app may mount a built frontend at "/". Keep the four test-only
+@app.post("/api/test/sidebar-project")
+def create_sidebar_project(values: dict[str, object]) -> dict[str, object]:
+    raw_titles = values.get("titles")
+    if not isinstance(raw_titles, list) or not raw_titles or not all(isinstance(title, str) for title in raw_titles):
+        raise ValueError("titles must be a non-empty string list")
+    project_name = str(values.get("name") or "Sidebar E2E Project")
+    project_dir = _root / f"sidebar-project-{uuid4().hex}"
+    project_dir.mkdir()
+    project = state.projects.create(project_dir, name=project_name)
+    store = session_store(state)
+    threads: list[dict[str, object]] = []
+    for raw_title in raw_titles:
+        title = raw_title.strip() or "新对话"
+        session = store.create_session(title)
+        thread = store.create_sidebar_thread(
+            session_id=session.session_id,
+            thread_id=session.session_id,
+            title=title,
+            title_is_custom=True,
+        )
+        state.projects.create_session(project.project_id, session.session_id)
+        threads.append(thread.to_dict())
+    return {
+        "project": {"project_id": project.project_id, "name": project.name},
+        "threads": threads,
+    }
+
+
+# create_app may mount a built frontend at "/". Keep the test-only
 # control routes ahead of that catch-all mount in the Starlette route table.
-for _test_route in range(5):
+for _test_route in range(6):
     app.router.routes.insert(0, app.router.routes.pop())
 
 

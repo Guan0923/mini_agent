@@ -27,6 +27,7 @@ const api = vi.hoisted(() => ({
   streamChat: vi.fn(),
   streamResume: vi.fn(),
   streamRewind: vi.fn(),
+  updateSidebarThreadOrder: vi.fn(),
   updateProfile: vi.fn(),
 }));
 
@@ -149,6 +150,7 @@ describe("AgentApp new conversation initialization", () => {
     api.listQueuedMessages.mockResolvedValue([]);
     api.pauseTurn.mockResolvedValue(undefined);
     api.streamAttachedTurn.mockResolvedValue("completed");
+    api.updateSidebarThreadOrder.mockResolvedValue({ ordered_thread_ids: [] });
     projectsApi.listProjects.mockResolvedValue([]);
   });
 
@@ -211,6 +213,68 @@ describe("AgentApp new conversation initialization", () => {
     });
 
     expect(shell.props?.current?.title).toBe("第一条用户消息");
+  });
+
+  it("optimistically reorders a group and restores the backend order when saving fails", async () => {
+    const first = { ...session("session-first"), thread_id: "thread-first", title: "第一条" };
+    const second = { ...session("session-second"), thread_id: "thread-second", title: "第二条" };
+    api.listSessions.mockImplementation(async (state: "active" | "archived" | "deleted" | "all") => (
+      state === "active" ? [first, second] : []
+    ));
+    let rejectSave!: (reason: Error) => void;
+    api.updateSidebarThreadOrder.mockReturnValue(new Promise((_resolve, reject) => {
+      rejectSave = reject;
+    }));
+    await renderReady();
+    await waitFor(() => expect(shell.props?.activeConversations.map((item) => item.threadId)).toEqual([
+      "thread-first",
+      "thread-second",
+    ]));
+
+    let saving!: Promise<void>;
+    act(() => {
+      saving = shell.props!.onReorderSidebar(null, ["thread-second", "thread-first"]);
+    });
+    await waitFor(() => expect(shell.props?.activeConversations.map((item) => item.threadId)).toEqual([
+      "thread-second",
+      "thread-first",
+    ]));
+
+    await act(async () => {
+      rejectSave(new Error("顺序保存失败"));
+      await saving;
+    });
+
+    expect(api.updateSidebarThreadOrder).toHaveBeenCalledWith(null, {
+      orderedThreadIds: ["thread-second", "thread-first"],
+    });
+    expect(shell.props?.activeConversations.map((item) => item.threadId)).toEqual([
+      "thread-first",
+      "thread-second",
+    ]);
+    await waitFor(() => expect(screen.getByText("顺序保存失败")).toBeInTheDocument());
+  });
+
+  it("applies the authoritative one-time sort without replacing conversation objects", async () => {
+    const first = { ...session("session-first"), thread_id: "thread-first", title: "第一条" };
+    const second = { ...session("session-second"), thread_id: "thread-second", title: "第二条" };
+    api.listSessions.mockImplementation(async (state: "active" | "archived" | "deleted" | "all") => (
+      state === "active" ? [first, second] : []
+    ));
+    api.updateSidebarThreadOrder.mockResolvedValue({
+      ordered_thread_ids: ["thread-second", "thread-first"],
+    });
+    await renderReady();
+    await waitFor(() => expect(shell.props?.activeConversations).toHaveLength(2));
+    const before = [...shell.props!.activeConversations];
+
+    await act(async () => {
+      await shell.props!.onSortSidebar(null, "recent_activity");
+    });
+
+    expect(api.updateSidebarThreadOrder).toHaveBeenCalledWith(null, { sortBy: "recent_activity" });
+    expect(shell.props?.activeConversations[0]).toBe(before[1]);
+    expect(shell.props?.activeConversations[1]).toBe(before[0]);
   });
 
   it("shows action errors through one keyed global Message, including in StrictMode", async () => {

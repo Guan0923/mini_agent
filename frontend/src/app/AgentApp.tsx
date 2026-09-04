@@ -6,8 +6,10 @@ import {
   getSessionNodes,
   listQueuedMessages,
   listSessions,
+  updateSidebarThreadOrder,
   updateProfile,
   type ProviderConfig,
+  type SidebarThreadSort,
 } from "../api";
 import type { ProjectInfo } from "../api/projects";
 import { loadSessionModes, saveSessionModes } from "./sessionModes";
@@ -358,17 +360,63 @@ function AgentApp() {
   async function refreshSessions(): Promise<void> {
     const summaries = await listSessions("active");
     setConversations((previous) => {
-      const next = [...previous];
-      for (const summary of summaries) {
-        const index = next.findIndex((item) =>
-          item.threadId === (summary.thread_id ?? summary.session_id)
-          || Boolean(summary.client_id && item.clientId === summary.client_id),
-        );
-        if (index >= 0) next[index] = summaryToConversation(summary, next[index]);
-        else next.push(summaryToConversation(summary));
-      }
-      return next;
+      const byThread = new Map(previous.map((item) => [item.threadId ?? item.id, item]));
+      const byClient = new Map(previous.filter((item) => item.clientId).map((item) => [item.clientId!, item]));
+      const activeKeys = new Set<string>();
+      const active = summaries.map((summary) => {
+        const threadId = summary.thread_id ?? summary.session_id;
+        const existing = byThread.get(threadId) ?? (summary.client_id ? byClient.get(summary.client_id) : undefined);
+        if (existing) activeKeys.add(existing.threadId ?? existing.id);
+        activeKeys.add(threadId);
+        return summaryToConversation(summary, existing);
+      });
+      return [...active, ...previous.filter((item) => !activeKeys.has(item.threadId ?? item.id))];
     });
+  }
+
+  function applySidebarOrder(projectId: string | null, orderedThreadIds: string[]) {
+    setConversations((previous) => {
+      const byThread = new Map(previous.map((item) => [item.threadId ?? item.id, item]));
+      const ordered = orderedThreadIds
+        .map((threadId) => byThread.get(threadId))
+        .filter((item): item is Conversation => Boolean(item));
+      let replacementIndex = 0;
+      const orderedIds = new Set(orderedThreadIds);
+      return previous.map((item) => {
+        const threadId = item.threadId ?? item.id;
+        const inScope = (item.projectId ?? null) === projectId && !item.archivedAt && !item.deletedAt;
+        return inScope && orderedIds.has(threadId) ? ordered[replacementIndex++] ?? item : item;
+      });
+    });
+  }
+
+  async function reorderSidebarGroup(projectId: string | null, orderedThreadIds: string[]) {
+    if (!currentId && current) setCurrentId(current.id);
+    const previousOrder = activeConversations
+      .filter((item) => (item.projectId ?? null) === projectId)
+      .map((item) => item.threadId ?? item.id);
+    applySidebarOrder(projectId, orderedThreadIds);
+    setActionError(null);
+    try {
+      const result = await updateSidebarThreadOrder(projectId, { orderedThreadIds });
+      applySidebarOrder(projectId, result.ordered_thread_ids);
+    } catch (error) {
+      applySidebarOrder(projectId, previousOrder);
+      setActionError(String((error as Error).message ?? error));
+      await refreshSessions().catch(() => undefined);
+    }
+  }
+
+  async function sortSidebarGroup(projectId: string | null, sortBy: SidebarThreadSort) {
+    if (!currentId && current) setCurrentId(current.id);
+    setActionError(null);
+    try {
+      const result = await updateSidebarThreadOrder(projectId, { sortBy });
+      applySidebarOrder(projectId, result.ordered_thread_ids);
+    } catch (error) {
+      setActionError(String((error as Error).message ?? error));
+      await refreshSessions().catch(() => undefined);
+    }
   }
 
   const {
@@ -455,6 +503,8 @@ function AgentApp() {
       onRename={renameConversation}
       onArchive={archiveConversation}
       onDelete={deleteConversation}
+      onReorderSidebar={reorderSidebarGroup}
+      onSortSidebar={sortSidebarGroup}
       onRestore={restoreConversation}
       onProfileUpdate={async (profile) => {
         const updated = await updateProfile(profile);

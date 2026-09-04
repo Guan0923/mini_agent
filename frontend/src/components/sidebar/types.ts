@@ -1,4 +1,4 @@
-import type { ProjectInfo } from "../../api";
+import type { ProjectInfo, SidebarThreadSort } from "../../api";
 import type { Conversation, LocalProfile, Page } from "../../types";
 
 export interface AppSidebarProps {
@@ -22,6 +22,8 @@ export interface AppSidebarProps {
   onRename: (id: string, title: string) => Promise<void>;
   onArchive: (id: string) => Promise<void>;
   onDelete: (id: string) => void | Promise<void>;
+  onReorder?: (projectId: string | null, orderedThreadIds: string[]) => Promise<void>;
+  onSort?: (projectId: string | null, sortBy: SidebarThreadSort) => Promise<void>;
   onProfileUpdate?: (profile: { display_name: string; agent_preferences: string }) => Promise<void>;
   onOpenSettings?: () => void;
   collapsed?: boolean;

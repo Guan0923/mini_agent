@@ -10,6 +10,7 @@ export interface SessionInfo {
   title: string;
   created_at: string;
   updated_at: string;
+  last_activity_at?: string;
   message_count: number;
   last_run_status: string | null;
   client_id?: string | null;
@@ -30,11 +31,14 @@ function summary(item: SidebarThread): SessionInfo {
     title: item.title,
     created_at: item.created_at,
     updated_at: item.updated_at,
+    last_activity_at: item.last_activity_at,
     message_count: 0,
     last_run_status: null,
     archived_at: item.archived_at,
     deleted_at: item.deleted_at,
     title_is_custom: item.title_is_custom,
+    project_id: item.project_id,
+    project_available: item.project_available,
   };
 }
 

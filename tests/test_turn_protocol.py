@@ -1959,6 +1959,20 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
     local_sandbox_runtime: None,
 ) -> None:
     state = WebAppState(tmp_path / "web")
+    activity_updates: list[tuple[str, str]] = []
+    original_touch_activity = SQLiteSessionStore.touch_sidebar_thread_activity
+
+    def record_touch_activity(
+        store: SQLiteSessionStore,
+        thread_id: str,
+        *,
+        timestamp: str | None = None,
+    ):
+        updated = original_touch_activity(store, thread_id, timestamp=timestamp)
+        activity_updates.append((thread_id, updated.last_activity_at))
+        return updated
+
+    monkeypatch.setattr(SQLiteSessionStore, "touch_sidebar_thread_activity", record_touch_activity)
     monkeypatch.setattr(
         state, "model_config", lambda *_args, **_kwargs: ModelConfig("test", "https://example.test/v1", "test")
     )
@@ -1974,6 +1988,7 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
 
     with TestClient(create_app(state)) as client:
         sidebar = client.post("/api/sidebar-threads", json={}).json()
+        initial_activity_at = sidebar["last_activity_at"]
         assert client.get("/api/turns", params={"session_id": sidebar["session_id"]}).json() == []
         turn_id = "turn_http_sse"
         accepted = client.post(
@@ -2052,6 +2067,13 @@ def test_real_sqlite_http_sse_round_trip_reconstructs_the_persisted_turn_from_de
         refreshed_sidebar = next(
             item for item in client.get("/api/sidebar-threads").json() if item["thread_id"] == sidebar["thread_id"]
         )
+        assert [thread_id for thread_id, _timestamp in activity_updates] == [
+            sidebar["thread_id"],
+            sidebar["thread_id"],
+        ]
+        assert activity_updates[0][1] > initial_activity_at
+        assert activity_updates[1][1] >= activity_updates[0][1]
+        assert refreshed_sidebar["last_activity_at"] == activity_updates[1][1]
         assert refreshed_sidebar["title"] == "hello side"
         assert refreshed_sidebar["title_is_custom"] is False
         assert state.active_turn_streams == {}

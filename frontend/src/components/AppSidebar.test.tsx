@@ -185,6 +185,73 @@ describe("AppSidebar utility navigation", () => {
     await waitFor(() => expect(item).not.toHaveClass("ant-collapse-item-active"));
   });
 
+  it("sorts project and ordinary groups independently", async () => {
+    const user = userEvent.setup();
+    const onSort = vi.fn().mockResolvedValue(undefined);
+    const projectSecond: Conversation = { ...projectConversation, id: "project-c2", title: "项目对话 2" };
+    const ordinarySecond: Conversation = { ...conversation, id: "c2", title: "普通对话 2" };
+    render(
+      <AppSidebar
+        profile={{ display_name: "账户名称", agent_preferences: "" }}
+        conversations={[projectConversation, projectSecond, conversation, ordinarySecond]}
+        projects={[{ ...project, conversation_count: 2, session_ids: ["project-c1", "project-c2"] }]}
+        archivedCount={0}
+        currentId={projectConversation.id}
+        page="chat"
+        onNew={vi.fn()}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onReorder={vi.fn().mockResolvedValue(undefined)}
+        onSort={onSort}
+      />,
+    );
+
+    const sortButtons = screen.getAllByRole("button", { name: "对话排序" });
+    await user.click(sortButtons[0]);
+    await user.click(await screen.findByText("按最近聊天"));
+    await waitFor(() => expect(onSort).toHaveBeenCalledWith("project-1", "recent_activity"));
+
+    await user.click(sortButtons[1]);
+    const createdAtOptions = await screen.findAllByText("按创建时间");
+    const visibleCreatedAtOption = createdAtOptions.find(
+      (option) => !option.closest(".ant-dropdown")?.classList.contains("ant-dropdown-hidden"),
+    );
+    if (!visibleCreatedAtOption) throw new Error("visible ordinary-group sort option was not rendered");
+    await user.click(visibleCreatedAtOption);
+    await waitFor(() => expect(onSort).toHaveBeenCalledWith(null, "created_at"));
+  });
+
+  it("keeps row selection and action buttons separate from drag activation", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(
+      <AppSidebar
+        profile={{ display_name: "账户名称", agent_preferences: "" }}
+        conversations={[conversation, { ...conversation, id: "c2", title: "第二个对话" }]}
+        archivedCount={0}
+        currentId={null}
+        page="chat"
+        onNew={vi.fn()}
+        onSelect={onSelect}
+        onNavigate={vi.fn()}
+        onRename={vi.fn().mockResolvedValue(undefined)}
+        onArchive={vi.fn().mockResolvedValue(undefined)}
+        onDelete={vi.fn()}
+        onReorder={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("listitem", { name: "拖动排序：测试对话" })).toHaveAttribute("aria-roledescription", "可排序对话");
+    await user.click(screen.getByRole("button", { name: "测试对话" }));
+    expect(onSelect).toHaveBeenCalledWith("c1");
+    await user.click(screen.getByRole("button", { name: "更多操作：测试对话" }));
+    expect(screen.getByText("重命名")).toBeInTheDocument();
+    expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+
   it("shows project settings as list buttons and dispatches rename, path, and removal actions", async () => {
     const user = userEvent.setup();
     const onRenameProject = vi.fn().mockResolvedValue(undefined);

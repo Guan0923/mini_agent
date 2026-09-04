@@ -69,7 +69,9 @@ export function summaryToConversation(summary: SessionInfo, existing?: Conversat
       (existing?.messages.length
         ? existing.messages.filter((message) => message.role === "user" || message.role === "assistant").length
         : existing?.messageCount ?? 0),
+    createdAt: summary.created_at ?? existing?.createdAt,
     updatedAt: summary.updated_at ?? existing?.updatedAt,
+    lastActivityAt: summary.last_activity_at ?? existing?.lastActivityAt,
     sessionId: summary.session_id,
     threadId: summary.thread_id ?? existing?.threadId ?? summary.session_id,
     clientId: summary.client_id ?? existing?.clientId ?? existing?.id ?? summary.session_id,
