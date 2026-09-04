@@ -9,7 +9,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AsyncExitStack
 from typing import Any, overload
 
-from mcp import ClientSession
+from mcp import ClientSession, types
 
 from backend.domain import safe_error_message
 from backend.jobs import AdmissionPolicy, JobLane, JobRegistry, JobScope, JobScopeKind, ServiceJob
@@ -35,6 +35,21 @@ class _McpServiceDriver:
 
     def stop(self, _handle: object) -> None:
         self.manager._stop_server(self.server_name)
+
+
+async def _list_all_tools(session: ClientSession) -> list[types.Tool]:
+    """Collect every tools/list page while tolerating cursor cycles."""
+
+    definitions: list[types.Tool] = []
+    seen_cursors: set[str] = set()
+    page = await session.list_tools()
+    while True:
+        definitions.extend(page.tools)
+        cursor = page.nextCursor
+        if cursor is None or cursor in seen_cursors:
+            return definitions
+        seen_cursors.add(cursor)
+        page = await session.list_tools(params=types.PaginatedRequestParams(cursor=cursor))
 
 
 class ExternalMcpManager:
@@ -105,7 +120,7 @@ class ExternalMcpManager:
             read, write = await stack.enter_async_context(controlled_stdio_client(_parameters(server)))
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
-            definitions = list((await session.list_tools()).tools)
+            definitions = await _list_all_tools(session)
         except BaseException:
             await stack.aclose()
             raise

@@ -1,11 +1,79 @@
 from __future__ import annotations
 
+import asyncio
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from backend.mcp import client as mcp_client
+from backend.mcp.client.manager import _list_all_tools
+
+
+def _definition(name: str) -> SimpleNamespace:
+    return SimpleNamespace(name=name, description=name, inputSchema={"type": "object"})
+
+
+class _PaginatedSession:
+    def __init__(self, pages: dict[str | None, SimpleNamespace]) -> None:
+        self.pages = pages
+        self.cursors: list[str | None] = []
+
+    async def list_tools(self, *, params=None):
+        cursor = params.cursor if params is not None else None
+        self.cursors.append(cursor)
+        return self.pages[cursor]
+
+
+def test_external_mcp_collects_all_tool_pages_in_order() -> None:
+    session = _PaginatedSession(
+        {
+            None: SimpleNamespace(tools=[_definition("first")], nextCursor="page-2"),
+            "page-2": SimpleNamespace(tools=[_definition("second")], nextCursor="page-3"),
+            "page-3": SimpleNamespace(tools=[_definition("third")], nextCursor=None),
+        }
+    )
+
+    definitions = asyncio.run(_list_all_tools(session))
+
+    assert [definition.name for definition in definitions] == ["first", "second", "third"]
+    assert session.cursors == [None, "page-2", "page-3"]
+
+
+def test_external_mcp_stops_after_a_repeated_cursor_and_keeps_the_current_page() -> None:
+    session = _PaginatedSession(
+        {
+            None: SimpleNamespace(tools=[_definition("first")], nextCursor="repeat"),
+            "repeat": SimpleNamespace(tools=[_definition("second")], nextCursor="repeat"),
+        }
+    )
+
+    definitions = asyncio.run(_list_all_tools(session))
+
+    assert [definition.name for definition in definitions] == ["first", "second"]
+    assert session.cursors == [None, "repeat"]
+
+
+def test_external_mcp_discovers_and_calls_tools_from_all_real_stdio_pages() -> None:
+    script = Path(__file__).parent / "support" / "paginated_mcp_server.py"
+    resources = mcp_client.start_external_tools(
+        (
+            mcp_client.McpServerConfig(
+                "paginated",
+                sys.executable,
+                (str(script),),
+                cwd=str(script.parent),
+            ),
+        )
+    )
+
+    try:
+        assert [tool.name for tool in resources] == ["mcp_paginated_first_page", "mcp_paginated_second_page"]
+        assert resources[0].handler() == "called first_page"
+        assert resources[1].handler() == "called second_page"
+    finally:
+        resources.close()
 
 
 def test_project_mcp_file_is_ignored_and_user_file_is_the_only_source(tmp_path: Path) -> None:
