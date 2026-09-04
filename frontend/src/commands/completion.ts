@@ -1,8 +1,22 @@
 import { COMMANDS, type CommandDefinition } from "./index";
 
-export function commandSuggestions(input: string): CommandDefinition[] {
-  if (!/^\/[^\s]*$/.test(input)) return [];
-  const prefix = input.toLowerCase();
+export interface CommandTrigger {
+  query: string;
+  start: number;
+  end: number;
+}
+
+export function commandTrigger(input: string, caret: number): CommandTrigger | null {
+  const head = input.slice(0, caret);
+  const match = /(?:^|\s)(\/[^\s/]*)$/.exec(head);
+  if (!match) return null;
+  const start = match.index + match[0].length - match[1].length;
+  return { query: match[1], start, end: caret };
+}
+
+export function commandSuggestions(query: string): CommandDefinition[] {
+  if (!/^\/[^\s]*$/.test(query)) return [];
+  const prefix = query.toLowerCase();
   return COMMANDS.filter((command) => command.name.startsWith(prefix));
 }
 
@@ -12,11 +26,12 @@ export function nextCommandIndex(current: number, direction: -1 | 1, count: numb
 }
 
 export function completionText(command: CommandDefinition): string {
-  return command.argument ? `${command.name} ` : command.name;
+  return command.name;
 }
 
 export type CommandKeyAction =
   | { type: "complete" }
+  | { type: "execute" }
   | { type: "dismiss" }
   | { type: "move"; direction: -1 | 1 }
   | { type: "send" }
@@ -38,7 +53,8 @@ export function commandKeyAction({
     return { type: "move", direction: key === "ArrowDown" ? 1 : -1 };
   }
   if (menuVisible && key === "Escape") return { type: "dismiss" };
-  if (menuVisible && (key === "Enter" || key === "Tab") && !shiftKey) return { type: "complete" };
+  if (menuVisible && key === "Enter" && !shiftKey) return { type: "execute" };
+  if (menuVisible && key === "Tab" && !shiftKey) return { type: "complete" };
   if (key === "Enter" && !shiftKey) return { type: "send" };
   return { type: "none" };
 }

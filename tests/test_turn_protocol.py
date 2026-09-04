@@ -271,7 +271,13 @@ def test_post_run_auto_title_falls_back_once_and_skips_reference_only_or_custom_
                 {
                     "type": "text",
                     "text": "",
-                    "references": [{"path": "README.md", "source": "project"}],
+                    "references": [
+                        {
+                            "path": "C:/workspace/README.md",
+                            "source": "project",
+                            "display_path": "README.md",
+                        }
+                    ],
                 }
             ],
         )

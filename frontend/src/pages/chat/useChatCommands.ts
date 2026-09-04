@@ -20,7 +20,6 @@ interface UseChatCommandsOptions {
   activeRuntimeNode?: RuntimeStateNode;
   clearComposer: () => void;
   onInsert: (content: string) => Promise<void>;
-  onNew: (title?: string) => unknown | Promise<unknown>;
   onReload: (conversationId: string, preferredActiveTurnId?: string) => Promise<void>;
   onInfo: (content: string) => void;
 }
@@ -39,7 +38,6 @@ export function useChatCommands({
   activeRuntimeNode,
   clearComposer,
   onInsert,
-  onNew,
   onReload,
   onInfo,
 }: UseChatCommandsOptions) {
@@ -47,13 +45,18 @@ export function useChatCommands({
     const command = filteredCommands[index];
     if (!command) return;
     const value = completionText(command);
-    editorRef.current?.clear();
-    editorRef.current?.insertText(value);
+    editorRef.current?.restore(value);
     setCommandMenuDismissedFor(value);
     setActiveCommandIndex(0);
   }
 
-  async function executeCommand(name: string, argument: string) {
+  async function executeSelectedCommand(index = activeCommandIndex) {
+    const command = filteredCommands[index];
+    if (!command) return;
+    await executeCommand(command.name);
+  }
+
+  async function executeCommand(name: string) {
     if (compactionPending) return;
     clearComposer();
     setCommandMenuDismissedFor(null);
@@ -64,10 +67,6 @@ export function useChatCommands({
     }
     if (name === "/help") {
       await onInsert(HELP_TEXT);
-      return;
-    }
-    if (name === "/new") {
-      await onNew(argument || undefined);
       return;
     }
     if (name === "/skills") {
@@ -96,5 +95,5 @@ export function useChatCommands({
     }
   }
 
-  return { completeCommand, executeCommand };
+  return { completeCommand, executeSelectedCommand, executeCommand };
 }

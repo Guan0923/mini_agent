@@ -39,7 +39,7 @@ def _merge(messages: Sequence[QueuedMessage]) -> tuple[str, tuple[dict[str, str]
             key = (str(reference.get("source") or ""), str(reference.get("path") or ""))
             if key not in seen:
                 seen.add(key)
-                references.append({"source": key[0], "path": key[1]})
+                references.append(dict(reference))
     return "\n\n".join(message.content for message in messages), tuple(references)
 
 

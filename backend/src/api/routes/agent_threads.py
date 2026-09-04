@@ -12,6 +12,8 @@ from backend.domain import MessageQueueUnavailable
 from backend.tools import ToolError
 
 from ..runtime_event_transport import thread_sse
+from ..session_files.routes import _store_for as session_file_store
+from ..session_files.store import SessionFileError
 from ..session_store import require_active_session, session_store
 from ..state import WebAppState
 from .turns import TurnExecutionConfig
@@ -23,7 +25,8 @@ class AgentFileReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: Literal["project", "upload"]
-    path: str = Field(min_length=1, max_length=1000)
+    path: str = Field(min_length=1, max_length=4000)
+    display_path: str = Field(min_length=1, max_length=4000)
 
 
 class AgentMessageRequest(TurnExecutionConfig):
@@ -70,13 +73,18 @@ def send_agent_thread_message(
         "running_mode": body.running_mode,
     }
     try:
+        references = session_file_store(state, body.session_id).normalize_references(
+            [item.model_dump() for item in body.references]
+        )
         return _coordinator(state).send_from_root(
             body.session_id,
             target_thread_id,
             body.content,
-            references=[item.model_dump() for item in body.references],
+            references=references,
             runtime_config={key: value for key, value in runtime_config.items() if value is not None},
         )
+    except SessionFileError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except MessageQueueUnavailable as exc:
         raise HTTPException(status_code=503, detail="message_queue_unavailable") from exc
     except ToolError as exc:

@@ -3,12 +3,10 @@ export interface CommandDefinition {
   name: string;
   label: string;
   description: string;
-  argument?: string;
 }
 
 /** Commands supported by the browser client. */
 export const COMMANDS: CommandDefinition[] = [
-  { name: "/new", label: "新建", description: "创建新的服务端会话", argument: "title" },
   { name: "/help", label: "帮助", description: "查看使用说明" },
   { name: "/skills", label: "技能", description: "列出已发现的技能" },
   { name: "/compact", label: "压缩", description: "压缩当前会话上下文" },
@@ -26,7 +24,7 @@ export const HELP_TEXT = [
   "- Plan：只读规划和讨论，提交计划后可进入 Plan Review。",
   "",
   "**斜杠命令：**",
-  ...COMMANDS.map((command) => `- \`${command.name}${command.argument ? ` ${command.argument}` : ""}\` ${command.description}`),
+  ...COMMANDS.map((command) => `- \`${command.name}\` ${command.description}`),
   "",
   "发送方式：`Enter` 发送，`Shift+Enter` 换行。",
 ].join("\n");
@@ -39,11 +37,7 @@ export interface ParsedCommand {
 const COMMAND_NAMES = new Set(COMMANDS.map((command) => command.name));
 
 export function parseCommand(input: string): ParsedCommand | null {
-  const match = input.trim().match(/^(\/[^\s]+)(?:\s+([\s\S]*))?$/);
+  const match = input.trim().match(/^(\/[^\s]+)$/);
   if (!match || !COMMAND_NAMES.has(match[1].toLowerCase())) return null;
-  return { name: match[1].toLowerCase(), argument: (match[2] ?? "").trim() };
-}
-
-export function isArgumentCommand(command: CommandDefinition): boolean {
-  return Boolean(command.argument);
+  return { name: match[1].toLowerCase(), argument: "" };
 }

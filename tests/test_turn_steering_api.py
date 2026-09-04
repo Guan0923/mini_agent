@@ -41,6 +41,11 @@ def test_steer_endpoint_accepts_only_an_active_running_turn_and_normalizes_refer
     state = WebAppState(tmp_path / "web")
     with TestClient(create_app(state)) as client:
         sidebar = client.post("/api/sidebar-threads", json={}).json()
+        workspace = state.session_workspace(sidebar["session_id"])
+        project_file = workspace / "README.md"
+        project_file.write_text("project", encoding="utf-8")
+        upload_file = state.paths.session_uploads(sidebar["session_id"]) / "notes.txt"
+        upload_file.write_text("upload", encoding="utf-8")
         store = session_store(state)
         turn = RuntimeState.create(
             session_id=sidebar["session_id"],
@@ -59,9 +64,9 @@ def test_steer_endpoint_accepts_only_an_active_running_turn_and_normalizes_refer
                 "id": "23d58ec5-7d2f-4a41-87e6-21ac50b5921d",
                 "content": " redirect ",
                 "references": [
-                    {"source": "project", "path": "README.md"},
-                    {"source": "project", "path": "README.md"},
-                    {"source": "upload", "path": "notes.txt"},
+                    {"source": "project", "path": str(project_file.resolve()), "display_path": "fake.md"},
+                    {"source": "project", "path": str(project_file.resolve()), "display_path": "README.md"},
+                    {"source": "upload", "path": str(upload_file.resolve()), "display_path": "wrong.txt"},
                 ],
             },
         ).json()
@@ -80,8 +85,8 @@ def test_steer_endpoint_accepts_only_an_active_running_turn_and_normalizes_refer
         assert claimed.envelope.delivery_id == "delivery-1"
         assert claimed.envelope.content == "redirect"
         assert list(claimed.envelope.references) == [
-            {"source": "project", "path": "README.md"},
-            {"source": "upload", "path": "notes.txt"},
+            {"source": "project", "path": str(project_file.resolve()), "display_path": "README.md"},
+            {"source": "upload", "path": str(upload_file.resolve()), "display_path": "notes.txt"},
         ]
 
         state.active_turn_streams.clear()

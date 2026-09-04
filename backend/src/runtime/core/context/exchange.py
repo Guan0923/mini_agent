@@ -149,18 +149,10 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                     for reference in item.get("references", []) if isinstance(item.get("references"), list) else []:
                         if isinstance(reference, Mapping) and reference.get("path"):
                             raw_path = str(reference["path"])
-                            if Path(raw_path).is_absolute() and "source" not in reference:
-                                references.append(f"- @{Path(raw_path).as_posix()}")
-                            else:
-                                source = str(reference.get("source") or "project")
-                                root = (
-                                    Path(node.cwd) / "uploads"
-                                    if source == "upload"
-                                    else Path(node.project_cwd or node.cwd)
-                                )
-                                candidate = (root / raw_path).resolve()
-                                path = candidate.as_posix() if candidate.is_relative_to(root.resolve()) else raw_path
-                                references.append(f"- @{path} ({source})")
+                            if Path(raw_path).is_absolute():
+                                source = str(reference.get("source") or "")
+                                suffix = f" ({source})" if source else ""
+                                references.append(f"- @{Path(raw_path).as_posix()}{suffix}")
                 if references:
                     user_text = f"{user_text}\n\nFile references:\n" + "\n".join(references)
                 if user_text:

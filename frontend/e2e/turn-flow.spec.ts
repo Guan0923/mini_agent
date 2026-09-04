@@ -60,6 +60,170 @@ function tracePanel(page: import("@playwright/test").Page, label: string, index 
   );
 }
 
+test("file references stay atomic and completion remains available during a running Turn", async ({ page }) => {
+  test.setTimeout(90_000);
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Reference Completion" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+  const projectResponse = await page.request.post("/api/test/session-file", {
+    data: {
+      session_id: sidebar.session_id,
+      display_path: "docs/alpha-note.txt",
+      content: "project reference",
+    },
+  });
+  expect(projectResponse.ok(), `${projectResponse.status()} ${await projectResponse.text()}`).toBeTruthy();
+  const projectReference = await projectResponse.json() as {
+    source: "project";
+    path: string;
+    display_path: string;
+  };
+  const uploadResponse = await page.request.post(`/api/sessions/${sidebar.session_id}/files`, {
+    multipart: {
+      files: {
+        name: "upload-note.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("upload reference"),
+      },
+    },
+  });
+  expect(uploadResponse.ok(), `${uploadResponse.status()} ${await uploadResponse.text()}`).toBeTruthy();
+  const [uploadedFile] = await uploadResponse.json() as Array<{
+    source: "upload";
+    path: string;
+    display_path: string;
+  }>;
+  const uploadReference = {
+    source: uploadedFile.source,
+    path: uploadedFile.path,
+    display_path: uploadedFile.display_path,
+  };
+
+  let turnPosts = 0;
+  const queuedBodies: Array<Record<string, unknown>> = [];
+  page.on("request", (request) => {
+    if (request.method() !== "POST") return;
+    if (request.url().endsWith("/api/turns")) turnPosts += 1;
+    if (request.url().includes("/queued-messages")) {
+      queuedBodies.push(request.postDataJSON() as Record<string, unknown>);
+    }
+  });
+
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Reference Completion", exact: true }).click();
+  const editor = page.getByLabel("聊天输入");
+  const bubbles = page.locator(".file-mention-bubble");
+
+  await editor.fill("before @alpha");
+  const projectCandidate = page.locator(".file-item").filter({ hasText: "docs/alpha-note.txt" });
+  await expect(projectCandidate).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(projectReference.path);
+  await editor.press("Enter");
+  await expect(bubbles).toHaveCount(1);
+  expect(turnPosts).toBe(0);
+  await editor.evaluate((element) => {
+    const mention = element.querySelector('[data-file-mention="true"]');
+    if (!mention) throw new Error("Missing file mention");
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStartAfter(mention);
+    range.collapse(true);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
+  await editor.press("Backspace");
+  await expect(bubbles).toHaveCount(0);
+  await expect(editor).toContainText("before");
+
+  await editor.fill("before @alpha");
+  await projectCandidate.click();
+  await expect(bubbles).toHaveCount(1);
+  await editor.press("End");
+  await editor.pressSequentially(" after");
+  await editor.evaluate((element) => {
+    const mention = element.querySelector('[data-file-mention="true"]');
+    if (!mention) throw new Error("Missing file mention");
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStartBefore(mention);
+    range.collapse(true);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
+  await editor.press("Delete");
+  await expect(bubbles).toHaveCount(0);
+  await expect(editor).toContainText("before");
+  await expect(editor).toContainText("after");
+
+  await editor.fill("project @alpha");
+  await projectCandidate.click();
+  const firstTurn = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  const firstTurnResponse = await firstTurn;
+  expect(firstTurnResponse.ok(), `${firstTurnResponse.status()} ${await firstTurnResponse.text()}`).toBeTruthy();
+  expect(firstTurnResponse.request().postDataJSON()).toMatchObject({
+    message: { content: [{ references: [projectReference] }] },
+  });
+  await expect(page.locator(".message.user").last()).toContainText(projectReference.display_path);
+  await expect(page.locator("body")).not.toContainText(projectReference.path);
+  await expect(page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }))
+    .toBeVisible({ timeout: 15_000 });
+
+  await editor.fill("upload @upload");
+  const uploadCandidate = page.locator(".file-item").filter({ hasText: "upload-note.txt" });
+  await expect(uploadCandidate).toBeVisible();
+  await editor.press("Tab");
+  await expect(bubbles).toHaveCount(1);
+  await page.getByRole("button", { name: "移除引用 upload-note.txt" }).click();
+  await expect(bubbles).toHaveCount(0);
+  await editor.fill("upload @upload");
+  await expect(uploadCandidate).toBeVisible();
+  await editor.press("Tab");
+  const secondTurn = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  const secondTurnResponse = await secondTurn;
+  expect(secondTurnResponse.ok(), `${secondTurnResponse.status()} ${await secondTurnResponse.text()}`).toBeTruthy();
+  expect(secondTurnResponse.request().postDataJSON()).toMatchObject({
+    message: { content: [{ references: [uploadReference] }] },
+  });
+  await expect(page.locator(".message.user").last()).toContainText(uploadReference.display_path);
+  await expect(page.locator("body")).not.toContainText(uploadReference.path);
+  await expect(page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }))
+    .toBeVisible({ timeout: 15_000 });
+
+  await editor.fill("steering fifo");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByRole("button", { name: "暂停" })).toBeVisible();
+  await editor.fill("/he");
+  await expect(page.locator(".command-name", { hasText: "/help" })).toBeVisible();
+  await editor.press("Enter");
+  await expect(editor).toHaveText("");
+  expect(queuedBodies).toHaveLength(0);
+
+  await editor.fill("@alpha");
+  await expect(projectCandidate).toBeVisible();
+  await editor.press("Enter");
+  await expect(bubbles).toHaveCount(1);
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByRole("region", { name: "待发送消息" })).toContainText("待发送 1 条");
+  expect(queuedBodies).toHaveLength(1);
+  expect(queuedBodies[0]).toMatchObject({ references: [projectReference] });
+  expect(JSON.stringify(queuedBodies[0])).not.toContain("/he");
+  const steerResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/steer"),
+  );
+  await page.getByRole("button", { name: "发送第 1 条待发送消息" }).click();
+  expect((await steerResponse).status()).toBe(202);
+  await expect(page.getByRole("region", { name: "待发送消息" })).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.locator(".message.assistant").last()).toContainText("FIFO steering complete.", { timeout: 20_000 });
+});
+
 test("Trace audit lists two real Turns oldest first and loads them independently", async ({ page }) => {
   const resetResponse = await page.request.post("/api/test/trace-model-reset");
   expect(resetResponse.ok(), `${resetResponse.status()} ${await resetResponse.text()}`).toBeTruthy();

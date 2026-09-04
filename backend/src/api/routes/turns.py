@@ -24,6 +24,7 @@ from ..chat.routes import (
     _startup_failure_message,
 )
 from ..runtime_event_transport import turn_sse
+from ..session_files.routes import _store_for as session_file_store
 from ..session_store import require_active_session, session_store
 from ..shared.runtime import build_local_application
 from ..state import WebAppState
@@ -122,6 +123,7 @@ async def create_turn(body: CreateTurnRequest, request: Request) -> dict[str, ob
     state: WebAppState = request.app.state.web
     store = session_store(state)
     require_active_session(store, body.session_id)
+    files = session_file_store(state, body.session_id)
     sidebar = store.get_sidebar_thread(body.thread_id)
     panel_window = store.active_right_panel_window_for_thread(body.session_id, body.thread_id)
     if (sidebar is None or sidebar.session_id != body.session_id or sidebar.state != "active") and panel_window is None:
@@ -190,7 +192,7 @@ async def create_turn(body: CreateTurnRequest, request: Request) -> dict[str, ob
             thread_id=body.thread_id,
             payload={
                 "content": str(item["text"]).strip(),
-                "references": _references(item),
+                "references": _references(item, files),
                 **command_payload,
             },
             source_message_ids=(delivery_id,),
@@ -207,6 +209,7 @@ async def rewind_turn(turn_id: str, body: RewindTurnRequest, request: Request) -
     state: WebAppState = request.app.state.web
     store = session_store(state)
     source = _turn(store, turn_id)
+    files = session_file_store(state, source.session_id)
     item = _user_item(body.message)
     try:
         state.message_queue.ping()
@@ -223,7 +226,7 @@ async def rewind_turn(turn_id: str, body: RewindTurnRequest, request: Request) -
         thread_id=source.thread_id,
         payload={
             "content": str(item["text"]).strip(),
-            "references": _references(item),
+            "references": _references(item, files),
             "version": 1,
             "operation": "rewind",
             "config": body.model_dump(

@@ -15,13 +15,12 @@ import os
 import re
 import shutil
 import unicodedata
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from backend.configuration import ClientPaths
-from backend.tools.filesystem.paths import workspace_relative_parts
+from backend.configuration import ClientPaths, ConfigurationError
 
 MAX_FILES_PER_BATCH = 20
 MAX_FILE_BYTES = 50 * 1024 * 1024
@@ -75,7 +74,10 @@ class SessionFileStore:
     def upload_root(self) -> Path:
         """Return the canonical upload directory, creating it if needed."""
 
-        self._paths.ensure_session(self._session_id)
+        try:
+            self._paths.ensure_session(self._session_id)
+        except ConfigurationError as exc:
+            raise SessionFileError("上传目录不可用。") from exc
         return self._paths.session_uploads(self._session_id)
 
     def project_root(self) -> Path | None:
@@ -118,10 +120,13 @@ class SessionFileStore:
         return candidate, candidate.name
 
     def metadata(self, path: Path, source: str) -> dict[str, object]:
+        resolved = path.resolve()
+        root = self._root_for(source)
         stat = path.stat()
         return {
             "source": source,
-            "path": path.relative_to(self._root_for(source)).as_posix(),
+            "path": str(resolved),
+            "display_path": resolved.relative_to(root).as_posix(),
             "name": path.name,
             "size": stat.st_size,
             "mime": _mime_for(path.name),
@@ -131,7 +136,10 @@ class SessionFileStore:
 
     def _root_for(self, source: str) -> Path:
         if source == "upload":
-            return self.upload_root()
+            root = self.upload_root()
+            if root.is_symlink():
+                raise SessionFileError("上传目录不能是符号链接。")
+            return root.resolve()
         if source == "project":
             root = self.project_root()
             if root is None:
@@ -251,22 +259,47 @@ class SessionFileStore:
                 yield resolved
 
     def resolve(self, source: str, path: str) -> Path:
-        """Resolve a confined reference to a real regular file."""
+        """Validate an absolute reference to a confined regular file."""
 
         root = self._root_for(source)
-        try:
-            parts = workspace_relative_parts(path)
-        except Exception as exc:
-            raise SessionFileError(f"无效的文件路径：{path}") from exc
-        candidate = root.joinpath(*parts)
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            raise SessionFileError("文件引用必须使用绝对路径。")
         if candidate.is_symlink():
             raise SessionFileError("不允许引用符号链接文件。")
-        resolved = candidate.resolve()
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise SessionFileError("引用的文件不存在。") from exc
         if resolved != root and root not in resolved.parents:
             raise SessionFileError("文件路径超出允许范围。")
         if not resolved.is_file():
             raise SessionFileError("引用的文件不存在。")
         return resolved
+
+    def normalize_references(self, values: Sequence[Mapping[str, object]]) -> list[dict[str, str]]:
+        """Validate browser references and return canonical absolute payloads."""
+
+        references: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for value in values:
+            source = value.get("source")
+            path = value.get("path")
+            if source not in {"project", "upload"} or not isinstance(path, str) or not path:
+                raise SessionFileError("无效的文件引用。")
+            resolved = self.resolve(str(source), path)
+            key = (str(source), str(resolved))
+            if key in seen:
+                continue
+            seen.add(key)
+            references.append(
+                {
+                    "source": key[0],
+                    "path": key[1],
+                    "display_path": resolved.relative_to(self._root_for(key[0])).as_posix(),
+                }
+            )
+        return references
 
     def delete_upload(self, path: str) -> None:
         """Delete one uploaded file; project files are never deleted here."""

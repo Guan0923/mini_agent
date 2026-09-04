@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 QueueMessageState = Literal["pending", "dispatched"]
@@ -57,7 +58,10 @@ class QueuedMessage:
         if not self.content.strip() and not self.references:
             raise ValueError("QueuedMessage requires content or references.")
         if any(
-            reference.get("source") not in {"project", "upload"} or not reference.get("path")
+            reference.get("source") not in {"project", "upload"}
+            or not reference.get("path")
+            or not reference.get("display_path")
+            or not Path(str(reference.get("path"))).is_absolute()
             for reference in self.references
         ):
             raise ValueError("QueuedMessage contains an invalid reference.")
@@ -123,11 +127,28 @@ class MessageEnvelope:
             raise ValueError("MessageEnvelope payload requires content or references.")
         if self.sender_kind == "agent":
             invalid_references = any(
-                set(reference) != {"path"} or not reference.get("path") for reference in self.references
+                not (
+                    (
+                        set(reference) == {"path"}
+                        and bool(reference.get("path"))
+                        and Path(str(reference.get("path"))).is_absolute()
+                    )
+                    or (
+                        set(reference) == {"source", "path", "display_path"}
+                        and reference.get("source") in {"project", "upload"}
+                        and bool(reference.get("path"))
+                        and bool(reference.get("display_path"))
+                        and Path(str(reference.get("path"))).is_absolute()
+                    )
+                )
+                for reference in self.references
             )
         else:
             invalid_references = any(
-                reference.get("source") not in {"project", "upload"} or not reference.get("path")
+                reference.get("source") not in {"project", "upload"}
+                or not reference.get("path")
+                or not reference.get("display_path")
+                or not Path(str(reference.get("path"))).is_absolute()
                 for reference in self.references
             )
         if invalid_references:

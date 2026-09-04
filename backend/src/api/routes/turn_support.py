@@ -18,6 +18,7 @@ from backend.domain.runtime_state import RuntimeRootState, RuntimeState
 
 from ..chat import routes as chat_routes
 from ..chat.routes import _model_config_snapshot, _stream
+from ..session_files.store import SessionFileError, SessionFileStore
 from ..state import WebAppState
 from .turn_models import TurnExecutionConfig
 
@@ -46,23 +47,16 @@ def _user_item(message: Mapping[str, object]) -> dict[str, object]:
     return item
 
 
-def _references(item: Mapping[str, object]) -> list[dict[str, str]]:
+def _references(item: Mapping[str, object], files: SessionFileStore) -> list[dict[str, str]]:
     raw = item.get("references", [])
     if not isinstance(raw, list):
         raise HTTPException(status_code=422, detail="references 必须为 list。")
-    result: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for value in raw:
-        if not isinstance(value, Mapping) or value.get("source") not in {"project", "upload"}:
-            raise HTTPException(status_code=422, detail="无效的文件引用。")
-        path = value.get("path")
-        if not isinstance(path, str) or not path:
-            raise HTTPException(status_code=422, detail="文件引用 path 不能为空。")
-        key = (str(value["source"]), path)
-        if key not in seen:
-            seen.add(key)
-            result.append({"source": key[0], "path": key[1]})
-    return result
+    if any(not isinstance(value, Mapping) for value in raw):
+        raise HTTPException(status_code=422, detail="无效的文件引用。")
+    try:
+        return files.normalize_references(raw)
+    except SessionFileError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _queue_http_error(exc: Exception) -> HTTPException:

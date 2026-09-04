@@ -16,6 +16,8 @@ from backend.domain import (
     QueueItemStateConflict,
 )
 
+from ..session_files.routes import _store_for as session_file_store
+from ..session_files.store import SessionFileError
 from ..session_store import session_store
 from ..state import WebAppState
 
@@ -60,18 +62,15 @@ def _queue_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail="message_queue_error")
 
 
-def _queue_references(values: list[dict[str, str]]) -> tuple[dict[str, str], ...]:
-    result: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for value in values:
-        source, path = value.get("source"), value.get("path")
-        if source not in {"project", "upload"} or not isinstance(path, str) or not path:
-            raise HTTPException(status_code=422, detail="无效的文件引用。")
-        key = (source, path)
-        if key not in seen:
-            seen.add(key)
-            result.append({"source": source, "path": path})
-    return tuple(result)
+def _queue_references(
+    state: WebAppState,
+    session_id: str,
+    values: list[dict[str, str]],
+) -> tuple[dict[str, str], ...]:
+    try:
+        return tuple(session_file_store(state, session_id).normalize_references(values))
+    except SessionFileError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _validate_queue_content(content: str, references: tuple[dict[str, str], ...]) -> str:
@@ -165,8 +164,9 @@ def list_queued_messages(thread_id: str, request: Request) -> list[dict[str, obj
 def create_queued_message(
     thread_id: str, body: CreateQueuedMessageRequest, request: Request, response: Response
 ) -> dict[str, object]:
-    _require_queue_thread(session_store(request.app.state.web), thread_id)
-    references = _queue_references(body.references)
+    state: WebAppState = request.app.state.web
+    thread = _require_queue_thread(session_store(state), thread_id)
+    references = _queue_references(state, thread.session_id, body.references)
     item = QueuedMessage(str(body.id), thread_id, _validate_queue_content(body.content, references), references)
     try:
         stored, created = request.app.state.web.message_queue.create(item)
@@ -180,8 +180,9 @@ def create_queued_message(
 def update_queued_message(
     thread_id: str, message_id: str, body: QueuedMessageBody, request: Request
 ) -> dict[str, object]:
-    _require_queue_thread(session_store(request.app.state.web), thread_id)
-    references = _queue_references(body.references)
+    state: WebAppState = request.app.state.web
+    thread = _require_queue_thread(session_store(state), thread_id)
+    references = _queue_references(state, thread.session_id, body.references)
     try:
         item = request.app.state.web.message_queue.update(
             thread_id,

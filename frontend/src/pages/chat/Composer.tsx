@@ -56,6 +56,7 @@ export interface ComposerProps {
   onEditorChange: (change: FileMentionChange) => void;
   onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   onComplete: (index?: number) => void;
+  onCommandExecute: (index?: number) => void;
   onActiveCommandChange: (index: number) => void;
   onModeChange: (mode: ChatMode) => void;
   onPermissionChange: (mode: PermissionMode) => void;
@@ -81,6 +82,7 @@ export interface ComposerProps {
     status: "uploading" | "done" | "error";
     percent: number;
     path?: string;
+    displayPath?: string;
     error?: string;
   }>;
   onRemoveUpload: (index: number) => void;
@@ -123,6 +125,12 @@ export default function Composer(props: ComposerProps) {
     if (files && files.length > 0 && !props.disabled && !props.uploadsDisabled) {
       event.preventDefault();
       props.onPickFiles(files);
+    }
+  }
+
+  function handleComposerKeyDownCapture(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.target instanceof HTMLElement && event.target.matches(".file-mention-editor")) {
+      props.onKeyDown(event);
     }
   }
 
@@ -216,19 +224,20 @@ export default function Composer(props: ComposerProps) {
             props.fileCandidates.map((candidate, index) => (
               <button
                 key={`${candidate.reference.source}:${candidate.reference.path}`}
+                type="button"
                 className={`command-item file-item${index === props.activeFileIndex ? " selected" : ""}`}
                 onMouseEnter={() => props.onActiveFileChange(index)}
                 onClick={() => props.onFileComplete(index)}
               >
-                <span className="file-item-name">{candidate.label}</span>
-                <span className="file-item-path">{candidate.reference.path}</span>
+                <span className="file-item-name">{candidate.file.name}</span>
+                <span className="file-item-path">{candidate.reference.display_path}</span>
                 <span className={`file-source-badge ${candidate.reference.source}`}>{candidate.sourceLabel}</span>
               </button>
             ))
           )}
         </div>
       )}
-      {props.commandMenuVisible && <div className="command-menu">{props.filteredCommands.map((command, index) => <button key={command.name} className={`command-item${index === props.activeCommandIndex ? " selected" : ""}`} onMouseEnter={() => props.onActiveCommandChange(index)} onClick={() => props.onComplete(index)}><span className="command-name">{command.name}</span><span className="command-desc">{command.label} · {command.description}</span></button>)}</div>}
+      {props.commandMenuVisible && <div className="command-menu">{props.filteredCommands.map((command, index) => <button key={command.name} type="button" className={`command-item${index === props.activeCommandIndex ? " selected" : ""}`} onMouseEnter={() => props.onActiveCommandChange(index)} onClick={() => props.onCommandExecute(index)}><span className="command-name">{command.name}</span><span className="command-desc">{command.label} · {command.description}</span></button>)}</div>}
       <div className="composer-box-anchor">
         <QueuedMessageList
           items={props.queuedMessages ?? []}
@@ -264,14 +273,13 @@ export default function Composer(props: ComposerProps) {
             />
           </div>
         ) : null}
-        <div className={`composer-box composer-reveal-item${dragOver ? " is-dragging" : ""}`} data-reveal-index="2" onDragOver={(event) => { if (!props.disabled) { event.preventDefault(); setDragOver(true); } }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}>
+        <div className={`composer-box composer-reveal-item${dragOver ? " is-dragging" : ""}`} data-reveal-index="2" onKeyDownCapture={handleComposerKeyDownCapture} onDragOver={(event) => { if (!props.disabled) { event.preventDefault(); setDragOver(true); } }} onDragLeave={() => setDragOver(false)} onDrop={handleDrop}>
           <input ref={fileInputRef} type="file" multiple hidden aria-hidden="true" onChange={handleFilesChange} />
           <FileMentionEditor
             ref={props.editorRef}
             disabled={props.disabled}
             placeholder={props.disabledReason || "输入任务，按 Enter 发送"}
             onChange={props.onEditorChange}
-            onKeyDown={props.onKeyDown}
             onPasteFiles={handlePaste}
           />
           <div className="composer-toolbar composer-reveal-item" data-reveal-index="4">

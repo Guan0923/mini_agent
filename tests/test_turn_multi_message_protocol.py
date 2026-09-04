@@ -12,6 +12,7 @@ from backend.domain.runtime_state import (
     RuntimeState,
     RuntimeStateValidationError,
 )
+from backend.runtime.conversation.steering import _model_content_with_references
 from backend.runtime.core.context import _chat_messages_from_nodes
 from backend.runtime.core.events import RuntimeEvent
 from backend.runtime.node_bridge import RuntimeEventNodeBridge
@@ -101,7 +102,13 @@ def test_runtime_bridge_appends_canonical_user_before_starting_the_next_assistan
             data={
                 "delivery_id": "delivery_1",
                 "content": "redirect",
-                "references": [{"source": "project", "path": "README.md"}],
+                "references": [
+                    {
+                        "source": "project",
+                        "path": "C:/workspace/README.md",
+                        "display_path": "README.md",
+                    }
+                ],
             },
         )
     )
@@ -145,8 +152,16 @@ def test_runtime_model_history_maps_structured_references_to_absolute_workspace_
                         "text": "redirect",
                         "status": "success",
                         "references": [
-                            {"source": "project", "path": "README.md"},
-                            {"source": "upload", "path": "notes.txt"},
+                            {
+                                "source": "project",
+                                "path": str((project_workspace / "README.md").resolve()),
+                                "display_path": "README.md",
+                            },
+                            {
+                                "source": "upload",
+                                "path": str((session_workspace / "uploads" / "notes.txt").resolve()),
+                                "display_path": "notes.txt",
+                            },
                         ],
                     }
                 ],
@@ -175,3 +190,20 @@ def test_plain_text_at_path_is_not_expanded_before_model_projection() -> None:
     history = _chat_messages_from_nodes([RuntimeState.from_dict(turn.to_dict())])
 
     assert history[0].content == "Please inspect @secret.txt"
+
+
+def test_running_steering_model_content_uses_validated_absolute_references(tmp_path: Path) -> None:
+    project_file = (tmp_path / "README.md").resolve()
+    upload_file = (tmp_path / "uploads" / "notes.txt").resolve()
+
+    content = _model_content_with_references(
+        "redirect",
+        (
+            {"source": "project", "path": str(project_file), "display_path": "README.md"},
+            {"source": "upload", "path": str(upload_file), "display_path": "notes.txt"},
+        ),
+    )
+
+    assert content == (
+        f"redirect\n\nFile references:\n- @{project_file.as_posix()} (project)\n- @{upload_file.as_posix()} (upload)"
+    )
