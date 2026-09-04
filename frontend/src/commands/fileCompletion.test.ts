@@ -10,7 +10,8 @@ import type { SessionFileInfo } from "../types";
 
 const uploadFile = (path: string): SessionFileInfo => ({
   source: "upload",
-  path,
+  path: `C:/uploads/${path}`,
+  display_path: path,
   name: path.split("/").pop() ?? path,
   size: 10,
   mime: "text/plain",
@@ -60,10 +61,17 @@ describe("file completion tokens and insertion", () => {
     expect(result.caret).toBe(4 + "@readme.md".length);
   });
   it("maps search results to candidates with source labels", () => {
-    const candidates = toCandidates([uploadFile("a.txt"), { ...uploadFile("b.txt"), source: "project" }]);
+    const candidates = toCandidates([
+      uploadFile("a.txt"),
+      { ...uploadFile("b.txt"), source: "project", path: "C:/workspace/b.txt" },
+    ]);
     expect(candidates[0].sourceLabel).toBe("会话上传");
     expect(candidates[1].sourceLabel).toBe("项目文件");
-    expect(candidates[1].reference).toEqual({ source: "project", path: "b.txt" });
+    expect(candidates[1].reference).toEqual({
+      source: "project",
+      path: "C:/workspace/b.txt",
+      display_path: "b.txt",
+    });
   });
 });
 

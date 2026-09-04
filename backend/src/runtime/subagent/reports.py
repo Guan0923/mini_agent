@@ -266,12 +266,23 @@ class _SubagentReportDeliveryMixin:
             raise ToolError("The target Agent has no canonical current Turn.")
         absolute: list[dict[str, str]] = []
         for value in values:
-            source, raw_path = value.get("source"), value.get("path")
-            if source not in {"project", "upload"} or not isinstance(raw_path, str):
-                raise ToolError("Browser Agent references require source and path.")
-            relative = Path(raw_path)
-            if relative.is_absolute():
-                raise ToolError("Browser Agent reference paths must be relative.")
-            root = Path(turn.cwd) / "uploads" if source == "upload" else Path(turn.project_cwd or turn.cwd)
-            absolute.append({"path": str((root / relative).resolve())})
-        return self._parse_references(session_id, target, absolute)
+            source, raw_path, display_path = value.get("source"), value.get("path"), value.get("display_path")
+            if (
+                source not in {"project", "upload"}
+                or not isinstance(raw_path, str)
+                or not isinstance(display_path, str)
+                or not display_path
+            ):
+                raise ToolError("Browser Agent references require source, path, and display_path.")
+            if not Path(raw_path).is_absolute():
+                raise ToolError("Browser Agent reference paths must be absolute.")
+            absolute.append({"path": raw_path})
+        parsed = self._parse_references(session_id, target, absolute)
+        return [
+            {
+                "source": str(value["source"]),
+                "path": reference["path"],
+                "display_path": str(value["display_path"]),
+            }
+            for value, reference in zip(values, parsed, strict=True)
+        ]

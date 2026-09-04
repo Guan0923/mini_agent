@@ -24,12 +24,14 @@ def test_queued_message_api_is_ordered_idempotent_and_restricts_dispatched_mutat
     with TestClient(create_app(state)) as client:
         sidebar = client.post("/api/sidebar-threads", json={}).json()
         thread_id = sidebar["thread_id"]
+        readme = state.session_workspace(sidebar["session_id"]) / "README.md"
+        readme.write_text("queued reference", encoding="utf-8")
         first_id = str(uuid4())
         second_id = str(uuid4())
         first = {
             "id": first_id,
             "content": "first",
-            "references": [{"source": "project", "path": "README.md"}],
+            "references": [{"source": "project", "path": str(readme.resolve()), "display_path": "forged.md"}],
         }
         assert client.post(f"/api/sidebar-threads/{thread_id}/queued-messages", json=first).status_code == 201
         assert client.post(f"/api/sidebar-threads/{thread_id}/queued-messages", json=first).status_code == 200
@@ -125,6 +127,77 @@ def test_create_turn_accepts_exactly_one_message_source_and_enqueues_queued_deli
     assert initial.envelope.delivery_id == "delivery-create"
 
 
+def test_create_turn_validates_and_normalizes_absolute_file_references(tmp_path: Path) -> None:
+    state = WebAppState(tmp_path / "web")
+    state.turn_message_worker.close()
+    with TestClient(create_app(state)) as client:
+        sidebar = client.post("/api/sidebar-threads", json={}).json()
+        workspace = state.session_workspace(sidebar["session_id"])
+        referenced = workspace / "docs" / "guide.md"
+        referenced.parent.mkdir()
+        referenced.write_text("guide", encoding="utf-8")
+        base = {
+            "session_id": sidebar["session_id"],
+            "thread_id": sidebar["thread_id"],
+            "parent_id": "",
+        }
+        accepted = client.post(
+            "/api/turns",
+            json={
+                **base,
+                "id": "turn-reference-valid",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "inspect",
+                            "references": [
+                                {
+                                    "source": "project",
+                                    "path": str(referenced.resolve()),
+                                    "display_path": "forged.md",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+        )
+        assert accepted.status_code == 202, accepted.text
+        claimed = state.message_queue.claim_turn_start("test-reference", recover=True)
+        assert claimed is not None
+        assert claimed.envelope.references == (
+            {
+                "source": "project",
+                "path": str(referenced.resolve()),
+                "display_path": "docs/guide.md",
+            },
+        )
+
+        rejected = client.post(
+            "/api/turns",
+            json={
+                **base,
+                "id": "turn-reference-relative",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "inspect",
+                            "references": [
+                                {"source": "project", "path": "docs/guide.md", "display_path": "docs/guide.md"}
+                            ],
+                        }
+                    ],
+                },
+            },
+        )
+        assert rejected.status_code == 422
+        assert "绝对路径" in rejected.json()["detail"]
+
+
 def test_create_turn_keeps_accepted_delivery_pending_until_worker_admission(tmp_path: Path) -> None:
     from backend.storage.message_queue import MemoryMessageQueue
 
@@ -198,8 +271,9 @@ def redis_queue() -> RedisMessageQueue:
 
 def test_real_redis_dispatch_claim_ack_and_receipt_replay(redis_queue: RedisMessageQueue) -> None:
     thread_id = "thread-real"
-    redis_queue.create(QueuedMessage("one", thread_id, "one", ({"source": "project", "path": "a"},)))
-    redis_queue.create(QueuedMessage("two", thread_id, "two", ({"source": "project", "path": "a"},)))
+    reference = {"source": "project", "path": "C:/workspace/a", "display_path": "a"}
+    redis_queue.create(QueuedMessage("one", thread_id, "one", (reference,)))
+    redis_queue.create(QueuedMessage("two", thread_id, "two", (reference,)))
     redis_queue.create(QueuedMessage("three", thread_id, "three"))
 
     first = redis_queue.dispatch(
@@ -219,7 +293,7 @@ def test_real_redis_dispatch_claim_ack_and_receipt_replay(redis_queue: RedisMess
     )
     assert first.source_message_ids == ("one", "two")
     assert first.content == "one\n\ntwo"
-    assert first.references == ({"source": "project", "path": "a"},)
+    assert first.references == (reference,)
 
     claimed_first = redis_queue.claim("turn-real", "consumer-a")
     assert claimed_first is not None and claimed_first.envelope.delivery_id == "delivery-one"

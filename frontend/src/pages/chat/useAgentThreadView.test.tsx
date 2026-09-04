@@ -208,7 +208,7 @@ describe("useAgentThreadView", () => {
     await act(async () => {
       await latestView!.sendMessage({
         content: "follow up",
-        references: [{ source: "project", path: "README.md" }],
+        references: [{ source: "project", path: "C:/workspace/README.md", display_path: "README.md" }],
         mode: "plan",
         permissionMode: "workspace_write",
         providerName: "local",
@@ -220,7 +220,7 @@ describe("useAgentThreadView", () => {
       "thread_a_child",
       expect.objectContaining({
         sessionId: "session_a",
-        references: [{ source: "project", path: "README.md" }],
+        references: [{ source: "project", path: "C:/workspace/README.md", display_path: "README.md" }],
         mode: "plan",
         permissionMode: "workspace_write",
       }),

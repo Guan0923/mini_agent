@@ -44,8 +44,8 @@ export interface FileCandidate {
 export function toCandidates(files: SessionFileInfo[]): FileCandidate[] {
   return files.map((file) => ({
     file,
-    reference: { source: file.source, path: file.path },
-    label: file.name,
+    reference: { source: file.source, path: file.path, display_path: file.display_path },
+    label: file.display_path,
     sourceLabel: file.source === "upload" ? "会话上传" : "项目文件",
   }));
 }

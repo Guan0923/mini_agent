@@ -11,6 +11,7 @@ import {
   getSessionNodes,
   listAgentThreadChildren,
   patchRuntimeConfig,
+  searchSessionFiles,
   sendAgentThreadMessage,
   steerTurn,
   streamAgentThread,
@@ -34,6 +35,7 @@ vi.mock("../../api", async (importOriginal) => ({
   getSessionNodes: vi.fn(),
   listAgentThreadChildren: vi.fn(),
   patchRuntimeConfig: vi.fn(),
+  searchSessionFiles: vi.fn(),
   sendAgentThreadMessage: vi.fn(),
   steerTurn: vi.fn().mockResolvedValue(undefined),
   streamAgentThread: vi.fn(),
@@ -183,7 +185,7 @@ function QueueHarness({
       id: "queued-1",
       thread_id: "session-rewind",
       content: "第一条",
-      references: [{ source: "project", path: "README.md" }],
+      references: [{ source: "project", path: "C:/workspace/README.md", display_path: "README.md" }],
       state: "pending",
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
@@ -193,8 +195,8 @@ function QueueHarness({
       thread_id: "session-rewind",
       content: "第二条",
       references: [
-        { source: "project", path: "README.md" },
-        { source: "upload", path: "notes.txt" },
+        { source: "project", path: "C:/workspace/README.md", display_path: "README.md" },
+        { source: "upload", path: "C:/uploads/notes.txt", display_path: "notes.txt" },
       ],
       state: "pending",
       created_at: "2026-01-01T00:00:01Z",
@@ -762,6 +764,101 @@ describe("ChatPage rewind projection", () => {
 
     await waitFor(() => expect(screen.queryByText("正在执行compaction操作中")).toBeNull());
     expect(screen.getByText("summary provider failed", { selector: "p" })).toBeVisible();
+  });
+});
+
+describe("ChatPage composer completion", () => {
+  afterEach(() => {
+    vi.mocked(searchSessionFiles).mockReset();
+  });
+
+  it("selects a file with Enter without sending and never renders its absolute path", async () => {
+    const onRun = vi.fn();
+    const absolutePath = "C:/workspace/docs/README.md";
+    vi.mocked(searchSessionFiles).mockResolvedValue([{
+      source: "project",
+      path: absolutePath,
+      display_path: "docs/README.md",
+      name: "README.md",
+      size: 12,
+      mime: "text/markdown",
+      mtime: "2026-09-04T00:00:00Z",
+      is_image: false,
+    }]);
+    const { container } = render(<Harness onRun={onRun} onRewind={vi.fn()} />);
+    const composer = screen.getByLabelText("聊天输入");
+
+    await userEvent.type(composer, "请查看 @read");
+    expect(await screen.findByText("docs/README.md", { selector: ".file-item-path" })).toBeVisible();
+    expect(container).not.toHaveTextContent(absolutePath);
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
+
+    expect(await screen.findByText("docs/README.md", { selector: ".file-mention-label" })).toBeVisible();
+    expect(composer).toHaveTextContent("请查看 docs/README.md");
+    expect(container).not.toHaveTextContent(absolutePath);
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
+  it("keeps command and file menus usable while a Turn is running", async () => {
+    const onRun = vi.fn();
+    vi.mocked(searchSessionFiles).mockResolvedValue([{
+      source: "upload",
+      path: "C:/session/uploads/notes.txt",
+      display_path: "notes.txt",
+      name: "notes.txt",
+      size: 5,
+      mime: "text/plain",
+      mtime: "2026-09-04T00:00:00Z",
+      is_image: false,
+    }]);
+    render(<QueueHarness terminalStatus="running" onRun={onRun} />);
+    const composer = screen.getByLabelText("聊天输入");
+
+    await userEvent.type(composer, "/he");
+    expect(await screen.findByText("/help", { selector: ".command-name" })).toBeVisible();
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(composer).toHaveTextContent(""));
+    expect(onRun).not.toHaveBeenCalled();
+    expect(screen.getByTestId("queued-count")).toHaveTextContent("2");
+
+    await userEvent.type(composer, "@note");
+    expect(await screen.findByText("notes.txt", { selector: ".file-item-path" })).toBeVisible();
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
+    expect(await screen.findByText("notes.txt", { selector: ".file-mention-label" })).toBeVisible();
+    expect(onRun).not.toHaveBeenCalled();
+    expect(screen.getByTestId("queued-count")).toHaveTextContent("2");
+  });
+
+  it("uses Tab only to complete a command and executes it on the next Enter", async () => {
+    const onRun = vi.fn();
+    render(<Harness onRun={onRun} onRewind={vi.fn()} />);
+    const composer = screen.getByLabelText("聊天输入");
+
+    await userEvent.type(composer, "draft /he");
+    expect(await screen.findByText("/help", { selector: ".command-name" })).toBeVisible();
+    fireEvent.keyDown(composer, { key: "Tab", code: "Tab" });
+    await waitFor(() => expect(composer).toHaveTextContent("/help"));
+    expect(screen.queryByText("/help", { selector: ".command-name" })).not.toBeInTheDocument();
+    expect(onRun).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(composer).toHaveTextContent(""));
+    expect(onRun).not.toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "使用说明" })).toBeVisible();
+  });
+
+  it("executes a clicked command candidate and clears the whole draft", async () => {
+    const onRun = vi.fn();
+    render(<Harness onRun={onRun} onRewind={vi.fn()} />);
+    const composer = screen.getByLabelText("聊天输入");
+    await userEvent.type(composer, "discard this /he");
+    const command = await screen.findByText("/help", { selector: ".command-name" });
+
+    await userEvent.click(command.closest("button")!);
+
+    await waitFor(() => expect(composer).toHaveTextContent(""));
+    expect(onRun).not.toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "使用说明" })).toBeVisible();
   });
 });
 

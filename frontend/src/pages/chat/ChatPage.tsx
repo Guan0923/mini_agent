@@ -3,7 +3,13 @@ import { App as AntApp, FloatButton } from "antd";
 import { VerticalAlignBottomOutlined } from "@ant-design/icons";
 import { sessionFileContentUrl, submitDecision } from "../../api";
 import { parseCommand } from "../../commands";
-import { commandKeyAction, commandSuggestions, nextCommandIndex } from "../../commands/completion";
+import {
+  commandKeyAction,
+  commandSuggestions,
+  commandTrigger,
+  nextCommandIndex,
+  type CommandTrigger,
+} from "../../commands/completion";
 import { fileKeyAction } from "../../commands/fileCompletion";
 import Composer from "./Composer";
 import { latestTodoList } from "./todoPanel";
@@ -81,6 +87,7 @@ export default function ChatPage({
   const [queueSubmitting, setQueueSubmitting] = useState(false);
   const [compactionPending, setCompactionPending] = useState(false);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
+  const [commandTriggerState, setCommandTriggerState] = useState<CommandTrigger | null>(null);
   const [commandMenuDismissedFor, setCommandMenuDismissedFor] = useState<string | null>(null);
   const [dismissedTodoPanels, setDismissedTodoPanels] = useState<Set<string>>(() => new Set());
   const [mainView, setMainView] = useState<ChatMainView>("chat");
@@ -97,12 +104,15 @@ export default function ChatPage({
   const busy = agentThreadView.isSubagent ? false : Boolean(runningProp) || queueSubmitting;
   const sandboxBlocked = sandboxHealth.phase !== "healthy";
   const interactionBusy = busy || compactionPending || sandboxBlocked;
+  const projectUnavailable = conversation?.projectId !== undefined && conversation.projectAvailable === false;
+  const completionDisabled = compactionPending || sandboxBlocked || projectUnavailable;
   const composerFiles = useComposerFiles({
     conversationId: conversation?.id,
     sessionId: conversation?.sessionId,
-    interactionBusy,
-    onTextChanged: () => {
-      setCommandMenuDismissedFor(null);
+    completionDisabled,
+    onTextChanged: (change) => {
+      setCommandTriggerState(commandTrigger(change.prompt, change.caret));
+      setCommandMenuDismissedFor((dismissed) => dismissed === change.prompt ? dismissed : null);
       setActiveCommandIndex(0);
     },
   });
@@ -128,13 +138,17 @@ export default function ChatPage({
     collectedReferences,
     clearComposer,
   } = composerFiles;
-  const filteredCommands = commandSuggestions(input).filter(
+  const filteredCommands = commandSuggestions(commandTriggerState?.query ?? "").filter(
     (command) => !agentThreadView.isSubagent || command.name !== "/compact",
   );
-  const commandMenuVisible = !interactionBusy && commandMenuDismissedFor !== input && filteredCommands.length > 0;
+  const commandMenuVisible = !completionDisabled
+    && !fileMenuAvailable
+    && commandTriggerState !== null
+    && commandMenuDismissedFor !== input
+    && filteredCommands.length > 0;
   // The file menu is mutually exclusive with the slash-command menu and only
   // appears while the caret still sits inside an `@` trigger.
-  const fileMenuVisible = !commandMenuVisible && fileMenuAvailable;
+  const fileMenuVisible = fileMenuAvailable;
   const display = configuredDisplayMode ?? "medium";
 
   const activeRuntimeNode = (() => {
@@ -236,7 +250,6 @@ export default function ChatPage({
     pendingUploads.some((upload) => upload.status === "uploading"),
   );
   const actionMode = agentThreadView.isSubagent ? "send" : composerActionState.mode;
-  const projectUnavailable = conversation?.projectId !== undefined && conversation.projectAvailable === false;
   const chatCommands = useChatCommands({
     activeCommandIndex,
     filteredCommands,
@@ -251,7 +264,6 @@ export default function ChatPage({
     activeRuntimeNode,
     clearComposer,
     onInsert: insert,
-    onNew,
     onReload,
     onInfo: (content) => void message.info(content),
   });
@@ -448,11 +460,11 @@ export default function ChatPage({
     if (!prompt && mergedReferences.length === 0) return;
     // Slash commands are control actions, not conversational turns.  They
     // must never be persisted into the running FIFO queue.  Keep command
-    // handling ahead of the running branch so `/new`, `/compact`, etc. remain
+    // handling ahead of the running branch so `/compact`, `/trace`, etc. remain
     // explicit commands even while an assistant is active.
     const command = parseCommand(prompt);
     if (command && prompt) {
-      await chatCommands.executeCommand(command.name, command.argument);
+      await chatCommands.executeCommand(command.name);
       return;
     }
     if (agentThreadView.isSubagent) {
@@ -512,6 +524,7 @@ export default function ChatPage({
     if (action.type === "move") { event.preventDefault(); setActiveCommandIndex((current) => nextCommandIndex(current, action.direction, filteredCommands.length)); return; }
     if (action.type === "dismiss") { event.preventDefault(); setCommandMenuDismissedFor(input); return; }
     if (action.type === "complete") { event.preventDefault(); chatCommands.completeCommand(); return; }
+    if (action.type === "execute") { event.preventDefault(); void chatCommands.executeSelectedCommand(); return; }
     if (action.type === "send") { event.preventDefault(); void send(); }
   }
 
@@ -601,6 +614,7 @@ export default function ChatPage({
         onEditorChange={handleEditorChange}
         onKeyDown={handleComposerKeyDown}
         onComplete={chatCommands.completeCommand}
+        onCommandExecute={(index) => void chatCommands.executeSelectedCommand(index)}
         onActiveCommandChange={setActiveCommandIndex}
         onModeChange={(value) => void changeRunningMode(value)}
         onPermissionChange={(value) => void changePermissionMode(value)}

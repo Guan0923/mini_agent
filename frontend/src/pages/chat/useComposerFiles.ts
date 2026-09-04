@@ -12,14 +12,14 @@ import type { PendingUpload } from "./contracts";
 interface ComposerFilesOptions {
   conversationId?: string;
   sessionId?: string;
-  interactionBusy: boolean;
-  onTextChanged: () => void;
+  completionDisabled: boolean;
+  onTextChanged: (change: FileMentionChange) => void;
 }
 
 export function useComposerFiles({
   conversationId,
   sessionId,
-  interactionBusy,
+  completionDisabled,
   onTextChanged,
 }: ComposerFilesOptions) {
   const [input, setInput] = useState("");
@@ -35,7 +35,7 @@ export function useComposerFiles({
   const discardedUploadUidsRef = useRef(new Set<string>());
   const editorRef = useRef<FileMentionEditorHandle>(null);
 
-  const fileMenuAvailable = !interactionBusy
+  const fileMenuAvailable = !completionDisabled
     && fileMenuDismissedFor !== input
     && fileTriggerState !== null
     && fileCandidates.length > 0;
@@ -78,7 +78,7 @@ export function useComposerFiles({
     if (!preserveDismissedMenu && dismissedPrompt !== null) fileMenuDismissedPromptRef.current = null;
     setInput(value);
     setReferences(inlineReferences);
-    onTextChanged();
+    onTextChanged(change);
     setFileTriggerState(trigger);
     latestFileTriggerRef.current = trigger;
     if (!trigger) {
@@ -103,12 +103,12 @@ export function useComposerFiles({
   function completeFile(index = activeFileIndex) {
     const candidate = fileCandidates[index];
     if (!candidate || !fileTriggerState) return;
-    const token = completionToken(candidate.reference.path);
+    const token = completionToken(candidate.reference.display_path);
     const completedPrompt = `${input.slice(0, fileTriggerState.start)}${token}${input.slice(fileTriggerState.end)}`;
     fileMenuDismissedPromptRef.current = completedPrompt;
     setFileMenuDismissedFor(completedPrompt);
     setFileCandidates([]);
-    editorRef.current?.replaceCurrentMention(candidate.reference, candidate.label);
+    editorRef.current?.replaceCurrentMention(candidate.reference);
   }
 
   function handlePickFiles(files: FileList | File[]) {
@@ -140,7 +140,13 @@ export function useComposerFiles({
             discardedPaths.push(result.path);
             return;
           }
-          next[position] = { ...next[position], status: "done", percent: 100, path: result.path };
+          next[position] = {
+            ...next[position],
+            status: "done",
+            percent: 100,
+            path: result.path,
+            displayPath: result.display_path,
+          };
         });
         return next;
       });
@@ -171,8 +177,12 @@ export function useComposerFiles({
 
   function collectedReferences(): FileReference[] {
     const uploadedReferences = pendingUploads
-      .filter((upload) => upload.status === "done" && upload.path)
-      .map((upload) => ({ source: "upload" as const, path: upload.path! }));
+      .filter((upload) => upload.status === "done" && upload.path && upload.displayPath)
+      .map((upload) => ({
+        source: "upload" as const,
+        path: upload.path!,
+        display_path: upload.displayPath!,
+      }));
     return [...references, ...uploadedReferences].filter((reference, index, all) =>
       all.findIndex((candidate) => candidate.source === reference.source && candidate.path === reference.path) === index);
   }

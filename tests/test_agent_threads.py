@@ -495,6 +495,10 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             store = SQLiteSessionStore(state.paths, state.agent_thread_index)
             source = _finished_source(store, sidebar["session_id"])
             child = _agent_create(sidebar["session_id"], source, name="worker")
+            workspace = state.session_workspace(sidebar["session_id"])
+            referenced = workspace / "README.md"
+            referenced.write_text("agent reference", encoding="utf-8")
+            child.turn.cwd = str(workspace.resolve())
             store.create_agent_thread(sidebar["session_id"], child)
             grandchild = _nested_agent_create(
                 sidebar["session_id"],
@@ -581,6 +585,13 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
                 json={
                     "session_id": sidebar["session_id"],
                     "content": "inspect the file",
+                    "references": [
+                        {
+                            "source": "project",
+                            "path": str(referenced.resolve()),
+                            "display_path": "forged.md",
+                        }
+                    ],
                     "permission_mode": "workspace_write",
                     "running_mode": "plan",
                 },
@@ -590,7 +601,13 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             envelope = queue.peek_thread(child.node.thread_id)
             assert envelope is not None
             assert envelope.source_thread_id == sidebar["session_id"]
-            assert envelope.references == ()
+            assert envelope.references == (
+                {
+                    "source": "project",
+                    "path": str(referenced.resolve()),
+                    "display_path": "README.md",
+                },
+            )
             assert envelope.payload["runtime_config"]["permission_mode"] == "workspace_write"
 
             fork_message = client.post(

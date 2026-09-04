@@ -864,6 +864,21 @@ def get_trace_model_last_request() -> dict[str, object]:
     return TRACE_MODEL_LAST_REQUEST
 
 
+@app.post("/api/test/session-file")
+def create_session_file(values: dict[str, object]) -> dict[str, str]:
+    session_id = str(values.get("session_id") or "")
+    relative = Path(str(values.get("display_path") or ""))
+    if not session_id or not relative.parts or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("A confined session file path is required.")
+    root = state.session_workspace(session_id).resolve()
+    target = (root / relative).resolve()
+    if target == root or not target.is_relative_to(root):
+        raise ValueError("The session file must stay inside its workspace.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(str(values.get("content") or "reference"), encoding="utf-8")
+    return {"source": "project", "path": str(target), "display_path": target.relative_to(root).as_posix()}
+
+
 @app.post("/api/test/sandbox-status")
 def set_sandbox_status(values: dict[str, object]) -> dict[str, object]:
     return sandbox_broker.set_status(
@@ -880,9 +895,9 @@ def set_redis_available(values: dict[str, object]) -> dict[str, bool]:
     return {"available": available}
 
 
-# create_app may mount a built frontend at "/". Keep the four test-only
+# create_app may mount a built frontend at "/". Keep the test-only
 # control routes ahead of that catch-all mount in the Starlette route table.
-for _test_route in range(5):
+for _test_route in range(6):
     app.router.routes.insert(0, app.router.routes.pop())
 
 

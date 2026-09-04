@@ -56,6 +56,7 @@ export interface PendingUpload {
   percent: number;
   file?: File;
   path?: string;
+  displayPath?: string;
   error?: string;
 }
 

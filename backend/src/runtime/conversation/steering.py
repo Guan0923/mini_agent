@@ -23,6 +23,16 @@ class SteeringUpdate:
     need_reply: bool = False
 
 
+def _model_content_with_references(content: str, references: tuple[dict[str, str], ...]) -> str:
+    reference_lines = [
+        f"- @{Path(reference['path']).as_posix()}" + (f" ({reference['source']})" if reference.get("source") else "")
+        for reference in references
+    ]
+    if not reference_lines:
+        return content
+    return f"{content}\n\nFile references:\n" + "\n".join(reference_lines)
+
+
 def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
     """Atomically drain the process-local steering handler without blocking."""
 
@@ -49,15 +59,19 @@ def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
             for value in raw.get("references", []):
                 if not isinstance(value, Mapping):
                     continue
-                source, path = str(value.get("source") or ""), str(value.get("path") or "")
+                source = str(value.get("source") or "")
+                path = str(value.get("path") or "")
+                display_path = str(value.get("display_path") or "")
                 key = (source, path)
                 if (
-                    ((source in {"project", "upload"}) or (not source and Path(path).is_absolute()))
+                    ((source in {"project", "upload"} and display_path) or (not source and Path(path).is_absolute()))
                     and path
                     and key not in seen_references
                 ):
                     seen_references.add(key)
-                    references.append({"source": source, "path": path} if source else {"path": path})
+                    references.append(
+                        {"source": source, "path": path, "display_path": display_path} if source else {"path": path}
+                    )
         else:
             content = str(raw).strip()
         if content or references:
@@ -95,7 +109,9 @@ def apply_steering(runtime: AgentRuntime, update: SteeringUpdate, *, phase: str)
         and has_turn_delivery(runtime.state.session_id, update.delivery_id)
     )
     if not already_applied:
-        runtime.state.messages.append(UserMessage(content=update.content))
+        runtime.state.messages.append(
+            UserMessage(content=_model_content_with_references(update.content, update.references))
+        )
         runtime.run.history = runtime.state.messages
     if store is not None:
         store.append_turn_input(

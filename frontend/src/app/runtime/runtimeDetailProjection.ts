@@ -15,8 +15,10 @@ function references(item: TurnItem): FileReference[] | undefined {
   const result = raw.flatMap((value) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return [];
     const record = value as Record<string, unknown>;
-    return (record.source === "project" || record.source === "upload") && typeof record.path === "string"
-      ? [{ source: record.source, path: record.path } as FileReference]
+    return (record.source === "project" || record.source === "upload")
+      && typeof record.path === "string"
+      && typeof record.display_path === "string"
+      ? [{ source: record.source, path: record.path, display_path: record.display_path } as FileReference]
       : [];
   });
   return result.length ? result : undefined;

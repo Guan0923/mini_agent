@@ -55,7 +55,7 @@ describe("Agent Thread API", () => {
     await sendAgentThreadMessage("thread_child", {
       sessionId: "session_1",
       content: "inspect",
-      references: [{ source: "project", path: "README.md" }],
+      references: [{ source: "project", path: "C:/workspace/README.md", display_path: "README.md" }],
       mode: "plan",
       permissionMode: "workspace_write",
       providerName: "local",
@@ -66,7 +66,7 @@ describe("Agent Thread API", () => {
     expect(body).toMatchObject({
       session_id: "session_1",
       content: "inspect",
-      references: [{ source: "project", path: "README.md" }],
+      references: [{ source: "project", path: "C:/workspace/README.md", display_path: "README.md" }],
       running_mode: "plan",
       permission_mode: "workspace_write",
       provider_name: "local",

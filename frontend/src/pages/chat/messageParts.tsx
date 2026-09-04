@@ -51,12 +51,12 @@ export function MessageReferenceChip({
   }, [reference.source, reference.path, sessionId]);
 
   const url = sessionId ? sessionFileContentUrl(sessionId, reference.source, reference.path) : undefined;
-  const label = reference.source === "upload" ? "会话上传" : "项目文件";
+  const sourceLabel = reference.source === "upload" ? "会话上传" : "项目文件";
   if (available === false) {
     return (
       <span className="message-reference is-unavailable" title="文件不可用">
-        <span className={`file-source-badge ${reference.source}`}>{label}</span>
-        <span className="message-reference-path">{reference.path}</span>
+        <span className={`file-source-badge ${reference.source}`}>{sourceLabel}</span>
+        <span className="message-reference-path">{reference.display_path}</span>
         <span className="message-reference-unavailable">文件不可用</span>
       </span>
     );
@@ -68,10 +68,10 @@ export function MessageReferenceChip({
       target="_blank"
       rel="noopener noreferrer"
       onClick={(event) => event.stopPropagation()}
-      aria-label={`引用 ${reference.path}`}
+      aria-label={`引用 ${reference.display_path}`}
     >
-      <span className={`file-source-badge ${reference.source}`}>{label}</span>
-      <span className="message-reference-path">{reference.path}</span>
+      <span className={`file-source-badge ${reference.source}`}>{sourceLabel}</span>
+      <span className="message-reference-path">{reference.display_path}</span>
     </a>
   );
 }

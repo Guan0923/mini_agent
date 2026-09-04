@@ -32,7 +32,7 @@ import { useEffect, useImperativeHandle, useRef, forwardRef, type KeyboardEvent,
 import type { FileReference, FileSource } from "../../types";
 import { completionToken, fileTrigger, type FileTrigger } from "../../commands/fileCompletion";
 
-const FILE_MENTION_VERSION = 1;
+const FILE_MENTION_VERSION = 2;
 
 export interface FileMentionChange {
   prompt: string;
@@ -46,7 +46,7 @@ export interface FileMentionEditorHandle {
   focus: () => void;
   clear: () => void;
   insertText: (text: string) => void;
-  replaceCurrentMention: (reference: FileReference, label: string) => void;
+  replaceCurrentMention: (reference: FileReference) => void;
   restore: (prompt: string, references?: FileReference[]) => void;
 }
 
@@ -54,7 +54,6 @@ interface FileMentionEditorProps {
   disabled?: boolean;
   placeholder?: string;
   onChange: (change: FileMentionChange) => void;
-  onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
   onPasteFiles?: (event: globalThis.ClipboardEvent) => void;
 }
 
@@ -63,24 +62,24 @@ interface SerializedFileMentionNode extends SerializedLexicalNode {
   version: typeof FILE_MENTION_VERSION;
   source: FileSource;
   path: string;
-  label: string;
+  displayPath: string;
 }
 
-function mentionToken(path: string): string {
-  return completionToken(path);
+function mentionToken(displayPath: string): string {
+  return completionToken(displayPath);
 }
 
 export class FileMentionNode extends DecoratorNode<ReactElement> {
   __source: FileSource;
   __path: string;
-  __label: string;
+  __displayPath: string;
 
   static getType(): string {
     return "file-mention";
   }
 
   static clone(node: FileMentionNode): FileMentionNode {
-    return new FileMentionNode(node.__source, node.__path, node.__label, node.__key);
+    return new FileMentionNode(node.__source, node.__path, node.__displayPath, node.__key);
   }
 
   static importJSON(serialized: SerializedLexicalNode & Record<string, unknown>): FileMentionNode {
@@ -88,15 +87,15 @@ export class FileMentionNode extends DecoratorNode<ReactElement> {
     return new FileMentionNode(
       data.source === "upload" ? "upload" : "project",
       typeof data.path === "string" ? data.path : "",
-      typeof data.label === "string" ? data.label : typeof data.path === "string" ? data.path : "",
+      typeof data.displayPath === "string" ? data.displayPath : "",
     );
   }
 
-  constructor(source: FileSource, path: string, label: string, key?: NodeKey) {
+  constructor(source: FileSource, path: string, displayPath: string, key?: NodeKey) {
     super(key);
     this.__source = source;
     this.__path = path;
-    this.__label = label;
+    this.__displayPath = displayPath;
   }
 
   exportJSON(): SerializedFileMentionNode {
@@ -105,17 +104,17 @@ export class FileMentionNode extends DecoratorNode<ReactElement> {
       version: FILE_MENTION_VERSION,
       source: this.__source,
       path: this.__path,
-      label: this.__label,
+      displayPath: this.__displayPath,
     };
   }
 
   getTextContent(): string {
-    return mentionToken(this.__path);
+    return mentionToken(this.__displayPath);
   }
 
   exportDOM(): DOMExportOutput {
     const element = document.createElement("span");
-    element.textContent = mentionToken(this.__path);
+    element.textContent = mentionToken(this.__displayPath);
     return { element };
   }
 
@@ -124,7 +123,6 @@ export class FileMentionNode extends DecoratorNode<ReactElement> {
     element.className = "file-mention-node";
     element.setAttribute("data-file-mention", "true");
     element.setAttribute("data-source", this.__source);
-    element.setAttribute("data-path", this.__path);
     element.setAttribute("contenteditable", "false");
     return element;
   }
@@ -151,27 +149,25 @@ export class FileMentionNode extends DecoratorNode<ReactElement> {
         editor={editor}
         nodeKey={this.__key}
         source={this.__source}
-        path={this.__path}
-        label={this.__label}
+        displayPath={this.__displayPath}
       />
     );
   }
 }
 
-function $createFileMentionNode(reference: FileReference, label: string): FileMentionNode {
-  return new FileMentionNode(reference.source, reference.path, label);
+function $createFileMentionNode(reference: FileReference): FileMentionNode {
+  return new FileMentionNode(reference.source, reference.path, reference.display_path);
 }
 
 function $isFileMentionNode(node: LexicalNode | null | undefined): node is FileMentionNode {
   return node instanceof FileMentionNode;
 }
 
-function FileMentionView({ editor, nodeKey, source, path, label }: {
+function FileMentionView({ editor, nodeKey, source, displayPath }: {
   editor: LexicalEditor;
   nodeKey: NodeKey;
   source: FileSource;
-  path: string;
-  label: string;
+  displayPath: string;
 }) {
   const remove = (event: ReactMouseEvent) => {
     event.preventDefault();
@@ -182,9 +178,9 @@ function FileMentionView({ editor, nodeKey, source, path, label }: {
     editor.focus();
   };
   return (
-    <span className={`file-mention-bubble ${source}`} contentEditable={false} data-file-mention-bubble="true" title={path}>
-      <span className="file-mention-label">{label || mentionToken(path)}</span>
-      <button type="button" className="file-mention-remove" aria-label={`移除引用 ${path}`} onMouseDown={remove}>×</button>
+    <span className={`file-mention-bubble ${source}`} contentEditable={false} data-file-mention-bubble="true" title={displayPath}>
+      <span className="file-mention-label">{displayPath}</span>
+      <button type="button" className="file-mention-remove" aria-label={`移除引用 ${displayPath}`} onMouseDown={remove}>×</button>
     </span>
   );
 }
@@ -217,7 +213,7 @@ function buildPromptNodes(prompt: string, references: FileReference[]): LexicalN
   const matches: Array<{ start: number; end: number; reference: FileReference }> = [];
   const used = new Map<string, number>();
   for (const reference of references) {
-    const token = mentionToken(reference.path);
+    const token = mentionToken(reference.display_path);
     const key = `${reference.source}:${token}`;
     const from = used.get(key) ?? 0;
     const index = prompt.indexOf(token, from);
@@ -232,7 +228,7 @@ function buildPromptNodes(prompt: string, references: FileReference[]): LexicalN
   for (const match of matches) {
     if (match.start < cursor) continue;
     if (match.start > cursor) nodes.push($createTextNode(prompt.slice(cursor, match.start)));
-    nodes.push($createFileMentionNode(match.reference, match.reference.path));
+    nodes.push($createFileMentionNode(match.reference));
     cursor = match.end;
   }
   if (cursor < prompt.length) nodes.push($createTextNode(prompt.slice(cursor)));
@@ -240,7 +236,7 @@ function buildPromptNodes(prompt: string, references: FileReference[]): LexicalN
   return nodes;
 }
 
-function EditorBridge({ handleRef, disabled, placeholder, onChange, onKeyDown, onPasteFiles }: FileMentionEditorProps & { handleRef: MutableRefObject<FileMentionEditorHandle | null> }) {
+function EditorBridge({ handleRef, disabled, placeholder, onChange, onPasteFiles }: FileMentionEditorProps & { handleRef: MutableRefObject<FileMentionEditorHandle | null> }) {
   const [editor] = useLexicalComposerContext();
   const contentEditableRef = useRef<HTMLDivElement | null>(null);
   const changeRef = useRef<FileMentionChange | null>(null);
@@ -259,7 +255,7 @@ function EditorBridge({ handleRef, disabled, placeholder, onChange, onKeyDown, o
       if ($isRangeSelection(selection)) selection.insertNodes([$createTextNode(text)]);
       else root.selectEnd().insertNodes([$createTextNode(text)]);
     }),
-    replaceCurrentMention: (reference, label) => editor.update(() => {
+    replaceCurrentMention: (reference) => editor.update(() => {
       const trigger = changeRef.current?.trigger;
       const root = $getRoot();
       if (!trigger) return;
@@ -270,7 +266,7 @@ function EditorBridge({ handleRef, disabled, placeholder, onChange, onKeyDown, o
       if (!$isRangeSelection(selection)) return;
       selection.setTextNodeRange(start.node, start.offset, end.node, end.offset);
       selection.removeText();
-      selection.insertNodes([$createFileMentionNode(reference, label)]);
+      selection.insertNodes([$createFileMentionNode(reference)]);
     }),
     restore: (prompt, references = []) => editor.update(() => {
       const root = $getRoot();
@@ -296,7 +292,11 @@ function EditorBridge({ handleRef, disabled, placeholder, onChange, onKeyDown, o
       const prompt = root.getTextContent();
       const selection = $getSelection();
       const caret = currentCaret(root);
-      const references = $nodesOfType(FileMentionNode).map((node) => ({ source: node.__source, path: node.__path }));
+      const references = $nodesOfType(FileMentionNode).map((node) => ({
+        source: node.__source,
+        path: node.__path,
+        display_path: node.__displayPath,
+      }));
       const next = { prompt, references, caret, trigger: fileTrigger(prompt, caret), canSend: Boolean(prompt.trim() || references.length) };
       changeRef.current = next;
       onChange(next);
@@ -353,7 +353,6 @@ function EditorBridge({ handleRef, disabled, placeholder, onChange, onKeyDown, o
   }, [editor]);
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    onKeyDown?.(event);
     if (event.defaultPrevented || event.nativeEvent.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
     // jsdom does not implement the browser beforeinput editing pipeline.
     // Keep unit tests deterministic without changing the real browser path.
@@ -387,7 +386,7 @@ const FileMentionEditor = forwardRef<FileMentionEditorHandle, FileMentionEditorP
     focus: () => handleRef.current?.focus(),
     clear: () => handleRef.current?.clear(),
     insertText: (text) => handleRef.current?.insertText(text),
-    replaceCurrentMention: (reference, label) => handleRef.current?.replaceCurrentMention(reference, label),
+    replaceCurrentMention: (reference) => handleRef.current?.replaceCurrentMention(reference),
     restore: (prompt, references) => handleRef.current?.restore(prompt, references),
   }), []);
   const initialConfig = {
