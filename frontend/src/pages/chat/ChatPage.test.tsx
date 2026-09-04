@@ -795,6 +795,9 @@ describe("ChatPage composer completion", () => {
 
     expect(await screen.findByText("docs/README.md", { selector: ".file-mention-label" })).toBeVisible();
     expect(composer).toHaveTextContent("请查看 docs/README.md");
+    expect(composer.querySelectorAll("p")).toHaveLength(1);
+    expect(composer.querySelector('br:not([data-lexical-managed-linebreak="true"])')).toBeNull();
+    expect(composer.querySelector("p")?.lastChild?.textContent).toBe(" ");
     expect(container).not.toHaveTextContent(absolutePath);
     expect(onRun).not.toHaveBeenCalled();
   });

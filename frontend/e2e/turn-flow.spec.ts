@@ -112,7 +112,9 @@ test("file references stay atomic and completion remains available during a runn
   });
 
   await page.goto("/app");
-  await page.getByRole("button", { name: "Reference Completion", exact: true }).click();
+  const referenceThread = page.getByRole("button", { name: "Reference Completion", exact: true });
+  await expect(referenceThread).toBeVisible();
+  if (await referenceThread.isEnabled()) await referenceThread.click();
   const editor = page.getByLabel("聊天输入");
   const bubbles = page.locator(".file-mention-bubble");
 
@@ -122,6 +124,13 @@ test("file references stay atomic and completion remains available during a runn
   await expect(page.locator("body")).not.toContainText(projectReference.path);
   await editor.press("Enter");
   await expect(bubbles).toHaveCount(1);
+  await expect(editor.locator("p")).toHaveCount(1);
+  await expect(editor.locator('br:not([data-lexical-managed-linebreak="true"])')).toHaveCount(0);
+  expect(await editor.evaluate((element) => (element as HTMLDivElement & { value: string }).value))
+    .toBe("before @docs/alpha-note.txt ");
+  await editor.pressSequentially("after");
+  expect(await editor.evaluate((element) => (element as HTMLDivElement & { value: string }).value))
+    .toBe("before @docs/alpha-note.txt after");
   expect(turnPosts).toBe(0);
   await editor.evaluate((element) => {
     const mention = element.querySelector('[data-file-mention="true"]');
@@ -137,11 +146,23 @@ test("file references stay atomic and completion remains available during a runn
   await expect(bubbles).toHaveCount(0);
   await expect(editor).toContainText("before");
 
+  await editor.fill("before @alpha suffix");
+  await editor.press("Home");
+  for (let index = 0; index < "before @alpha".length; index += 1) await editor.press("ArrowRight");
+  await expect(projectCandidate).toBeVisible();
+  await editor.press("Tab");
+  await expect(bubbles).toHaveCount(1);
+  await expect(editor.locator('br:not([data-lexical-managed-linebreak="true"])')).toHaveCount(0);
+  expect(await editor.evaluate((element) => (element as HTMLDivElement & { value: string }).value))
+    .toBe("before @docs/alpha-note.txt suffix");
+
   await editor.fill("before @alpha");
   await projectCandidate.click();
   await expect(bubbles).toHaveCount(1);
-  await editor.press("End");
-  await editor.pressSequentially(" after");
+  await expect(editor.locator('br:not([data-lexical-managed-linebreak="true"])')).toHaveCount(0);
+  await editor.pressSequentially("after");
+  expect(await editor.evaluate((element) => (element as HTMLDivElement & { value: string }).value))
+    .toBe("before @docs/alpha-note.txt after");
   await editor.evaluate((element) => {
     const mention = element.querySelector('[data-file-mention="true"]');
     if (!mention) throw new Error("Missing file mention");

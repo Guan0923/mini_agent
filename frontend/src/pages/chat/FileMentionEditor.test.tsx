@@ -4,15 +4,25 @@ import { describe, expect, it } from "vitest";
 import type { FileReference } from "../../types";
 import FileMentionEditor, { type FileMentionChange, type FileMentionEditorHandle } from "./FileMentionEditor";
 
-function Harness({ initial, references = [] }: { initial: string; references?: FileReference[] }) {
+function Harness({
+  initial,
+  references = [],
+  completion,
+}: {
+  initial: string;
+  references?: FileReference[];
+  completion?: FileReference;
+}) {
   const editorRef = useRef<FileMentionEditorHandle>(null);
   const [change, setChange] = useState<FileMentionChange | null>(null);
   return (
     <>
       <FileMentionEditor ref={editorRef} onChange={setChange} />
       <button type="button" onClick={() => editorRef.current?.restore(initial, references)}>恢复</button>
+      {completion ? <button type="button" onClick={() => editorRef.current?.replaceCurrentMention(completion)}>补全</button> : null}
       <output data-testid="prompt">{change?.prompt ?? ""}</output>
       <output data-testid="references">{JSON.stringify(change?.references ?? [])}</output>
+      <output data-testid="trigger">{JSON.stringify(change?.trigger ?? null)}</output>
     </>
   );
 }
@@ -44,5 +54,26 @@ describe("FileMentionEditor", () => {
     await act(async () => { screen.getAllByRole("button", { name: "移除引用 a.txt" })[0]?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); });
     expect(screen.getAllByRole("button", { name: "移除引用 a.txt" })).toHaveLength(1);
     expect(screen.getByTestId("references")).toHaveTextContent(JSON.stringify([reference]));
+  });
+
+  it("adds one editable space after a completed mention", async () => {
+    const reference = {
+      source: "project" as const,
+      path: "C:/workspace/docs/alpha-note.txt",
+      display_path: "docs/alpha-note.txt",
+    };
+    render(<Harness initial="before @alpha" completion={reference} />);
+    await act(async () => { screen.getByRole("button", { name: "恢复" }).click(); });
+    await waitFor(() => expect(screen.getByTestId("prompt").textContent).toBe("before @alpha"));
+
+    await act(async () => { screen.getByRole("button", { name: "补全" }).click(); });
+
+    await waitFor(() => expect(screen.getByTestId("prompt").textContent).toBe("before @docs/alpha-note.txt "));
+    expect(screen.getByTestId("references")).toHaveTextContent(JSON.stringify([reference]));
+    expect(screen.getByTestId("trigger").textContent).toBe("null");
+    const editor = screen.getByLabelText("聊天输入");
+    expect(editor.querySelectorAll("p")).toHaveLength(1);
+    expect(editor.querySelector('br:not([data-lexical-managed-linebreak="true"])')).toBeNull();
+    expect(editor.querySelector("p")?.lastChild?.textContent).toBe(" ");
   });
 });

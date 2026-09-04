@@ -520,7 +520,12 @@ export default function ChatPage({
     const fileAction = fileKeyAction({ key: event.key, shiftKey: event.shiftKey, isComposing, menuVisible: fileMenuVisible });
     if (fileAction.type === "move") { event.preventDefault(); setActiveFileIndex((current) => nextCommandIndex(current, fileAction.direction, fileCandidates.length)); return; }
     if (fileAction.type === "dismiss") { event.preventDefault(); setFileMenuDismissedFor(input); return; }
-    if (fileAction.type === "complete") { event.preventDefault(); completeFile(); return; }
+    if (fileAction.type === "complete") {
+      event.preventDefault();
+      if (event.key === "Enter") event.stopPropagation();
+      completeFile();
+      return;
+    }
     const action = commandKeyAction({ key: event.key, shiftKey: event.shiftKey, isComposing, menuVisible: commandMenuVisible });
     if (action.type === "move") { event.preventDefault(); setActiveCommandIndex((current) => nextCommandIndex(current, action.direction, filteredCommands.length)); return; }
     if (action.type === "dismiss") { event.preventDefault(); setCommandMenuDismissedFor(input); return; }

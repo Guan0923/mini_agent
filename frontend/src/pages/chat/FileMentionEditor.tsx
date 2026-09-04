@@ -3,6 +3,7 @@ import {
   $getAdjacentNode,
   $getRoot,
   $getSelection,
+  $isElementNode,
   $isRangeSelection,
   $nodesOfType,
   $createParagraphNode,
@@ -14,6 +15,7 @@ import {
   DecoratorNode,
   type EditorConfig,
   type EditorState,
+  type ElementNode,
   type DOMExportOutput,
   type LexicalEditor,
   type LexicalNode,
@@ -197,16 +199,46 @@ function findTextPoint(root: ReturnType<typeof $getRoot>, offset: number): { nod
   return last ? { node: last, offset: last.getTextContentSize() } : null;
 }
 
+function childTextContribution(children: LexicalNode[], index: number): number {
+  const child = children[index];
+  if (!child) return 0;
+  const blockSeparator = $isElementNode(child) && !child.isInline() && index < children.length - 1 ? 2 : 0;
+  return child.getTextContentSize() + blockSeparator;
+}
+
+function textOffsetBeforeNode(parent: ElementNode, target: LexicalNode): number | null {
+  if (parent.is(target)) return 0;
+  const children = parent.getChildren();
+  let offset = 0;
+  for (let index = 0; index < children.length; index += 1) {
+    const child = children[index]!;
+    if (child.is(target)) return offset;
+    if ($isElementNode(child)) {
+      const nestedOffset = textOffsetBeforeNode(child, target);
+      if (nestedOffset !== null) return offset + nestedOffset;
+    }
+    offset += childTextContribution(children, index);
+  }
+  return null;
+}
+
 function currentCaret(root: ReturnType<typeof $getRoot>): number {
   const selection = $getSelection();
   if (!$isRangeSelection(selection)) return root.getTextContentSize();
-  const anchorNode = selection.anchor.getNode();
-  let offset = 0;
-  for (const text of root.getAllTextNodes()) {
-    if (text.is(anchorNode)) return offset + selection.anchor.offset;
-    offset += text.getTextContentSize();
+  const anchor = selection.anchor;
+  const anchorNode = anchor.getNode();
+  const nodeOffset = textOffsetBeforeNode(root, anchorNode);
+  if (nodeOffset === null) return root.getTextContentSize();
+  if (anchor.type === "text") return nodeOffset + anchor.offset;
+  if ($isElementNode(anchorNode)) {
+    const children = anchorNode.getChildren();
+    let childOffset = 0;
+    for (let index = 0; index < Math.min(anchor.offset, children.length); index += 1) {
+      childOffset += childTextContribution(children, index);
+    }
+    return nodeOffset + childOffset;
   }
-  return root.getTextContentSize();
+  return nodeOffset;
 }
 
 function buildPromptNodes(prompt: string, references: FileReference[]): LexicalNode[] {
@@ -256,9 +288,10 @@ function EditorBridge({ handleRef, disabled, placeholder, onChange, onPasteFiles
       else root.selectEnd().insertNodes([$createTextNode(text)]);
     }),
     replaceCurrentMention: (reference) => editor.update(() => {
-      const trigger = changeRef.current?.trigger;
+      const change = changeRef.current;
+      const trigger = change?.trigger;
       const root = $getRoot();
-      if (!trigger) return;
+      if (!change || !trigger) return;
       const start = findTextPoint(root, trigger.start);
       const end = findTextPoint(root, trigger.end);
       if (!start || !end) return;
@@ -266,7 +299,11 @@ function EditorBridge({ handleRef, disabled, placeholder, onChange, onPasteFiles
       if (!$isRangeSelection(selection)) return;
       selection.setTextNodeRange(start.node, start.offset, end.node, end.offset);
       selection.removeText();
-      selection.insertNodes([$createFileMentionNode(reference)]);
+      const mention = $createFileMentionNode(reference);
+      const followingCharacter = change.prompt.slice(trigger.end, trigger.end + 1);
+      const spacer = /\s/.test(followingCharacter) ? null : $createTextNode(" ");
+      selection.insertNodes(spacer ? [mention, spacer] : [mention]);
+      spacer?.selectEnd();
     }),
     restore: (prompt, references = []) => editor.update(() => {
       const root = $getRoot();
