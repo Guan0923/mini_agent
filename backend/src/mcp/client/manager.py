@@ -1,4 +1,4 @@
-"""Long-lived event-loop ownership for external stdio MCP sessions."""
+"""Run-local event-loop ownership for external MCP connections."""
 
 from __future__ import annotations
 
@@ -6,18 +6,18 @@ import asyncio
 import threading
 from collections.abc import Iterator, Sequence
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from contextlib import AsyncExitStack
 from typing import Any, overload
 
-from mcp import ClientSession, types
+from mcp import Client, types
 
 from backend.domain import safe_error_message
 from backend.jobs import AdmissionPolicy, JobLane, JobRegistry, JobScope, JobScopeKind, ServiceJob
 from backend.tools import Tool, ToolError
 
 from ..config import McpServerConfig, McpSettings
-from ..controlled_stdio import controlled_stdio_client
-from .adapters import _parameters, _render_result
+from .adapters import _render_result, render_mcp_value
+from .subscriptions import ResourceSubscriptions
+from .transports import connection_transport
 
 
 class _McpServiceDriver:
@@ -37,7 +37,7 @@ class _McpServiceDriver:
         self.manager._stop_server(self.server_name)
 
 
-async def _list_all_tools(session: ClientSession) -> list[types.Tool]:
+async def _list_all_tools(session: Client) -> list[types.Tool]:
     """Collect every tools/list page while tolerating cursor cycles."""
 
     definitions: list[types.Tool] = []
@@ -45,15 +45,15 @@ async def _list_all_tools(session: ClientSession) -> list[types.Tool]:
     page = await session.list_tools()
     while True:
         definitions.extend(page.tools)
-        cursor = page.nextCursor
+        cursor = page.next_cursor
         if cursor is None or cursor in seen_cursors:
             return definitions
         seen_cursors.add(cursor)
-        page = await session.list_tools(params=types.PaginatedRequestParams(cursor=cursor))
+        page = await session.list_tools(cursor=cursor)
 
 
 class ExternalMcpManager:
-    """Own one event loop and the stdio sessions started on it."""
+    """Own one event loop and its stdio/HTTP clients and subscriptions."""
 
     def __init__(
         self,
@@ -67,9 +67,12 @@ class ExternalMcpManager:
         self._settings = settings or McpSettings()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, name="mini-agent-mcp", daemon=True)
-        self._stack: AsyncExitStack | None = None
-        self._server_stacks: dict[str, AsyncExitStack] = {}
-        self._sessions: dict[str, ClientSession] = {}
+        self._connections: dict[str, asyncio.Task] = {}
+        self._stops: dict[str, asyncio.Event] = {}
+        self._sessions: dict[str, Client] = {}
+        self.capabilities: dict[str, types.ServerCapabilities] = {}
+        self.protocol_versions: dict[str, str] = {}
+        self._subscriptions: dict[str, ResourceSubscriptions] = {}
         self.failed_servers: dict[str, str] = {}
         self.server_health: dict[str, str] = {}
         self.service_jobs: dict[str, ServiceJob] = {}
@@ -113,28 +116,59 @@ class ExternalMcpManager:
         return definitions
 
     async def _open_server(self, server: McpServerConfig) -> list[object]:
-        """Open one server in an independent exit stack and return tools."""
-        stack = AsyncExitStack()
-        await stack.__aenter__()
+        ready = self._loop.create_future()
+        self._stops[server.name] = asyncio.Event()
+        task = asyncio.create_task(self._serve(server, ready))
+        self._connections[server.name] = task
         try:
-            read, write = await stack.enter_async_context(controlled_stdio_client(_parameters(server)))
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            definitions = await _list_all_tools(session)
+            return await ready
         except BaseException:
-            await stack.aclose()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self._connections.pop(server.name, None)
+            self._stops.pop(server.name, None)
             raise
-        self._server_stacks[server.name] = stack
-        self._sessions[server.name] = session
-        self.server_health[server.name] = "healthy"
-        return definitions
+
+    async def _serve(self, server: McpServerConfig, ready: asyncio.Future) -> None:
+        subscriptions = self._subscriptions.setdefault(server.name, ResourceSubscriptions())
+        try:
+            # Client/transport task groups must enter and leave in the same task.
+            async with Client(
+                connection_transport(server, self._settings),
+                mode="auto",
+                cache=None,
+                message_handler=subscriptions.notification,
+                read_timeout_seconds=self._settings.call_timeout_seconds,
+            ) as client:
+                self._sessions[server.name] = client
+                self.capabilities[server.name] = client.server_capabilities
+                self.protocol_versions[server.name] = client.protocol_version
+                definitions = await _list_all_tools(client) if client.server_capabilities.tools is not None else []
+                ready.set_result(definitions)
+                try:
+                    await self._stops[server.name].wait()
+                finally:
+                    await subscriptions.close(preserve_updates=not self._closed)
+        except asyncio.CancelledError:
+            if not ready.done():
+                ready.cancel()
+            raise
+        except Exception as exc:
+            if not ready.done():
+                ready.set_exception(ToolError(f"MCP connection failed ({type(exc).__name__})."))
+            self.server_health[server.name] = "down"
+        finally:
+            self._sessions.pop(server.name, None)
+            subscriptions.lost()
 
     async def _close_server(self, server_name: str) -> None:
-        stack = self._server_stacks.pop(server_name, None)
-        self._sessions.pop(server_name, None)
+        stop = self._stops.pop(server_name, None)
+        if stop is not None:
+            stop.set()
+        task = self._connections.pop(server_name, None)
+        if task is not None:
+            await task
         self.server_health[server_name] = "down"
-        if stack is not None:
-            await stack.aclose()
 
     def _server_config(self, server_name: str) -> McpServerConfig:
         for config in self._configs:
@@ -192,7 +226,7 @@ class ExternalMcpManager:
                 job.report_failure()
             raise ToolError(safe_error_message(exc)) from exc
         rendered = _render_result(result)
-        if getattr(result, "isError", False):
+        if getattr(result, "is_error", False):
             job = getattr(self, "service_jobs", {}).get(server_name)
             if job is not None:
                 job.report_failure()
@@ -201,6 +235,68 @@ class ExternalMcpManager:
         if job is not None:
             job.report_success()
         return rendered or "MCP tool completed without output."
+
+    def request(self, server: str, method: str, **arguments: Any) -> str:
+        try:
+            return self._submit(self._request(server, method, arguments), timeout=self._settings.call_timeout_seconds)
+        except Exception as exc:
+            if isinstance(exc, ToolError):
+                raise
+            raise ToolError(f"MCP {method} failed ({type(exc).__name__}).") from None
+
+    async def _request(self, server: str, method: str, arguments: dict[str, Any]) -> str:
+        client = self._sessions.get(server)
+        if client is None:
+            raise ToolError("MCP server is unavailable.")
+        subscriptions = self._subscriptions[server]
+        if method == "get_resource_updates":
+            if client.protocol_version != "2026-07-28" and any(
+                status == "active" for status in subscriptions.states.values()
+            ):
+                try:
+                    await client.session.send_ping()
+                except Exception:
+                    subscriptions.lost()
+            return render_mcp_value(subscriptions.snapshot())
+        if method == "subscribe_resource":
+            result = await subscriptions.subscribe(client, arguments["uri"])
+        elif method == "unsubscribe_resource":
+            result = await subscriptions.unsubscribe(client, arguments["uri"])
+        else:
+            revision = subscriptions.revision
+            result = await getattr(client, method)(**arguments)
+            if method == "read_resource" and subscriptions.changed.get(arguments["uri"], 0) <= revision:
+                subscriptions.changed.pop(arguments["uri"], None)
+        return render_mcp_value(result)
+
+    def describe(self, server: str) -> dict[str, Any]:
+        return self._submit(self._describe(server), timeout=self._settings.initialization_timeout_seconds)
+
+    async def _describe(self, server: str) -> dict[str, Any]:
+        client = self._sessions[server]
+        caps = self.capabilities[server]
+        counts = {"tools": len(self.definitions[server]), "resources": 0, "resource_templates": 0, "prompts": 0}
+        for capability, method, field in (
+            ("resources", "list_resources", "resources"),
+            ("resources", "list_resource_templates", "resource_templates"),
+            ("prompts", "list_prompts", "prompts"),
+        ):
+            if getattr(caps, capability) is None:
+                continue
+            cursor = None
+            seen: set[str] = set()
+            while True:
+                page = await getattr(client, method)(cursor=cursor)
+                counts[field] += len(getattr(page, field))
+                cursor = page.next_cursor
+                if cursor is None or cursor in seen:
+                    break
+                seen.add(cursor)
+        return {
+            "protocol_version": client.protocol_version,
+            "capabilities": [name for name in ("tools", "resources", "prompts") if getattr(caps, name) is not None],
+            "counts": counts,
+        }
 
     def close(self) -> None:
         if self._closed:
@@ -225,7 +321,7 @@ class ExternalMcpManager:
             raise ToolError("MCP shutdown timed out.")
 
     async def _close_all_servers(self) -> None:
-        for server_name in tuple(self._server_stacks):
+        for server_name in tuple(self._connections):
             await self._close_server(server_name)
 
     def _register_service_jobs(self) -> None:

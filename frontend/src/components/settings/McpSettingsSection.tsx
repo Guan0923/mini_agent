@@ -1,5 +1,5 @@
 import { DeleteOutlined, MinusCircleOutlined, PlusOutlined } from "@ant-design/icons";
-import { Alert, App, Button, Collapse, Form, Input, Space, Spin, Switch, Tag, Typography } from "antd";
+import { Alert, App, Button, Collapse, Form, Input, Segmented, Space, Spin, Switch, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import {
   createMcpServer,
@@ -17,6 +17,10 @@ import {
 type EnvironmentRow = { name: string; value: string };
 type SecretRow = { name: string; value: string; configured?: boolean; remove?: boolean };
 type ServerFormValues = {
+  transport: "stdio" | "streamable_http";
+  url: string;
+  headers: EnvironmentRow[];
+  headerSecrets: SecretRow[];
   name?: string;
   command: string;
   args: string[];
@@ -31,6 +35,10 @@ function errorMessage(cause: unknown, fallback: string): string {
 
 function formValues(server?: McpServerSettings): ServerFormValues {
   return {
+    transport: server?.transport ?? "stdio",
+    url: server?.url ?? "",
+    headers: Object.entries(server?.headers ?? {}).map(([name, value]) => ({ name, value })),
+    headerSecrets: (server?.secret_headers ?? []).map(({ name, configured }) => ({ name, value: "", configured, remove: false })),
     name: server?.name ?? "",
     command: server?.command ?? "",
     args: server?.args.length ? server.args : [""],
@@ -46,6 +54,15 @@ function formValues(server?: McpServerSettings): ServerFormValues {
 }
 
 function inputFrom(values: ServerFormValues, enabled: boolean): McpServerInput {
+  if (values.transport === "streamable_http") {
+    return {
+      transport: "streamable_http", url: values.url.trim(),
+      command: "", args: [], cwd: null, env: {}, secrets: {}, remove_secrets: [], enabled,
+      headers: Object.fromEntries((values.headers ?? []).filter((row) => row?.name?.trim()).map((row) => [row.name.trim(), row.value ?? ""])),
+      header_secrets: Object.fromEntries((values.headerSecrets ?? []).filter((row) => row?.name?.trim() && row.value && !row.remove).map((row) => [row.name.trim(), row.value])),
+      remove_header_secrets: (values.headerSecrets ?? []).filter((row) => row?.configured && row.remove).map((row) => row.name),
+    };
+  }
   const environment = Object.fromEntries(
     (values.env ?? [])
       .filter((item) => item?.name?.trim())
@@ -60,6 +77,7 @@ function inputFrom(values: ServerFormValues, enabled: boolean): McpServerInput {
     .filter((item) => item?.configured && item.remove)
     .map((item) => item.name);
   return {
+    transport: "stdio",
     command: values.command.trim(),
     args: (values.args ?? []).filter((item) => item !== ""),
     cwd: values.cwd?.trim() || null,
@@ -80,6 +98,8 @@ function ServerEditor({
   onSave: (values: ServerFormValues) => Promise<void>;
 }) {
   const [form] = Form.useForm<ServerFormValues>();
+  const transport = Form.useWatch("transport", form) ?? server?.transport ?? "stdio";
+  const url = Form.useWatch("url", form) ?? "";
 
   useEffect(() => {
     form.setFieldsValue(formValues(server));
@@ -108,6 +128,10 @@ function ServerEditor({
           <Input value={server.name} disabled />
         </Form.Item>
       )}
+      <Form.Item name="transport" label="连接方式">
+        <Segmented options={[{ label: "本地命令", value: "stdio" }, { label: "Streamable HTTP", value: "streamable_http" }]} />
+      </Form.Item>
+      {transport === "stdio" ? <>
       <Form.Item name="command" label="Command" rules={[{ required: true, whitespace: true, message: "请输入命令" }]}>
         <Input aria-label={`MCP Command ${server?.name ?? "new"}`} placeholder="例如 python" />
       </Form.Item>
@@ -213,6 +237,39 @@ function ServerEditor({
           </Space>
         )}
       </Form.List>
+      </> : <>
+        <Form.Item name="url" label="MCP URL" rules={[{ required: true, whitespace: true, message: "请输入 HTTP 或 HTTPS 地址" }, { pattern: /^https?:\/\//, message: "仅支持 HTTP 或 HTTPS" }]}>
+          <Input aria-label={`MCP URL ${server?.name ?? "new"}`} placeholder="https://example.com/mcp" />
+        </Form.Item>
+        {url.startsWith("http://") ? <Alert type="warning" showIcon title="HTTP 会明文传输请求头和内容。" style={{ marginBottom: 16 }} /> : null}
+        <Typography.Title level={5}>普通请求头</Typography.Title>
+        <Form.List name="headers">
+          {(fields, { add, remove }) => <Space orientation="vertical" style={{ width: "100%", marginBottom: 16 }}>
+            {fields.map((field, index) => <Space key={field.key} wrap align="start">
+              <Form.Item name={[field.name, "name"]} rules={[{ required: true, message: "请输入请求头名称" }]}><Input aria-label={`MCP 请求头名称 ${index + 1}`} /></Form.Item>
+              <Form.Item name={[field.name, "value"]}><Input aria-label={`MCP 请求头值 ${index + 1}`} /></Form.Item>
+              <Button type="text" aria-label={`删除 MCP 请求头 ${index + 1}`} icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} />
+            </Space>)}
+            <Button icon={<PlusOutlined />} onClick={() => add({ name: "", value: "" })}>添加请求头</Button>
+          </Space>}
+        </Form.List>
+        <Typography.Title level={5}>密钥请求头</Typography.Title>
+        <Form.List name="headerSecrets">
+          {(fields, { add, remove }) => <Space orientation="vertical" style={{ width: "100%", marginBottom: 16 }}>
+            {fields.map((field, index) => <Form.Item key={field.key} noStyle shouldUpdate>
+              {() => {
+                const row = form.getFieldValue(["headerSecrets", field.name]) as SecretRow | undefined;
+                return <Space wrap align="start">
+                  <Form.Item name={[field.name, "name"]} rules={[{ required: true, message: "请输入请求头名称" }]}><Input aria-label={`MCP 密钥请求头名称 ${index + 1}`} placeholder="Authorization" disabled={row?.configured} /></Form.Item>
+                  <Form.Item name={[field.name, "value"]}><Input.Password aria-label={`MCP 密钥请求头值 ${index + 1}`} placeholder={row?.configured ? "留空以保留" : "Bearer ..."} disabled={row?.remove} /></Form.Item>
+                  {row?.configured ? <><Tag color={row.remove ? "error" : "success"}>{row.remove ? "待清除" : "已配置"}</Tag><Button onClick={() => form.setFieldValue(["headerSecrets", field.name, "remove"], !row.remove)}>{row.remove ? "撤销清除" : "清除"}</Button></> : <Button type="text" aria-label={`删除 MCP 密钥请求头 ${index + 1}`} icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} />}
+                </Space>;
+              }}
+            </Form.Item>)}
+            <Button icon={<PlusOutlined />} onClick={() => add({ name: "", value: "", configured: false, remove: false })}>添加密钥请求头</Button>
+          </Space>}
+        </Form.List>
+      </>}
       <Button type="primary" htmlType="submit" loading={saving}>
         {server ? "保存 Server" : "创建 Server"}
       </Button>
@@ -356,7 +413,7 @@ export function McpSettingsSection() {
     setRowError(server.name, "");
     try {
       const result = await testMcpServer(server.name);
-      message.success(`连接成功：发现 ${result.count} 个工具${result.tools.length ? `（${result.tools.join("、")}）` : ""}`);
+      message.success(`连接成功：${result.protocol_version}；工具 ${result.counts.tools}，资源 ${result.counts.resources}，资源模板 ${result.counts.resource_templates}，提示词 ${result.counts.prompts}；能力：${result.capabilities.join("、") || "无"}`);
     } catch (cause) {
       setRowError(server.name, errorMessage(cause, "MCP 连接测试失败。"));
     } finally {
@@ -423,7 +480,7 @@ export function McpSettingsSection() {
           loading={globalSaving}
           onChange={(enabled) => void toggleGlobal(enabled)}
         />
-        <Typography.Text>启用 MCP 工具</Typography.Text>
+        <Typography.Text>启用 MCP</Typography.Text>
       </Space>
       {error ? <Alert type="error" showIcon title={error} style={{ marginBottom: 16 }} /> : null}
       <Collapse items={items} />

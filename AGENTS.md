@@ -29,7 +29,7 @@ frontend/ ── HTTP/SSE ──> backend (127.0.0.1:8000)
 - `backend/src/runtime/`：装配、会话、执行、Plan mode、恢复和事件。
 - `backend/src/providers/`：通用 transport 与 provider 适配；不得导入 storage。
 - `backend/src/tools/`：ToolRegistry、schema 和工具实现。
-- `backend/src/mcp/`：只读 server 与审批型外部 MCP 客户端。
+- `backend/src/mcp/`：审批型外部 MCP 客户端，支持 stdio 与 Streamable HTTP。
 - `backend/src/storage/`：本地 TOML、SQLite 和凭据加密。
 - `frontend/`：React/Vite/TypeScript，只调用 API。
 

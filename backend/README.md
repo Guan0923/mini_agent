@@ -32,7 +32,7 @@ src/
 ├─ api/            FastAPI 装配、Origin 防护、HTTP/SSE 路由
 ├─ domain/         无外层依赖的消息、计划、会话、Skill 与运行状态
 ├─ jobs/           本地后台 Job 注册和生命周期
-├─ mcp/            只读 stdio MCP server 与审批型外部 MCP 客户端
+├─ mcp/            审批型外部 MCP 客户端（stdio / Streamable HTTP）
 ├─ observability/  日志、指标与递归脱敏
 ├─ planning/       Planner、上下文与模型请求生命周期
 ├─ providers/      通用 transport 和 Provider 适配
@@ -81,15 +81,13 @@ src/
 
 Redis 连接由 `MINI_AGENT_REDIS_URL` 指定，默认 `redis://127.0.0.1:6379/0`，不进入 `config.toml`。Redis 保存明文待发送草稿、Turn Stream 和短期 delivery receipt，因此 Compose 端口只能绑定 loopback。Redis 中断不回退：running Turn 在安全边界失败，未 ack delivery 在恢复 reconciliation 时回退 pending。
 
-## MCP stdio server
+## MCP 客户端
 
-安装 workspace 依赖后可启动只读 MCP server，并把工具可见范围限制到指定目录：
+Mini-Agent 只作为 MCP 客户端使用外部工具、资源与提示词，不提供 MCP 服务端命令。在设置页选择本地命令或 Streamable HTTP；SDK 自动优先使用 `2026-07-28` 并兼容旧版初始化协议。
 
-```powershell
-uv run mini-agent-mcp --workspace C:\path\to\workspace
-```
+HTTP 请求头中的 Token 和 API Key 存入 OS 凭据库，配置只保存引用。HTTP 可明文传输内容；HTTPS 校验证书，连接不自动跟随重定向。不提供 OAuth 或旧 SSE 连接。
 
-省略 `--workspace` 时使用当前目录。传入路径必须是已存在的目录。
+资源和提示词通过审批型 Agent 工具按需读取。订阅只在当前运行内有效，更新只记录 URI，Agent 检查后决定是否重读；外部提示词不会覆盖系统消息。
 
 ## 验证
 

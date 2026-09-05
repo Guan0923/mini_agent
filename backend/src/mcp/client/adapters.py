@@ -6,6 +6,8 @@ import json
 import os
 from typing import Any, Protocol
 
+from pydantic import BaseModel
+
 from backend.tools import ToolError
 
 from ..config import McpServerConfig
@@ -90,7 +92,7 @@ def _render_result(result: object) -> str:
                 {
                     "type": "resource",
                     "uri": str(getattr(resource, "uri", "")),
-                    "mimeType": getattr(resource, "mimeType", None),
+                    "mimeType": getattr(resource, "mime_type", None),
                     "text": resource_text,
                 }
             )
@@ -100,12 +102,12 @@ def _render_result(result: object) -> str:
         rendered.append(
             {
                 "type": str(getattr(item, "type", type(item).__name__)),
-                "mimeType": getattr(item, "mimeType", getattr(resource, "mimeType", None)),
+                "mimeType": getattr(item, "mime_type", getattr(resource, "mime_type", None)),
                 "size": len(data) if isinstance(data, str) else len(blob) if isinstance(blob, str) else None,
                 "content_omitted": True,
             }
         )
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", None)
     if structured is not None:
         rendered.append({"type": "structured", "value": structured})
     if not rendered:
@@ -119,3 +121,40 @@ def _render_result(result: object) -> str:
         return value
     omitted = len(value) - _MAX_RESULT_CHARS
     return f"{value[:_MAX_RESULT_CHARS]}… ({omitted} characters omitted)"
+
+
+def render_mcp_value(value: Any) -> str:
+    """Keep prompt roles and resource metadata, but never embed binary payloads."""
+
+    def plain(item: Any) -> Any:
+        if isinstance(item, BaseModel):
+            item = item.model_dump(mode="json", exclude_none=True)
+        if isinstance(item, dict):
+            result = {}
+            for key, child in item.items():
+                if key == "blob" or (key == "data" and item.get("type") in {"image", "audio"}):
+                    result.update(size=len(child), content_omitted=True)
+                else:
+                    result[key] = plain(child)
+            return result
+        if isinstance(item, (list, tuple)):
+            return [plain(child) for child in item]
+        return item
+
+    data = plain(value)
+    text = json.dumps(data, ensure_ascii=False)
+    if len(text) <= _MAX_RESULT_CHARS:
+        return text
+    preview = text[: _MAX_RESULT_CHARS - 256]
+    while True:
+        limited = {"truncated": True, "content_preview": preview}
+        if isinstance(data, dict) and "next_cursor" in data:
+            cursor = data["next_cursor"]
+            if cursor is None or isinstance(cursor, str) and len(cursor) <= 4096:
+                limited["next_cursor"] = cursor
+            else:
+                limited["next_cursor_omitted"] = True
+        result = json.dumps(limited, ensure_ascii=False)
+        if len(result) <= _MAX_RESULT_CHARS:
+            return result
+        preview = preview[: len(preview) // 2]

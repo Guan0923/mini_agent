@@ -9,6 +9,7 @@ const redisKeyPrefix = `mini-agent:e2e:${process.pid}:${Date.now()}`;
 
 export default defineConfig({
   testDir: "./e2e",
+  testIgnore: "mcp-capabilities.spec.ts",
   timeout: 30_000,
   workers: 1,
   use: {

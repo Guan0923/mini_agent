@@ -223,8 +223,8 @@ def test_mcp_shutdown_timeout_stops_loop_and_has_stable_error(monkeypatch) -> No
 
 def test_non_text_mcp_content_is_described_without_binary_payload() -> None:
     result = SimpleNamespace(
-        content=[SimpleNamespace(type="image", mimeType="image/png", data="abc123")],
-        structuredContent={"ok": True},
+        content=[SimpleNamespace(type="image", mime_type="image/png", data="abc123")],
+        structured_content={"ok": True},
     )
 
     rendered = mcp_client._render_result(result)

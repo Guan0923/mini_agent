@@ -12,7 +12,7 @@ from backend.mcp.client.manager import _list_all_tools
 
 
 def _definition(name: str) -> SimpleNamespace:
-    return SimpleNamespace(name=name, description=name, inputSchema={"type": "object"})
+    return SimpleNamespace(name=name, description=name, input_schema={"type": "object"})
 
 
 class _PaginatedSession:
@@ -20,8 +20,7 @@ class _PaginatedSession:
         self.pages = pages
         self.cursors: list[str | None] = []
 
-    async def list_tools(self, *, params=None):
-        cursor = params.cursor if params is not None else None
+    async def list_tools(self, *, cursor=None):
         self.cursors.append(cursor)
         return self.pages[cursor]
 
@@ -29,9 +28,9 @@ class _PaginatedSession:
 def test_external_mcp_collects_all_tool_pages_in_order() -> None:
     session = _PaginatedSession(
         {
-            None: SimpleNamespace(tools=[_definition("first")], nextCursor="page-2"),
-            "page-2": SimpleNamespace(tools=[_definition("second")], nextCursor="page-3"),
-            "page-3": SimpleNamespace(tools=[_definition("third")], nextCursor=None),
+            None: SimpleNamespace(tools=[_definition("first")], next_cursor="page-2"),
+            "page-2": SimpleNamespace(tools=[_definition("second")], next_cursor="page-3"),
+            "page-3": SimpleNamespace(tools=[_definition("third")], next_cursor=None),
         }
     )
 
@@ -44,8 +43,8 @@ def test_external_mcp_collects_all_tool_pages_in_order() -> None:
 def test_external_mcp_stops_after_a_repeated_cursor_and_keeps_the_current_page() -> None:
     session = _PaginatedSession(
         {
-            None: SimpleNamespace(tools=[_definition("first")], nextCursor="repeat"),
-            "repeat": SimpleNamespace(tools=[_definition("second")], nextCursor="repeat"),
+            None: SimpleNamespace(tools=[_definition("first")], next_cursor="repeat"),
+            "repeat": SimpleNamespace(tools=[_definition("second")], next_cursor="repeat"),
         }
     )
 
@@ -143,12 +142,13 @@ def test_external_mcp_tools_are_approval_gated_and_not_plan_safe(tmp_path: Path,
     class Manager:
         def __init__(self, configs) -> None:
             assert configs[0].name == "demo"
+            self.capabilities = {}
             self.definitions = {
                 "demo": [
                     SimpleNamespace(
                         name="echo",
                         description="Echo input",
-                        inputSchema={"type": "object", "properties": {"value": {"type": "string"}}},
+                        input_schema={"type": "object", "properties": {"value": {"type": "string"}}},
                     )
                 ]
             }

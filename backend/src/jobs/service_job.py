@@ -159,6 +159,7 @@ class ServiceJob(Job):
         self._health = ServiceHealth.DOWN
         self._rebuild_count = 0
         self._force_rebuild = threading.Event()
+        self._cancel_wakeup = threading.Event()
         self._external_failures = 0
 
     # -- public API ---------------------------------------------------------
@@ -244,6 +245,7 @@ class ServiceJob(Job):
         can never leak an instance: whichever generation handle is current is
         closed exactly once, and handles already closed are skipped.
         """
+        self._cancel_wakeup.set()
         with self._lock:
             handle = self._active_handle
         if handle is not None:
@@ -280,7 +282,7 @@ class ServiceJob(Job):
         self._set_health(ServiceHealth.HEALTHY)
 
         consecutive_failures = 0
-        while not self._cancelled():
+        while not self._cancel_wakeup.wait(self._check_interval_seconds) and not self._cancelled():
             if self._force_rebuild.is_set():
                 self._force_rebuild.clear()
                 consecutive_failures = self._max_failures + 1

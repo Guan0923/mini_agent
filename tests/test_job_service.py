@@ -136,6 +136,28 @@ def test_normal_start_reaches_healthy_with_driver_handle() -> None:
     job.close(timeout=5)
 
 
+def test_healthy_probes_observe_interval_and_cancel_wakes_waiter() -> None:
+    checked = threading.Event()
+    times: list[float] = []
+
+    class TimedDriver(FakeDriver):
+        def check(self, handle: str) -> bool:
+            times.append(time.monotonic())
+            if len(times) == 2:
+                checked.set()
+            return super().check(handle)
+
+    job = make_job(TimedDriver(), check_interval_seconds=0.1)
+    job.start()
+    try:
+        assert checked.wait(5)
+        assert times[1] - times[0] >= 0.09
+        job._check_interval_seconds = 60
+    finally:
+        job.close(timeout=1)
+    assert job.info().state is JobState.CANCELLED
+
+
 # ---------------------------------------------------------------------------
 # Probe degradation / recovery on the same instance
 # ---------------------------------------------------------------------------
