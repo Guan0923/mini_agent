@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -28,7 +29,14 @@ from backend.sandbox.broker_service import (
     WindowsServiceInstaller,
     build_ready_marker,
 )
-from backend.sandbox.broker_service.installer import _elevated_helper_argv, _write_python_service_path
+from backend.sandbox.broker_service.installer import (
+    _absolute_windows_path,
+    _elevated_helper_argv,
+    _normalized_windows_path,
+    _service_class_matches,
+    _service_command_check,
+    _write_python_service_path,
+)
 from backend.sandbox.errors import BrokerInstallationError, BrokerInstallFailureCode
 from backend.sandbox.install_helper import (
     EXIT_ACCOUNT_FAILED,
@@ -149,6 +157,175 @@ def test_broker_status_distinguishes_invalid_service_configuration() -> None:
     assert status.installed is True
     assert status.code is BrokerStatusFailureCode.SERVICE_CONFIGURATION_INVALID
     assert status.detail == "Broker service configuration requires repair"
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        (
+            r"C:\Program Files\Mini Agent\pythonservice.exe",
+            r"\\?\C:\Program Files\Mini Agent\pythonservice.exe",
+        ),
+        (
+            r"C:\Program Files\Mini Agent\pythonservice.exe",
+            r"c:/program files/mini agent/pythonservice.exe",
+        ),
+        (
+            r"\\server\share\Mini Agent\pythonservice.exe",
+            r"\\?\UNC\SERVER\SHARE\Mini Agent\pythonservice.exe",
+        ),
+    ],
+)
+def test_windows_path_normalization_treats_equivalent_spellings_as_equal(left: str, right: str) -> None:
+    assert _normalized_windows_path(left) == _normalized_windows_path(right)
+
+
+def test_absolute_windows_path_removes_extended_prefix() -> None:
+    assert _absolute_windows_path(r"\\?\C:\Mini Agent\pythonservice.exe") == (r"C:\Mini Agent\pythonservice.exe")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="uses the Windows command-line parser")
+def test_service_command_check_normalizes_only_the_executable_path() -> None:
+    expected = (r"C:\Program Files\Mini Agent\pythonservice.exe", "--mode", "broker value")
+    equivalent = subprocess.list2cmdline(
+        [r"\\?\c:\program files\mini agent\pythonservice.exe", "--mode", "broker value"]
+    )
+
+    assert _service_command_check(equivalent, expected)[0] is None
+    assert (
+        _service_command_check(
+            subprocess.list2cmdline([expected[0], "--mode", "other value"]),
+            expected,
+        )[0]
+        == "service_arguments"
+    )
+    assert (
+        _service_command_check(
+            subprocess.list2cmdline([r"C:\Program Files\Other\pythonservice.exe", "--mode", "broker value"]),
+            expected,
+        )[0]
+        == "service_executable"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="uses the Windows command-line parser")
+def test_configuration_health_accepts_equivalent_service_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RegistryKey:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    expected_command = (r"C:\Program Files\Mini Agent\pythonservice.exe", "--mode", "broker value")
+    expected_class = r"C:\Mini Agent\backend\src\sandbox_service_bootstrap.MiniAgentSandboxBrokerService"
+    config = [
+        16,
+        3,
+        0,
+        subprocess.list2cmdline([r"\\?\c:\program files\mini agent\pythonservice.exe", "--mode", "broker value"]),
+        None,
+        None,
+        None,
+        r"NT SERVICE\MiniAgentSandboxBroker",
+    ]
+    fake_win32service = types.SimpleNamespace(
+        SC_MANAGER_CONNECT=1,
+        SERVICE_QUERY_CONFIG=2,
+        SERVICE_CONFIG_SERVICE_SID_INFO=3,
+        SERVICE_WIN32_OWN_PROCESS=16,
+        SERVICE_DEMAND_START=3,
+        SERVICE_SID_TYPE_UNRESTRICTED=1,
+        OpenSCManager=lambda *args: object(),
+        OpenService=lambda *args: object(),
+        QueryServiceConfig=lambda _service: config,
+        QueryServiceConfig2=lambda *_args: 1,
+        CloseServiceHandle=lambda _handle: None,
+    )
+    fake_winreg = types.SimpleNamespace(
+        HKEY_LOCAL_MACHINE=1,
+        KEY_READ=2,
+        REG_SZ=1,
+        OpenKey=lambda *_args: RegistryKey(),
+        QueryValueEx=lambda *_args: (
+            r"\\?\c:/mini agent/backend/src/sandbox_service_bootstrap.MiniAgentSandboxBrokerService",
+            1,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "win32service", fake_win32service)
+    monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
+    installer = WindowsServiceInstaller(
+        expected_command,
+        service_class=expected_class,
+        is_windows=True,
+    )
+
+    assert installer.configuration_healthy() is True
+
+
+def test_service_class_normalizes_only_the_directory() -> None:
+    expected = r"C:\Mini Agent\backend\src\sandbox_service_bootstrap.MiniAgentSandboxBrokerService"
+
+    assert _service_class_matches(
+        r"\\?\c:/mini agent/backend/src/sandbox_service_bootstrap.MiniAgentSandboxBrokerService",
+        expected,
+    )
+    assert not _service_class_matches(
+        r"C:\Mini Agent\backend\src\sandbox_service_bootstrap.OtherService",
+        expected,
+    )
+    assert not _service_class_matches(
+        r"C:\Other\backend\src\sandbox_service_bootstrap.MiniAgentSandboxBrokerService",
+        expected,
+    )
+
+
+def test_configuration_diagnostics_are_redacted_limited_and_deduplicated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    installer = WindowsServiceInstaller(("pythonservice.exe",), is_windows=True)
+    sensitive_path = rf"C:\api_key=secret-value\{'x' * 400}\pythonservice.exe"
+    caplog.set_level(logging.WARNING, logger="backend.sandbox.broker_service.installer")
+
+    installer._configuration_failure("service_executable", actual=sensitive_path)
+    installer._configuration_failure("service_executable", actual=sensitive_path)
+    installer._configuration_recovered()
+    installer._configuration_failure("service_executable", actual=sensitive_path)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 2
+    assert all("secret-value" not in message for message in messages)
+    assert all("[REDACTED]" in message for message in messages)
+    assert all(len(message) < 400 for message in messages)
+
+
+def test_configuration_read_failure_logs_step_error_type_and_winerror_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class ServiceReadError(Exception):
+        winerror = 5
+
+    fake_win32service = types.SimpleNamespace(
+        SC_MANAGER_CONNECT=1,
+        OpenSCManager=lambda *args: (_ for _ in ()).throw(ServiceReadError("api_key=secret-value")),
+    )
+    monkeypatch.setitem(sys.modules, "win32service", fake_win32service)
+    installer = WindowsServiceInstaller(("pythonservice.exe",), is_windows=True)
+    caplog.set_level(logging.WARNING, logger="backend.sandbox.broker_service.installer")
+
+    assert installer.configuration_healthy() is False
+    assert installer.configuration_healthy() is False
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1
+    assert "field=configuration_read_failed" in messages[0]
+    assert "step=open_service_manager" in messages[0]
+    assert "error_type=ServiceReadError" in messages[0]
+    assert "winerror=5" in messages[0]
+    assert "secret-value" not in messages[0]
 
 
 @pytest.mark.parametrize(
@@ -409,7 +586,11 @@ def test_pywin32_service_host_is_resolved_before_elevation(monkeypatch: pytest.M
     pywintypes_dll.write_bytes(b"pywin32-runtime")
     servicemanager_pyd = tmp_path / "packages" / "servicemanager.pyd"
     servicemanager_pyd.write_bytes(b"service-manager")
-    module = types.SimpleNamespace(LocatePythonServiceExe=lambda: str(host))
+    base_prefix = tmp_path / "base runtime" / "python"
+    environment_prefix = tmp_path / "environment runtime" / "venv"
+    monkeypatch.setattr(sys, "base_prefix", rf"\\?\{base_prefix}")
+    monkeypatch.setattr(sys, "prefix", rf"\\?\{environment_prefix}")
+    module = types.SimpleNamespace(LocatePythonServiceExe=lambda: rf"\\?\{host}")
     monkeypatch.setitem(sys.modules, "win32serviceutil", module)
     monkeypatch.setitem(
         sys.modules,
@@ -430,6 +611,22 @@ def test_pywin32_service_host_is_resolved_before_elevation(monkeypatch: pytest.M
     assert (host.parent / python_dll.name).read_bytes() == b"python-runtime"
     assert (host.parent / pywintypes_dll.name).read_bytes() == b"pywin32-runtime"
     assert (host.parent / servicemanager_pyd.name).read_bytes() == b"service-manager"
+    path_file = host.parent / f"python{sys.version_info.major}{sys.version_info.minor}._pth"
+    assert "\\\\?\\" not in path_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows runtime path normalization test")
+def test_broker_factory_normalizes_prefixed_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "prefix", r"\\?\C:\Mini Agent\.venv")
+    monkeypatch.setattr(sys, "base_prefix", r"\\?\C:\Runtime\Python312")
+
+    client = WindowsBrokerClient.from_system()
+
+    assert client._installer.service_command == (r"C:\Mini Agent\.venv\pythonservice.exe",)
+    assert client._installer.service_runtime_paths == (
+        Path(r"C:\Mini Agent\.venv"),
+        Path(r"C:\Runtime\Python312"),
+    )
 
 
 def test_python_service_path_lists_only_explicit_import_roots(tmp_path: Path) -> None:

@@ -142,19 +142,23 @@ class WindowsBrokerClient:
             return cls(is_windows=False)
         try:
             from ..broker_service import BrokerConfiguration, DpapiKeyStore, WindowsServiceInstaller
+            from ..broker_service.installer import _absolute_windows_path
         except Exception:
             return cls(is_windows=True)
         configuration = BrokerConfiguration.create()
         key_store = DpapiKeyStore(configuration.installation_key_path)
-        source_root = Path(__file__).resolve().parents[2]
+        source_root = Path(_absolute_windows_path(Path(__file__).resolve().parents[2]))
+        source_boundary = Path(_absolute_windows_path(Path(__file__).resolve().parents[4]))
+        runtime_prefix = Path(_absolute_windows_path(sys.prefix))
+        runtime_base_prefix = Path(_absolute_windows_path(sys.base_prefix))
         installer = WindowsServiceInstaller(
-            (str(Path(sys.prefix) / "pythonservice.exe"),),
+            (_absolute_windows_path(Path(sys.prefix) / "pythonservice.exe"),),
             service_class=(rf"{source_root}\sandbox_service_bootstrap.MiniAgentSandboxBrokerService"),
             backend_sid_path=configuration.backend_sid_path,
             program_data_path=configuration.program_data,
             service_code_path=source_root,
-            service_code_boundary_path=Path(__file__).resolve().parents[4],
-            service_runtime_paths=(Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()),
+            service_code_boundary_path=source_boundary,
+            service_runtime_paths=(runtime_prefix, runtime_base_prefix),
             proxy_port=expected_proxy_port,
         )
         try:

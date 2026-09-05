@@ -3,18 +3,115 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import json
+import logging
+import ntpath
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
+from backend.domain import redact_sensitive_text
+
 from ..errors import BrokerInstallationError, BrokerInstallFailureCode, SandboxInitializationError
 from ..runtime.manifest import ResourceRecord
+
+logger = logging.getLogger(__name__)
+
+_MAX_DIAGNOSTIC_VALUE_LENGTH = 240
+
+
+def _absolute_windows_path(value: str | os.PathLike[str]) -> str:
+    """Return one lexical absolute spelling for a Windows path."""
+
+    raw = os.fspath(value).replace("/", "\\")
+    folded = raw.casefold()
+    if folded.startswith("\\\\?\\unc\\"):
+        raw = f"\\\\{raw[8:]}"
+    elif folded.startswith("\\??\\unc\\"):
+        raw = f"\\\\{raw[8:]}"
+    elif folded.startswith("\\\\?\\"):
+        raw = raw[4:]
+    elif folded.startswith("\\??\\"):
+        raw = raw[4:]
+    return ntpath.abspath(ntpath.normpath(raw))
+
+
+def _normalized_windows_path(value: str | os.PathLike[str]) -> str:
+    return ntpath.normcase(_absolute_windows_path(value))
+
+
+def _windows_command_line_argv(command: str) -> tuple[str, ...]:
+    """Parse an SCM command line using the Windows command-line parser."""
+
+    if os.name != "nt":
+        raise OSError("Windows command-line parsing is unavailable")
+    argc = ctypes.c_int()
+    command_line_to_argv = ctypes.windll.shell32.CommandLineToArgvW
+    command_line_to_argv.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+    command_line_to_argv.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    argv = command_line_to_argv(command, ctypes.byref(argc))
+    if not argv:
+        raise ctypes.WinError()
+    try:
+        return tuple(argv[index] for index in range(argc.value))
+    finally:
+        ctypes.windll.kernel32.LocalFree(ctypes.cast(argv, ctypes.c_void_p))
+
+
+def _service_command_check(
+    actual_command: str,
+    expected_command: tuple[str, ...],
+) -> tuple[str | None, tuple[str, ...]]:
+    actual = _windows_command_line_argv(actual_command)
+    if not actual or not expected_command:
+        return "service_command", actual
+    if _normalized_windows_path(actual[0]) != _normalized_windows_path(expected_command[0]):
+        return "service_executable", actual
+    if actual[1:] != expected_command[1:]:
+        return "service_arguments", actual
+    return None, actual
+
+
+def _split_service_class(value: str) -> tuple[str, str] | None:
+    separator = max(value.rfind("\\"), value.rfind("/"))
+    if separator < 0:
+        return None
+    return value[:separator], value[separator + 1 :]
+
+
+def _service_class_matches(actual: str, expected: str) -> bool:
+    if actual == expected:
+        return True
+    actual_parts = _split_service_class(actual)
+    expected_parts = _split_service_class(expected)
+    if actual_parts is None or expected_parts is None:
+        return False
+    actual_directory, actual_entrypoint = actual_parts
+    expected_directory, expected_entrypoint = expected_parts
+    return actual_entrypoint == expected_entrypoint and _normalized_windows_path(
+        actual_directory
+    ) == _normalized_windows_path(expected_directory)
+
+
+def _diagnostic_value(value: object) -> str:
+    text = redact_sensitive_text(str(value)).replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) <= _MAX_DIAGNOSTIC_VALUE_LENGTH:
+        return text
+    return f"{text[: _MAX_DIAGNOSTIC_VALUE_LENGTH - 3]}..."
+
+
+def _diagnostic_path(value: object) -> str:
+    try:
+        return _diagnostic_value(_absolute_windows_path(str(value)))
+    except Exception:
+        return _diagnostic_value(value)
 
 
 def _elevated_helper_argv(encoded_payload: str, source_root: Path | None) -> tuple[str, ...]:
@@ -89,6 +186,8 @@ class WindowsServiceInstaller:
         if isinstance(proxy_port, bool) or not isinstance(proxy_port, int) or not 1 <= proxy_port <= 65535:
             raise ValueError("proxy_port must be between 1 and 65535")
         self.proxy_port = proxy_port
+        self._configuration_diagnostic_lock = threading.Lock()
+        self._last_configuration_failure: tuple[str, object] | None = None
 
     def install(self) -> None:
         self._require_windows()
@@ -117,33 +216,101 @@ class WindowsServiceInstaller:
         manager = None
         service = None
         win32service = None
+        step = "import_dependencies"
         try:
             import winreg
 
             import win32service as win32service_module  # type: ignore[import-not-found]
 
             win32service = win32service_module
+            step = "open_service_manager"
             manager = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+            step = "open_service"
             service = win32service.OpenService(manager, self.service_name, win32service.SERVICE_QUERY_CONFIG)
+            step = "query_service_config"
             config = win32service.QueryServiceConfig(service)
+            step = "query_service_sid"
             sid_type = win32service.QueryServiceConfig2(service, win32service.SERVICE_CONFIG_SERVICE_SID_INFO)
-            expected_command = subprocess.list2cmdline(list(self.service_command))
-            if (
-                int(config[0]) != win32service.SERVICE_WIN32_OWN_PROCESS
-                or int(config[1]) != win32service.SERVICE_DEMAND_START
-                or str(config[3]).casefold() != expected_command.casefold()
-                or str(config[7]).casefold() != f"NT SERVICE\\{self.service_name}".casefold()
-                or int(sid_type) != win32service.SERVICE_SID_TYPE_UNRESTRICTED
-            ):
-                return False
+            if int(config[0]) != win32service.SERVICE_WIN32_OWN_PROCESS:
+                return self._configuration_failure(
+                    "service_type",
+                    expected=win32service.SERVICE_WIN32_OWN_PROCESS,
+                    actual=config[0],
+                )
+            if int(config[1]) != win32service.SERVICE_DEMAND_START:
+                return self._configuration_failure(
+                    "start_type",
+                    expected=win32service.SERVICE_DEMAND_START,
+                    actual=config[1],
+                )
+            step = "parse_service_command"
+            command_mismatch, actual_command = _service_command_check(str(config[3]), self.service_command)
+            if command_mismatch == "service_command":
+                return self._configuration_failure(command_mismatch)
+            if command_mismatch == "service_executable":
+                return self._configuration_failure(
+                    command_mismatch,
+                    expected=_diagnostic_path(self.service_command[0]),
+                    actual=_diagnostic_path(actual_command[0]),
+                )
+            if command_mismatch == "service_arguments":
+                return self._configuration_failure(
+                    command_mismatch,
+                    _identity=actual_command[1:],
+                    expected_count=max(0, len(self.service_command) - 1),
+                    actual_count=max(0, len(actual_command) - 1),
+                )
+            expected_account = f"NT SERVICE\\{self.service_name}"
+            if str(config[7]).casefold() != expected_account.casefold():
+                return self._configuration_failure(
+                    "service_account",
+                    expected=expected_account,
+                    actual=config[7],
+                )
+            if int(sid_type) != win32service.SERVICE_SID_TYPE_UNRESTRICTED:
+                return self._configuration_failure(
+                    "service_sid_type",
+                    expected=win32service.SERVICE_SID_TYPE_UNRESTRICTED,
+                    actual=sid_type,
+                )
             if self.service_class is None:
+                self._configuration_recovered()
                 return True
             key_path = rf"SYSTEM\CurrentControlSet\Services\{self.service_name}\PythonClass"
+            step = "read_python_class"
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ) as key:
                 value, value_type = winreg.QueryValueEx(key, "")
-            return value_type == winreg.REG_SZ and value == self.service_class
-        except Exception:
-            return False
+            if value_type != winreg.REG_SZ:
+                return self._configuration_failure(
+                    "python_class_type",
+                    expected=winreg.REG_SZ,
+                    actual=value_type,
+                )
+            if not isinstance(value, str) or not _service_class_matches(value, self.service_class):
+                actual_parts = _split_service_class(value) if isinstance(value, str) else None
+                expected_parts = _split_service_class(self.service_class)
+                return self._configuration_failure(
+                    "python_class",
+                    expected_directory=(
+                        _diagnostic_path(expected_parts[0]) if expected_parts is not None else "<module>"
+                    ),
+                    actual_directory=(_diagnostic_path(actual_parts[0]) if actual_parts is not None else "<module>"),
+                    expected_entrypoint=(expected_parts[1] if expected_parts is not None else self.service_class),
+                    actual_entrypoint=(actual_parts[1] if actual_parts is not None else value),
+                )
+            self._configuration_recovered()
+            return True
+        except Exception as exc:
+            winerror = getattr(exc, "winerror", None)
+            if winerror is None and getattr(exc, "args", None):
+                first = exc.args[0]
+                winerror = first if isinstance(first, int) else None
+            return self._configuration_failure(
+                "configuration_read_failed",
+                step=step,
+                error_type=type(exc).__name__,
+                winerror=winerror if winerror is not None else "none",
+            )
         finally:
             if win32service is not None and service is not None:
                 try:
@@ -155,6 +322,25 @@ class WindowsServiceInstaller:
                     win32service.CloseServiceHandle(manager)
                 except Exception:
                     pass
+
+    def _configuration_failure(self, field: str, *, _identity: object | None = None, **details: object) -> bool:
+        safe_details = tuple(sorted((key, _diagnostic_value(value)) for key, value in details.items()))
+        signature = (field, safe_details if _identity is None else _identity)
+        with self._configuration_diagnostic_lock:
+            if signature == self._last_configuration_failure:
+                return False
+            self._last_configuration_failure = signature
+        suffix = " ".join(f"{key}={value}" for key, value in safe_details)
+        logger.warning(
+            "sandbox Broker service configuration check failed field=%s%s",
+            field,
+            f" {suffix}" if suffix else "",
+        )
+        return False
+
+    def _configuration_recovered(self) -> None:
+        with self._configuration_diagnostic_lock:
+            self._last_configuration_failure = None
 
     def service_installed(self) -> bool:
         """Return whether SCM contains this service, preserving other query failures."""
@@ -208,8 +394,10 @@ class WindowsServiceInstaller:
             import win32api  # type: ignore[import-not-found]
             import win32serviceutil  # type: ignore[import-not-found]
 
-            executable_path = Path(win32serviceutil.LocatePythonServiceExe()).resolve()
-            python_dll = Path(win32api.GetModuleFileName(sys.dllhandle)).resolve()
+            executable_path = Path(_absolute_windows_path(win32serviceutil.LocatePythonServiceExe()))
+            python_dll = Path(_absolute_windows_path(win32api.GetModuleFileName(sys.dllhandle)))
+            base_prefix = Path(_absolute_windows_path(sys.base_prefix))
+            environment_prefix = Path(_absolute_windows_path(sys.prefix))
             runtime_binaries = [
                 python_dll,
                 Path(pywintypes.__file__).resolve(),
@@ -224,9 +412,9 @@ class WindowsServiceInstaller:
                 target = executable_path.parent / source.name
                 if not target.exists() or target.stat().st_size != source.stat().st_size:
                     shutil.copy2(source, target)
-            _write_python_service_path(executable_path, Path(sys.base_prefix), Path(sys.prefix))
+            _write_python_service_path(executable_path, base_prefix, environment_prefix)
             executable_path.with_suffix("._pth").unlink(missing_ok=True)
-            executable = str(executable_path)
+            executable = _absolute_windows_path(executable_path)
         except Exception as exc:  # pragma: no cover - Windows install path
             raise BrokerInstallationError(
                 BrokerInstallFailureCode.DEPENDENCY_MISSING,
