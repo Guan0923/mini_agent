@@ -1062,10 +1062,8 @@ def create_sidebar_project(values: dict[str, object]) -> dict[str, object]:
     }
 
 
-# create_app may mount a built frontend at "/". Keep the test-only
-# control routes ahead of that catch-all mount in the Starlette route table.
-for _test_route in range(7):
-    app.router.routes.insert(0, app.router.routes.pop())
+# Keep every test control route ahead of the API fallback and frontend mount.
+app.router.routes.sort(key=lambda route: not getattr(route, "path", "").startswith("/api/test/"))
 
 
 if __name__ == "__main__":

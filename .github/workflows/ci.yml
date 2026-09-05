@@ -55,6 +55,8 @@ jobs:
     name: Backend tests / Python ${{ matrix.python-version }} / ubuntu
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      MINI_AGENT_MCP_V1_PYTHON: ${{ github.workspace }}/.tmp-mcp-v1/bin/python
     services:
       redis:
         image: redis:7.4-alpine
@@ -79,6 +81,12 @@ jobs:
           enable-cache: true
       - name: Install locked development dependencies
         run: uv sync --locked --dev
+      - name: Prepare MCP v1 integration peer
+        run: |
+          uv venv .tmp-mcp-v1 --python ${{ matrix.python-version }}
+          uv pip install --python "$MINI_AGENT_MCP_V1_PYTHON" "mcp==1.29.1"
+      - name: Require Redis for integration tests
+        run: uv run python -c "from redis import Redis; Redis.from_url('redis://127.0.0.1:6379/0').ping()"
       - name: Run tests from tests/
         run: uv run python -m pytest tests --cov=backend --cov-report=term-missing --durations=20
 
@@ -86,6 +94,8 @@ jobs:
     name: Backend tests / Python 3.11 / windows
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      MINI_AGENT_MCP_V1_PYTHON: ${{ github.workspace }}/.tmp-mcp-v1/Scripts/python.exe
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -96,5 +106,82 @@ jobs:
           enable-cache: true
       - name: Install locked development dependencies
         run: uv sync --locked --dev
+      - name: Prepare MCP v1 integration peer
+        run: |
+          uv venv .tmp-mcp-v1 --python 3.11
+          uv pip install --python "$env:MINI_AGENT_MCP_V1_PYTHON" "mcp==1.29.1"
       - name: Run tests from tests/
         run: uv run python -m pytest tests --cov=backend --cov-report=term-missing --durations=20
+
+  browser-tests:
+    name: Browser tests / ${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: turn-flow
+            config: playwright.config.ts
+            spec: turn-flow.spec.ts
+          - suite: right-panel
+            config: playwright.config.ts
+            spec: right-panel.spec.ts
+          - suite: scoped-file-paths
+            config: playwright.config.ts
+            spec: scoped-file-paths.spec.ts
+          - suite: sidebar-order
+            config: playwright.config.ts
+            spec: sidebar-order.spec.ts
+          - suite: latex-selection
+            config: playwright.config.ts
+            spec: latex-selection.spec.ts
+          - suite: mcp
+            config: playwright.mcp.config.ts
+            spec: mcp-capabilities.spec.ts
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked development dependencies
+        run: uv sync --locked --dev
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Install Chromium and system dependencies
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Require Redis for browser tests
+        run: uv run python -c "from redis import Redis; Redis.from_url('redis://127.0.0.1:6379/0').ping()"
+      - name: Run browser tests with local backend and model fixtures
+        working-directory: frontend
+        run: npm run test:e2e -- ${{ matrix.spec }} --config=${{ matrix.config }} --reporter=line,html --trace=retain-on-failure
+      - name: Upload browser test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-tests-${{ matrix.suite }}
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

@@ -41,7 +41,7 @@ def test_read_file_validates_columns_and_streams_universal_newlines(tmp_path: Pa
     files = WorkspaceFiles(tmp_path)
 
     assert files.read_file(str(path), start_line=1, start_column=2, max_lines=2) == (
-        f"{path.resolve().as_posix()}: lines 1-2 of 2, starting at column 2\n1 | ne\n2 | two"
+        "workspace:note.txt: lines 1-2 of 2, starting at column 2\n1 | ne\n2 | two"
     )
     with pytest.raises(ToolError, match="start_column"):
         files.read_file(str(path), start_line=1, start_column=5)
@@ -52,7 +52,7 @@ def test_iterative_glob_supports_deep_valid_patterns_and_rejects_excessive_depth
     files = WorkspaceFiles(tmp_path)
     valid_pattern = "/".join(["**"] * 200 + ["*.py"])
 
-    assert files.glob(valid_pattern) == (tmp_path / "app.py").resolve().as_posix()
+    assert files.glob(valid_pattern) == "workspace:app.py"
     with pytest.raises(ToolError, match="path segments"):
         files.glob("/".join(["**"] * 257))
 

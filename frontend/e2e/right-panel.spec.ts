@@ -243,6 +243,7 @@ test("mobile right panel uses a full-width Drawer and keeps the empty creation s
 });
 
 test("real cmd terminal starts in the Turn cwd, replays after refresh, and closes from its tab", async ({ page }) => {
+  test.skip(process.platform !== "win32", "Exercises the Windows cmd terminal.");
   test.slow();
   const title = "Right Panel Terminal E2E";
   const { session_id: sessionId } = await createConversation(page, title);
