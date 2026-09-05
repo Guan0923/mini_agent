@@ -8,6 +8,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 from backend.configuration import ClientPaths, ConfigurationError, section
 from backend.tools import ToolError
@@ -51,12 +52,37 @@ class McpSettings:
 @dataclass(frozen=True, repr=False)
 class McpServerConfig:
     name: str
-    command: str
+    command: str = ""
     args: tuple[str, ...] = ()
     cwd: str | None = None
     env: dict[str, str] | None = None
     enabled: bool = True
     env_refs: dict[str, str] | None = None
+    transport: str = "stdio"
+    url: str | None = None
+    headers: dict[str, str] | None = None
+    header_refs: dict[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.transport == "stdio":
+            if not self.command.strip() or self.url is not None or self.headers or self.header_refs:
+                raise ToolError("stdio requires a command and cannot include HTTP fields.")
+        elif self.transport == "streamable_http":
+            if self.command or self.args or self.cwd is not None or self.env or self.env_refs:
+                raise ToolError("HTTP connections cannot include command or environment fields.")
+            validate_http_url(self.url)
+            validate_headers(
+                self.headers if self.headers is not None else {},
+                self.header_refs if self.header_refs is not None else {},
+            )
+            if self.header_refs:
+                object.__setattr__(
+                    self,
+                    "header_refs",
+                    {name.lower(): _parse_secret_reference(value) for name, value in self.header_refs.items()},
+                )
+        else:
+            raise ToolError("Unsupported MCP transport.")
 
     def __repr__(self) -> str:
         """Keep accidental diagnostics from printing environment values."""
@@ -64,7 +90,7 @@ class McpServerConfig:
         names = sorted((self.env or {}).keys())
         references = sorted((self.env_refs or {}).keys())
         return (
-            "McpServerConfig("
+            f"McpServerConfig(transport={self.transport!r}, "
             f"name={self.name!r}, command={self.command!r}, args={self.args!r}, cwd={self.cwd!r}, "
             f"env_names={names!r}, env_ref_names={references!r}, enabled={self.enabled!r})"
         )
@@ -132,6 +158,28 @@ def read_server_configs(path: Path, *, reject_plaintext_secrets: bool = False) -
         command, args = value.get("command"), value.get("args", [])
         cwd, env, enabled = value.get("cwd"), value.get("env"), value.get("enabled", True)
         env_refs = value.get("env_refs")
+        transport = value.get("transport", "stdio")
+        if transport == "streamable_http":
+            if not isinstance(enabled, bool) or not isinstance(args, list):
+                raise ToolError("Invalid MCP HTTP configuration.")
+            result.append(
+                McpServerConfig(
+                    name=name,
+                    command=command or "",
+                    args=tuple(args),
+                    cwd=cwd,
+                    env=env,
+                    env_refs=env_refs,
+                    enabled=enabled,
+                    transport=transport,
+                    url=value.get("url"),
+                    headers=value.get("headers"),
+                    header_refs=value.get("header_refs"),
+                )
+            )
+            continue
+        if transport != "stdio" or any(key in value for key in ("url", "headers", "header_refs")):
+            raise ToolError("Invalid MCP transport fields.")
         if (
             not isinstance(command, str)
             or not command.strip()
@@ -200,6 +248,60 @@ def valid_environment_name(value: str) -> bool:
 
 def sensitive_environment_name(value: str) -> bool:
     return _SENSITIVE_ENV_KEY_PATTERN.search(value) is not None
+
+
+_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_RESERVED_HEADERS = {"host", "content-length", "content-type", "accept", "connection", "transfer-encoding"}
+
+
+def sensitive_header_name(name: str) -> bool:
+    return bool(re.search(r"auth|cookie|key|token|secret|credential", name, re.IGNORECASE))
+
+
+def valid_header_name(name: str) -> bool:
+    return (
+        bool(_HEADER_NAME.fullmatch(name))
+        and name.lower() not in _RESERVED_HEADERS
+        and not name.lower().startswith("mcp-")
+    )
+
+
+def validate_http_url(value: str | None) -> None:
+    try:
+        if not isinstance(value, str) or not value or any(char.isspace() for char in value):
+            raise ValueError
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+        ):
+            raise ValueError
+        if parsed.port is not None and not 0 < parsed.port <= 65535:
+            raise ValueError
+        if any(sensitive_header_name(key) for key, _ in parse_qsl(parsed.query)):
+            raise ValueError
+    except ValueError as exc:
+        raise ToolError("MCP URL must be HTTP(S), without credentials, secret query parameters or fragments.") from exc
+
+
+def validate_headers(headers: dict[str, str], references: dict[str, str]) -> None:
+    seen: set[str] = set()
+    for mapping, secret in ((headers, False), (references, True)):
+        if not isinstance(mapping, dict) or len(mapping) > 128:
+            raise ToolError("MCP headers must be a bounded string mapping.")
+        for name, value in mapping.items():
+            if not isinstance(name, str) or not valid_header_name(name) or name.lower() in seen:
+                raise ToolError("Invalid, reserved or duplicate MCP header name.")
+            seen.add(name.lower())
+            if not isinstance(value, str) or len(value) > 4096 or "\r" in value or "\n" in value:
+                raise ToolError("Invalid MCP header value.")
+            if secret and _parse_secret_reference(value) is None:
+                raise ToolError("MCP header secrets must use credential or environment references.")
+            if not secret and sensitive_header_name(name):
+                raise ToolError("Sensitive MCP headers must use the credential vault.")
 
 
 def _positive_number(values: Mapping[str, object], name: str, default: float) -> float:

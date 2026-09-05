@@ -1,8 +1,8 @@
 """Small stdio MCP server used only by the Playwright Trace audit flow."""
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
-server = FastMCP("trace-audit-e2e")
+server = MCPServer("trace-audit-e2e")
 
 
 @server.tool()

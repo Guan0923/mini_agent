@@ -58,7 +58,7 @@ async def controlled_stdio_client(
                         if not line.strip():
                             continue
                         try:
-                            message = types.JSONRPCMessage.model_validate_json(line)
+                            message = types.jsonrpc_message_adapter.validate_json(line)
                             await read_writer.send(SessionMessage(message))
                         except Exception as exc:
                             logger.warning("MCP stdio message rejected: %s", type(exc).__name__)

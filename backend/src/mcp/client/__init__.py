@@ -1,4 +1,4 @@
-"""External stdio MCP client public API."""
+"""External stdio and Streamable HTTP MCP client public API."""
 
 import asyncio
 from concurrent.futures import TimeoutError as FutureTimeoutError

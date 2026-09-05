@@ -296,4 +296,6 @@ def test_mcp_master_switch_skips_parsing_and_real_connection_test_closes(tmp_pat
         assert client.post("/api/settings/mcp/servers", json=payload).status_code == 201
         tested = client.post("/api/settings/mcp/servers/trace/test")
         assert tested.status_code == 200, tested.text
-        assert tested.json() == {"tools": ["mcp_trace_inspect_trace"], "count": 1}
+        assert tested.json()["tools"] == ["mcp_trace_inspect_trace"]
+        assert tested.json()["protocol_version"] == "2026-07-28"
+        assert tested.json()["counts"] == {"tools": 1, "resources": 0, "resource_templates": 0, "prompts": 0}

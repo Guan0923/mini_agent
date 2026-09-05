@@ -7,9 +7,9 @@ import os
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 
 from backend.configuration import ClientPaths, ConfigurationError, atomic_write_text
-from backend.domain import safe_error_message
 
 from .config import McpServerConfig, read_server_configs
 
@@ -29,6 +29,14 @@ def _managed_account(reference: str) -> str | None:
     return reference[len(_MANAGED_REFERENCE_PREFIX) :] if reference.startswith(_MANAGED_REFERENCE_PREFIX) else None
 
 
+def _header_key(name: str) -> str:
+    return "http." + name.lower().encode("ascii").hex()
+
+
+def _references(server: McpServerConfig) -> dict[str, str]:
+    return {**(server.env_refs or {}), **(server.header_refs or {})}
+
+
 def _keyring_module():
     import keyring
 
@@ -41,11 +49,15 @@ def _render_servers(configs: tuple[McpServerConfig, ...]) -> str:
         lines.extend(
             (
                 f"[servers.{server.name}]",
-                f"command = {json.dumps(server.command, ensure_ascii=False)}",
-                "args = [" + ", ".join(json.dumps(item, ensure_ascii=False) for item in server.args) + "]",
+                f"transport = {json.dumps(server.transport)}",
                 f"enabled = {'true' if server.enabled else 'false'}",
             )
         )
+        if server.transport == "stdio":
+            lines.append(f"command = {json.dumps(server.command, ensure_ascii=False)}")
+            lines.append("args = [" + ", ".join(json.dumps(item, ensure_ascii=False) for item in server.args) + "]")
+        else:
+            lines.append(f"url = {json.dumps(server.url, ensure_ascii=False)}")
         if server.cwd is not None:
             lines.append(f"cwd = {json.dumps(server.cwd, ensure_ascii=False)}")
         if server.env:
@@ -60,6 +72,13 @@ def _render_servers(configs: tuple[McpServerConfig, ...]) -> str:
             lines.extend(
                 f"{name} = {json.dumps(value, ensure_ascii=False)}" for name, value in sorted(server.env_refs.items())
             )
+        for field, values in (("headers", server.headers), ("header_refs", server.header_refs)):
+            if values:
+                lines.extend(("", f"[servers.{server.name}.{field}]"))
+                lines.extend(
+                    f"{json.dumps(name)} = {json.dumps(value, ensure_ascii=False)}"
+                    for name, value in sorted(values.items())
+                )
         lines.append("")
     return "\n".join(lines).rstrip() + ("\n" if lines else "")
 
@@ -90,6 +109,10 @@ class McpSettingsStore:
             "env": dict(server.env or {}),
             "secret_env": [{"name": name, "configured": True} for name in sorted((server.env_refs or {}).keys())],
             "enabled": server.enabled,
+            "transport": server.transport,
+            "url": server.url,
+            "headers": dict(server.headers or {}),
+            "secret_headers": [{"name": name, "configured": True} for name in sorted(server.header_refs or {})],
         }
 
     def create(
@@ -102,6 +125,10 @@ class McpSettingsStore:
         env: Mapping[str, str],
         secrets: Mapping[str, str],
         enabled: bool,
+        transport: str = "stdio",
+        url: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        header_secrets: Mapping[str, str] | None = None,
     ) -> McpServerConfig:
         with self._lock():
             current = list(self.servers())
@@ -111,8 +138,27 @@ class McpSettingsStore:
             overlap = set(env) & set(references)
             if overlap:
                 raise ValueError("MCP environment names cannot be both plain and secret")
-            server = McpServerConfig(name, command, args, cwd, dict(env) or None, enabled, references or None)
-            self._commit(tuple((*current, server)), credential_sets=self._credential_sets(name, secrets))
+            header_refs = {key.lower(): _reference(name, _header_key(key)) for key in (header_secrets or {})}
+            server = McpServerConfig(
+                name,
+                command,
+                args,
+                cwd,
+                dict(env) or None,
+                enabled,
+                references or None,
+                transport,
+                url,
+                dict(headers or {}) or None,
+                header_refs or None,
+            )
+            sets = {
+                **self._credential_sets(name, secrets),
+                **self._credential_sets(
+                    name, {_header_key(key): value for key, value in (header_secrets or {}).items()}
+                ),
+            }
+            self._commit(tuple((*current, server)), credential_sets=sets)
             return server
 
     def update(
@@ -126,19 +172,28 @@ class McpSettingsStore:
         secrets: Mapping[str, str],
         remove_secrets: set[str],
         enabled: bool,
+        transport: str = "stdio",
+        url: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        header_secrets: Mapping[str, str] | None = None,
+        remove_header_secrets: set[str] | None = None,
     ) -> McpServerConfig:
         with self._lock():
             current = list(self.servers())
             previous = next((item for item in current if item.name == name), None)
             if previous is None:
                 raise ValueError("MCP server not found")
-            references = dict(previous.env_refs or {})
+            references = dict(previous.env_refs or {}) if transport == "stdio" else {}
             for environment_name in remove_secrets:
                 references.pop(environment_name, None)
             references.update({key: _reference(name, key) for key in secrets})
             overlap = set(env) & set(references)
             if overlap:
                 raise ValueError("MCP environment names cannot be both plain and secret")
+            header_refs = dict(previous.header_refs or {}) if transport == "streamable_http" else {}
+            for key in remove_header_secrets or ():
+                header_refs.pop(key.lower(), None)
+            header_refs.update({key.lower(): _reference(name, _header_key(key)) for key in (header_secrets or {})})
             updated = McpServerConfig(
                 name,
                 command,
@@ -147,12 +202,21 @@ class McpSettingsStore:
                 dict(env) or None,
                 enabled,
                 references or None,
+                transport,
+                url,
+                dict(headers or {}) or None,
+                header_refs or None,
             )
             removed_accounts = self._removed_accounts(previous, updated)
             configs = tuple(updated if item.name == name else item for item in current)
             self._commit(
                 configs,
-                credential_sets=self._credential_sets(name, secrets),
+                credential_sets={
+                    **self._credential_sets(name, secrets),
+                    **self._credential_sets(
+                        name, {_header_key(key): value for key, value in (header_secrets or {}).items()}
+                    ),
+                },
                 credential_deletes=removed_accounts,
             )
             return updated
@@ -163,15 +227,7 @@ class McpSettingsStore:
             previous = next((item for item in current if item.name == name), None)
             if previous is None:
                 raise ValueError("MCP server not found")
-            updated = McpServerConfig(
-                previous.name,
-                previous.command,
-                previous.args,
-                previous.cwd,
-                previous.env,
-                enabled,
-                previous.env_refs,
-            )
+            updated = replace(previous, enabled=enabled)
             self._commit(tuple(updated if item.name == name else item for item in current))
             return updated
 
@@ -183,7 +239,7 @@ class McpSettingsStore:
                 raise ValueError("MCP server not found")
             accounts = tuple(
                 account
-                for reference in (previous.env_refs or {}).values()
+                for reference in _references(previous).values()
                 if (account := _managed_account(reference)) is not None
             )
             self._commit(
@@ -197,10 +253,10 @@ class McpSettingsStore:
 
     @staticmethod
     def _removed_accounts(previous: McpServerConfig, updated: McpServerConfig) -> tuple[str, ...]:
-        retained = set((updated.env_refs or {}).values())
+        retained = set(_references(updated).values())
         return tuple(
             account
-            for reference in (previous.env_refs or {}).values()
+            for reference in _references(previous).values()
             if reference not in retained and (account := _managed_account(reference)) is not None
         )
 
@@ -227,7 +283,7 @@ class McpSettingsStore:
                 if previous.get(account) is not None:
                     keyring.delete_password(KEYRING_SERVICE, account)
             atomic_write_text(self.paths.mcp_file, _render_servers(configs))
-        except Exception as exc:
+        except Exception:
             for account, value in previous.items():
                 try:
                     if value is None:
@@ -237,7 +293,7 @@ class McpSettingsStore:
                         keyring.set_password(KEYRING_SERVICE, account, value)
                 except Exception:
                     pass
-            raise ValueError(safe_error_message(exc)) from exc
+            raise ValueError("Unable to save MCP credentials or configuration.") from None
 
     @contextmanager
     def _lock(self) -> Iterator[None]:

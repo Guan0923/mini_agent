@@ -102,6 +102,10 @@ export interface McpSecretStatus {
 }
 
 export interface McpServerSettings {
+  transport: "stdio" | "streamable_http";
+  url: string | null;
+  headers: Record<string, string>;
+  secret_headers: McpSecretStatus[];
   name: string;
   command: string;
   args: string[];
@@ -117,6 +121,11 @@ export interface McpSettingsResponse {
 }
 
 export interface McpServerInput {
+  transport: "stdio" | "streamable_http";
+  url?: string | null;
+  headers?: Record<string, string>;
+  header_secrets?: Record<string, string>;
+  remove_header_secrets?: string[];
   command: string;
   args: string[];
   cwd: string | null;
@@ -198,8 +207,16 @@ export function deleteMcpServer(name: string): Promise<void> {
   return requestVoid(`/api/settings/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" });
 }
 
-export function testMcpServer(name: string): Promise<{ tools: string[]; count: number }> {
-  return requestJson<{ tools: string[]; count: number }>(
+export interface McpConnectionTest {
+  tools: string[];
+  count: number;
+  protocol_version: string;
+  capabilities: string[];
+  counts: { tools: number; resources: number; resource_templates: number; prompts: number };
+}
+
+export function testMcpServer(name: string): Promise<McpConnectionTest> {
+  return requestJson<McpConnectionTest>(
     `/api/settings/mcp/servers/${encodeURIComponent(name)}/test`,
     { method: "POST" },
   );

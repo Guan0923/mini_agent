@@ -110,7 +110,7 @@ describe("McpSettingsSection", () => {
     api.createMcpServer.mockResolvedValue(structuredClone(mcpServer));
     api.updateMcpServer.mockResolvedValue(structuredClone(mcpServer));
     api.deleteMcpServer.mockResolvedValue(undefined);
-    api.testMcpServer.mockResolvedValue({ tools: ["mcp_trace_inspect_trace"], count: 1 });
+    api.testMcpServer.mockResolvedValue({ tools: ["mcp_trace_inspect_trace"], count: 1, protocol_version: "2026-07-28", capabilities: ["tools"], counts: { tools: 1, resources: 0, resource_templates: 0, prompts: 0 } });
   });
 
   it("shows redacted secret state and tests the saved connection", async () => {
@@ -160,6 +160,41 @@ describe("McpSettingsSection", () => {
       env: {},
       secrets: {},
       enabled: true,
+    })));
+  });
+
+  it("creates an HTTP connection without carrying hidden command fields", async () => {
+    renderWithApp(<McpSettingsSection />);
+    await screen.findByText("trace");
+    await userEvent.click(screen.getByRole("button", { name: /新增 MCP Server/ }));
+    await userEvent.type(screen.getByLabelText("MCP Server 名称"), "remote");
+    await userEvent.type(screen.getByLabelText("MCP Command new"), "discard-this-command");
+    await userEvent.click(screen.getByText("Streamable HTTP", { exact: true }));
+    await userEvent.type(screen.getByLabelText("MCP URL new"), "http://127.0.0.1:19999/mcp");
+    expect(await screen.findByText("HTTP 会明文传输请求头和内容。")).toBeInTheDocument();
+    expect(screen.queryByLabelText("MCP Command new")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /添加密钥请求头/ }));
+    await userEvent.type(screen.getByLabelText("MCP 密钥请求头名称 1"), "Authorization");
+    await userEvent.type(screen.getByLabelText("MCP 密钥请求头值 1"), "test-only-token");
+    await userEvent.click(screen.getByRole("button", { name: "创建 Server" }));
+    await waitFor(() => expect(api.createMcpServer).toHaveBeenCalledWith(expect.objectContaining({
+      transport: "streamable_http", command: "", env: {}, secrets: {},
+      url: "http://127.0.0.1:19999/mcp", header_secrets: { Authorization: "test-only-token" },
+    })));
+  });
+
+  it("retains and explicitly clears saved HTTP credentials", async () => {
+    api.getMcpSettings.mockResolvedValue({ enabled: true, servers: [{
+      ...mcpServer, transport: "streamable_http", command: "", args: [], env: {}, secret_env: [],
+      url: "https://example.test/mcp", headers: {}, secret_headers: [{ name: "authorization", configured: true }],
+    }] });
+    renderWithApp(<McpSettingsSection />);
+    await screen.findByText("trace");
+    await userEvent.click(screen.getByRole("button", { name: /trace/ }));
+    expect(await screen.findByLabelText("MCP 密钥请求头值 1")).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: "保存 Server" }));
+    await waitFor(() => expect(api.updateMcpServer).toHaveBeenCalledWith("trace", expect.objectContaining({
+      header_secrets: {}, remove_header_secrets: [],
     })));
   });
 });

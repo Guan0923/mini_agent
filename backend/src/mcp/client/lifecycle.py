@@ -11,6 +11,7 @@ from backend.tools import Tool, ToolError
 
 from ..config import McpServerConfig, McpSettings, read_server_configs, valid_tool_name
 from .adapters import _handler
+from .features import feature_tools
 from .manager import ExternalMcpResources
 
 
@@ -52,6 +53,7 @@ def start_external_tools(
     job_registry: JobRegistry | None = None,
     job_scope: JobScope | None = None,
 ) -> ExternalMcpResources:
+    configs = tuple(server for server in configs if server.enabled)
     if not configs:
         return ExternalMcpResources()
     try:
@@ -86,7 +88,7 @@ def start_external_tools(
                 if external_name in names:
                     raise ToolError(f"Duplicate external MCP tool name: {external_name}")
                 names.add(external_name)
-                schema_value = getattr(definition, "inputSchema", {})
+                schema_value = getattr(definition, "input_schema", {})
                 schema = dict(schema_value) if isinstance(schema_value, dict) else {"type": "object"}
                 tools.append(
                     Tool(
@@ -111,6 +113,7 @@ def start_external_tools(
         except ToolError:
             pass
         raise ToolError("Cannot initialize external MCP servers: all configured servers failed.")
+    tools.extend(feature_tools(manager))
     return ExternalMcpResources(tuple(tools), manager)
 
 
