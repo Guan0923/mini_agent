@@ -5,9 +5,10 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-import stat
 from collections.abc import Iterable, Iterator
 from pathlib import Path
+
+from backend.domain.file_paths import ScopedPaths
 
 from ..base import ToolError
 
@@ -32,93 +33,64 @@ def workspace_relative_parts(path: str, *, allow_root: bool = False) -> tuple[st
 def normalized_workspace_path(workspaces: Path | Iterable[Path], path: str) -> str:
     """Return one canonical lock key after enforcing multi-workspace confinement."""
 
-    if not isinstance(path, str) or not path.strip():
-        raise ToolError("path must be a non-empty string.")
-    normalised = path.strip().replace("\\", "/")
-    candidate = Path(normalised)
-    if not candidate.is_absolute() and not re.match(r"^[A-Za-z]:", normalised):
-        raise ToolError("path must be absolute.")
-    resolved = Path(os.path.abspath(candidate)).resolve()
     roots = (workspaces,) if isinstance(workspaces, Path) else tuple(workspaces)
-    if not any(resolved != root.resolve() and resolved.is_relative_to(root.resolve()) for root in roots):
-        raise ToolError("Path must stay inside an approved workspace.")
+    try:
+        resolved = ScopedPaths(roots[0], roots[1] if len(roots) > 1 else None).resolve(path)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     return os.path.normcase(str(resolved))
 
 
 class WorkspacePathMixin:
     def _read_path(self, path: str, *, allow_root: bool = False) -> Path:
-        return self._resolve_absolute(path, self.workspaces, allow_root=allow_root)
+        return self._resolve_path(path, allow_root=allow_root)
 
     def _read_file_path(self, path: str) -> Path:
-        """Resolve an absolute file path inside a workspace or read-only root."""
+        """Resolve a scoped/bare path, or an approved absolute read-only path."""
 
-        return self._resolve_absolute(path, (*self.workspaces, *self.read_file_roots), allow_root=False)
+        return self._resolve_path(path, read_roots=self.read_file_roots)
 
-    def _resolve_absolute(self, path: str, roots: Iterable[Path], *, allow_root: bool) -> Path:
-        if not isinstance(path, str) or not path.strip():
-            raise ToolError("path must be a non-empty string.")
-        normalised = path.strip().replace("\\", "/")
-        candidate = Path(normalised)
-        if not candidate.is_absolute() and not re.match(r"^[A-Za-z]:", normalised):
-            raise ToolError("path must be absolute.")
-        if ".." in candidate.parts:
-            raise ToolError("Path must stay inside an approved workspace.")
-        lexical = Path(os.path.abspath(candidate))
-        resolved = lexical.resolve()
-        for root in roots:
-            lexical_root = Path(os.path.abspath(root))
-            try:
-                lexical.relative_to(lexical_root)
-                resolved.relative_to(root)
-            except ValueError:
-                continue
-            self._reject_reparse_points(lexical, lexical_root)
-            if resolved == root and not allow_root:
-                raise ToolError("path must identify an entry inside an approved workspace.")
-            return resolved
-        raise ToolError("Absolute path must stay inside an approved workspace.")
+    def _resolve_path(self, path: str, *, allow_root: bool = False, read_roots: tuple[Path, ...] = ()) -> Path:
+        try:
+            return self.paths.resolve(path, allow_root=allow_root, read_roots=read_roots)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
 
     @staticmethod
     def _reject_reparse_points(path: Path, root: Path) -> None:
-        current = root
-        candidates = [root]
         try:
-            relative = path.relative_to(root)
+            ScopedPaths.reject_links(path, root)
         except ValueError as exc:
-            raise ToolError("Path must stay inside an allowed read root.") from exc
-        for part in relative.parts:
-            current /= part
-            candidates.append(current)
-        for candidate in candidates:
-            try:
-                info = candidate.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise ToolError(f"Unable to inspect whitelisted path: {candidate}") from exc
-            attributes = int(getattr(info, "st_file_attributes", 0))
-            if stat.S_ISLNK(info.st_mode) or attributes & 0x400:
-                raise ToolError(f"Symbolic links and reparse points are not supported: {candidate}")
+            raise ToolError(str(exc)) from exc
 
     def _write_path(self, path: str) -> Path:
-        return self._resolve_absolute(path, self.workspaces, allow_root=False)
+        return self._resolve_path(path)
 
     def _iter_files(self, root: Path) -> Iterator[Path]:
+        self._reject_reparse_points(root, root)
         for directory, directories, filenames in os.walk(root, followlinks=False):
             directory_path = Path(directory)
             directories[:] = sorted(
                 name
                 for name in directories
-                if name not in self._IGNORED_DIRECTORIES and not (directory_path / name).is_symlink()
+                if name not in self._IGNORED_DIRECTORIES and not self._is_link(directory_path / name)
             )
             for name in sorted(filenames):
                 file_path = directory_path / name
-                if file_path.is_symlink() or not file_path.is_file():
+                if self._is_link(file_path) or not file_path.is_file():
                     continue
                 resolved = file_path.resolve()
                 if resolved == root or root not in resolved.parents:
                     continue
                 yield resolved
+
+    @staticmethod
+    def _is_link(path: Path) -> bool:
+        try:
+            ScopedPaths.reject_links(path, path)
+        except ValueError:
+            return True
+        return False
 
     def _pattern_parts(self, pattern: str) -> tuple[str, ...]:
         if not isinstance(pattern, str) or not pattern.strip():

@@ -29,7 +29,8 @@ def _store_for(state: WebAppState, session_id: str) -> SessionFileStore:
     paths.ensure_session(session_id)
     project_root = None
     try:
-        project_root = state.session_workspace(session_id)
+        if state.projects.session_project(session_id) is not None:
+            project_root = state.session_workspace(session_id)
     except RuntimeError:
         # A removed/unavailable project cwd keeps uploads usable while
         # project-root search and content resolve to nothing.

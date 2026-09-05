@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from backend.api.app import create_app  # noqa: E402
 from backend.api.chat import routes as chat_routes  # noqa: E402
 from backend.api.routes import turns as turn_routes  # noqa: E402
+from backend.api.session_files.routes import _store_for as session_file_store  # noqa: E402
 from backend.api.session_store import session_store  # noqa: E402
 from backend.api.state import WebAppState  # noqa: E402
 from backend.domain import AssistantMessage, ToolMessage, TurnTrace, TurnTraceContext, TurnTraceItem  # noqa: E402
@@ -35,7 +36,9 @@ from backend.runtime.core.context import PreparedResponse  # noqa: E402
 from backend.runtime.planning.review import REQUEST_PLAN_REVIEW_NAME  # noqa: E402
 from backend.sandbox import BrokerStatus  # noqa: E402
 from backend.tools import Tool, ToolRegistry, delegation_tools  # noqa: E402
+from backend.tools.default_tools.filesystem import filesystem_read_tools  # noqa: E402
 from backend.tools.default_tools.todo import todo_tools  # noqa: E402
+from backend.tools.filesystem import WorkspaceFiles  # noqa: E402
 
 _temporary_root = tempfile.TemporaryDirectory(prefix="mini-agent-turn-e2e-")
 _root = Path(_temporary_root.name)
@@ -162,6 +165,57 @@ class TraceModelHandler(BaseHTTPRequestHandler):
             return
         TRACE_MODEL_CALLS += 1
         TRACE_MODEL_LAST_REQUEST = payload
+        messages = payload.get("messages", [])
+        latest_user = next(
+            (index for index in range(len(messages) - 1, -1, -1) if messages[index].get("role") == "user"), -1
+        )
+        user_text = messages[latest_user].get("content", "") if latest_user >= 0 else ""
+        if isinstance(user_text, str) and user_text.startswith("scoped-read-e2e "):
+            tool_result = next(
+                (
+                    message.get("content", "")
+                    for message in messages[latest_user + 1 :]
+                    if message.get("role") == "tool"
+                ),
+                None,
+            )
+            message = {"role": "assistant", "content": tool_result}
+            finish_reason = "stop"
+            if tool_result is None:
+                message["tool_calls"] = [
+                    {
+                        "id": f"scoped_read_{uuid4().hex}",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": user_text.removeprefix("scoped-read-e2e ").strip()}),
+                        },
+                    }
+                ]
+                finish_reason = "tool_calls"
+            response = {
+                "id": "scoped-path-e2e",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "trace-e2e-model",
+                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+            }
+            if payload.get("stream"):
+                if "tool_calls" in message:
+                    message["tool_calls"][0]["index"] = 0
+                response["choices"] = [{"index": 0, "delta": message, "finish_reason": finish_reason}]
+                body = (f"data: {json.dumps(response)}\n\ndata: [DONE]\n\n").encode()
+                content_type = "text/event-stream"
+            else:
+                body = json.dumps(response).encode("utf-8")
+                content_type = "application/json"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         serialized_messages = json.dumps(payload.get("messages", []), ensure_ascii=False).lower()
         agent_thread_request = AGENT_THREAD_NESTED_TASK in serialized_messages
         raw_chunked_error_request = RAW_CHUNKED_ERROR_TASK in serialized_messages
@@ -566,6 +620,13 @@ class CooperativePausePlanner(LLMPlanner):
                 [trace_mcp_tool.spec],
                 [trace_mcp_tool.spec],
             ).decide(runtime)
+        if task.startswith("scoped-read-e2e "):
+            files = WorkspaceFiles(
+                Path(runtime.state.workspace_root),
+                project_workspace=Path(runtime.state.project_cwd) if runtime.state.project_cwd else None,
+            )
+            specs = [tool.spec for tool in filesystem_read_tools(files)]
+            return LLMPlanner(LLMClient(TRACE_MODEL_CONFIG), specs, specs).decide(runtime)
         if task == AGENT_THREAD_NAV_TASK:
             if runtime.run.model_turns == 1:
                 return AssistantMessage(
@@ -802,6 +863,7 @@ def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
     )
     application = build_application(
         resolved_workspace,
+        project_cwd=_kwargs.get("project_cwd"),
         planner_name="rule",
         paths=state.paths,
         job_registry=state.job_registry,
@@ -820,18 +882,7 @@ def local_application(_state, *, session_id: str, workspace=None, **_kwargs):
 
     application.runner.tools = ToolRegistry(
         [
-            Tool(
-                "read_file",
-                "Read a deterministic workspace file.",
-                lambda path: (resolved_workspace / path).read_text(encoding="utf-8"),
-            ),
-            Tool(
-                "glob",
-                "List deterministic workspace files.",
-                lambda pattern: "\n".join(
-                    str(path.relative_to(resolved_workspace)) for path in resolved_workspace.glob(pattern)
-                ),
-            ),
+            *filesystem_read_tools(WorkspaceFiles(resolved_workspace, project_workspace=_kwargs.get("project_cwd"))),
             Tool(
                 "web_search",
                 "Return a deterministic local search result.",
@@ -947,13 +998,24 @@ def create_session_file(values: dict[str, object]) -> dict[str, str]:
     relative = Path(str(values.get("display_path") or ""))
     if not session_id or not relative.parts or relative.is_absolute() or ".." in relative.parts:
         raise ValueError("A confined session file path is required.")
-    root = state.session_workspace(session_id).resolve()
+    files = session_file_store(state, session_id)
+    source = str(values.get("source") or "workspace")
+    root = files.file_paths.root(source).resolve()
     target = (root / relative).resolve()
     if target == root or not target.is_relative_to(root):
         raise ValueError("The session file must stay inside its workspace.")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(str(values.get("content") or "reference"), encoding="utf-8")
-    return {"source": "project", "path": str(target), "display_path": target.relative_to(root).as_posix()}
+    metadata = files.metadata(target, source)
+    return {key: str(metadata[key]) for key in ("source", "path", "display_path")}
+
+
+@app.post("/api/test/project")
+def create_test_project() -> dict[str, str]:
+    directory = _root / f"project-{uuid4().hex}"
+    directory.mkdir()
+    project = state.projects.create(directory)
+    return {"project_id": project.project_id}
 
 
 @app.post("/api/test/sandbox-status")

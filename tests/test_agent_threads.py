@@ -587,8 +587,8 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
                     "content": "inspect the file",
                     "references": [
                         {
-                            "source": "project",
-                            "path": str(referenced.resolve()),
+                            "source": "workspace",
+                            "path": "workspace:README.md",
                             "display_path": "forged.md",
                         }
                     ],
@@ -603,9 +603,9 @@ def test_agent_thread_http_navigation_and_root_mediated_message(tmp_path: Path) 
             assert envelope.source_thread_id == sidebar["session_id"]
             assert envelope.references == (
                 {
-                    "source": "project",
-                    "path": str(referenced.resolve()),
-                    "display_path": "README.md",
+                    "source": "workspace",
+                    "path": "workspace:README.md",
+                    "display_path": "workspace:README.md",
                 },
             )
             assert envelope.payload["runtime_config"]["permission_mode"] == "workspace_write"
@@ -2437,7 +2437,8 @@ def test_delegate_paths_source_auth_and_recursive_get_thread_node(tmp_path: Path
         parent_runner.close()
 
 
-def test_send_agent_message_reference_boundaries_and_symlink_escape(tmp_path: Path) -> None:
+@pytest.mark.parametrize("path_style", ["absolute", "scoped", "bare"])
+def test_send_agent_message_reference_boundaries_and_symlink_escape(tmp_path: Path, path_style: str) -> None:
     session_workspace = (tmp_path / "session").resolve()
     project_workspace = (tmp_path / "project").resolve()
     outside_workspace = (tmp_path / "outside").resolve()
@@ -2494,20 +2495,29 @@ def test_send_agent_message_reference_boundaries_and_symlink_escape(tmp_path: Pa
                 {
                     "target_thread_path": "/root/worker",
                     "subagent_task": "inspect files",
-                    "references": [{"path": str(session_file)}, {"path": str(project_file)}],
+                    "references": [
+                        {"path": str(session_file) if path_style == "absolute" else "workspace:session.txt"},
+                        {
+                            "path": str(project_file)
+                            if path_style == "absolute"
+                            else "project:project.txt"
+                            if path_style == "scoped"
+                            else "project.txt"
+                        },
+                    ],
                 },
             )
         )
         assert result == {"thread_path": "/root/worker", "thread_status": "running"}
         envelope = queue.peek_thread(child.node.thread_id)
         assert envelope is not None
-        assert envelope.references == ({"path": str(session_file)}, {"path": str(project_file)})
+        assert envelope.references == ({"path": "workspace:session.txt"}, {"path": "project:project.txt"})
 
         invalid_references = (
-            ({"path": "relative.txt"}, "absolute"),
-            ({"path": str(tmp_path / "missing.txt")}, "does not exist"),
-            ({"path": str(session_workspace)}, "not a file"),
-            ({"path": str(outside_file)}, "outside"),
+            ({"path": "relative.txt"}, "not a file"),
+            ({"path": "project:missing.txt"}, "not a file"),
+            ({"path": str(session_workspace)}, "identify an entry"),
+            ({"path": str(outside_file)}, "approved workspace"),
         )
         for reference, message in invalid_references:
             with pytest.raises(ToolError, match=message):
@@ -2527,7 +2537,7 @@ def test_send_agent_message_reference_boundaries_and_symlink_escape(tmp_path: Pa
         except OSError:
             link = None
         if link is not None:
-            with pytest.raises(ToolError, match="outside"):
+            with pytest.raises(ToolError, match="Symbolic links"):
                 coordinator.invoke(
                     runtime,
                     "send_agent_message",

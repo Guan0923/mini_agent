@@ -17,6 +17,7 @@ from backend.domain import (
     ToolSpec,
     UserMessage,
 )
+from backend.domain.file_paths import is_reference_path
 from backend.domain.runtime_state import RuntimeState as RuntimeTreeNode
 
 RuntimeOperation = Literal[
@@ -149,7 +150,7 @@ def _chat_messages_from_nodes(nodes: Sequence[RuntimeTreeNode]) -> list[ChatMess
                     for reference in item.get("references", []) if isinstance(item.get("references"), list) else []:
                         if isinstance(reference, Mapping) and reference.get("path"):
                             raw_path = str(reference["path"])
-                            if Path(raw_path).is_absolute():
+                            if is_reference_path(raw_path):
                                 source = str(reference.get("source") or "")
                                 suffix = f" ({source})" if source else ""
                                 references.append(f"- @{Path(raw_path).as_posix()}{suffix}")

@@ -83,7 +83,7 @@ def delegation_tools() -> tuple[Tool, Tool, Tool, Tool, Tool]:
                                     "type": "string",
                                     "minLength": 1,
                                     "maxLength": 4000,
-                                    "description": "An absolute path to one referenced file.",
+                                    "description": "A workspace: or project: file path. Absolute paths are accepted; bare paths use project when available, otherwise workspace.",
                                 },
                             },
                             "required": ["path"],

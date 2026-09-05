@@ -230,7 +230,7 @@ export default function Composer(props: ComposerProps) {
                 onClick={() => props.onFileComplete(index)}
               >
                 <span className="file-item-name">{candidate.file.name}</span>
-                <span className="file-item-path">{candidate.reference.display_path}</span>
+                <span className="file-item-path" title={candidate.reference.display_path}>{candidate.reference.display_path}</span>
                 <span className={`file-source-badge ${candidate.reference.source}`}>{candidate.sourceLabel}</span>
               </button>
             ))
@@ -253,7 +253,7 @@ export default function Composer(props: ComposerProps) {
                 {upload.isImage && upload.status === "done" && upload.path && props.sessionId ? (
                   <img className="composer-upload-thumb" src={sessionFileContentUrl(props.sessionId, "upload", upload.path)} alt={upload.name} onClick={() => props.onUploadPreview(index)} />
                 ) : <span className="composer-upload-icon">📄</span>}
-                <span className="composer-upload-name" title={upload.name}>{upload.name}</span>
+                <span className="composer-upload-name" title={upload.displayPath ?? upload.name}>{upload.displayPath ?? upload.name}</span>
                 {upload.status === "uploading" ? <Progress size="small" percent={upload.percent} showInfo={false} className="composer-upload-progress" /> : null}
                 {upload.status === "error" ? <span className="composer-upload-error" title={upload.error}>上传失败</span> : null}
                 {upload.status === "error" ? <Button type="text" size="small" onClick={() => props.onRetryUpload(index)}>重试</Button> : null}

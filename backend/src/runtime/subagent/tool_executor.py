@@ -61,9 +61,7 @@ class LockedToolExecutor:
         self._locks = locks
         self._workspace = (workspace or Path(".")).resolve()
         self._workspaces = (
-            (self._workspace, project_workspace.resolve())
-            if project_workspace is not None and project_workspace.resolve() != self._workspace
-            else (self._workspace,)
+            (self._workspace, project_workspace.resolve()) if project_workspace is not None else (self._workspace,)
         )
 
     def names(self) -> list[str]:

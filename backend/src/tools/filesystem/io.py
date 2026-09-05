@@ -26,7 +26,7 @@ class FileIOMixin:
         except FileExistsError as exc:
             raise ToolError(f"File already exists: {self._display_path(file_path)}") from exc
         except OSError as exc:
-            raise ToolError(f"Unable to create {self._display_path(file_path)}: {exc}") from exc
+            raise ToolError(f"Unable to create {self._display_path(file_path)}: {exc.strerror or str(exc)}") from exc
         finally:
             if opened and not completed:
                 file_path.unlink(missing_ok=True)
@@ -56,7 +56,7 @@ class FileIOMixin:
         except ToolError:
             raise
         except OSError as exc:
-            raise ToolError(f"Unable to replace {self._display_path(file_path)}: {exc}") from exc
+            raise ToolError(f"Unable to replace {self._display_path(file_path)}: {exc.strerror or str(exc)}") from exc
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
@@ -69,7 +69,7 @@ class FileIOMixin:
         except UnicodeDecodeError as exc:
             raise ToolError(f"File is not valid UTF-8: {display_path}") from exc
         except OSError as exc:
-            raise ToolError(f"Unable to read {display_path}: {exc}") from exc
+            raise ToolError(f"Unable to read {display_path}: {exc.strerror or str(exc)}") from exc
 
     @staticmethod
     def _read_raw(file_path: Path, display_path: str) -> str:
@@ -79,7 +79,7 @@ class FileIOMixin:
         except UnicodeDecodeError as exc:
             raise ToolError(f"File is not valid UTF-8: {display_path}") from exc
         except OSError as exc:
-            raise ToolError(f"Unable to read {display_path}: {exc}") from exc
+            raise ToolError(f"Unable to read {display_path}: {exc.strerror or str(exc)}") from exc
 
     @staticmethod
     def _normalise_newlines(value: str) -> str:
@@ -99,7 +99,12 @@ class FileIOMixin:
         return newline if count else "\n"
 
     def _display_path(self, path: Path) -> str:
-        return path.resolve().as_posix()
+        try:
+            return self.paths.format(path)
+        except ValueError:
+            if any(path.resolve().is_relative_to(root) for root in self.read_file_roots):
+                return path.resolve().as_posix()
+            raise
 
     def _display_candidate(self, path: Path) -> str:
         try:

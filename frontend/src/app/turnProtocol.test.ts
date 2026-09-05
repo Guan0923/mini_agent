@@ -35,6 +35,12 @@ function turn(overrides: Partial<RuntimeStateNode> = {}): RuntimeStateNode {
 }
 
 describe("Turn protocol projection", () => {
+  it("preserves workspace references when projecting saved messages", () => {
+    const reference = { source: "workspace", path: "workspace:generated/note.txt", display_path: "workspace:generated/note.txt" };
+    const node = turn();
+    node.data[0][0].content[0].references = [reference];
+    expect(projectTurnPath(new Map([["session_1:turn_1", node]]), node.id)[0].references).toEqual([reference]);
+  });
   it("accepts only protocol 0.0.2 with a string project_cwd", () => {
     expect(TURN_PROTOCOL_VERSION).toBe("0.0.2");
     expect(normalizeRuntimeNode(turn()).project_cwd).toBe("C:\\project");

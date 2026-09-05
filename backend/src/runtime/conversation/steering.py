@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from backend.domain import UserMessage
+from backend.domain.file_paths import FILE_SOURCES, is_reference_path
 
 from ..core.context import AgentRuntime
 from ..core.events import RuntimeEvent
@@ -64,7 +65,8 @@ def collect_steering(runtime: AgentRuntime) -> SteeringUpdate | None:
                 display_path = str(value.get("display_path") or "")
                 key = (source, path)
                 if (
-                    ((source in {"project", "upload"} and display_path) or (not source and Path(path).is_absolute()))
+                    ((source in FILE_SOURCES and display_path) or not source)
+                    and is_reference_path(path)
                     and path
                     and key not in seen_references
                 ):

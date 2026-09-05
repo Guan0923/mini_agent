@@ -31,7 +31,7 @@ def test_queued_message_api_is_ordered_idempotent_and_restricts_dispatched_mutat
         first = {
             "id": first_id,
             "content": "first",
-            "references": [{"source": "project", "path": str(readme.resolve()), "display_path": "forged.md"}],
+            "references": [{"source": "workspace", "path": str(readme.resolve()), "display_path": "forged.md"}],
         }
         assert client.post(f"/api/sidebar-threads/{thread_id}/queued-messages", json=first).status_code == 201
         assert client.post(f"/api/sidebar-threads/{thread_id}/queued-messages", json=first).status_code == 200
@@ -154,7 +154,7 @@ def test_create_turn_validates_and_normalizes_absolute_file_references(tmp_path:
                             "text": "inspect",
                             "references": [
                                 {
-                                    "source": "project",
+                                    "source": "workspace",
                                     "path": str(referenced.resolve()),
                                     "display_path": "forged.md",
                                 }
@@ -169,9 +169,9 @@ def test_create_turn_validates_and_normalizes_absolute_file_references(tmp_path:
         assert claimed is not None
         assert claimed.envelope.references == (
             {
-                "source": "project",
-                "path": str(referenced.resolve()),
-                "display_path": "docs/guide.md",
+                "source": "workspace",
+                "path": "workspace:docs/guide.md",
+                "display_path": "workspace:docs/guide.md",
             },
         )
 
@@ -187,7 +187,11 @@ def test_create_turn_validates_and_normalizes_absolute_file_references(tmp_path:
                             "type": "text",
                             "text": "inspect",
                             "references": [
-                                {"source": "project", "path": "docs/guide.md", "display_path": "docs/guide.md"}
+                                {
+                                    "source": "workspace",
+                                    "path": "project:docs/guide.md",
+                                    "display_path": "docs/guide.md",
+                                }
                             ],
                         }
                     ],
@@ -195,7 +199,7 @@ def test_create_turn_validates_and_normalizes_absolute_file_references(tmp_path:
             },
         )
         assert rejected.status_code == 422
-        assert "绝对路径" in rejected.json()["detail"]
+        assert "前缀与来源不一致" in rejected.json()["detail"]
 
 
 def test_create_turn_keeps_accepted_delivery_pending_until_worker_admission(tmp_path: Path) -> None:

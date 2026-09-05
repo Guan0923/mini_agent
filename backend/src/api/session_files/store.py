@@ -1,8 +1,8 @@
 """Session-scoped file upload, search, preview, and deletion.
 
 The store owns the durable upload directory below a session's workspace
-(``runtime/<session>/workspace/uploads``) plus the read-only project search
-root (the session's effective cwd, which may be an external project folder).
+(``runtime/<session>/workspace/uploads``), searches the complete workspace,
+and optionally searches the bound project directory.
 All handlers here are workspace-confined and reject traversal, symbolic links
 and special files.  Upload batches are staged to temporary files and renamed
 atomically so a failed batch never leaves partial files behind.
@@ -21,6 +21,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from backend.configuration import ClientPaths, ConfigurationError
+from backend.domain.file_paths import FILE_SOURCES, ScopedPaths
 
 MAX_FILES_PER_BATCH = 20
 MAX_FILE_BYTES = 50 * 1024 * 1024
@@ -65,7 +66,8 @@ class SessionFileStore:
     def __init__(self, paths: ClientPaths, session_id: str, project_root: Path | None = None) -> None:
         self._paths = paths
         self._session_id = session_id
-        self._project_root = Path(project_root).resolve() if project_root is not None else None
+        self._project_root = Path(project_root).absolute() if project_root is not None else None
+        self.file_paths = ScopedPaths(paths.session_workspace(session_id), self._project_root)
 
     @property
     def session_id(self) -> str:
@@ -120,13 +122,13 @@ class SessionFileStore:
         return candidate, candidate.name
 
     def metadata(self, path: Path, source: str) -> dict[str, object]:
-        resolved = path.resolve()
-        root = self._root_for(source)
+        resolved = self.resolve(source, str(path.absolute()))
+        scoped = self.file_paths.format(resolved, scope="project" if source == "project" else "workspace")
         stat = path.stat()
         return {
             "source": source,
-            "path": str(resolved),
-            "display_path": resolved.relative_to(root).as_posix(),
+            "path": scoped,
+            "display_path": scoped,
             "name": path.name,
             "size": stat.st_size,
             "mime": _mime_for(path.name),
@@ -135,6 +137,8 @@ class SessionFileStore:
         }
 
     def _root_for(self, source: str) -> Path:
+        if source == "workspace":
+            return self.file_paths.workspace
         if source == "upload":
             root = self.upload_root()
             if root.is_symlink():
@@ -143,7 +147,7 @@ class SessionFileStore:
         if source == "project":
             root = self.project_root()
             if root is None:
-                raise SessionFileError("项目 cwd 不可访问，无法引用项目文件。")
+                raise SessionFileError("当前会话没有项目目录。")
             return root
         raise SessionFileError(f"不支持的引用来源：{source}")
 
@@ -202,32 +206,37 @@ class SessionFileStore:
             raise
 
     def search(self, q: str, limit: int = 20) -> list[dict[str, object]]:
-        """Search project and upload roots with the file-tool ignore policy."""
+        """Search both complete roots, retaining upload ownership labels."""
 
         if not isinstance(limit, int) or limit < 1:
             raise SessionFileError("limit 必须是正整数。")
         limit = min(limit, MAX_SEARCH_RESULTS)
-        query = (q or "").casefold()
+        query = (q or "").strip().replace("\\", "/").casefold()
+        scope, separator, relative_query = query.partition(":")
+        search_scope = scope if separator and scope in {"workspace", "project"} else None
+        if search_scope:
+            query = relative_query
         results: list[dict[str, object]] = []
         upload_root = self.upload_root()
-        # For ordinary sessions the project root is the session workspace,
-        # which contains the upload directory.  Skip that nested directory in
-        # the project scan so uploaded files are never duplicated under a
-        # second source label.
-        skipped_in_project = {upload_root.name} if self._project_root == upload_root.parent else set()
-        roots: list[tuple[Path, str, set[str]]] = []
-        if self._project_root is not None:
-            roots.append((self._project_root, "project", skipped_in_project))
-        roots.append((upload_root, "upload", set()))
-        for root, source, skipped in roots:
+        roots: list[tuple[Path, str]] = []
+        if self._project_root is not None and search_scope != "workspace":
+            roots.append((self._project_root, "project"))
+        if search_scope != "project":
+            roots.append((self.file_paths.workspace, "workspace"))
+        seen: set[Path] = set()
+        for root, scope in roots:
             if len(results) >= limit:
                 break
-            for path in self._iter_files(root, skipped):
+            for path in self._iter_files(root):
                 if len(results) >= limit:
                     break
                 relative = path.relative_to(root).as_posix()
                 if query and query not in relative.casefold() and query not in path.name.casefold():
                     continue
+                if path in seen:
+                    continue
+                seen.add(path)
+                source = "upload" if path.is_relative_to(upload_root) else scope
                 results.append(self.metadata(path, source))
         return results[:limit]
 
@@ -240,37 +249,49 @@ class SessionFileStore:
         """
 
         ignored = _IGNORED_DIRECTORIES | (skipped_dirs or set())
+        try:
+            ScopedPaths.reject_links(root, root)
+        except ValueError as exc:
+            raise SessionFileError(str(exc)) from exc
         examined = 0
         for directory, directories, filenames in os.walk(root, followlinks=False):
             directory_path = Path(directory)
             directories[:] = sorted(
-                name for name in directories if name not in ignored and not (directory_path / name).is_symlink()
+                name for name in directories if name not in ignored and not self._is_link(directory_path / name)
             )
             for name in sorted(filenames):
                 examined += 1
                 if examined > MAX_WALKED_FILES:
                     return
                 file_path = directory_path / name
-                if file_path.is_symlink() or not file_path.is_file():
+                if self._is_link(file_path) or not file_path.is_file():
                     continue
                 resolved = file_path.resolve()
                 if resolved == root or root not in resolved.parents:
                     continue
                 yield resolved
 
+    @staticmethod
+    def _is_link(path: Path) -> bool:
+        try:
+            ScopedPaths.reject_links(path, path)
+        except ValueError:
+            return True
+        return False
+
     def resolve(self, source: str, path: str) -> Path:
-        """Validate an absolute reference to a confined regular file."""
+        """Resolve a reference while checking both scope and source ownership."""
 
         root = self._root_for(source)
-        candidate = Path(path)
-        if not candidate.is_absolute():
-            raise SessionFileError("文件引用必须使用绝对路径。")
-        if candidate.is_symlink():
-            raise SessionFileError("不允许引用符号链接文件。")
         try:
-            resolved = candidate.resolve(strict=True)
-        except OSError as exc:
-            raise SessionFileError("引用的文件不存在。") from exc
+            prefix = path.partition(":")[0]
+            expected_scope = "project" if source == "project" else "workspace"
+            if prefix in {"workspace", "project"} and prefix != expected_scope:
+                raise ValueError("文件路径前缀与来源不一致。")
+            resolved = self.file_paths.resolve(path)
+        except ValueError as exc:
+            raise SessionFileError(str(exc)) from exc
+        root = root.resolve()
         if resolved != root and root not in resolved.parents:
             raise SessionFileError("文件路径超出允许范围。")
         if not resolved.is_file():
@@ -278,17 +299,21 @@ class SessionFileStore:
         return resolved
 
     def normalize_references(self, values: Sequence[Mapping[str, object]]) -> list[dict[str, str]]:
-        """Validate browser references and return canonical absolute payloads."""
+        """Validate browser references and return canonical scoped payloads."""
 
         references: list[dict[str, str]] = []
         seen: set[tuple[str, str]] = set()
         for value in values:
             source = value.get("source")
             path = value.get("path")
-            if source not in {"project", "upload"} or not isinstance(path, str) or not path:
+            if source not in FILE_SOURCES or not isinstance(path, str) or not path:
                 raise SessionFileError("无效的文件引用。")
             resolved = self.resolve(str(source), path)
-            key = (str(source), str(resolved))
+            canonical_source = (
+                "upload" if resolved.is_relative_to(self._paths.session_uploads(self._session_id)) else str(source)
+            )
+            scoped = self.file_paths.format(resolved, scope="project" if canonical_source == "project" else "workspace")
+            key = (canonical_source, scoped)
             if key in seen:
                 continue
             seen.add(key)
@@ -296,7 +321,7 @@ class SessionFileStore:
                 {
                     "source": key[0],
                     "path": key[1],
-                    "display_path": resolved.relative_to(self._root_for(key[0])).as_posix(),
+                    "display_path": scoped,
                 }
             )
         return references

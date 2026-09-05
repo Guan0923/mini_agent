@@ -47,6 +47,7 @@
 }
 
 .file-mention-bubble {
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -68,6 +69,7 @@
 }
 
 .file-mention-label {
+  min-width: 0;
   max-width: min(32ch, 55vw);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -75,6 +77,7 @@
 }
 
 .file-mention-remove {
+  flex-shrink: 0;
   width: 16px;
   height: 16px;
   padding: 0;

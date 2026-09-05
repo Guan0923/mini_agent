@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/agent-threads", tags=["agent-threads"])
 class AgentFileReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source: Literal["project", "upload"]
+    source: Literal["project", "upload", "workspace"]
     path: str = Field(min_length=1, max_length=4000)
     display_path: str = Field(min_length=1, max_length=4000)
 

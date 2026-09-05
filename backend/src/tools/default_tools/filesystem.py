@@ -6,13 +6,18 @@ from ..base import Tool
 from ..filesystem import WorkspaceFiles
 from .schema import object_schema
 
+_PATH_RULES = (
+    "Use workspace:relative/path or project:relative/path. Approved absolute paths are also accepted. "
+    "Bare paths use project when available, otherwise workspace; missing files never fall back to another root. "
+)
+
 
 def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
     return (
         Tool(
             "read_file",
             (
-                "Reads a bounded range from an absolute UTF-8 text-file path inside an approved workspace or "
+                "Reads a bounded range from a UTF-8 text-file path inside an approved workspace or "
                 "read-only Skill root, returning numbered normalized-LF lines and range metadata."
             ),
             files.read_file,
@@ -22,8 +27,7 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                         "type": "string",
                         "minLength": 1,
                         "description": (
-                            "The absolute path to the UTF-8 text file inside cwd, project_cwd, or an approved "
-                            "read-only Skill root."
+                            _PATH_RULES + "A UTF-8 text file, or an absolute path in an approved read-only Skill root."
                         ),
                     },
                     "start_line": {
@@ -74,7 +78,7 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                         "type": "string",
                         "minLength": 1,
                         "description": (
-                            "The absolute directory to search inside cwd or project_cwd. When omitted, both "
+                            _PATH_RULES + "The directory to search. When omitted, both "
                             "available workspaces are searched."
                         ),
                     },
@@ -109,7 +113,7 @@ def filesystem_read_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                         "type": "string",
                         "minLength": 1,
                         "description": (
-                            "The absolute file or directory to search inside cwd or project_cwd. When omitted, "
+                            _PATH_RULES + "The file or directory to search. When omitted, "
                             "both available workspaces are searched."
                         ),
                     },
@@ -162,7 +166,7 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "The absolute directory path to create inside cwd or project_cwd.",
+                        "description": _PATH_RULES + "The directory to create.",
                     },
                 },
                 ["path"],
@@ -183,7 +187,7 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "The absolute file path to write inside cwd or project_cwd.",
+                        "description": _PATH_RULES + "The file to write.",
                     },
                     "content": {
                         "type": "string",
@@ -216,7 +220,7 @@ def filesystem_mutation_tools(files: WorkspaceFiles) -> tuple[Tool, ...]:
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "The absolute path to the existing UTF-8 text file inside cwd or project_cwd.",
+                        "description": _PATH_RULES + "The existing UTF-8 text file to edit.",
                     },
                     "start_line": {
                         "type": "integer",

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from backend.domain.file_paths import ScopedPaths
+
 from .io import FileIOMixin
 from .paths import WorkspacePathMixin
 from .reading import FileReadMixin
@@ -42,6 +44,7 @@ class WorkspaceFiles(FileReadMixin, FileWriteMixin, WorkspacePathMixin, FileIOMi
         project_workspace: Path | None = None,
         read_file_roots: tuple[Path, ...] = (),
     ) -> None:
+        self.paths = ScopedPaths(workspace, project_workspace)
         self.workspace = workspace.resolve()
         roots = [self.workspace]
         if project_workspace is not None:

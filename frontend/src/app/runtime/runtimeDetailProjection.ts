@@ -16,7 +16,7 @@ function references(item: TurnItem): FileReference[] | undefined {
   const result = raw.flatMap((value) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return [];
     const record = value as Record<string, unknown>;
-    return (record.source === "project" || record.source === "upload")
+    return (record.source === "project" || record.source === "upload" || record.source === "workspace")
       && typeof record.path === "string"
       && typeof record.display_path === "string"
       ? [{ source: record.source, path: record.path, display_path: record.display_path } as FileReference]

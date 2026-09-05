@@ -48,8 +48,8 @@ def test_upload_round_trip_and_binary_integrity(client: TestClient) -> None:
     items = response.json()
     assert len(items) == 1
     assert items[0]["source"] == "upload"
-    assert Path(items[0]["path"]).is_absolute()
-    assert items[0]["display_path"] == "bin.dat"
+    assert items[0]["path"] == "workspace:uploads/bin.dat"
+    assert items[0]["display_path"] == items[0]["path"]
     assert items[0]["name"] == "bin.dat"
     assert items[0]["size"] == len(payload)
     assert items[0]["is_image"] is False
@@ -79,14 +79,14 @@ def test_upload_round_trip_and_binary_integrity(client: TestClient) -> None:
     assert missing.status_code == 404
 
 
-def test_project_file_head_probe(client: TestClient, state: WebAppState) -> None:
+def test_workspace_file_head_probe(client: TestClient, state: WebAppState) -> None:
     workspace = state.session_workspace(client.session_id)  # type: ignore[attr-defined]
     project_file = workspace / "biome.jsonc"
     project_file.write_text("{}", encoding="utf-8")
 
     available = client.head(
         f"/api/sessions/{client.session_id}/files/content",  # type: ignore[attr-defined]
-        params={"source": "project", "path": str(project_file.resolve())},
+        params={"source": "workspace", "path": str(project_file.resolve())},
     )
     assert available.status_code == 200
     assert available.content == b""
@@ -123,7 +123,12 @@ def test_upload_isolation_between_sessions(state: WebAppState) -> None:
             f"/api/sessions/{session_b}/files/content",
             params={"source": "upload", "path": uploaded_path},
         )
-        assert missing.status_code == 400
+        assert missing.status_code == 404
+        escaped = first.get(
+            f"/api/sessions/{session_b}/files/content",
+            params={"source": "upload", "path": str(state.paths.session_uploads(session_a) / "secret.txt")},
+        )
+        assert escaped.status_code == 400
 
 
 def test_upload_name_sanitization_and_conflict_naming(client: TestClient) -> None:
@@ -132,8 +137,8 @@ def test_upload_name_sanitization_and_conflict_naming(client: TestClient) -> Non
     paths = {item["display_path"] for item in response.json()}
     # Separators become underscores; leading dots are stripped so a traversal
     # name cannot survive; conflicts are numbered from (2).
-    assert paths == {"_evil.txt", "_evil (2).txt", "evil.txt"}
-    assert all(Path(item["path"]).is_absolute() for item in response.json())
+    assert paths == {"workspace:uploads/_evil.txt", "workspace:uploads/_evil (2).txt", "workspace:uploads/evil.txt"}
+    assert all(item["path"] == item["display_path"] for item in response.json())
 
     search = client.get(f"/api/sessions/{client.session_id}/files?q=evil")  # type: ignore[attr-defined]
     assert search.status_code == 200
@@ -167,9 +172,9 @@ def test_search_combines_project_and_upload_sources(client: TestClient, state: W
     _upload(client, [("uploaded.png", b"\x89PNG\r\n\x1a\n" + b"0" * 16)])
     search = client.get(f"/api/sessions/{session_id}/files?q=note")
     assert search.status_code == 200
-    assert [item["source"] for item in search.json()] == ["project"]
-    assert search.json()[0]["path"] == str((workspace / "project-note.md").resolve())
-    assert search.json()[0]["display_path"] == "project-note.md"
+    assert [item["source"] for item in search.json()] == ["workspace"]
+    assert search.json()[0]["path"] == "workspace:project-note.md"
+    assert search.json()[0]["display_path"] == "workspace:project-note.md"
 
     search = client.get(f"/api/sessions/{session_id}/files?q=uploaded")
     assert [item["source"] for item in search.json()] == ["upload"]
@@ -210,7 +215,7 @@ def test_store_resolve_and_normalize_references(tmp_path: Path) -> None:
     upload.write_text("upload", encoding="utf-8")
     assert store.resolve("upload", str(upload)) == upload.resolve()
     assert store.normalize_references([{"source": "upload", "path": str(upload), "display_path": "forged.txt"}]) == [
-        {"source": "upload", "path": str(upload.resolve()), "display_path": "note.txt"}
+        {"source": "upload", "path": "workspace:uploads/note.txt", "display_path": "workspace:uploads/note.txt"}
     ]
 
     with pytest.raises(SessionFileError):

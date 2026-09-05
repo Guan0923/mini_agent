@@ -158,7 +158,12 @@ class RequestMixin:
             "## Workspace paths",
             f"- cwd: {cwd}",
             f"- project_cwd: {project_cwd or '(none)'}",
-            "Use absolute paths for file tools. Omitting glob.path or grep.path searches both available workspaces.",
+            "Use workspace:relative/path or project:relative/path for file tools and file references. "
+            "Absolute paths inside approved roots are also accepted. Bare relative paths use project when "
+            "available, otherwise workspace; a missing file never falls back to the other root. "
+            "project: is unavailable without a project. Uploads live in workspace:uploads/. "
+            "Omitting glob.path or grep.path searches both available workspaces. "
+            "These prefixes are file-tool notation, not shell syntax. Skill paths outside these roots remain absolute.",
         ]
         return SystemMessage(
             name=system.name,

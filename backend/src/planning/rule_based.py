@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from backend.domain import (
     AssistantMessage,
@@ -58,11 +57,6 @@ class RuleBasedPlanner:
         file_match = re.search(r"(?:read|show|cat|查看|读取)\s+[`'\"]?([^`'\"\s]+)", task, flags=re.IGNORECASE)
         if file_match:
             path = file_match.group(1).rstrip("。.!！")
-            candidate = Path(path)
-            if not candidate.is_absolute():
-                root = runtime.state.project_cwd or runtime.state.workspace_root
-                if root:
-                    path = str((Path(root) / candidate).resolve())
             return self._tool("read_file", {"path": path}, runtime)
         if re.search(r"(?:list|ls|files|目录|文件)", task, flags=re.IGNORECASE):
             return self._tool("glob", {"pattern": "**/*"}, runtime)

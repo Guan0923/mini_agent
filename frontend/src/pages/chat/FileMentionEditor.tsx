@@ -87,7 +87,7 @@ export class FileMentionNode extends DecoratorNode<ReactElement> {
   static importJSON(serialized: SerializedLexicalNode & Record<string, unknown>): FileMentionNode {
     const data = serialized as Partial<SerializedFileMentionNode>;
     return new FileMentionNode(
-      data.source === "upload" ? "upload" : "project",
+      data.source === "upload" || data.source === "workspace" ? data.source : "project",
       typeof data.path === "string" ? data.path : "",
       typeof data.displayPath === "string" ? data.displayPath : "",
     );

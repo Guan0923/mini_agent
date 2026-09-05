@@ -116,9 +116,10 @@ def test_locked_executor_serializes_same_path_writes(tmp_path: Path) -> None:
     executor = LockedToolExecutor(Tools(), WorkspaceWriteLock(), tmp_path)
     with ThreadPoolExecutor(max_workers=2) as workers:
         futures = [
-            workers.submit(executor.invoke, "write_file", {"path": str(tmp_path / "same.txt")}, True) for _ in range(2)
+            workers.submit(executor.invoke, "write_file", {"path": path}, True)
+            for path in (str(tmp_path / "same.txt"), "workspace:same.txt", "same.txt")
         ]
-        assert [future.result() for future in futures] == ["written", "written"]
+        assert [future.result() for future in futures] == ["written", "written", "written"]
     assert maximum == 1
 
 

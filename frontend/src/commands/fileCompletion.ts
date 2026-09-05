@@ -1,4 +1,5 @@
 import type { FileReference, SessionFileInfo } from "../types";
+import { fileSourceLabels } from "../types/files";
 
 export interface FileTrigger {
   /** The text typed after the triggering `@` (may be empty). */
@@ -38,7 +39,7 @@ export interface FileCandidate {
   file: SessionFileInfo;
   reference: FileReference;
   label: string;
-  sourceLabel: "项目文件" | "会话上传";
+  sourceLabel: string;
 }
 
 export function toCandidates(files: SessionFileInfo[]): FileCandidate[] {
@@ -46,7 +47,7 @@ export function toCandidates(files: SessionFileInfo[]): FileCandidate[] {
     file,
     reference: { source: file.source, path: file.path, display_path: file.display_path },
     label: file.display_path,
-    sourceLabel: file.source === "upload" ? "会话上传" : "项目文件",
+    sourceLabel: fileSourceLabels[file.source],
   }));
 }
 

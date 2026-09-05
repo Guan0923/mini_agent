@@ -28,6 +28,18 @@ function Harness({
 }
 
 describe("FileMentionEditor", () => {
+  it.each(["workspace", "project", "upload"] as const)("preserves prefixed %s references through restore", async (source) => {
+    const path = source === "upload" ? "workspace:uploads/my notes.txt" : `${source}:docs/my notes.txt`;
+    const reference = { source, path, display_path: path };
+    render(<Harness initial={`查看 @"${path}"`} references={[reference]} />);
+    await act(async () => { screen.getByRole("button", { name: "恢复" }).click(); });
+    expect(await screen.findByText(path, { selector: ".file-mention-label" })).toBeInTheDocument();
+    expect(screen.getByTestId("references")).toHaveTextContent(JSON.stringify([reference]));
+    expect(screen.getByTestId("prompt")).toHaveTextContent(`查看 @"${path}"`);
+    expect(document.querySelector('[data-file-mention="true"]')).toHaveAttribute("data-source", source);
+    await act(async () => { screen.getByRole("button", { name: `移除引用 ${path}` }).dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); });
+    expect(screen.getByTestId("references")).toHaveTextContent("[]");
+  });
   it("restores referenced tokens as atomic bubbles and serializes their plain token", async () => {
     const reference = {
       source: "project" as const,

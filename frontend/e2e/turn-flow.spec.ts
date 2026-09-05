@@ -76,7 +76,7 @@ test("file references stay atomic and completion remains available during a runn
   });
   expect(projectResponse.ok(), `${projectResponse.status()} ${await projectResponse.text()}`).toBeTruthy();
   const projectReference = await projectResponse.json() as {
-    source: "project";
+    source: "workspace";
     path: string;
     display_path: string;
   };
@@ -121,16 +121,16 @@ test("file references stay atomic and completion remains available during a runn
   await editor.fill("before @alpha");
   const projectCandidate = page.locator(".file-item").filter({ hasText: "docs/alpha-note.txt" });
   await expect(projectCandidate).toBeVisible();
-  await expect(page.locator("body")).not.toContainText(projectReference.path);
+  await expect(projectCandidate).toContainText("workspace:docs/alpha-note.txt");
   await editor.press("Enter");
   await expect(bubbles).toHaveCount(1);
   await expect(editor.locator("p")).toHaveCount(1);
   await expect(editor.locator('br:not([data-lexical-managed-linebreak="true"])')).toHaveCount(0);
   expect(await editor.evaluate((element) => (element as HTMLDivElement & { value: string }).value))
-    .toBe("before @docs/alpha-note.txt ");
+    .toBe("before @workspace:docs/alpha-note.txt ");
   await editor.pressSequentially("after");
   expect(await editor.evaluate((element) => (element as HTMLDivElement & { value: string }).value))
-    .toBe("before @docs/alpha-note.txt after");
+    .toBe("before @workspace:docs/alpha-note.txt after");
   expect(turnPosts).toBe(0);
   await editor.evaluate((element) => {
     const mention = element.querySelector('[data-file-mention="true"]');
@@ -146,7 +146,8 @@ test("file references stay atomic and completion remains available during a runn
   await expect(bubbles).toHaveCount(0);
   await expect(editor).toContainText("before");
 
-  await editor.fill("before @alpha suffix");
+  await editor.press("ControlOrMeta+A");
+  await editor.pressSequentially("before @alpha suffix");
   await editor.press("Home");
   for (let index = 0; index < "before @alpha".length; index += 1) await editor.press("ArrowRight");
   await expect(projectCandidate).toBeVisible();
@@ -154,7 +155,7 @@ test("file references stay atomic and completion remains available during a runn
   await expect(bubbles).toHaveCount(1);
   await expect(editor.locator('br:not([data-lexical-managed-linebreak="true"])')).toHaveCount(0);
   expect(await editor.evaluate((element) => (element as HTMLDivElement & { value: string }).value))
-    .toBe("before @docs/alpha-note.txt suffix");
+    .toBe("before @workspace:docs/alpha-note.txt suffix");
 
   await editor.fill("before @alpha");
   await projectCandidate.click();
@@ -162,7 +163,7 @@ test("file references stay atomic and completion remains available during a runn
   await expect(editor.locator('br:not([data-lexical-managed-linebreak="true"])')).toHaveCount(0);
   await editor.pressSequentially("after");
   expect(await editor.evaluate((element) => (element as HTMLDivElement & { value: string }).value))
-    .toBe("before @docs/alpha-note.txt after");
+    .toBe("before @workspace:docs/alpha-note.txt after");
   await editor.evaluate((element) => {
     const mention = element.querySelector('[data-file-mention="true"]');
     if (!mention) throw new Error("Missing file mention");
@@ -190,7 +191,7 @@ test("file references stay atomic and completion remains available during a runn
     message: { content: [{ references: [projectReference] }] },
   });
   await expect(page.locator(".message.user").last()).toContainText(projectReference.display_path);
-  await expect(page.locator("body")).not.toContainText(projectReference.path);
+  await expect(editor).not.toContainText(/[A-Za-z]:[\\/]/);
   await expect(page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }))
     .toBeVisible({ timeout: 15_000 });
 
@@ -199,7 +200,7 @@ test("file references stay atomic and completion remains available during a runn
   await expect(uploadCandidate).toBeVisible();
   await editor.press("Tab");
   await expect(bubbles).toHaveCount(1);
-  await page.getByRole("button", { name: "移除引用 upload-note.txt" }).click();
+  await page.getByRole("button", { name: "移除引用 workspace:uploads/upload-note.txt" }).click();
   await expect(bubbles).toHaveCount(0);
   await editor.fill("upload @upload");
   await expect(uploadCandidate).toBeVisible();
@@ -214,7 +215,7 @@ test("file references stay atomic and completion remains available during a runn
     message: { content: [{ references: [uploadReference] }] },
   });
   await expect(page.locator(".message.user").last()).toContainText(uploadReference.display_path);
-  await expect(page.locator("body")).not.toContainText(uploadReference.path);
+  await expect(editor).not.toContainText(/[A-Za-z]:[\\/]/);
   await expect(page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }))
     .toBeVisible({ timeout: 15_000 });
 

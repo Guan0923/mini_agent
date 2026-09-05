@@ -1,18 +1,24 @@
-export type FileSource = "project" | "upload";
+export type FileSource = "project" | "upload" | "workspace";
+
+export const fileSourceLabels: Record<FileSource, string> = {
+  project: "项目文件",
+  upload: "会话上传",
+  workspace: "会话文件",
+};
 
 export interface FileReference {
   source: FileSource;
-  /** Canonical absolute local path; never render this value in the UI. */
+  /** Canonical workspace: or project: path returned by the backend. */
   path: string;
-  /** Source-root-relative path used for every user-visible label. */
+  /** Full prefixed relative path used for every user-visible label. */
   display_path: string;
 }
 
 export interface SessionFileInfo {
   source: FileSource;
-  /** Canonical absolute local path; never render this value in the UI. */
+  /** Canonical workspace: or project: path returned by the backend. */
   path: string;
-  /** Source-root-relative path used for every user-visible label. */
+  /** Full prefixed relative path used for every user-visible label. */
   display_path: string;
   name: string;
   size: number;

@@ -10,6 +10,7 @@ class FileWriteMixin:
         """Recursively create one approved-workspace directory."""
 
         directory_path = self._write_path(path)
+        path = self._display_path(directory_path)
         current = directory_path
         while not current.exists() and current not in self.workspaces:
             current = current.parent
@@ -20,7 +21,7 @@ class FileWriteMixin:
         try:
             directory_path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise ToolError(f"Could not create directory {path}: {exc}") from exc
+            raise ToolError(f"Could not create directory {path}: {exc.strerror or str(exc)}") from exc
         return f"Created directory {self._display_path(directory_path)}."
 
     def write_file(self, path: str, content: str, overwrite: bool = False) -> str:
@@ -31,6 +32,7 @@ class FileWriteMixin:
         if not isinstance(overwrite, bool):
             raise ToolError("overwrite must be a boolean.")
         file_path = self._write_path(path)
+        path = self._display_path(file_path)
         if not file_path.parent.is_dir():
             self.create_directory(str(file_path.parent))
             file_path = self._write_path(path)
@@ -70,6 +72,7 @@ class FileWriteMixin:
             raise ToolError("expected_lines length must match the inclusive line range.")
 
         file_path = self._write_path(path)
+        path = self._display_path(file_path)
         if not file_path.is_file():
             raise ToolError(f"Not a file: {path}")
         original = self._read_raw(file_path, path)

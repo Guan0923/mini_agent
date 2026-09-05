@@ -14,6 +14,7 @@ class FileReadMixin:
         """Read one complete UTF-8 file for trusted internal consumers."""
 
         file_path = self._read_path(path)
+        path = self._display_path(file_path)
         if not file_path.is_file():
             raise ToolError(f"Not a file: {path}")
         return self._normalise_newlines(self._read_raw(file_path, path))
@@ -31,6 +32,7 @@ class FileReadMixin:
         self._validate_integer("max_lines", max_lines, minimum=1, maximum=self._MAX_READ_LINES)
         self._validate_integer("start_column", start_column, minimum=1)
         file_path = self._read_file_path(path)
+        path = self._display_path(file_path)
         if not file_path.is_file():
             raise ToolError(f"Not a file: {path}")
 
@@ -171,7 +173,7 @@ class FileReadMixin:
                     continue
                 raw = file_path.read_bytes()
             except OSError as exc:
-                raise ToolError(f"Unable to read {self._display_path(file_path)}: {exc}") from exc
+                raise ToolError(f"Unable to read {self._display_path(file_path)}: {exc.strerror or str(exc)}") from exc
             if b"\x00" in raw:
                 skipped += 1
                 continue
@@ -213,6 +215,7 @@ class FileReadMixin:
         if path is None:
             return self.workspaces
         root = self._read_path(path, allow_root=True)
+        path = self._display_path(root)
         if not root.exists():
             raise ToolError(f"Path does not exist: {path}")
         if root.is_file() and allow_file:

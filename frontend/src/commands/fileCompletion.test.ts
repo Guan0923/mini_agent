@@ -20,6 +20,14 @@ const uploadFile = (path: string): SessionFileInfo => ({
 });
 
 describe("file completion triggers", () => {
+  it("keeps scope prefixes in search queries", () => {
+    for (const prefix of ["workspace:", "project:"]) {
+      const input = `@${prefix}docs/`;
+      expect(fileTrigger(input, input.length)?.query).toBe(`${prefix}docs/`);
+    }
+    const file = { ...uploadFile("note.txt"), source: "workspace" as const, path: "workspace:note.txt", display_path: "workspace:note.txt" };
+    expect(toCandidates([file])[0]).toMatchObject({ label: "workspace:note.txt", sourceLabel: "会话文件", reference: { source: "workspace", path: "workspace:note.txt" } });
+  });
   it("triggers at the start of the input", () => {
     expect(fileTrigger("@re", 3)).toEqual({ query: "re", start: 0, end: 3 });
     expect(fileTrigger("@", 1)).toEqual({ query: "", start: 0, end: 1 });

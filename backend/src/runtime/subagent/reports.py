@@ -13,6 +13,7 @@ from backend.domain import (
     MessageEnvelope,
     ThreadNode,
 )
+from backend.domain.file_paths import FILE_SOURCES, ScopedPaths
 from backend.domain.runtime_state import (
     NodeFrame,
     RuntimeState,
@@ -264,25 +265,29 @@ class _SubagentReportDeliveryMixin:
         )
         if not isinstance(turn, RuntimeState):
             raise ToolError("The target Agent has no canonical current Turn.")
-        absolute: list[dict[str, str]] = []
+        paths = ScopedPaths(Path(turn.cwd), Path(turn.project_cwd) if turn.project_cwd else None)
+        references: list[dict[str, str]] = []
         for value in values:
             source, raw_path, display_path = value.get("source"), value.get("path"), value.get("display_path")
             if (
-                source not in {"project", "upload"}
+                source not in FILE_SOURCES
                 or not isinstance(raw_path, str)
                 or not isinstance(display_path, str)
                 or not display_path
             ):
                 raise ToolError("Browser Agent references require source, path, and display_path.")
-            if not Path(raw_path).is_absolute():
-                raise ToolError("Browser Agent reference paths must be absolute.")
-            absolute.append({"path": raw_path})
-        parsed = self._parse_references(session_id, target, absolute)
-        return [
-            {
-                "source": str(value["source"]),
-                "path": reference["path"],
-                "display_path": str(value["display_path"]),
-            }
-            for value, reference in zip(values, parsed, strict=True)
-        ]
+            scope = "project" if source == "project" else "workspace"
+            try:
+                prefix = raw_path.partition(":")[0]
+                if prefix in {"workspace", "project"} and prefix != scope:
+                    raise ValueError("File reference source does not match its path prefix.")
+                resolved = paths.resolve(raw_path)
+                scoped = paths.format(resolved, scope=scope)
+                if source == "upload" and not resolved.is_relative_to(paths.workspace / "uploads"):
+                    raise ValueError("Upload references must stay inside workspace:uploads/.")
+            except ValueError as exc:
+                raise ToolError(str(exc)) from exc
+            if not resolved.is_file():
+                raise ToolError(f"Referenced path is not a file: {scoped}")
+            references.append({"source": str(source), "path": scoped, "display_path": scoped})
+        return references

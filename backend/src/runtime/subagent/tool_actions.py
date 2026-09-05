@@ -17,6 +17,7 @@ from backend.domain import (
     ThreadNode,
     safe_error_message,
 )
+from backend.domain.file_paths import ScopedPaths
 from backend.domain.runtime_state import (
     NodeFrame,
     RuntimeState,
@@ -273,26 +274,21 @@ class _SubagentToolActionsMixin:
         )
         if not isinstance(turn, RuntimeState) or not turn.cwd:
             raise ToolError("The target Agent has no canonical Session workspace.")
-        roots = [Path(turn.cwd).resolve()]
-        if turn.project_cwd:
-            roots.append(Path(turn.project_cwd).resolve())
+        paths = ScopedPaths(Path(turn.cwd), Path(turn.project_cwd) if turn.project_cwd else None)
         references: list[dict[str, str]] = []
         for item in value:
             if not isinstance(item, Mapping) or set(item) != {"path"}:
                 raise ToolError("Every reference must contain only path.")
             raw_path = item.get("path")
-            path = Path(raw_path) if isinstance(raw_path, str) else Path()
-            if not isinstance(raw_path, str) or len(raw_path) > 4000 or not path.is_absolute():
-                raise ToolError("Every reference path must be absolute.")
+            if not isinstance(raw_path, str) or not raw_path or len(raw_path) > 4000:
+                raise ToolError("Every reference requires a non-empty file path.")
             try:
-                resolved = path.resolve(strict=True)
-            except OSError as exc:
-                raise ToolError(f"Referenced file does not exist: {raw_path}") from exc
+                resolved = paths.resolve(raw_path)
+            except ValueError as exc:
+                raise ToolError(str(exc)) from exc
             if not resolved.is_file():
-                raise ToolError(f"Referenced path is not a file: {raw_path}")
-            if not any(resolved.is_relative_to(root) for root in roots):
-                raise ToolError(f"Referenced file is outside the Session and project workspaces: {raw_path}")
-            references.append({"path": str(resolved)})
+                raise ToolError(f"Referenced path is not a file: {paths.format(resolved)}")
+            references.append({"path": paths.format(resolved)})
         return references
 
     def _dispatch_message(

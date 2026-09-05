@@ -64,8 +64,8 @@ def test_steer_endpoint_accepts_only_an_active_running_turn_and_normalizes_refer
                 "id": "23d58ec5-7d2f-4a41-87e6-21ac50b5921d",
                 "content": " redirect ",
                 "references": [
-                    {"source": "project", "path": str(project_file.resolve()), "display_path": "fake.md"},
-                    {"source": "project", "path": str(project_file.resolve()), "display_path": "README.md"},
+                    {"source": "workspace", "path": str(project_file.resolve()), "display_path": "fake.md"},
+                    {"source": "workspace", "path": "workspace:README.md", "display_path": "README.md"},
                     {"source": "upload", "path": str(upload_file.resolve()), "display_path": "wrong.txt"},
                 ],
             },
@@ -85,8 +85,8 @@ def test_steer_endpoint_accepts_only_an_active_running_turn_and_normalizes_refer
         assert claimed.envelope.delivery_id == "delivery-1"
         assert claimed.envelope.content == "redirect"
         assert list(claimed.envelope.references) == [
-            {"source": "project", "path": str(project_file.resolve()), "display_path": "README.md"},
-            {"source": "upload", "path": str(upload_file.resolve()), "display_path": "notes.txt"},
+            {"source": "workspace", "path": "workspace:README.md", "display_path": "workspace:README.md"},
+            {"source": "upload", "path": "workspace:uploads/notes.txt", "display_path": "workspace:uploads/notes.txt"},
         ]
 
         state.active_turn_streams.clear()

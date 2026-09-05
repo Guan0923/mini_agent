@@ -132,7 +132,7 @@ def test_runtime_bridge_appends_canonical_user_before_starting_the_next_assistan
     assert completed.data[0][-1]["content"] == [{"type": "text", "text": "new answer", "status": "success"}]
 
 
-def test_runtime_model_history_maps_structured_references_to_absolute_workspace_paths(tmp_path: Path) -> None:
+def test_runtime_model_history_preserves_scoped_references(tmp_path: Path) -> None:
     turn = make_running_turn()
     session_workspace = tmp_path / "session"
     project_workspace = tmp_path / "project"
@@ -154,13 +154,13 @@ def test_runtime_model_history_maps_structured_references_to_absolute_workspace_
                         "references": [
                             {
                                 "source": "project",
-                                "path": str((project_workspace / "README.md").resolve()),
-                                "display_path": "README.md",
+                                "path": "project:README.md",
+                                "display_path": "project:README.md",
                             },
                             {
                                 "source": "upload",
-                                "path": str((session_workspace / "uploads" / "notes.txt").resolve()),
-                                "display_path": "notes.txt",
+                                "path": "workspace:uploads/notes.txt",
+                                "display_path": "workspace:uploads/notes.txt",
                             },
                         ],
                     }
@@ -177,9 +177,7 @@ def test_runtime_model_history_maps_structured_references_to_absolute_workspace_
     history = _chat_messages_from_nodes([turn])
     assert [message.role for message in history] == ["user", "assistant", "user", "assistant"]
     assert history[2].content == (
-        "redirect\n\nFile references:\n"
-        f"- @{(project_workspace / 'README.md').resolve().as_posix()} (project)\n"
-        f"- @{(session_workspace / 'uploads' / 'notes.txt').resolve().as_posix()} (upload)"
+        "redirect\n\nFile references:\n- @project:README.md (project)\n- @workspace:uploads/notes.txt (upload)"
     )
 
 
@@ -192,18 +190,15 @@ def test_plain_text_at_path_is_not_expanded_before_model_projection() -> None:
     assert history[0].content == "Please inspect @secret.txt"
 
 
-def test_running_steering_model_content_uses_validated_absolute_references(tmp_path: Path) -> None:
-    project_file = (tmp_path / "README.md").resolve()
-    upload_file = (tmp_path / "uploads" / "notes.txt").resolve()
-
+def test_running_steering_model_content_uses_validated_scoped_references() -> None:
     content = _model_content_with_references(
         "redirect",
         (
-            {"source": "project", "path": str(project_file), "display_path": "README.md"},
-            {"source": "upload", "path": str(upload_file), "display_path": "notes.txt"},
+            {"source": "workspace", "path": "workspace:README.md", "display_path": "workspace:README.md"},
+            {"source": "upload", "path": "workspace:uploads/notes.txt", "display_path": "workspace:uploads/notes.txt"},
         ),
     )
 
     assert content == (
-        f"redirect\n\nFile references:\n- @{project_file.as_posix()} (project)\n- @{upload_file.as_posix()} (upload)"
+        "redirect\n\nFile references:\n- @workspace:README.md (workspace)\n- @workspace:uploads/notes.txt (upload)"
     )
