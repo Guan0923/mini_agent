@@ -72,7 +72,8 @@ export function sessionFileContentUrl(
   path: string,
   download = false,
 ): string {
-  const params = new URLSearchParams({ source, path, download: download ? "true" : "" });
+  const params = new URLSearchParams({ source, path });
+  if (download) params.set("download", "true");
   return apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/files/content?${params.toString()}`);
 }
 

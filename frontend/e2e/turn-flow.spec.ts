@@ -60,6 +60,80 @@ function tracePanel(page: import("@playwright/test").Page, label: string, index 
   );
 }
 
+test("file reference bubble remains available after send and reload", async ({ page }) => {
+  test.setTimeout(60_000);
+  const sidebarResponse = await page.request.post("/api/sidebar-threads", {
+    data: { title: "Reference Availability" },
+  });
+  expect(sidebarResponse.ok(), `${sidebarResponse.status()} ${await sidebarResponse.text()}`).toBeTruthy();
+  const sidebar = await sidebarResponse.json() as { session_id: string };
+  const fileResponse = await page.request.post("/api/test/session-file", {
+    data: {
+      session_id: sidebar.session_id,
+      display_path: "docs/availability note.txt",
+      content: "available project reference",
+    },
+  });
+  expect(fileResponse.ok(), `${fileResponse.status()} ${await fileResponse.text()}`).toBeTruthy();
+  const reference = await fileResponse.json() as {
+    source: "workspace";
+    path: string;
+    display_path: string;
+  };
+
+  await page.goto("/app");
+  const referenceThread = page.getByRole("button", { name: "Reference Availability", exact: true });
+  await expect(referenceThread).toBeVisible();
+  if (await referenceThread.isEnabled()) await referenceThread.click();
+  const editor = page.getByLabel("聊天输入");
+  await editor.fill("check @availability");
+  const candidate = page.locator(".file-item").filter({ hasText: reference.display_path });
+  await expect(candidate).toBeVisible();
+  await candidate.click();
+
+  const availabilityResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "HEAD"
+      && url.searchParams.get("path") === reference.path;
+  });
+  const turnResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/api/turns"),
+  );
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await turnResponse).ok()).toBeTruthy();
+  const availability = await availabilityResponse;
+  expect(availability.status()).toBe(200);
+  expect(new URL(availability.url()).searchParams.has("download")).toBe(false);
+
+  const userMessage = page.locator(".message.user").last();
+  const referenceChip = userMessage.locator(".message-reference");
+  await expect(referenceChip).toContainText(reference.display_path);
+  await expect(referenceChip).not.toHaveClass(/is-unavailable/);
+  await expect(referenceChip.locator(".message-reference-unavailable")).toHaveCount(0);
+  const contentUrl = await referenceChip.getAttribute("href");
+  expect(contentUrl).toBeTruthy();
+  const contentResponse = await page.request.get(contentUrl!);
+  const contentText = await contentResponse.text();
+  expect(contentResponse.ok(), `${contentResponse.status()} ${contentText}`).toBeTruthy();
+  expect(contentText).toBe("available project reference");
+  await expect(page.locator(".message.assistant").last().getByRole("button", { name: "Fork" }))
+    .toBeVisible({ timeout: 15_000 });
+
+  const reloadedAvailabilityResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "HEAD"
+      && url.searchParams.get("path") === reference.path;
+  });
+  await page.reload();
+  const reloadedAvailability = await reloadedAvailabilityResponse;
+  expect(reloadedAvailability.status()).toBe(200);
+  expect(new URL(reloadedAvailability.url()).searchParams.has("download")).toBe(false);
+  const reloadedChip = page.locator(".message.user").last().locator(".message-reference");
+  await expect(reloadedChip).toContainText(reference.display_path);
+  await expect(reloadedChip).not.toHaveClass(/is-unavailable/);
+  await expect(reloadedChip.locator(".message-reference-unavailable")).toHaveCount(0);
+});
+
 test("file references stay atomic and completion remains available during a running Turn", async ({ page }) => {
   test.setTimeout(90_000);
   const sidebarResponse = await page.request.post("/api/sidebar-threads", {
